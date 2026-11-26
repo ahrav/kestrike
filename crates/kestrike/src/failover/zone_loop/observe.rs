@@ -29,6 +29,14 @@
 //!   last admitted one with its report keys or that `Directory::succeeds` admits over it; any other ends the tick
 //!   as [`Source::Succession`]. The succession rule spans the ticks of one `ZoneLoop`. When an admitted snapshot
 //!   changes a host's report key, the loop starts tracking that host afresh.
+//! - HELD-RESTART-MATCH: [`ShardRecords::held`] takes the record owner's diagnostic entry of a restart held after a
+//!   bump whose reply is unknown (`report::VolumeEntry::held_restart`) while the owner reads live, for the active
+//!   volume at the record's generation and at the record's tenure or one attempt below it, and
+//!   [`ShardRecords::entries`] leaves that entry out. The status builder reads the same entry ([`held_entry`]) from
+//!   the owner's fresh report for the shard's class. The match reads no record beyond the shard's own reads. After
+//!   a later incarnation of the owner bumps, the match stands until the loop holds the owner's first report sealed
+//!   after the agent took that incarnation's `Starting` status: one report period and a tick when reports arrive,
+//!   and at most the fresh window, past which the owner reads other than live.
 //! - A failed census fails every shard and a failed shard read fails that shard, each as [`Source::Store`]. A store
 //!   error that withdraws the reconciler's client (`Regression`, `Namespace`, `Log`) makes every later store read of
 //!   the loop return `Withdrawn`.
@@ -109,8 +117,14 @@ pub struct ShardRecords {
     pub receipt: Option<Receipt>,
     pub replacement: Option<VolumeRecord>,
     /// The entries for this shard of the reports held for the zone's hosts, each at the tenure `(g, 2E)` of the shard
-    /// record read in the same tick and naming its active volume.
+    /// record read in the same tick and naming its active volume, a held restart's diagnostic entry excepted.
     pub entries: Vec<(Host, VolumeEntry)>,
+    /// HELD-RESTART-MATCH: the diagnostic entry ([`VolumeEntry::held_restart`]) of a restart held after a bump whose
+    /// reply is unknown, from the record owner's report when that host reads live, for the shard's active volume, at
+    /// the record's generation and at the record's tenure `(g, 2E)` or one attempt below it, `(g, 2E - 2)`, where a
+    /// restart that read `E - 1` leaves the record once its bump commits. The match is diagnostic evidence: it shows
+    /// no bump committed or uncommitted, and the plan names a blocker from it and orders no step.
+    pub held: Option<(Host, VolumeEntry)>,
     /// This shard's own volumes are its active volume and the volume its receipt of a later generation records as
     /// created. `others` and `complete` assess every other volume a read record names before retirement, listed or
     /// not, and every other listed volume whose health reads impaired, lost or unvalued and whose own record shows it
@@ -318,6 +332,54 @@ fn entries_by_shard(hosts: &[HostView]) -> BTreeMap<Shard, Vec<(Host, &VolumeEnt
     by_shard
 }
 
+#[cfg(test)]
+thread_local! {
+    /// When true, HELD-RESTART-MATCH takes the record's tenure alone.
+    pub(crate) static HELD_AT_RECORD_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The HELD-RESTART-MATCH of `record` among the shard's report entries `held`: the record owner's diagnostic entry
+/// ([`held_entry`]) when `live` holds the owner.
+fn held_restart(
+    record: &ShardRecord,
+    held: &[(Host, &VolumeEntry)],
+    live: &BTreeSet<Host>,
+) -> Option<(Host, VolumeEntry)> {
+    if !live.contains(&record.owner) {
+        return None;
+    }
+    let owners = (held.iter())
+        .filter(|(host, _)| *host == record.owner)
+        .map(|&(_, entry)| entry);
+    held_entry(record, owners).map(|entry| (record.owner, *entry))
+}
+
+/// The diagnostic entry of a held restart for `record` among `entries`, the entries of a report of the record's
+/// owner: the entry for the shard's active volume at the record's generation whose epoch is the record's `2E` or
+/// `2E - 2`. The status builder reads it from the owner's fresh report for the shard's class.
+pub(crate) fn held_entry<'e>(
+    record: &ShardRecord,
+    entries: impl IntoIterator<Item = &'e VolumeEntry>,
+) -> Option<&'e VolumeEntry> {
+    #[cfg(test)]
+    let below = !HELD_AT_RECORD_ONLY.get();
+    #[cfg(not(test))]
+    let below = true;
+    let current = u64::from(record.attempts) * 2;
+    let at = |entry: &VolumeEntry| {
+        entry.tenure.is_some_and(|(generation, epoch)| {
+            let epoch = u64::from(epoch.get());
+            generation == record.generation && (epoch == current || (below && epoch + 2 == current))
+        })
+    };
+    entries.into_iter().find(|entry| {
+        entry.shard == record.shard
+            && entry.volume == record.active
+            && entry.held_restart()
+            && at(entry)
+    })
+}
+
 fn one_form(listed: &[ListedVolume]) -> bool {
     let mut forms: BTreeMap<VolumeId, (VolumeCondition, Vec<&str>)> = BTreeMap::new();
     listed.iter().all(|row| {
@@ -406,13 +468,17 @@ impl<S: Store, L: WatermarkLog> ZoneLoop<S, L> {
             Ok(_) => entries_by_shard(&hosts),
             Err(_) => BTreeMap::new(),
         };
+        let live: BTreeSet<Host> = (hosts.iter())
+            .filter(|view| view.verdict == HostEvidence::Live)
+            .map(|view| view.entry.host)
+            .collect();
         let mut shards: Vec<ShardView> = (directory.shards().iter())
             .map(|entry| {
                 let held = entries.get(&entry.shard).map_or(&[][..], Vec::as_slice);
                 ShardView {
                     shard: entry.shard,
                     records: (census.as_ref().map_err(|&source| source))
-                        .and_then(|_| self.shard_records(entry.shard, held)),
+                        .and_then(|_| self.shard_records(entry.shard, held, &live)),
                 }
             })
             .collect();
@@ -557,6 +623,7 @@ impl<S: Store, L: WatermarkLog> ZoneLoop<S, L> {
         &mut self,
         shard: Shard,
         held: &[(Host, &VolumeEntry)],
+        live: &BTreeSet<Host>,
     ) -> Result<Option<ShardRecords>, Source> {
         let Some(record) = present(self.reconciler.read::<ShardRecord>(Key::Shard(shard)))? else {
             return Ok(None);
@@ -575,9 +642,10 @@ impl<S: Store, L: WatermarkLog> ZoneLoop<S, L> {
             .map(|epoch| (record.generation, epoch));
         let entries = (held.iter())
             .filter(|(_, entry)| tenure.is_some() && entry.tenure == tenure)
-            .filter(|(_, entry)| entry.volume == record.active)
+            .filter(|(_, entry)| entry.volume == record.active && !entry.held_restart())
             .map(|&(host, entry)| (host, *entry))
             .collect();
+        let held = held_restart(&record, held, live);
         let judgement = VolumeJudgement {
             health: None,
             others: 0,
@@ -592,6 +660,7 @@ impl<S: Store, L: WatermarkLog> ZoneLoop<S, L> {
             receipt,
             replacement,
             entries,
+            held,
             judgement,
         }))
     }

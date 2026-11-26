@@ -801,6 +801,7 @@ mod survey {
             receipt: None,
             replacement: None,
             entries: Vec::new(),
+            held: None,
             judgement: VolumeJudgement {
                 health: Some(Health::Available),
                 others: 0,

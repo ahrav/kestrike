@@ -36,8 +36,10 @@
 //!   on the last message it stays true over an empty queue until the next drain. [`StatusCell::take`] and
 //!   [`Inbox::drain`] load the flag first and a call that loads false returns without the lock, so the owner's
 //!   turn with nothing delivered costs one load. A false load is a missed poll, as a contended `try_lock` is, and a
-//!   later call takes what waits. The flag only gates the `try_lock`: the lock orders every read and write of the
-//!   status and the queue, so the flag's loads and stores are relaxed.
+//!   later call takes what waits. The flag gates the `try_lock`: the lock orders every read and write of the
+//!   status and the queue, so the flag's loads and stores are relaxed. [`StatusCell::waiting`] also loads the
+//!   cell's flag; it orders no data, so a relaxed load gives it the occupancy the last store left, and a publisher
+//!   that reads it after its own accepted publication learns whether a take has followed that publication.
 //! - LINK-CARRIES-VALUES: a nomination starts the takeover sequence, and that sequence's step 1 and its
 //!   compare-and-swap determine whether the takeover commits. A peer read time is an availability input. A status
 //!   and a request carry observations and bytes. The owner's records and its device change only through the
@@ -577,6 +579,13 @@ impl StatusCell {
         *cell = Some(status);
         self.full.store(true, Ordering::Relaxed);
         true
+    }
+
+    /// Whether a published status waits for its take. Read by the sole publisher of the cell after its own accepted
+    /// publication, `false` shows that the agent's caller has taken that status; the agent receives it at the start of
+    /// the turn it was taken for, before that turn seals a report.
+    pub fn waiting(&self) -> bool {
+        self.full.load(Ordering::Relaxed)
     }
 
     /// `take` returns the status written since the last take, and `None` when the cell is empty or the owner thread

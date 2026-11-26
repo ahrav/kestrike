@@ -1520,6 +1520,14 @@ fn a_run_refuses_an_armed_fault_control_by_name_and_restores_inline_recovery() {
         );
         assert!(!crate::host::agent::tests::armed(), "{plant} cleared");
     }
+    // The held-restart latch's plant changes what the agent seals, so a run refuses it as it refuses the others.
+    let refused = crate::host::agent::tests::planted("fresh-latch", || {
+        message(&|| play(&config, || panic!("a draw preceded the agent plant check")))
+    });
+    assert!(
+        refused.contains("a host agent plant is armed"),
+        "fresh-latch: {refused}"
+    );
     crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(true));
     let refused = message(&|| run(&config));
     crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(false));
@@ -1556,6 +1564,12 @@ fn a_run_refuses_an_armed_fault_control_by_name_and_restores_inline_recovery() {
             "{plant}: {refused}"
         );
     }
+    let refused =
+        crate::host::agent::tests::planted("fresh-latch", || message(&|| run_shared(&config)));
+    assert!(
+        refused.contains("a host agent plant is armed"),
+        "fresh-latch: {refused}"
+    );
 
     let unwound = catch_unwind(|| play(&config, || panic!("a draw that unwinds")));
     assert!(unwound.is_err());

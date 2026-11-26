@@ -99,20 +99,7 @@ fn agent_of(own: Host, store: &Shared) -> Agent {
         reporting(own, 3 * H),
     )
     .unwrap();
-    let records = [shard_now(store)];
-    let placement = placement();
-    let out = agent.turn(
-        0,
-        Inputs {
-            sync: Some(Synced {
-                records: &records,
-                placement: &placement,
-            }),
-            clock: clock(0),
-            ..Inputs::NONE
-        },
-    );
-    assert!(out.refused.is_empty(), "{:?}", out.refused);
+    resync(&mut agent, store, 0);
     agent
 }
 
@@ -736,4 +723,105 @@ fn the_control_whose_preempt_misses_the_predecessor_fails_the_isolation_case() {
         !served_by_both(&isolated).is_empty(),
         "the control serves an object from both tenures after the preempt"
     );
+}
+
+/// One turn of `agent` at `now` that syncs the shard record `store` holds.
+fn resync(agent: &mut Agent, store: &Shared, now: u64) {
+    let records = [shard_now(store)];
+    let placement = placement();
+    let out = agent.turn(
+        now,
+        Inputs {
+            sync: Some(Synced {
+                records: &records,
+                placement: &placement,
+            }),
+            clock: clock(now),
+            ..Inputs::NONE
+        },
+    );
+    assert!(out.refused.is_empty(), "{:?}", out.refused);
+}
+
+/// A's restart after its process stopped, through `recover` on A's pair, whose bump reply is lost and whose bump
+/// commits when `commit` holds; the final status `held_status` builds for it, handed over to A's link.
+fn held_restart(store: &Shared, registry: &Control, commit: bool, owner: &Owner) -> Status {
+    use crate::storage::store::sim::Arm;
+    let arena = crate::storage::gate_fixture::arena_with(16, 9);
+    let clock = crate::storage::gate_fixture::Ticking::default();
+    let read = shard_now(store);
+    for arm in [Arm::Pass, Arm::Pass, Arm::Pass, Arm::Timeout { commit }] {
+        store.schedule(arm);
+    }
+    let disk = super::fencer_tests::host(registry, crate::failover::restart::tests::own(), 1).0;
+    let recovery = super::recover_tests::recovered(Role::Restart, store, disk, &arena, &clock);
+    let super::recover::Recovery::Ended(ended) = recovery else {
+        panic!("the restart acquired a tenure or waits");
+    };
+    assert_eq!(
+        ended.exit,
+        Exit::Held {
+            recovery: crate::failover::retire::Target::of(&read)
+        }
+    );
+    let mut attempts = RecoveryStatus::NO_ATTEMPT;
+    attempts.start(crate::failover::report::RecoveryKind::Restart, 0);
+    let status = super::recover::held_status(
+        (&holder_of(a_host()), shard(), 2),
+        (&ended.exit, ended.refusal),
+        attempts,
+        1,
+    )
+    .expect("the held restart's final status");
+    assert_eq!(shard_now(store).attempts, read.attempts + u32::from(commit));
+    assert!(super::recover::hand_over(&owner.link.status, status, 8).is_ok());
+    status
+}
+
+/// HOST-HEALTH with the real publisher: A serves, stops, and its next incarnation's restart holds after a bump whose
+/// reply is lost, at either outcome of that bump. `held_status` builds the final status and `hand_over` gives it to
+/// A's link; A's agent takes it once and goes on turning, reports A unhealthy in every heartbeat, and C's standby
+/// takes the shard over warm and serves the retained set.
+#[test]
+fn a_restart_held_after_an_unanswered_bump_is_taken_over_by_its_named_standby() {
+    for commit in [false, true] {
+        let volume = warm_volume_certified(0);
+        let store = volume.0.clone();
+        let (registry, media, exit, mut owner, mut standby) = serve_beside(volume, &store);
+        assert_eq!(exit, Exit::Stopped);
+        let held = held_restart(&store, &registry, commit, &owner);
+        let now = standby.now.get() + H;
+        resync(&mut owner.agent, &store, now);
+        resync(&mut standby.agent, &store, now);
+        standby.now.set(now);
+        standby.reading = DECLARED;
+        let unhealthy = Cell::new(true);
+        let succeeded = succeed_beside(&store, &media, &registry, &mut standby, &mut |now, c| {
+            let statuses: Vec<Status> = owner.link.status.take().into_iter().collect();
+            assert!(statuses.iter().all(|status| *status == held));
+            let out = owner.agent.turn(
+                now,
+                Inputs {
+                    statuses: &statuses,
+                    clock: clock(now),
+                    ..Inputs::NONE
+                },
+            );
+            c.inbound.borrow_mut().extend(beats_to(&out, c_host()));
+            unhealthy.set(unhealthy.get() && !owner.agent.healthy(now));
+        });
+        assert!(
+            unhealthy.get(),
+            "commit {commit}: A read unhealthy at every turn"
+        );
+        assert!(succeeded.nominations >= 1, "commit {commit}");
+        let record = shard_now(&store);
+        assert_eq!(
+            (record.owner, record.standby),
+            (c_host(), None),
+            "commit {commit}"
+        );
+        let expected: Vec<_> = (1..=4).map(|n| (n, Some(retained(n)))).collect();
+        assert_eq!(succeeded.served, expected, "commit {commit}");
+    }
 }

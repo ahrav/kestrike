@@ -104,6 +104,7 @@ fn records(number: u32, active: VolumeRecord, entries: Vec<(Host, VolumeEntry)>)
         receipt: None::<Receipt>,
         replacement: None,
         entries,
+        held: None,
         judgement: VolumeJudgement {
             health: Some(Health::Available),
             others: 0,
@@ -313,6 +314,60 @@ fn an_owner_entry_decides_only_while_the_owner_report_is_fresh() {
     );
     assert_eq!(class(HostEvidence::Live, false), (Class::Served, vec![]));
     assert_eq!(class(HostEvidence::Unknown, false), (Class::Served, vec![]));
+}
+
+/// A held restart's diagnostic entry in the owner's fresh report reads `blocked` at the record's tenure and one
+/// attempt above the read, with the owner live, in conflict or unknown, as a failed instance listing leaves it; the
+/// survey's match, which needs a live owner, is absent in the last two. A silent report reads `silent`, a lost owner
+/// `fresh`, and an entry two attempts below the record or for another volume decides nothing.
+#[test]
+fn a_held_restart_entry_in_the_owner_s_fresh_report_reads_blocked_under_each_verdict_but_lost() {
+    let read = records(1, v3(), vec![]).record;
+    let entry = crate::host::agent::tests::held_final(&read, 7)
+        .entry
+        .unwrap();
+    assert!(entry.held_restart());
+    let class = |verdict: HostEvidence, silent: bool, bumps: u32, entry: VolumeEntry| {
+        let owner = host_view(11, verdict, Some(reported(11, vec![entry])));
+        let mut records = records(1, v3(), vec![]);
+        records.record.attempts += bumps;
+        let matched = verdict == HostEvidence::Live && bumps < 2 && entry.volume == read.active;
+        records.held = matched.then_some((host(11), entry));
+        let shards = [(row(1, ShardState::Protected, None), Some(records))];
+        let fed = [(&owner, silent)];
+        let part = build_fed(&fed, &shards, &mut Memory::default(), &wide(), 5);
+        CLASSES[part.classes.iter().position(|&n| n == 1).unwrap()]
+    };
+    for verdict in [
+        HostEvidence::Live,
+        HostEvidence::Conflict,
+        HostEvidence::Unknown,
+    ] {
+        for bumps in [0, 1] {
+            assert_eq!(
+                class(verdict, false, bumps, entry),
+                Class::Blocked,
+                "{verdict:?}, {bumps} bumps"
+            );
+        }
+        assert_eq!(class(verdict, true, 0, entry), Class::Silent, "{verdict:?}");
+        assert_eq!(
+            class(verdict, false, 2, entry),
+            Class::Silent,
+            "{verdict:?}"
+        );
+        let elsewhere = VolumeEntry {
+            volume: v3().volume,
+            ..entry
+        };
+        assert_ne!(elsewhere.volume, read.active);
+        assert_eq!(
+            class(verdict, false, 0, elsewhere),
+            Class::Silent,
+            "{verdict:?}"
+        );
+    }
+    assert_eq!(class(HostEvidence::Lost, false, 0, entry), Class::Fresh);
 }
 
 /// Every survey state that fixes a class gives it, and every other state leaves the class to the owner's entry.

@@ -43,6 +43,10 @@
 //!   within the shard; the recovery attempt count and the detector's nomination count restart under a new
 //!   `WriterId::boot`. The contract's `resets` map names each count's reset identity, and its `reset_identities`
 //!   map gives the report fields that key each identity.
+//! - A restart held after a bump whose reply is unknown reports one diagnostic entry ([`VolumeEntry::held_restart`]):
+//!   its tenure is the `(g, 2E)` of the `(g, owner, E)` the restart read, which names no session of the held
+//!   incarnation and can equal the earlier session's tenure that set `E`, and every other field but its role, phase,
+//!   exit label and recovery part reads null or unavailable, so the entry adds to no counter series.
 //! - `report_age_us` is the authority's Report age on its serving clock. `checkpoint_age_us` counts from this owner
 //!   tenure's first read of a shard record naming the checkpoint, on the owner's turn clock, and restarts with each
 //!   tenure, so a monitor compares checkpoint identity across reports for the checkpoint's age across tenures.
@@ -125,7 +129,7 @@ use crate::failover::records::{
     self, CHECKPOINT, CodecError, Host, NamedCheckpoint, Reader as Bytes, STATES, ShardRecord,
     VOLUME, VolumeId, VolumeState, index,
 };
-use crate::failover::retire::Stale;
+use crate::failover::retire::{Stale, Target};
 use crate::failover::serving::{self, Cause, Deposing};
 use crate::net::ownership::{ActivatedEpoch, Shard, ShardGeneration};
 use crate::storage::store::StoreError;
@@ -631,7 +635,8 @@ pub struct VolumeEntry {
     /// `None` without an accepted shard record, and without an own-volume read when the shard record names neither
     /// the owner nor the replacement role.
     pub role: Option<RecordedRole>,
-    /// The `(g, a)` of the tenure's session.
+    /// The `(g, a)` of the tenure's session; for a held restart's diagnostic entry ([`VolumeEntry::held_restart`]),
+    /// the [`held_tenure`] of the record the restart read.
     pub tenure: Option<(ShardGeneration, ActivatedEpoch)>,
     /// The state of the volume's last read record.
     pub volume_state: Option<VolumeState>,
@@ -811,6 +816,19 @@ pub struct Coverage {
 }
 
 impl Recovery {
+    /// Whether this is the recovery part of a restart held after a bump whose reply is unknown: kind `restart`,
+    /// outcome `refused`, check `bump`, next `hold` and store class `unknown`.
+    pub fn unknown_bump_hold(&self) -> bool {
+        (self.kind, self.outcome, self.check, self.next, self.store)
+            == (
+                Some(RecoveryKind::Restart),
+                Some(RecoveryOutcome::Refused),
+                Some(RecoveryCheck::Bump),
+                Some(RecoveryNext::Hold),
+                Some(StoreClass::Unknown),
+            )
+    }
+
     pub const UNAVAILABLE: Self = Self {
         kind: None,
         outcome: None,
@@ -1268,6 +1286,13 @@ fn layout(bytes: &[u8], trailer: usize) -> Result<usize, ReportError> {
         .ok_or(ReportError::Length)
 }
 
+/// The tenure `(g, 2E)` a held restart's diagnostic entry carries for the `(g, owner, E)` its restart read, `None`
+/// at `E = 0` or past the activated epochs.
+pub fn held_tenure(read: Target) -> Option<(ShardGeneration, ActivatedEpoch)> {
+    let epoch = ActivatedEpoch::new(read.attempts.checked_mul(2)?)?;
+    epoch.is_activated().then_some((read.generation, epoch))
+}
+
 impl VolumeEntry {
     /// The entry of `volume` and `shard` with every other field absent or unavailable (NO-INVENTED-VALUES), for a
     /// producer that fills the fields it has a source for.
@@ -1325,6 +1350,26 @@ impl VolumeEntry {
             read_defects: None,
             served: None,
         }
+    }
+
+    /// Whether this is the diagnostic entry of a restart held after a bump whose reply is unknown (HELD-RESTART): role
+    /// `Owner`, a tenure at an activated epoch, phase `Held`, the exit label `held`, the recovery part of
+    /// [`Recovery::unknown_bump_hold`], and every other field absent or unavailable, so no serving state, flip, exit
+    /// request, count or duration. Its tenure is [`held_tenure`] of the `(g, owner, E)` the restart read: the shard
+    /// record stands at `E` or, when the bump committed, at `E + 1`. That tenure names no session of the held
+    /// incarnation and can equal the tenure of the earlier session whose bump set `E`, so a reader that keys a series
+    /// or a join on an entry's tenure tells this entry apart by this predicate.
+    pub fn held_restart(&self) -> bool {
+        let activated = self.tenure.is_some_and(|(_, epoch)| epoch.is_activated());
+        let diagnostic = Self {
+            role: Some(RecordedRole::Owner),
+            tenure: self.tenure,
+            phase: Some(Phase::Held),
+            ended: Some(Ended::Held),
+            recovery: self.recovery,
+            ..Self::unobserved(self.volume, self.shard)
+        };
+        activated && self.recovery.unknown_bump_hold() && *self == diagnostic
     }
 
     /// The entry's fixed encoding in a schema-[`SCHEMA`] report, returned only when [`VolumeEntry::decode`] accepts

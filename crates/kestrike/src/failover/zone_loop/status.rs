@@ -15,7 +15,8 @@
 //!   `Recorded` carries `ControlPlaneUnavailable` while the volume listing is unavailable. An `Enrolling` shard with a
 //!   step or a start to plan and no other blocker carries `ControlPlaneUnavailable` while its active volume's health
 //!   is unknown, and the plan withholds that step. `Protected` and `Enrolling` otherwise carry
-//!   the shard's host-side blocker, `RecordedHolderHold`, `DeviceFailureHold` or `SelfSuspect`, when it has one. A
+//!   the shard's host-side blocker, `RestartHeld`, `RecordedHolderHold`, `DeviceFailureHold` or `SelfSuspect`, in
+//!   that order, when it has one. A
 //!   `Protected` shard whose owner reads lost carries `QuorumUnreachable` when its named standby's possible probers
 //!   span fewer partitions than any detector quorum counts (QUORUM-PREMISE in `plan`), after the standby's own
 //!   `SelfSuspect` and ahead of the owner-side holds of the lost owner's last report. A census slot host that reports the device-failure hold on the active volume gives its `Enrolling` shard
@@ -164,11 +165,15 @@ pub enum Blocker {
     /// detector quorum can nominate the standby's takeover (QUORUM-PREMISE in `plan`, which states what the count
     /// leaves out).
     QuorumUnreachable,
+    /// The owner's report holds the diagnostic entry of a restart held after a bump whose reply is unknown at the
+    /// record's tenure or one attempt below it (HELD-RESTART-MATCH in `observe`), so the shard is unserved until the
+    /// owner's next incarnation restarts and serves, a standby takes it over or an operator acts.
+    RestartHeld,
 }
 
 impl Blocker {
     /// The number of blockers.
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 19;
 
     /// Every blocker, at its [`Blocker::position`].
     pub const ALL: [Self; Self::COUNT] = [
@@ -190,6 +195,7 @@ impl Blocker {
         Self::Placement,
         Self::PerHostCap,
         Self::QuorumUnreachable,
+        Self::RestartHeld,
     ];
 
     /// The blocker's position in [`Blocker::ALL`], the closed table the reconciler status counts blockers by. The
@@ -215,6 +221,7 @@ impl Blocker {
             placement,
             per_host_cap,
             quorum_unreachable,
+            restart_held,
         ] = positions::<{ Self::COUNT }>();
         match self {
             Self::CensusFull => census_full,
@@ -235,6 +242,7 @@ impl Blocker {
             Self::Placement => placement,
             Self::PerHostCap => per_host_cap,
             Self::QuorumUnreachable => quorum_unreachable,
+            Self::RestartHeld => restart_held,
         }
     }
 }

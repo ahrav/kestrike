@@ -27,6 +27,13 @@
 //!   so a role that the records stopped supporting refuses at that step.
 //! - READ-ORDER: the role read takes the volume record before the shard record, as every check of
 //!   `failover::poll` does.
+//! - STARTING-ORDER: the incarnations of one volume run one at a time and publish to one status cell. An
+//!   incarnation publishes a `Starting` status before its recovery runs, and may wait for
+//!   [`link::StatusCell::waiting`] to read `false`, for at most one status period ([`duties::STATUS_US`]), before
+//!   its sequence runs. The supervisor finishes or abandons the previous incarnation's [`recover::hand_over`] before
+//!   the next incarnation publishes, so a final status never replaces a successor's. The agent's held-restart latch
+//!   (HELD-RESTART-LATCH in [`agent`]) clears on that `Starting` status, and a report the agent sealed before taking
+//!   it can carry the earlier latch past the new incarnation's bump for at most one report period.
 //! - ONE-EXIT: an incarnation's recovery attempt ends through exactly one [`Exit`]. The exits that park keep the
 //!   process running with no device while it rereads its role, and the process leaves the park through
 //!   `Rerun::RoleChanged` with no second attempt; the others end the process, and its next incarnation derives its
@@ -51,7 +58,8 @@ pub use inputs::Inputs;
 pub use lane::{Done, Job, Lane};
 pub use link::{Inbound, Link, Status};
 pub use recover::{
-    Ended, Recovery, Role, Signals, Sources, Tenure, recover, role, stand_by, survey,
+    Ended, Recovery, Role, Signals, Sources, Tenure, hand_over, held_status, recover, role,
+    stand_by, survey,
 };
 pub use serve::{
     Attachment, BringUp, Custody, Endpoint, Served, Teardown, Unbrought, bring_up, serve, teardown,

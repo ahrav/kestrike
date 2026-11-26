@@ -25,7 +25,7 @@ use crate::net::ownership::Shard;
 const MAGIC: &[u8; 4] = b"RSTS";
 const DOMAIN: &[u8; 16] = b"ebs-recon-status";
 const KEY_DOMAIN: &[u8] = b"ebs-recon-status-key";
-/// The 4-byte counts of a part: seven classes, the stale count, five standby states, two needs, eighteen
+/// The 4-byte counts of a part: seven classes, the stale count, five standby states, two needs, nineteen
 /// blockers, four attach counts, five closed causes, four receipt and four volume counts, four verdicts, the
 /// self-suspect count, four store outcomes, the event counts and the omitted count.
 const COUNTS: usize = CLASSES.len()
@@ -54,7 +54,7 @@ const COUNTS: usize = CLASSES.len()
 /// alarm (1) and the row count (1).
 pub(super) const PART_LEN: usize = 2 + 8 + 1 + 4 * COUNTS + 2 * 9 + 5 * 17 + 1 + 1;
 
-const _: () = assert!(PART_LEN == 552 && ROW_LEN == 14 && super::MAX_LEN == 16_080);
+const _: () = assert!(PART_LEN == 556 && ROW_LEN == 14 && super::MAX_LEN == 16_144);
 
 /// The key that authenticates one reconciler's statuses. It has no `Debug`, so no format string prints it. A key
 /// from [`StatusKey::derive`] lies in its own HMAC domain, so no host report key derived from the same secret

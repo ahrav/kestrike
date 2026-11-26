@@ -56,7 +56,8 @@
 //!   that ALIVE veto while the last sync places the prober outside the suspect's partition and refuses it otherwise.
 //! - REPORT-PER-PERIOD: the agent seals a schema-3 report through its [`Writer`] at the first turn and at each turn
 //!   once the writer's period has passed, with one entry per fresh status that carries a report entry naming its
-//!   own volume, shard and tenure, so a host whose processes send no such fresh entry seals an empty report. The
+//!   own volume, shard and tenure, and one entry per latched held restart (HELD-RESTART-LATCH), so a host whose
+//!   processes send no such entry seals an empty report. The
 //!   entries of the last sync's roles come first and a report holds [`MAX_ENTRIES`], so the entry of a role the
 //!   sync no longer lists takes a place only when every listed role's entry has one.
 //!   Parking ends the tenure. The agent seals a parked status's entry when the entry names the status's volume and
@@ -68,6 +69,21 @@
 //!   accepted sync. A seal the writer refuses reports its [`SealError`] in
 //!   [`Outputs::seal_refused`], and the next turn tries again. [`Outputs::deliver`] hands the sealed bytes to a [`ReportSink`]
 //!   unchanged.
+//! - HELD-RESTART-LATCH: the final status of a restart held after a bump whose reply is unknown
+//!   ([`held_status`](super::recover::held_status)) latches for its volume, outside the freshness rule, and each
+//!   report seals its diagnostic entry while the latch stands; the entry seals from the latch alone and credits no
+//!   owned role in the producer-missing gauge, since its process has ended. The latch clears on a later status of
+//!   the volume that passes the replay checks, a new incarnation's `Starting` status included (STARTING-ORDER in
+//!   [`super`]); on a sync that lists no record of the shard, or lists one at or past the status's target unless it
+//!   names this host owner of the volume at the target or one attempt above it; and with the agent, which keeps it
+//!   in memory only. A final status that arrives after such a sync sets no latch, so the two orders of a sync and
+//!   a final status end in one state, and the agent keeps a latched volume's status for as long as the latch stands.
+//!   A `Starting` status names the volume's newest process and the process whose status it replaced, until a
+//!   `Closing` status of the newest process or a final held status the agent takes ends the record, or the agent
+//!   keeps no status of the volume. The agent drops a final status of the replaced process, which a successor's
+//!   `Starting` status followed. A final status of any other process latches: the newest process's, or a later
+//!   one's whose `Starting` status the cell lost before a take. The status carries no tenure, so it gives no
+//!   heartbeat entry and no progress credit, and HOST-HEALTH reads its process held.
 //! - REPORTS-CONFER-NO-AUTHORITY: the agent holds no store client and no device handle. A report, a probe reading
 //!   and a heartbeat change the detector's evidence and the values the agent returns.
 
@@ -87,7 +103,7 @@ use crate::failover::detect::probe::{self, Keyed, Message, ProbeError, ProbeKey}
 use crate::failover::records::{self, Host, ShardRecord, VolumeId};
 use crate::failover::report::{
     BuildIdentity, Detector, Ended, Gauge, Headroom, Health, HostState, MAX_ENTRIES, Members,
-    Phase, RecordedRole, SealError, VolumeEntry, Writer, producer_missing,
+    Phase, RecordedRole, SealError, VolumeEntry, Writer, held_tenure, producer_missing,
 };
 use crate::failover::retire::Target;
 use crate::failover::zone_loop::directory::{HostProjection, Projection};
@@ -327,7 +343,19 @@ pub struct Agent {
     suspecting: bool,
     writer: Writer,
     build: BuildIdentity,
+    /// The final statuses of incarnations whose restart held after a bump whose reply is unknown, one per volume,
+    /// under HELD-RESTART-LATCH.
+    latched: Vec<Status>,
+    /// For each volume, the process of its last `Starting` status and the process whose status that one replaced,
+    /// the volume's newest incarnation and its predecessor.
+    started: Vec<(VolumeId, u32, Option<u32>)>,
+    /// Each record of the last sync as HELD-RESTART-LATCH reads it: the shard, the generation, the attempt count and
+    /// the active volume where the record names this host owner. `None` before the first accepted sync.
+    synced: Option<Vec<Listed>>,
 }
+
+/// One synced record as [`Agent::stands`] reads it.
+type Listed = (Shard, ShardGeneration, u32, Option<VolumeId>);
 
 impl Agent {
     /// `new` builds the detector with the self-suspicion threshold [`SELF_SUSPECT`] in place of `watch`'s. `boot` is a
@@ -393,6 +421,9 @@ impl Agent {
             suspecting: false,
             writer,
             build,
+            latched: Vec::new(),
+            started: Vec::new(),
+            synced: None,
         })
     }
 
@@ -608,8 +639,21 @@ impl Agent {
         // The roles of the last sync come first, so a status the sync kept for an unlisted role takes a place only
         // after every listed one has its own.
         let listed = |status: &&Status| self.roles.contains(&(status.shard, status.volume));
-        let entries: Vec<VolumeEntry> = (self.fresh(now).filter(listed))
-            .chain(self.fresh(now).filter(|status| !listed(status)))
+        // A held restart's final status seals its entry only from its latch, which stands outside the freshness rule.
+        #[cfg(test)]
+        let planted = tests::fresh_latch();
+        #[cfg(not(test))]
+        let planted = false;
+        let agent = &*self;
+        let standing = move |held: &&Status| {
+            !planted || (agent.fresh(now)).any(|status| status.volume == held.volume)
+        };
+        let sealed = || {
+            (self.fresh(now).filter(|status| !Self::final_held(status)))
+                .chain(self.latched.iter().filter(standing))
+        };
+        let entries: Vec<VolumeEntry> = (sealed().filter(listed))
+            .chain(sealed().filter(|status| !listed(status)))
             .filter_map(|status| {
                 let entry = Self::own_entry(status)?;
                 Some(VolumeEntry {
@@ -620,12 +664,14 @@ impl Agent {
             })
             .take(MAX_ENTRIES)
             .collect();
-        // A waiting process's entry produces no owned role's entry.
+        // A waiting process's entry and a held restart's diagnostic entry, whose process has ended, produce no owned
+        // role's entry.
         let produced = (self.owned.as_ref()).map(|owned| {
             producer_missing(owned.iter().map(|&(shard, volume)| {
                 (entries.iter()).any(|entry| {
                     (entry.shard, entry.volume) == (shard, volume)
                         && entry.phase != Some(Phase::Standby)
+                        && !entry.held_restart()
                 })
             }))
         });
@@ -648,13 +694,22 @@ impl Agent {
     }
 
     /// A parked `status` with `tenure == None` can accept an entry with `Some` tenure when volume and shard match.
-    /// All other statuses require matching tenure as well. A `Standby` status and its entry also hold no tenure, and
-    /// the entry no serving state and the role `Standby` or `Unrecorded`, so a waiting process's entry never reads as
-    /// an owner's.
+    /// A `Held` status with no tenure accepts an entry with a tenure only as a held restart's diagnostic entry: the
+    /// status carries the exit label `held` and names a target, the entry's tenure is [`held_tenure`] of that
+    /// target, and the entry has the shape [`VolumeEntry::held_restart`] names. All other statuses require matching tenure as
+    /// well. A `Standby` status and its entry also hold no tenure, and the entry no serving state and the role
+    /// `Standby` or `Unrecorded`, so a waiting process's entry never reads as an owner's.
     fn own_entry(status: &Status) -> Option<VolumeEntry> {
         let entry = status.entry?;
         let tenure = match status.tenure {
             Some(tenure) => entry.tenure == Some(tenure),
+            None if status.phase == Phase::Held && entry.tenure.is_some() => {
+                status.ended == Some(Ended::Held)
+                    && status
+                        .target
+                        .is_some_and(|target| entry.tenure == held_tenure(target))
+                    && entry.held_restart()
+            }
             None => status.phase == Phase::Parked || entry.tenure.is_none(),
         };
         let waiting = status.phase != Phase::Standby
@@ -669,6 +724,82 @@ impl Agent {
         own.then_some(entry)
     }
 
+    /// Whether `status` is a final status that [`hand_over`](super::recover::hand_over) gives the agent for a
+    /// restart held after a bump whose reply is unknown: phase `Held` with no tenure, the exit label `held` and the
+    /// diagnostic entry [`Agent::own_entry`] accepts.
+    fn final_held(status: &Status) -> bool {
+        status.phase == Phase::Held
+            && status.tenure.is_none()
+            && status.ended == Some(Ended::Held)
+            && Self::own_entry(status).is_some_and(|entry| entry.tenure.is_some())
+    }
+
+    /// HELD-RESTART-LATCH for one received status that passed the replay checks: a final held status latches,
+    /// replacing its volume's latch, unless it comes from the process the volume's last `Starting` status replaced;
+    /// every other status of the volume, a `Starting` one included, clears the volume's latch. A `Starting` status
+    /// of a new process records it as the volume's newest, beside the process of the status the agent keeps for the
+    /// volume, which it replaces. A `Closing` status of the newest process or a final held status the agent takes
+    /// ends the record, since the volume's newest process has then ended. A final held status that no record of the
+    /// last sync supports ([`Agent::stands`]) sets no latch and clears the volume's, as that sync would have cleared
+    /// it; before the first sync every final held status latches. Returns `false` for a final status of the replaced
+    /// process, which the agent drops. `receive` calls this before it replaces the volume's kept status.
+    fn latch(&mut self, status: &Status) -> bool {
+        let volume = status.volume;
+        let at = (self.latched.iter()).position(|held| held.volume == volume);
+        let record = (self.started.iter()).position(|&(started, ..)| started == volume);
+        let final_held = Self::final_held(status);
+        if final_held && record.is_some_and(|at| self.started[at].2 == Some(status.pid)) {
+            return false;
+        }
+        match record {
+            Some(at) if status.phase == Phase::Starting && self.started[at].1 == status.pid => {}
+            _ if status.phase == Phase::Starting => {
+                let kept = (self.statuses.iter()).find(|kept| kept.status.volume == volume);
+                let earlier = [
+                    kept.map(|kept| kept.status.pid),
+                    record.map(|at| self.started[at].1),
+                ];
+                let replaced = earlier.into_iter().flatten().find(|&pid| pid != status.pid);
+                let next = (volume, status.pid, replaced);
+                match record {
+                    Some(at) => self.started[at] = next,
+                    None => self.started.push(next),
+                }
+            }
+            Some(at)
+                if final_held
+                    || (status.phase == Phase::Closing && self.started[at].1 == status.pid) =>
+            {
+                self.started.swap_remove(at);
+            }
+            _ => {}
+        }
+        let stands = |view: &Vec<Listed>| view.iter().any(|listed| Self::stands(status, listed));
+        let latches = final_held && self.synced.as_ref().is_none_or(stands);
+        match (latches, at) {
+            (true, Some(at)) => self.latched[at] = *status,
+            (true, None) => self.latched.push(*status),
+            (false, Some(at)) => {
+                self.latched.swap_remove(at);
+            }
+            (false, None) => {}
+        }
+        true
+    }
+
+    /// Whether a record of the last sync supports the latch of `held`: it lists this host owner of the latch's
+    /// volume at the status's target or one attempt above it, where a committed bump leaves the record, or it is a
+    /// record of the shard older than the target, a view from before the restart's read.
+    fn stands(held: &Status, &(shard, generation, attempts, owned): &Listed) -> bool {
+        let Some(read) = held.target.filter(|_| shard == held.shard) else {
+            return false;
+        };
+        let older = (generation, attempts) < (read.generation, read.attempts);
+        let at_or_bumped = generation == read.generation
+            && (attempts == read.attempts || Some(attempts) == read.attempts.checked_add(1));
+        older || (at_or_bumped && owned == Some(held.volume))
+    }
+
     fn receive(&mut self, statuses: &[Status], now: u64) {
         for status in statuses {
             let received = Received {
@@ -676,8 +807,8 @@ impl Agent {
                 at: now,
                 published_after: self.turned_at,
             };
-            let baseline = (self.baselines.iter_mut()).find(|kept| kept.volume == status.volume);
-            let previous = baseline.as_deref().copied();
+            let baseline = (self.baselines.iter()).position(|kept| kept.volume == status.volume);
+            let previous = baseline.map(|at| self.baselines[at]);
             // A status of an earlier tenure than the volume's baseline, or a same-tenure sample whose counts fell, is
             // a replay or a reordering: it changes neither the row, the baseline nor the progress totals.
             let earlier = previous.is_some_and(|last| {
@@ -687,7 +818,7 @@ impl Agent {
                 previous.filter(|last| last.pid == status.pid && last.tenure == status.tenure);
             let fell = same
                 .is_some_and(|last| status.io < last.io || status.completions < last.completions);
-            if earlier || fell {
+            if earlier || fell || !self.latch(status) {
                 continue;
             }
             // A status without a tenure counts no tenure's progress, so it leaves the baseline and the totals to the
@@ -706,7 +837,7 @@ impl Agent {
                     completions: status.completions,
                 };
                 match baseline {
-                    Some(baseline) => *baseline = next,
+                    Some(at) => self.baselines[at] = next,
                     None => self.baselines.push(next),
                 }
             }
@@ -745,17 +876,35 @@ impl Agent {
         self.roles.clear();
         let held = |r: &&ShardRecord| r.owner == own || r.standby == Some(own);
         (self.roles).extend(sync.records.iter().filter(held).map(role));
+        // HELD-RESTART-LATCH: a latch stands while a record of the sync supports it, and the agent keeps the sync's
+        // records in that reading for a final status that arrives later. A sync with no record of the shard keeps no
+        // latch for it.
+        let mut view = self.synced.take().unwrap_or_default();
+        view.clear();
+        let listed = |r: &ShardRecord| {
+            let owned = (r.owner == own).then_some(r.active);
+            (r.shard, r.generation, r.attempts, owned)
+        };
+        view.extend(sync.records.iter().map(listed));
+        (self.latched).retain(|held| view.iter().any(|listed| Self::stands(held, listed)));
+        self.synced = Some(view);
         let mut owned = self.owned.take().unwrap_or_default();
         owned.clear();
         owned.extend(sync.records.iter().filter(|r| r.owner == own).map(role));
         self.owned = Some(owned);
         // A status of a role the records no longer list stays for the restart grace, so the fresh-status readers keep
-        // the entry of a process that still runs.
-        let (roles, grace) = (&self.roles, self.grace());
+        // the entry of a process that still runs, and for as long as its volume's latch stands, so HOST-HEALTH reads
+        // the held process when a later sync lists the role again.
+        let (roles, latched, grace) = (&self.roles, &self.latched, self.grace());
         self.statuses.retain(|kept| {
             roles.contains(&(kept.status.shard, kept.status.volume))
+                || latched.iter().any(|held| held.volume == kept.status.volume)
                 || now.saturating_sub(kept.at) <= grace
         });
+        // The newest-process record of a volume lasts while the agent keeps a status of that volume.
+        let statuses = &self.statuses;
+        (self.started)
+            .retain(|&(volume, ..)| statuses.iter().any(|kept| kept.status.volume == volume));
         // A standby-named role that stays named and unreported keeps its original `since`, so repeated syncs
         // preserve its grace deadline.
         let (before, statuses) = (std::mem::take(&mut self.unreported), &self.statuses);

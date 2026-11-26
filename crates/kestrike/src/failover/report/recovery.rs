@@ -83,6 +83,12 @@ impl RecoveryStatus {
         self.end(Outcome::Refused(refusal));
     }
 
+    /// Whether the last attempt runs.
+    pub fn running(&self) -> bool {
+        self.last
+            .is_some_and(|attempt| attempt.outcome == Outcome::Running)
+    }
+
     /// Whether the last attempt holds a recovery slot: it runs, or it refused with a next step of hold or restart.
     pub fn holds_slot(&self) -> bool {
         self.last.is_some_and(|attempt| match attempt.outcome {

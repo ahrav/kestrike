@@ -10,6 +10,10 @@
 //! - QUORUM-PREMISE: a shard whose owner reads `Lost` while its named standby's possible probers span fewer than
 //!   [`QUORUM_MIN`] partitions carries `Blocker::QuorumUnreachable` (`Zone::quorum_unreachable`) in state
 //!   `Protected`. The blocker names the condition and plans no step.
+//! - HELD-RESTART: a shard whose owner's live report holds a held restart's diagnostic entry at the record's tenure or
+//!   one attempt below it (`ShardRecords::held`) carries `Blocker::RestartHeld` as its host-side blocker, ahead of the
+//!   owner entry's holds, with QUORUM-PREMISE's blockers first. The match is diagnostic evidence only: it inhibits no
+//!   enrollment, no takeover and no other step, and orders no rerun; `device_hold` reads the entry as no device hold.
 //! - ATTACH-EVIDENCE: host evidence and the active volume's record determine standby need. `Zone::protected` requires
 //!   a live attach between the named standby and the active volume. A named standby whose attach of the active
 //!   volume is ended and not yet gone loses its census slot to another candidate regardless of its host evidence;
@@ -302,10 +306,15 @@ thread_local! {
     pub(crate) static LOST_PROBERS_COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn device_hold(entry: &VolumeEntry) -> bool {
+/// A held entry with a device in it. A held restart's diagnostic entry ([`VolumeEntry::held_restart`]) is none: its
+/// bump is a store write after Report #1 completed, so its fencer holds no device command.
+pub(super) fn device_hold(entry: &VolumeEntry) -> bool {
     let unheld = withdrawn(entry.withdrawal) == Withdrawn::Records
         || entry.recovery.check == Some(RecoveryCheck::Unheld);
-    entry.phase == Some(OwnerPhase::Held) && !recorded_holder(entry) && !unheld
+    entry.phase == Some(OwnerPhase::Held)
+        && !recorded_holder(entry)
+        && !unheld
+        && !entry.held_restart()
 }
 
 fn serving(entry: &VolumeEntry) -> bool {
@@ -576,7 +585,12 @@ impl<'a> Zone<'a> {
         records.entries.iter().find(owned).map(|(_, entry)| entry)
     }
 
+    /// The host-side blocker: `RestartHeld` for a HELD-RESTART-MATCH, then the owner entry's recorded-holder or
+    /// device hold, then the named standby's `SelfSuspect`.
     fn host_side(&self, records: &ShardRecords, owner: Option<&VolumeEntry>) -> Option<Blocker> {
+        if records.held.is_some() {
+            return Some(Blocker::RestartHeld);
+        }
         let owner_side = owner.and_then(|entry| {
             if recorded_holder(entry) {
                 Some(Blocker::RecordedHolderHold)

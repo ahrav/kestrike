@@ -2,8 +2,8 @@
  "record": "alarm-catalog",
  "version": 1,
  "contracts": {
-  "report": {"path": "failover/report/contract.json", "schema": 3, "sha256": "c4b471cc24c8cfa41980fc6fa2221fb738b24e8198e50553259b0549b94ef130"},
-  "status": {"path": "failover/report/status_contract.json", "schema": 1, "sha256": "a976137c44508dd0c3361d44615b77d5f8f4ae82cc678068efa9f21577b5d945"}
+  "report": {"path": "failover/report/contract.json", "schema": 3, "sha256": "f7eb0d3924e4f340ec1e2c941209574962ec88c68538d07cd0869e602fa17bd7"},
+  "status": {"path": "failover/report/status_contract.json", "schema": 1, "sha256": "46910175eeae80fb5ad7dd0e92a83910a63580a39418b08d0daad271a2a5f231"}
  },
  "routes": ["ownership", "recovery", "standby-capacity", "store", "device", "control-plane", "network", "telemetry", "deploy"],
  "rows": [

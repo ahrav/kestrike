@@ -115,6 +115,7 @@ fn unattached(number: u32, owner: u64, standby: Option<u64>, active: VolumeRecor
         receipt: None,
         replacement: None,
         entries: Vec::new(),
+        held: None,
         judgement: VolumeJudgement {
             health: Some(Health::Available),
             others: 0,

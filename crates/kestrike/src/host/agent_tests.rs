@@ -25,7 +25,7 @@ use crate::host::{Exit, HostGate};
 use crate::net::ownership::{ActivatedEpoch, Shard, ShardGeneration, VolumeState};
 use crate::storage::store_tests::record as base_record;
 
-pub(super) const OWN: u64 = 1;
+pub(crate) const OWN: u64 = 1;
 const BOOT: [u8; 16] = [0xA1; 16];
 
 /// The boot nonce of the test agent of host `h`; [`BOOT`] is the observer's.
@@ -40,6 +40,7 @@ thread_local! {
     static UNBOUND: Cell<bool> = const { Cell::new(false) };
     static ANY_HOLD: Cell<bool> = const { Cell::new(false) };
     static FIRED: Cell<bool> = const { Cell::new(false) };
+    static FRESH_LATCH: Cell<bool> = const { Cell::new(false) };
 }
 
 /// The health rule's mutant: a held or silent process makes the host unhealthy whether or not its shard names a
@@ -47,6 +48,11 @@ thread_local! {
 /// silent. An armed mutant returns `quiet`, which turns that reading unhealthy, and then sets [`fired`].
 pub(super) fn any_hold(quiet: bool) -> bool {
     fire(&ANY_HOLD, quiet)
+}
+
+/// The plant under which a latched held restart seals only while its status is fresh.
+pub(super) fn fresh_latch() -> bool {
+    FRESH_LATCH.with(Cell::get)
 }
 
 pub(super) fn unbound() -> bool {
@@ -81,9 +87,15 @@ pub(crate) fn fired() -> bool {
 
 /// Whether any plant of [`planted`] is set on this thread.
 pub(crate) fn armed() -> bool {
-    [&UNBOUND, &UNREVALIDATED, &PUBLISHED_ONLY, &ANY_HOLD]
-        .into_iter()
-        .any(|plant| plant.with(Cell::get))
+    [
+        &UNBOUND,
+        &UNREVALIDATED,
+        &PUBLISHED_ONLY,
+        &ANY_HOLD,
+        &FRESH_LATCH,
+    ]
+    .into_iter()
+    .any(|plant| plant.with(Cell::get))
 }
 
 /// Arms `plant` on this thread until [`disarm`] and clears [`fired`].
@@ -103,6 +115,7 @@ fn cell_of(plant: &'static str) -> &'static std::thread::LocalKey<Cell<bool>> {
         "published-only" => &PUBLISHED_ONLY,
         "unbound" => &UNBOUND,
         "any-hold" => &ANY_HOLD,
+        "fresh-latch" => &FRESH_LATCH,
         _ => panic!("no plant {plant}"),
     }
 }
@@ -3455,5 +3468,733 @@ fn a_waiting_standby_beside_an_owned_shard_reads_as_no_owner() {
     assert!(
         !sent.is_empty() && sent.iter().all(|to| *to == volume(2)),
         "a nomination reaches the waiting process alone: {sent:?}"
+    );
+}
+
+/// The refusal class of a restart that read `read` and held after a bump whose reply is unknown.
+pub(crate) fn unknown_bump(read: Target) -> crate::failover::report::RecoveryRefusal {
+    use crate::failover::restart::{Check, Refused};
+    use crate::storage::store::StoreError;
+    crate::failover::report::RecoveryRefusal::from(&Refused {
+        check: Check::Bump(StoreError::Unknown),
+        flip: None,
+        recovery: Some(read),
+    })
+}
+
+/// The final status [`held_status`](super::super::recover::held_status) builds for process `pid` of `record`'s
+/// shard whose restart read `record` and held after a bump whose reply is unknown.
+pub(crate) fn held_final(record: &ShardRecord, pid: u32) -> Status {
+    let holder = crate::failover::poll::Holder {
+        volume: record.active,
+        ..crate::failover::takeover::tests::holder_of(host(OWN))
+    };
+    let mut recovery = crate::failover::report::RecoveryStatus::NO_ATTEMPT;
+    recovery.start(crate::failover::report::RecoveryKind::Restart, 0);
+    let exit = Exit::Held {
+        recovery: Target::of(record),
+    };
+    super::super::recover::held_status(
+        (&holder, record.shard, pid),
+        (&exit, Some(unknown_bump(Target::of(record)))),
+        recovery,
+        5,
+    )
+    .expect("a held restart's final status")
+}
+
+/// The report entries the agent seals at `now` with `statuses` received at that turn and, when given, `records`
+/// synced at it.
+fn sealed_entries(
+    agent: &mut Agent,
+    now: u64,
+    statuses: &[Status],
+    records: Option<&[ShardRecord]>,
+) -> Vec<VolumeEntry> {
+    let placement = placement();
+    let out = agent.turn(
+        now,
+        Inputs {
+            statuses,
+            sync: records.map(|records| Synced {
+                records,
+                placement: &placement,
+            }),
+            clock: clock(now),
+            ..Inputs::NONE
+        },
+    );
+    assert!(out.refused.is_empty(), "{:?}", out.refused);
+    let report = out.report.expect("a report is due");
+    Reader::default()
+        .accept(&report, reader_key)
+        .unwrap()
+        .entries
+        .clone()
+}
+
+/// HELD-RESTART-LATCH: the final status of a restart held after a bump whose reply is unknown seals its diagnostic
+/// entry, the tenure `(g, 2E)` of the target the restart read with every tenure-keyed count null, in every report
+/// while the latch stands, past the status's freshness bound; it gives no heartbeat entry and no progress credit.
+#[test]
+fn a_held_restart_s_final_status_seals_its_entry_past_the_freshness_bound_with_no_heartbeat_entry()
+{
+    let records = [record(1, OWN, None), record(2, OWN, None)];
+    // Counts on the final status that a credit would add to the heartbeat's totals.
+    let held = Status {
+        io: 50,
+        completions: 5,
+        ..held_final(&records[0], 7)
+    };
+    let serving = status(2, Phase::Serving);
+    let mut agent = synced(&records, &[held, serving]);
+    let fresh = at(&mut agent, H, &[]);
+    let (header, beats) = beat_to(&fresh, 11);
+    let shards: Vec<u32> = beats.iter().map(|entry| entry.shard.get()).collect();
+    assert_eq!(shards, [2], "only the tenured twin gives a heartbeat entry");
+    assert_eq!(
+        (header.io, header.completions),
+        (serving.io, serving.completions),
+        "the held status adds no progress credit"
+    );
+    let tenure = Some((
+        records[0].generation,
+        ActivatedEpoch::new(2 * records[0].attempts).unwrap(),
+    ));
+    for now in [REPORT_US, STALE_US + REPORT_US, 10 * STALE_US] {
+        let entries = sealed_entries(&mut agent, now, &[], None);
+        let held: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.shard.get() == 1)
+            .collect();
+        assert_eq!(held.len(), 1, "at {now}: {entries:?}");
+        let entry = held[0];
+        assert!(entry.held_restart(), "at {now}: {entry:?}");
+        assert_eq!((entry.tenure, entry.phase), (tenure, Some(Phase::Held)));
+    }
+}
+
+/// HELD-RESTART-LATCH's clearings and its successor rule: a later status of the volume, a new incarnation's
+/// `Starting` status, a sync that no longer names this host owner of the volume at the read target or one above it,
+/// and the agent's restart each clear the latch; a late final status of a process a successor replaced latches
+/// nothing.
+#[test]
+fn the_held_restart_latch_clears_on_each_of_its_four_events_and_takes_no_late_final_status() {
+    let records = [record(1, OWN, None)];
+    let held = held_final(&records[0], 7);
+    let latched = |agent: &mut Agent, now, statuses: &[Status], sync: Option<&[ShardRecord]>| {
+        let entries = sealed_entries(agent, now, statuses, sync);
+        entries.iter().any(VolumeEntry::held_restart)
+    };
+    // A later status of the volume.
+    let mut agent = synced(&records, &[held]);
+    let serving = Status {
+        volume: held.volume,
+        ..status(1, Phase::Recovering)
+    };
+    assert!(!latched(&mut agent, REPORT_US, &[serving], None));
+    // A new incarnation's first status, which it publishes before its sequence can bump.
+    let mut agent = synced(&records, &[held]);
+    let starting = Status::idle(held.shard, held.volume, 8, Phase::Starting);
+    assert!(!latched(&mut agent, REPORT_US, &[starting], None));
+    // A late final status of the replaced process latches nothing.
+    assert!(!latched(&mut agent, 2 * REPORT_US, &[held], None));
+    // A redelivery of the latched status keeps it.
+    let mut agent = synced(&records, &[held]);
+    assert!(latched(&mut agent, REPORT_US, &[held], None));
+    // A sync at the read target and at one attempt above it keeps the latch; another owner, another active volume
+    // or a target two above clears it.
+    let bumped = ShardRecord {
+        attempts: records[0].attempts + 1,
+        ..records[0]
+    };
+    assert!(latched(&mut agent, 2 * REPORT_US, &[], Some(&records)));
+    assert!(latched(&mut agent, 3 * REPORT_US, &[], Some(&[bumped])));
+    for moved in [
+        ShardRecord {
+            owner: host(11),
+            ..records[0]
+        },
+        ShardRecord {
+            active: volume(9),
+            ..records[0]
+        },
+        ShardRecord {
+            attempts: records[0].attempts + 2,
+            ..records[0]
+        },
+    ] {
+        let mut agent = synced(&records, &[held]);
+        assert!(
+            !latched(&mut agent, REPORT_US, &[], Some(&[moved])),
+            "{moved:?}"
+        );
+    }
+    // A sync of a record older than the read keeps the latch.
+    let older = ShardRecord {
+        attempts: records[0].attempts - 1,
+        owner: host(11),
+        ..records[0]
+    };
+    let mut agent = synced(&records, &[held]);
+    assert!(latched(&mut agent, REPORT_US, &[], Some(&[older])));
+    // A sync that lists no record of the shard ends the host's role in it and clears the latch, and a later sync
+    // that lists the record again sets none.
+    let mut agent = synced(&records, &[held]);
+    let other = [record(2, OWN, None)];
+    assert!(!latched(&mut agent, REPORT_US, &[], Some(&other)));
+    assert!(!latched(&mut agent, 2 * REPORT_US, &[], Some(&records)));
+    // A final status that arrives after the sync that would have cleared its latch sets none, in either order of
+    // the two; the volume's row still takes the status.
+    for moved in [
+        ShardRecord {
+            owner: host(11),
+            ..records[0]
+        },
+        ShardRecord {
+            attempts: records[0].attempts + 2,
+            ..records[0]
+        },
+    ] {
+        let mut agent = synced(&[moved], &[]);
+        assert!(
+            !latched(&mut agent, REPORT_US, &[held], None),
+            "after the sync: {moved:?}"
+        );
+        let row = (agent.statuses.iter()).find(|kept| kept.status.volume == held.volume);
+        assert_eq!(row.map(|kept| kept.status.pid), Some(held.pid));
+        assert!(!latched(&mut agent, 2 * REPORT_US, &[], None));
+    }
+    // A sync that supports the final status lets it latch on a later turn, and so does an agent with no sync yet.
+    let mut agent = synced(&records, &[]);
+    assert!(latched(&mut agent, REPORT_US, &[held], None));
+    let mut unsynced = self::agent();
+    assert!(latched(&mut unsynced, REPORT_US, &[held], None));
+    // The agent keeps the latch in memory only, so an agent that starts again holds none until a final status
+    // reaches it.
+}
+
+/// A lagging sync of a record older than the restart's read keeps the latch past the restart grace, and with it
+/// the volume's row: when the current record returns, the health bit reads the held process at once.
+#[test]
+fn a_latch_kept_through_an_older_record_keeps_its_row_and_the_health_bit() {
+    let records = [record(1, OWN, Some(11))];
+    let held = held_final(&records[0], 7);
+    let latched = |agent: &mut Agent, now, sync: &[ShardRecord]| {
+        let entries = sealed_entries(agent, now, &[], Some(sync));
+        entries.iter().any(VolumeEntry::held_restart)
+    };
+    let mut agent = synced(&records, &[held]);
+    assert!(!agent.healthy(REPORT_US));
+    let older = ShardRecord {
+        attempts: records[0].attempts - 1,
+        owner: host(11),
+        standby: None,
+        ..records[0]
+    };
+    let late = RESTART_GRACE_US + REPORT_US;
+    assert!(latched(&mut agent, late, &[older]));
+    assert!(latched(&mut agent, late + REPORT_US, &records));
+    assert!(
+        !agent.healthy(late + REPORT_US),
+        "the latched process reads held"
+    );
+}
+
+/// The successor rule's accepting side: a process's own `Starting` status lets its final status latch; a successor's
+/// `Starting` status clears the latch and names the successor, whose own final status latches, while the
+/// predecessor's late final status leaves the successor's row and the host's health as they were. A `Closing`
+/// status ends the named process, so a later process that published no `Starting` status still latches.
+#[test]
+fn a_final_status_latches_after_its_own_starting_status_and_a_late_predecessor_changes_no_row() {
+    let records = [record(1, OWN, Some(11))];
+    let (shard, volume) = (records[0].shard, records[0].active);
+    let held = |pid| held_final(&records[0], pid);
+    let starting = |pid| Status::idle(shard, volume, pid, Phase::Starting);
+    let latched = |agent: &mut Agent, now, statuses: &[Status]| {
+        let entries = sealed_entries(agent, now, statuses, None);
+        entries.iter().any(VolumeEntry::held_restart)
+    };
+    let mut agent = synced(&records, &[starting(7)]);
+    assert!(
+        latched(&mut agent, REPORT_US, &[held(7)]),
+        "its own Starting status"
+    );
+    assert!(!agent.healthy(REPORT_US), "the held process reads held");
+    assert!(
+        !latched(&mut agent, 2 * REPORT_US, &[starting(8)]),
+        "the successor's Starting status"
+    );
+    assert!(agent.healthy(2 * REPORT_US), "the successor reads starting");
+    assert!(
+        !latched(&mut agent, 3 * REPORT_US, &[held(7)]),
+        "the late predecessor"
+    );
+    assert!(
+        agent.healthy(3 * REPORT_US),
+        "the late predecessor leaves the health bit"
+    );
+    let row = (agent.statuses.iter())
+        .find(|kept| kept.status.volume == volume)
+        .unwrap();
+    assert_eq!((row.status.pid, row.status.phase), (8, Phase::Starting));
+    assert!(
+        latched(&mut agent, 4 * REPORT_US, &[held(8)]),
+        "the successor's own final status"
+    );
+    let mut agent = synced(&records, &[starting(7)]);
+    let closing = Status::idle(shard, volume, 7, Phase::Closing);
+    assert!(!latched(&mut agent, REPORT_US, &[closing]));
+    assert!(
+        latched(&mut agent, 2 * REPORT_US, &[held(9)]),
+        "a later process with no Starting status"
+    );
+    assert!(!agent.healthy(2 * REPORT_US));
+}
+
+/// A process whose `Starting` status the cell lost before a take still latches its final status: the named
+/// process ended with no `Closing` status, alone or with a successor of its own, or the later process published an
+/// ordinary status first. The volume's row and the health bit then read the held process.
+#[test]
+fn a_final_status_of_a_later_process_latches_with_no_starting_status_of_its_own() {
+    let records = [record(1, OWN, Some(11))];
+    let (shard, volume) = (records[0].shard, records[0].active);
+    let held = |pid| held_final(&records[0], pid);
+    let starting = |pid| Status::idle(shard, volume, pid, Phase::Starting);
+    let latched = |agent: &mut Agent, now, statuses: &[Status]| {
+        let entries = sealed_entries(agent, now, statuses, None);
+        entries.iter().any(VolumeEntry::held_restart)
+    };
+    let row = |agent: &Agent| {
+        let kept = (agent.statuses.iter()).find(|kept| kept.status.volume == volume);
+        kept.map(|kept| (kept.status.pid, kept.status.phase))
+    };
+    let mut agent = synced(&records, &[starting(7)]);
+    assert!(
+        latched(&mut agent, REPORT_US, &[held(9)]),
+        "no Closing status from 7 and no Starting status from 9"
+    );
+    assert!(!agent.healthy(REPORT_US), "the held process reads held");
+    assert_eq!(row(&agent), Some((9, Phase::Held)));
+    let mut agent = synced(&records, &[starting(7)]);
+    assert!(!latched(&mut agent, REPORT_US, &[starting(8)]));
+    assert!(
+        latched(&mut agent, 2 * REPORT_US, &[held(9)]),
+        "a process later than the newest named one and the one it replaced"
+    );
+    let mut agent = synced(&records, &[starting(7)]);
+    let recovering = Status::idle(shard, volume, 9, Phase::Recovering);
+    assert!(!latched(&mut agent, REPORT_US, &[recovering]));
+    assert!(
+        latched(&mut agent, 2 * REPORT_US, &[held(9)]),
+        "an ordinary status of 9 and no Starting status from it"
+    );
+    assert_eq!(row(&agent), Some((9, Phase::Held)));
+}
+
+/// The process whose final status the agent drops is the one whose status the newest `Starting` status replaced: a
+/// repeated `Starting` status of the newest process keeps it, a process's own repeated `Starting` status names no
+/// replaced process, and each new incarnation moves it to the incarnation before.
+#[test]
+fn the_dropped_final_status_is_the_one_of_the_process_the_newest_starting_status_replaced() {
+    let records = [record(1, OWN, Some(11))];
+    let (shard, volume) = (records[0].shard, records[0].active);
+    let held = |pid| held_final(&records[0], pid);
+    let starting = |pid| Status::idle(shard, volume, pid, Phase::Starting);
+    let latched = |agent: &mut Agent, now, statuses: &[Status]| {
+        let entries = sealed_entries(agent, now, statuses, None);
+        entries.iter().any(VolumeEntry::held_restart)
+    };
+    let mut agent = synced(&records, &[starting(7)]);
+    assert!(!latched(&mut agent, REPORT_US, &[starting(8)]));
+    assert!(!latched(&mut agent, 2 * REPORT_US, &[starting(8)]));
+    assert!(
+        !latched(&mut agent, 3 * REPORT_US, &[held(7)]),
+        "the late predecessor after a repeated Starting status"
+    );
+    assert!(agent.healthy(3 * REPORT_US));
+    assert!(latched(&mut agent, 4 * REPORT_US, &[held(8)]));
+    let mut agent = synced(&records, &[starting(7)]);
+    assert!(!latched(&mut agent, REPORT_US, &[starting(7)]));
+    assert!(
+        latched(&mut agent, 2 * REPORT_US, &[held(7)]),
+        "its own repeated Starting status"
+    );
+    let mut agent = synced(&records, &[starting(7)]);
+    assert!(!latched(&mut agent, REPORT_US, &[starting(8)]));
+    assert!(!latched(&mut agent, 2 * REPORT_US, &[starting(9)]));
+    assert!(
+        !latched(&mut agent, 3 * REPORT_US, &[held(8)]),
+        "the process the newest one replaced"
+    );
+    assert!(latched(&mut agent, 4 * REPORT_US, &[held(9)]));
+}
+
+/// A status the replay checks reject, a sample of an earlier tenure, leaves the latch standing.
+#[test]
+fn a_rejected_replay_leaves_the_held_restart_latch() {
+    let records = [record(1, OWN, None)];
+    let later = status(1, Phase::Serving);
+    let replay = Status {
+        tenure: Some((
+            ShardGeneration::new(3).unwrap(),
+            ActivatedEpoch::new(2).unwrap(),
+        )),
+        ..later
+    };
+    let held = held_final(&records[0], 7);
+    let mut agent = synced(&records, &[later]);
+    let entries = sealed_entries(&mut agent, REPORT_US, &[held], None);
+    assert!(entries.iter().any(VolumeEntry::held_restart));
+    let entries = sealed_entries(&mut agent, 2 * REPORT_US, &[replay], None);
+    assert!(entries.iter().any(VolumeEntry::held_restart), "{entries:?}");
+}
+
+/// A latched held restart credits no owned role in the producer-missing gauge: its process has ended.
+#[test]
+fn a_latched_held_restart_counts_its_owned_role_missing() {
+    let records = [record(1, OWN, None)];
+    let held = held_final(&records[0], 7);
+    let mut agent = synced(&records, &[held]);
+    let out = at(&mut agent, 10 * STALE_US, &[]);
+    let report = Reader::default()
+        .accept(out.report.as_ref().unwrap(), reader_key)
+        .unwrap();
+    assert!(report.entries.iter().any(VolumeEntry::held_restart));
+    assert_eq!(
+        report.host.producer_missing,
+        Members::Known { used: 1, limit: 1 }
+    );
+}
+
+/// `VolumeEntry::held_restart` takes the entry `held_status` builds and refuses each departure from it.
+#[test]
+fn the_held_restart_predicate_refuses_each_departure_from_its_shape() {
+    use crate::failover::report::{
+        Recovery, RecoveryCheck, RecoveryKind, RecoveryNext, StoreClass,
+    };
+    let entry = held_final(&record(1, OWN, None), 7).entry.unwrap();
+    assert!(entry.held_restart());
+    let r = entry.recovery;
+    let with = |recovery: Recovery| VolumeEntry { recovery, ..entry };
+    let zero = Some((
+        ShardGeneration::new(3).unwrap(),
+        ActivatedEpoch::new(0).unwrap(),
+    ));
+    let departures = [
+        (
+            "role",
+            VolumeEntry {
+                role: Some(RecordedRole::Standby),
+                ..entry
+            },
+        ),
+        (
+            "tenure",
+            VolumeEntry {
+                tenure: None,
+                ..entry
+            },
+        ),
+        (
+            "epoch 0",
+            VolumeEntry {
+                tenure: zero,
+                ..entry
+            },
+        ),
+        (
+            "phase",
+            VolumeEntry {
+                phase: Some(Phase::Parked),
+                ..entry
+            },
+        ),
+        (
+            "exit label",
+            VolumeEntry {
+                ended: Some(Ended::Rerun),
+                ..entry
+            },
+        ),
+        (
+            "serving",
+            VolumeEntry {
+                serving: Some(State::Withdrawn),
+                ..entry
+            },
+        ),
+        (
+            "flip",
+            VolumeEntry {
+                flip: true,
+                ..entry
+            },
+        ),
+        (
+            "served",
+            VolumeEntry {
+                served: Some(0),
+                ..entry
+            },
+        ),
+        (
+            "report age",
+            VolumeEntry {
+                report_age_us: Some(1),
+                ..entry
+            },
+        ),
+        (
+            "volume state",
+            VolumeEntry {
+                volume_state: Some(Recorded::Active),
+                ..entry
+            },
+        ),
+        (
+            "kind",
+            with(Recovery {
+                kind: Some(RecoveryKind::Lineage),
+                ..r
+            }),
+        ),
+        ("outcome", with(Recovery { outcome: None, ..r })),
+        (
+            "check",
+            with(Recovery {
+                check: Some(RecoveryCheck::FirstReport),
+                ..r
+            }),
+        ),
+        (
+            "next",
+            with(Recovery {
+                next: Some(RecoveryNext::Stop),
+                ..r
+            }),
+        ),
+        (
+            "store",
+            with(Recovery {
+                store: Some(StoreClass::Log),
+                ..r
+            }),
+        ),
+    ];
+    for (name, departed) in departures {
+        assert!(!departed.held_restart(), "{name}");
+    }
+}
+
+/// The hand-over's retry loop: a publication refused once and then accepted takes two calls, and one always
+/// refused takes every try.
+#[test]
+fn the_hand_over_retries_a_refused_publication_up_to_its_tries() {
+    use super::super::recover::retried;
+    let calls = Cell::new(0);
+    let once = retried(4, || {
+        calls.set(calls.get() + 1);
+        calls.get() > 1
+    });
+    assert_eq!((once, calls.get()), (Ok(()), 2));
+    calls.set(0);
+    let never = retried(4, || {
+        calls.set(calls.get() + 1);
+        false
+    });
+    assert_eq!((never, calls.get()), (Err(()), 4));
+}
+
+/// `own_entry`'s held-restart conjunct: a `Held` status with no tenure seals an entry with a tenure only when the
+/// status names a target whose `(g, 2E)` the entry carries and the entry has the held restart's shape.
+#[test]
+fn a_held_status_seals_a_tenured_entry_only_in_the_held_restart_s_shape() {
+    let records = [record(1, OWN, None)];
+    let held = held_final(&records[0], 7);
+    let entry = held.entry.unwrap();
+    let other = Target {
+        attempts: records[0].attempts + 1,
+        ..Target::of(&records[0])
+    };
+    let variants = [
+        (
+            "no exit label",
+            Status {
+                ended: None,
+                ..held
+            },
+        ),
+        (
+            "no target",
+            Status {
+                target: None,
+                ..held
+            },
+        ),
+        (
+            "another target",
+            Status {
+                target: Some(other),
+                ..held
+            },
+        ),
+        (
+            "a serving state",
+            Status {
+                entry: Some(VolumeEntry {
+                    serving: Some(State::Withdrawn),
+                    ..entry
+                }),
+                ..held
+            },
+        ),
+        (
+            "a count",
+            Status {
+                entry: Some(VolumeEntry {
+                    served: Some(0),
+                    ..entry
+                }),
+                ..held
+            },
+        ),
+        (
+            "another store class",
+            Status {
+                entry: Some(VolumeEntry {
+                    recovery: crate::failover::report::Recovery {
+                        store: Some(crate::failover::report::StoreClass::Unavailable),
+                        ..entry.recovery
+                    },
+                    ..entry
+                }),
+                ..held
+            },
+        ),
+    ];
+    for (name, status) in variants {
+        let mut agent = synced(&records, &[status]);
+        let entries = sealed_entries(&mut agent, REPORT_US, &[], None);
+        assert!(entries.is_empty(), "{name}: {entries:?}");
+    }
+    let mut agent = synced(&records, &[held]);
+    assert_eq!(sealed_entries(&mut agent, REPORT_US, &[], None), [entry]);
+}
+
+/// A final status handed over after a turn that sealed no report, and first sealed past its freshness bound, still
+/// reaches the report: the latch, not the status's freshness, carries it to the first seal after the hand-over.
+#[test]
+fn a_held_restart_s_entry_missed_by_the_first_seal_after_its_hand_over_reaches_the_next() {
+    let records = [record(1, OWN, None)];
+    let held = held_final(&records[0], 7);
+    let mut agent = synced(&records, &[]);
+    let out = agent.turn(
+        1,
+        Inputs {
+            statuses: &[held],
+            clock: clock(1),
+            ..Inputs::NONE
+        },
+    );
+    assert!(out.report.is_none(), "no report is due at the hand-over");
+    let later = STALE_US + 2 * REPORT_US;
+    let entries = sealed_entries(&mut agent, later, &[], None);
+    assert_eq!(entries, [held.entry.unwrap()]);
+}
+
+/// `hand_over` retries a publication the held cell refuses and returns the status after its last try; a free cell
+/// takes it, and `waiting` reads `false` once the agent's caller took it.
+#[test]
+fn a_final_status_the_held_cell_refuses_returns_to_its_caller_and_a_free_cell_takes_it() {
+    use super::super::link::StatusCell;
+    use super::super::recover::hand_over;
+    let cell = StatusCell::default();
+    let held = held_final(&record(1, OWN, None), 7);
+    {
+        let _held = cell.hold();
+        assert_eq!(hand_over(&cell, held, 4), Err(Box::new(held)));
+    }
+    assert_eq!(hand_over(&cell, held, 4), Ok(()));
+    assert!(cell.waiting());
+    assert_eq!(cell.take(), Some(held));
+    assert!(!cell.waiting());
+}
+
+/// `held_status` builds a final status only for a restart held after a bump whose reply is unknown: another exit,
+/// another bump error, no refusal, no started attempt and a read at `E = 0` give none.
+#[test]
+fn held_status_builds_only_the_held_restart_s_final_status() {
+    use super::super::recover::held_status;
+    use crate::failover::report::{RecoveryKind, RecoveryRefusal, RecoveryStatus};
+    use crate::failover::restart::{Check, Refused};
+    use crate::storage::store::StoreError;
+    let read = record(1, OWN, None);
+    let target = Target::of(&read);
+    let holder = crate::failover::poll::Holder {
+        volume: read.active,
+        ..crate::failover::takeover::tests::holder_of(host(OWN))
+    };
+    let mut started = RecoveryStatus::NO_ATTEMPT;
+    started.start(RecoveryKind::Restart, 0);
+    let held = Exit::Held { recovery: target };
+    let unavailable = RecoveryRefusal::from(&Refused {
+        check: Check::Bump(StoreError::Unavailable),
+        flip: None,
+        recovery: Some(target),
+    });
+    let built = |exit: &Exit, refusal, recovery| {
+        held_status((&holder, read.shard, 7), (exit, refusal), recovery, 5)
+    };
+    let status = built(&held, Some(unknown_bump(target)), started).unwrap();
+    assert_eq!(
+        (status.phase, status.tenure, status.target, status.ended),
+        (Phase::Held, None, Some(target), Some(Ended::Held))
+    );
+    assert_eq!((status.io, status.completions, status.pending), (0, 0, 0));
+    assert!(status.entry.unwrap().held_restart());
+    assert_eq!(
+        built(&Exit::Stopped, Some(unknown_bump(target)), started),
+        None
+    );
+    assert_eq!(built(&held, Some(unavailable), started), None);
+    assert_eq!(built(&held, None, started), None);
+    assert_eq!(
+        built(
+            &held,
+            Some(unknown_bump(target)),
+            RecoveryStatus::NO_ATTEMPT
+        ),
+        None
+    );
+    let mut ended = started;
+    ended.refuse(unavailable);
+    assert_eq!(
+        built(&held, Some(unknown_bump(target)), ended),
+        None,
+        "an attempt another refusal ended"
+    );
+    let unread = Exit::Held {
+        recovery: Target {
+            attempts: 0,
+            ..target
+        },
+    };
+    assert_eq!(built(&unread, Some(unknown_bump(target)), started), None);
+}
+
+/// The control: a latch that seals only while its status is fresh drops the held restart's entry from the report
+/// sealed past the freshness bound.
+#[test]
+fn the_control_whose_latch_keeps_the_freshness_rule_drops_the_held_restart_s_entry() {
+    let records = [record(1, OWN, None)];
+    let held = held_final(&records[0], 7);
+    let entries = planted("fresh-latch", || {
+        let mut agent = synced(&records, &[held]);
+        sealed_entries(&mut agent, 10 * STALE_US, &[], None)
+    });
+    assert!(
+        entries.is_empty(),
+        "the planted fresh latch drops the held restart's entry: {entries:?}"
     );
 }

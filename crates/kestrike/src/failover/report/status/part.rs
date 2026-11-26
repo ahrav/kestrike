@@ -24,10 +24,12 @@ labels! {
         Recovering,
         /// The owner's entry reads withdrawn or closed.
         Withdrawn,
-        /// The owner's entry reads held, parked, a held tenure or an unloadable metadata outcome, or the survey finds
-        /// a retirement request, an impaired volume or an unconfirmed loss.
+        /// The owner's entry reads held, parked, a held tenure or an unloadable metadata outcome, the owner's fresh
+        /// report holds a held restart's diagnostic entry, or the survey finds a retirement request, an impaired volume
+        /// or an unconfirmed loss.
         Blocked,
-        /// The loop holds no owner entry at the record's tenure from a fresh report, or could not read the shard.
+        /// The loop holds no owner entry at the record's tenure and no held restart's entry from a fresh report, or
+        /// could not read the shard.
         Silent,
         /// The active volume is lost: a replacement runs, is held or has no generation left.
         Cold,

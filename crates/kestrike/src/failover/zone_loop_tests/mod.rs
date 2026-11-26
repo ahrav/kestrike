@@ -5,6 +5,7 @@ mod detach_guard;
 pub(crate) mod directory;
 mod evidence;
 mod fresh_first;
+mod held;
 mod loss;
 pub(crate) mod observe;
 mod reclaim;

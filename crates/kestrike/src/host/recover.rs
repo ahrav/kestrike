@@ -45,7 +45,9 @@ use crate::failover::reconcile::{StandbyGate, enroll_standby, records_admit_stan
 use crate::failover::record::LocalRecord;
 use crate::failover::records::Host;
 use crate::failover::records::{ShardRecord, VolumeId, VolumeRecord, VolumeState};
-use crate::failover::report::{Phase, RecordedRole, RecoveryRefusal, VolumeEntry};
+use crate::failover::report::{
+    Ended as Exited, Phase, RecordedRole, RecoveryRefusal, RecoveryStatus, VolumeEntry, held_tenure,
+};
 use crate::failover::restart::{self, Check, Local, LocalSource};
 use crate::failover::retire::Target;
 use crate::failover::takeover::Next;
@@ -236,6 +238,8 @@ pub struct Sources<'r, S: Store, L: WatermarkLog, R, K> {
     pub refusals: &'r mut Refusals,
 }
 
+/// The caller publishes the incarnation's `Starting` status before this call (STARTING-ORDER in [`super`]).
+///
 /// Runs the sequence `role` names, once: [`Restart::run`] for [`Role::Restart`] and [`Fresh::run`] for
 /// [`Role::Fresh`], through `fencer`. The serving authority comes only from the sequence's success, through
 /// [`ServingAuthority::restarted`] or [`ServingAuthority::activated`] on `clock`, and the tenure takes the driver
@@ -634,6 +638,71 @@ pub(crate) fn standing(
         entry: Some(entry),
         ..Status::idle(shard, holder.volume, pid, Phase::Standby)
     }
+}
+
+/// The final status of an incarnation whose restart held after a bump whose reply is unknown (HELD-RESTART), for the
+/// volume of `holder` and process `pid`: phase `Held` with no tenure, `target` the `(g, owner, E)` the restart read,
+/// the exit label `held`, and the diagnostic entry [`VolumeEntry::held_restart`] names, whose tenure is `(g, 2E)`
+/// and whose recovery part is `recovery` once `refusal` ends its running attempt at `now_us`. The status carries no
+/// tenure, so no heartbeat entry, progress baseline or count derives from it. `None` for every other end: an exit
+/// other than [`Exit::Held`], a hold of another refusal class, no refusal, a `recovery` with no running attempt for
+/// the refusal to end, and a read at `E = 0`.
+///
+/// The caller hands the status over with [`hand_over`] and finishes or abandons the hand-over before the volume's
+/// next incarnation starts (the STARTING-ORDER rule of [`super`]), so the hand-over never replaces a successor's
+/// status.
+pub fn held_status(
+    (holder, shard, pid): (&Holder, Shard, u32),
+    (exit, refusal): (&Exit, Option<RecoveryRefusal>),
+    mut recovery: RecoveryStatus,
+    now_us: u64,
+) -> Option<Status> {
+    let Exit::Held { recovery: target } = *exit else {
+        return None;
+    };
+    if !recovery.running() {
+        return None;
+    }
+    recovery.refuse(refusal?);
+    let entry = VolumeEntry {
+        role: Some(RecordedRole::Owner),
+        tenure: Some(held_tenure(target)?),
+        phase: Some(Phase::Held),
+        ended: Some(Exited::Held),
+        recovery: recovery.recovery(now_us),
+        ..VolumeEntry::unobserved(holder.volume, shard)
+    };
+    entry.held_restart().then(|| Status {
+        target: Some(target),
+        entry: Some(entry),
+        ended: Some(Exited::Held),
+        ..Status::idle(shard, holder.volume, pid, Phase::Held)
+    })
+}
+
+/// Publishes `status`, an incarnation's final status, to `cell`, trying up to `tries` times and yielding the thread
+/// between tries, since a publication fails only while the agent's caller holds the cell for a take. The tries bound
+/// the hand-over's work; a take holds the cell for one copy of a status.
+///
+/// # Errors
+///
+/// `hand_over` returns `status` when every try failed, for the supervisor that receives the incarnation's end to
+/// hand over.
+pub fn hand_over(cell: &StatusCell, status: Status, tries: u32) -> Result<(), Box<Status>> {
+    retried(tries, || cell.publish(status)).map_err(|()| Box::new(status))
+}
+
+/// Calls `publish` until it returns `true`, at most `tries` times, yielding the thread between calls.
+pub(super) fn retried(tries: u32, mut publish: impl FnMut() -> bool) -> Result<(), ()> {
+    for at in 0..tries {
+        if publish() {
+            return Ok(());
+        }
+        if at + 1 < tries {
+            std::thread::yield_now();
+        }
+    }
+    Err(())
 }
 
 /// The waiting host's publications to its status cell: the status of the last role read that succeeded, the time of

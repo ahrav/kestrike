@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2295",
+  "kind": "contract-change",
+  "pull_request": 2295,
+  "changed": "The zone loop's blocker table gains RestartHeld (label restart-held), so Blocker::COUNT is 19 and a status part is 556 bytes, where it was 552, and a status of 16 parts of 32 rows is 16,144 bytes; the status contract's labels, wire table, layout and fixtures change with it at schema 1, and its units gain the schema entry: the first status a deployed reconciler seals freezes the layout, the label tables, the units and the reset points, and a change to any of them after it takes a new version. The host report keeps every byte: FP-MON-02's 65,536 bytes, MAX_ENTRIES 128 and the 509-byte entry stand, and contract.json changes in text only, stating that for an entry of phase held with recovery {restart, refused, bump, hold, unknown} entries.tenure is the tenure (g, 2E) the held restart read. The alarm catalog re-pins both contract digests and gains no row. HELD-RESTART in failover/zone_loop/plan.rs: a shard whose owner's live report holds that entry at the record's tenure or one attempt below it (ShardRecords::held) carries RestartHeld ahead of the owner entry's holds, with QUORUM-PREMISE's blockers first, and reads the class blocked.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "zone-loop-names-restart-held-for-a-held-restart-s-entry",
+    "reason": "Its invariant states the new rule: the held restart's final status and its latch, the entry's shape, the match at both bump outcomes and its exclusions, the blocker and the class. Before this change such a shard read Protected with no blocker, or DeviceFailureHold when the record stood at the E the restart read."
+  }
+}

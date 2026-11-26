@@ -1314,6 +1314,63 @@ fn fired(row: &Value, steps: &[controls::Step]) -> Vec<Fired> {
     evaluate(row, &inputs, Deltas::ResetAware)
 }
 
+/// The held restart's diagnostic entry, at the tenure `(g, 2E)` of the record its restart read and with every count
+/// its tenure keys null, sealed in one report more than the longest report window: of the report rows only
+/// `unknown-recovery-write` fires, once, and
+/// no row that reads a counter forms a series from it.
+#[test]
+fn a_held_restart_entry_pages_unknown_recovery_write_alone_and_starts_no_counter_series() {
+    let read = crate::host::agent::tests::record(1, crate::host::agent::tests::OWN, None);
+    let entry = crate::host::agent::tests::held_final(&read, 7)
+        .entry
+        .expect("the held restart's entry");
+    let catalog = catalog();
+    let rows = catalog["rows"].as_array().unwrap();
+    let longest = (rows.iter())
+        .filter(|row| row["source"] == "report")
+        .filter_map(|row| row["window"]["reports"].as_u64())
+        .max()
+        .unwrap();
+    let steps: Vec<controls::Step> = (0..=longest)
+        .map(|_| controls::Step::Report {
+            host: 1,
+            state: Box::new(controls::host_state()),
+            entries: vec![entry],
+        })
+        .collect();
+    let mut firing = Vec::new();
+    for row in rows {
+        if row["source"] != "report" {
+            continue;
+        }
+        let fired = fired(row, &steps);
+        if !fired.is_empty() {
+            firing.push((row["id"].as_str().unwrap().to_owned(), fired.len()));
+        }
+    }
+    assert_eq!(firing, [("unknown-recovery-write".to_owned(), 1)]);
+    let (inputs, _) = controls::sealed(&steps);
+    let Input::Record { view, .. } = &inputs[0] else {
+        panic!("a report record");
+    };
+    let scope = &view["entries"][0];
+    assert!(
+        activated(scope).is_some(),
+        "the entry carries the read tenure"
+    );
+    let counters = &PINNED["report"].counters;
+    let tenured: Vec<&String> = (counters.iter())
+        .filter(|(_, reset)| reset.as_str() == "tenure")
+        .map(|(signal, _)| signal)
+        .collect();
+    assert!(tenured.len() >= 9, "{tenured:?}");
+    for signal in tenured {
+        let path = signal.strip_prefix("entries.").unwrap();
+        let value = path.split('.').fold(scope, |at, key| &at[key]);
+        assert!(value.is_null(), "{signal} reads {value}");
+    }
+}
+
 /// The shipped row `id`, checked to read `source` over a window counted in records: the helpers below reseal what
 /// a producer published one fixture step apart, so they judge no row whose window or rate is measured in time.
 fn record_row(id: &str, source: &str) -> Value {

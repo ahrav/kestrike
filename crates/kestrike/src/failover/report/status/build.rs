@@ -5,9 +5,11 @@
 //!   entry at the shard record's tenure; the builder adds no second state table. The survey's state decides first,
 //!   through the one state the survey's ONE-STATE order gives the shard: an unread shard is `Silent`; a record at
 //!   `E = 0` is `Fresh`; a retirement request, an impaired volume or an unconfirmed loss is `Blocked`; a replacement
-//!   in progress, held or exhausted is `Cold`. Then a lost owner reads `Fresh`; then, while the owner's report is fresh, its entry decides: held or
-//!   parked, a held tenure, or an unloadable metadata outcome is `Blocked`; serving is `Served`; withdrawn, closed or
-//!   closing is `Withdrawn`; every other state is `Recovering`. Every other shard reads `Silent`.
+//!   in progress, held or exhausted is `Cold`. Then a lost owner reads `Fresh`; then, while the owner's report is fresh,
+//!   a held restart's diagnostic entry in that report (`observe::held_entry`) is `Blocked`, whatever verdict short of
+//!   lost the owner has, and otherwise its entry decides: held or parked, a held tenure, or an unloadable metadata
+//!   outcome is `Blocked`; serving is `Served`; withdrawn, closed or closing is `Withdrawn`; every other state is
+//!   `Recovering`. Every other shard reads `Silent`.
 //! - STALE-SERVING: an entry of a fresh report, one whose last advance lies within the fresh window, that reads
 //!   serving for a shard at a tenure below the shard record's `(g, 2E)` is stale once per host and shard, and counts
 //!   once it has been observed stale for longer than the fresh window, so a predecessor's last report from before a
@@ -38,7 +40,7 @@ use crate::failover::serving::State;
 use crate::failover::standbys::{self, Zone};
 use crate::failover::zone_loop::directory::DirectoryState;
 use crate::failover::zone_loop::evidence::HostEvidence;
-use crate::failover::zone_loop::observe::{HostView, ShardRecords};
+use crate::failover::zone_loop::observe::{HostView, ShardRecords, held_entry};
 use crate::failover::zone_loop::status::{EnrollPhase, ShardState, ShardStatus, ZoneStatus};
 use crate::net::ownership::{ActivatedEpoch, Shard, ShardGeneration};
 use crate::storage::store::{Alarm, Tally};
@@ -399,8 +401,8 @@ impl<'a> Builder<'a> {
     }
 
     /// The shard's class (ONE-CLASSIFICATION): the survey's fixed classes first; then a lost owner reads `Fresh`;
-    /// then the owner's entry at the record's tenure decides while the owner's report is fresh; every other shard
-    /// reads `Silent`.
+    /// then, while the owner's report is fresh, a held restart's diagnostic entry in it ([`held_entry`]) reads
+    /// `Blocked` and otherwise the owner's entry at the record's tenure decides; every other shard reads `Silent`.
     fn class(&self, status: &ShardStatus, records: Option<&ShardRecords>) -> Class {
         if let Some(class) = status.state.class() {
             return class;
@@ -413,11 +415,14 @@ impl<'a> Builder<'a> {
         if seen.is_some_and(|seen| seen.verdict == HostEvidence::Lost) {
             return Class::Fresh;
         }
-        let entry = records.entries.iter().find(|(host, _)| *host == owner);
-        match entry {
-            Some((_, entry)) if seen.is_some_and(|seen| seen.fresh.is_some()) => entry_class(entry),
-            _ => Class::Silent,
+        let Some(report) = seen.and_then(|seen| seen.fresh) else {
+            return Class::Silent;
+        };
+        if held_entry(&records.record, &report.entries).is_some() {
+            return Class::Blocked;
         }
+        let entry = records.entries.iter().find(|(host, _)| *host == owner);
+        entry.map_or(Class::Silent, |(_, entry)| entry_class(entry))
     }
 
     fn attaches(&mut self, volume: &VolumeRecord) {
