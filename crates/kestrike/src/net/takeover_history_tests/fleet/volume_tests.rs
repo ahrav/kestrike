@@ -132,7 +132,8 @@ fn an_impaired_volume_is_retained_through_one_takeover_that_holds_and_the_succes
     let attempts: Vec<_> = (report.hosts.takeovers.iter())
         .map(|attempt| (attempt.shard, attempt.host, attempt.refused.as_deref()))
         .collect();
-    assert_eq!(attempts, [(S3, H0, Some("Ready(Failed(None))"))]);
+    // The stalled volume delivers no completion, so the takeover's first Report after its compare-and-swap times out.
+    assert_eq!(attempts, [(S3, H0, Some("FirstReport"))]);
     let recovered = recovered_by_the_arm(&report);
     no_standby_while_held(&report, recovered);
     others_keep_serving(&report, &[S3]);

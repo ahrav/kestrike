@@ -21,7 +21,7 @@ use crate::failover::record::LocalRecord;
 use crate::failover::records::{Record, VolumeId, VolumeRecord};
 
 use crate::failover::report::{RecoveryKind, RecoveryRefusal};
-use crate::failover::takeover::tests::{Card, Reservation};
+use crate::failover::takeover::tests::Reservation;
 use crate::failover::zone_loop::actuate::Outcome;
 use crate::failover::zone_loop::evidence::{ListedVolumeState, VolumeCondition, VolumeStatus};
 use crate::failover::zone_loop::replace::Replaced;
@@ -32,9 +32,6 @@ use super::hosts::Up;
 use super::reconcile::{Aim, Ending};
 use super::{FIRST_KEY_EPOCH, Fleet, Live, Slots, Stopped, Stored};
 
-/// The commands a stalled or lost volume's card completes before the next one fails with no status: `start` alone,
-/// so `ready` fails.
-const STALLED_AT: usize = 1;
 /// The rounds the operator's release follows the latched hold by.
 pub(crate) const RELEASE_ROUNDS: u64 = 20;
 /// The rounds after the injector's last volume fault at which the operator releases with no hold read. They leave a
@@ -161,13 +158,6 @@ impl Held {
         }
     }
 
-    pub(crate) fn restart(refused: &crate::failover::restart::Refused) -> Self {
-        Self {
-            kind: RecoveryKind::Restart,
-            refusal: refused.into(),
-        }
-    }
-
     pub(crate) fn status(self, now_us: u64) -> crate::failover::report::RecoveryStatus {
         let mut status = crate::failover::report::RecoveryStatus::NO_ATTEMPT;
         status.start(self.kind, now_us);
@@ -271,15 +261,6 @@ fn condition(state: ListedVolumeState, status: VolumeStatus) -> VolumeCondition 
 }
 
 impl Fleet<'_> {
-    /// A card of `pair` on cell `at`'s reservation, which fails its second command while the volume is stalled or lost.
-    pub(super) fn card(&self, at: usize, pair: crate::failover::evidence::Pair) -> Card {
-        let mut card = Card::new(pair, &self.cells[at].world.reservation);
-        if self.cells[at].device != Device::Up {
-            card.stop_at = Some(STALLED_AT);
-        }
-        card
-    }
-
     pub(super) fn receipt_now(&self, at: usize) -> Option<Receipt> {
         let store = self.store.0.borrow();
         let item = store.current(&Key::Replacement(self.cells[at].placement.shard))?;

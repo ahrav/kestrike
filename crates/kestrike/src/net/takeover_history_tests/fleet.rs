@@ -5,12 +5,12 @@
 //! fixtures, and recovers every owner once from its capturing tenure's media. Each owner then, in a drawn order,
 //! drops without quiesce and recovers while the other shards serve the GETs drawn for the [`DOWN_ROUNDS`] rounds
 //! the shard stays down. Each recovered tenure reads every object in its shard during the retained-set sweep.
-//! The reconciler stand-ins survey after each recovery. Every fresh activation, and every restart other than the one
-//! a standby runs after its refused takeover, is an incarnation of the production owner process (`owners`): its role
-//! read, `host::recover` through a fencer over the host's device double, and the production bring-up, one
+//! The reconciler stand-ins survey after each recovery. Every fresh activation and every restart, the one that
+//! follows a standby's refused takeover included, is an incarnation of the production owner process (`owners`): its
+//! role read, `host::recover` through a fencer over the host's device double, and the production bring-up, one
 //! `host::serve::turn_up` per owner turn of the round loop. A standby's takeover in a host scenario (`hosts`) runs
-//! `Takeover::run` over the standby's card, and `Restart::run` over it when the refusal's next step is a restart, and
-//! its tenure starts through the fixture bring-up (`Fleet::bring_up`). The `actors` module holds the owner turn and
+//! one `host::stand_by` view period (`owners::stand_by`) through a fencer over the standby's device double, and its
+//! tenure starts through the same production bring-up (`Fleet::rise`). The `actors` module holds the owner turn and
 //! the reconciler tick.
 //!
 //! A host scenario (`hosts`) instead boots every owner, has each acknowledge one FILL and one INVALIDATE, and runs
@@ -56,7 +56,6 @@ use sha2::{Digest, Sha256};
 
 use crate::failover::evidence::Pair;
 use crate::failover::records::{Host, Record, ShardRecord, VolumeRecord};
-use crate::failover::restart::Restarted;
 use crate::failover::restart::tests::{self as restart_tests, Stored};
 use crate::failover::route::HighWater;
 use crate::failover::serving::State;
@@ -76,7 +75,7 @@ use super::super::requests::RequestId;
 use super::cycles::{Plant as CyclePlant, Verdict, hex};
 use super::{
     FleetDuties, Grounds, Inline, Pools, ROUND_US, Serving, Source, WINDOW, World, activate,
-    closed, collect, content, first, honest, open, tenure_of,
+    closed, collect, content, first, honest, tenure_of,
 };
 
 pub(crate) mod actors;
@@ -172,8 +171,9 @@ pub(crate) enum Plant {
     UnbackedBlocker,
     /// `Fleet::drop_entry` removes the shard's census entry at the index while its record still names the standby.
     UncoveredEntry,
-    /// The host that takes the shard over issues its card's first device command before `Takeover::run`, so the
-    /// command precedes the takeover's compare-and-swap and the card's first-command assertion panics.
+    /// The host that takes the shard over starts its fencer's device before the standby's view period runs, so the
+    /// device call precedes the takeover's compare-and-swap, and the period's CAS-BEFORE-DEVICE assertion over the
+    /// record the fencer's connect met panics.
     EarlyDevice,
     /// `Fleet::held_entries` leaves the held entry of the shard at the index out of every report but its holder's.
     EnrollBack,
@@ -709,9 +709,9 @@ impl Config {
     }
 }
 
-/// The format tag [`Config::identity`] hashes first: `fleet-v16-recover`, since each restart and fresh activation is
-/// an incarnation of the production owner process, whose blocker names the class of its refusal.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v16-recover";
+/// The format tag [`Config::identity`] hashes first: `fleet-v16-standby`, since a takeover attempt names the
+/// reservation commands of its standby's view period and the blocker that period refused with.
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v16-standby";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2629,42 +2629,6 @@ impl<'c> Fleet<'c> {
                 Ok(None)
             }
         }
-    }
-
-    /// Fences `restarted`'s tenure, records its activation by the cell's holder, attaches over `ground`, loads and
-    /// opens the client session. Returns the tenure whose session opened; a load that did not open reports a
-    /// blocker and returns `None` with `live[at]` empty.
-    ///
-    /// # Panics
-    ///
-    /// When `restarted` holds the session of another shard.
-    fn bring_up<'w>(
-        &mut self,
-        live: &mut Live<'w>,
-        ground: (&'w Grounds, &'w Pools<'w>),
-        at: usize,
-        restarted: Restarted,
-    ) -> Result<Option<Tenure>, Stopped> {
-        let cell = &mut self.cells[at];
-        cell.blocked = false;
-        let session = restarted.session();
-        assert_eq!(
-            session.shard(),
-            cell.placement.shard,
-            "the restart returned the session of its own shard"
-        );
-        cell.world.fence(&restarted);
-        let tenure = tenure_of(session.get());
-        let host = self.topology.members[cell.holder].host;
-        self.activations.push((at, tenure, host));
-        let serving = open(
-            &mut cell.world,
-            ground,
-            restarted,
-            Source::Named,
-            self.round,
-        );
-        self.serve_opened(live, at, serving, Source::Named)
     }
 
     /// Runs `serving`'s bootstrap, activates its load from `source` and opens its client session. Returns the tenure

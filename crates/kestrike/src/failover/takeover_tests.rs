@@ -528,20 +528,6 @@ pub(crate) fn card_after_cas(
     card
 }
 
-impl Card {
-    /// The card's first device command asserts that `store`'s record of `shard` names `host` owner with no standby,
-    /// the committed takeover's record.
-    pub(crate) fn after_cas_of(
-        mut self,
-        store: &Shared,
-        shard: crate::net::ownership::Shard,
-        host: Host,
-    ) -> Self {
-        self.after_cas = Some((store.clone(), shard, host));
-        self
-    }
-}
-
 fn own_target() -> Target {
     Target::of(&taken(&shard_record(), c_host()))
 }

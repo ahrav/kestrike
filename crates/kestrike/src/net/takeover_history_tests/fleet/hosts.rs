@@ -1,9 +1,9 @@
 //! Each host runs the production `host::agent::Agent`. Once a round the agent reads the host's process statuses and
 //! the heartbeats and probe messages [`HostLinks`] carried to it, and every `REPORT_ROUNDS` rounds it seals a report.
 //! The agent revalidates each nomination its detector published and addresses the witness to the named shard's
-//! standby process. The fleet queues the witness with the agent turn's time, the time the process reads it at:
-//! `Takeover::nominated` starts the takeover at that time and `Takeover::run` runs it to its end or refusal in one
-//! turn. The new tenure then loads warm over later turns, and at the load's start each other shard its host serves is
+//! standby process. The fleet queues the witness with the agent turn's time, the time the process reads it at. One
+//! view period of `host::stand_by` reads its role, accepts the witness at that time and runs the takeover to its end
+//! or refusal in one turn. The new tenure then loads warm over later turns, and at the load's start each other shard its host serves is
 //! offered one GET, so the host log counts the GETs a loading host's shards serve while the load runs.
 //!
 //! [`HostLinks`]: super::faults::HostLinks
@@ -21,8 +21,8 @@ use crate::failover::records::{self, Host, ShardRecord, VolumeId};
 use crate::failover::report::Phase as OwnerPhase;
 use crate::failover::report::{self, BuildIdentity, Gauge};
 use crate::failover::restart::tests as restart_tests;
+use crate::failover::takeover::Takeover;
 use crate::failover::takeover::tests::holder_on;
-use crate::failover::takeover::{Next, Takeover};
 use crate::host::HostGate;
 use crate::host::agent::{Agent, HostSample, Inputs as AgentInputs, Keys, Synced};
 use crate::host::link::{Inbound, Status as LinkStatus};
@@ -728,12 +728,14 @@ impl HostLog {
 pub(crate) struct Attempt {
     pub(crate) shard: u32,
     pub(crate) host: u64,
-    /// The check a refused takeover names; `None` once the takeover, or the same-host restart its refusal
-    /// licensed, returned its session. A takeover whose restart refused too keeps its first refusal, whether or
-    /// not its compare-and-swap committed, so a takeover whose compare-and-swap committed and whose device step
-    /// then refused keeps its check; each record's version history holds every committed owner change.
+    /// The blocker a refused takeover names (`owners::blocker`: its refusal class's check, or its exit), or
+    /// `Stopped` while the record names another owner, for a period that started no takeover or whose takeover
+    /// refused with its compare-and-swap uncommitted and no device command issued; `None` once the takeover, or the
+    /// next incarnation its refusal ended in, acquired a tenure. A takeover whose next incarnation refused too keeps
+    /// its first refusal, whether or not its compare-and-swap committed; each record's version history holds every
+    /// committed owner change.
     pub(crate) refused: Option<String>,
-    /// The device commands of the takeover's card, in order.
+    /// The reservation commands the volume's table logged during the period, in order (`owners::commands_since`).
     pub(crate) commands: Vec<&'static str>,
 }
 
@@ -2422,68 +2424,117 @@ impl<'c> Fleet<'c> {
         let of = self.topology.members[member];
         let cell = &self.cells[at];
         let holder = holder_on(cell.placement.volume, of.host, of.instance);
-        let restart = restart_tests::restart_of(cell.placement.shard, holder);
+        let shard = cell.placement.shard;
+        // The production takeover's own acceptance of the witness, read for the lapse count alone. The standby
+        // reads the witness at the agent turn's time: the fleet's queue holds a witness behind another takeover's
+        // load only because the fleet runs bring-ups one at a time.
+        let restart = restart_tests::restart_of(shard, holder);
         let addressed = self.addressed(member, volume, witness.shard);
-        let started = addressed.then(|| Takeover::nominated(restart, &witness, received));
-        let started = started.flatten();
-        let Some(path) = started else {
+        if !addressed || Takeover::nominated(restart, &witness, received).is_none() {
             self.log.lapsed += 1;
             return Ok(());
-        };
-        let (pair, local) = cell.local_of(member).expect("the standby's local record");
-        let shard = cell.placement.shard;
-        let mut card = self
-            .card(at, pair)
-            .after_cas_of(&self.store, shard, of.host);
-        if self.config.planted_at(Plant::EarlyDevice, at) {
-            self.planted = true;
-            let _ = crate::failover::takeover::Device::start(&mut card);
         }
+        let (pair, local) = cell.local_of(member).expect("the standby's local record");
+        let table = std::rc::Rc::clone(&cell.world.reservation);
+        let from = table.borrow().log.len();
+        // Under the plant the fencer starts the device before the period, while the record still names the lost
+        // owner, and the period's CAS-BEFORE-DEVICE assertion fails.
+        let early = self.config.planted_at(Plant::EarlyDevice, at);
+        self.planted |= early;
+        let ground = slots.take(member);
         let mut client = self.client(member);
-        let restarted = match path.run(&mut client, &local, &mut card) {
-            Ok(restarted) => {
-                (self.log.takeovers).push(Attempt {
-                    shard: shard.get(),
-                    host: of.host.get(),
-                    refused: None,
-                    commands: card.log.clone(),
-                });
-                restarted
+        let persist = |_| Ok(local.0.clone().expect("the standby's local record"));
+        let stood = super::owners::stand_by(
+            (&self.cells[at], of, pair),
+            (self.round, &self.store),
+            ground.0,
+            (&mut client, &local),
+            (Some((witness, received)), early),
+            persist,
+        );
+        let attempt = |refused| Attempt {
+            shard: shard.get(),
+            host: of.host.get(),
+            refused,
+            commands: super::owners::commands_since(&table, from),
+        };
+        let (tenure, control, now) = match stood {
+            super::owners::Stood::Tenure(tenure, control, now) => {
+                self.log.takeovers.push(attempt(None));
+                (tenure, control, now)
             }
-            Err(refused) => {
-                (self.log.takeovers).push(Attempt {
-                    shard: shard.get(),
-                    host: of.host.get(),
-                    refused: Some(format!("{:?}", refused.check)),
-                    commands: card.log.clone(),
-                });
-                let Next::Restart(restart) = path.next(&refused) else {
-                    return Ok(());
-                };
-                let mut card = self.card(at, pair);
-                match restart.run(&mut client, &local, &mut card) {
-                    Ok(restarted) => {
+            // The takeover's refusal ends the incarnation, and the next one reads its role and recovers.
+            super::owners::Stood::Ended(
+                crate::host::Exit::Rerun(crate::host::Rerun::Takeover),
+                refusal,
+            ) => {
+                let exit = crate::host::Exit::Rerun(crate::host::Rerun::Takeover);
+                self.log
+                    .takeovers
+                    .push(attempt(Some(super::owners::blocker(&exit, refusal))));
+                let mut local = super::owners::OwnerLocal(local);
+                let mut plane = crate::failover::fresh::tests::plane();
+                let mut refusals = crate::failover::fresh::Refusals::default();
+                let sources = (&mut local, &mut plane, &mut refusals);
+                let cell = (&self.cells[at], of, pair);
+                // The next incarnation opens its own store client over the host's durable watermark log: a takeover
+                // read that withdrew the ending incarnation's client withdraws none of the next one's.
+                drop(client);
+                client = self.client(member);
+                match super::owners::incarnate(cell, self.round, ground.0, &mut client, sources) {
+                    super::owners::Incarnation::Tenure(tenure, control, now) => {
                         let attempt = self.log.takeovers.last_mut().expect("the refused attempt");
                         attempt.refused = None;
-                        restarted
+                        (tenure, control, now)
                     }
-                    Err(refused) => {
-                        let check = refused.check.clone();
+                    super::owners::Incarnation::Ended(exit, refusal) => {
+                        slots.put_back(member, ground.0);
                         drop(client);
-                        let recovery = super::volumes::Held::restart(&refused);
-                        self.held(at, member, recovery);
                         let held = self.cells[at].device != super::volumes::Device::Up
                             && self.record_now(at).owner == of.host;
+                        if let Some(refusal) = refusal {
+                            self.held(at, member, super::volumes::Held::of_restart(refusal));
+                        }
                         let cell = &mut self.cells[at];
-                        cell.flip_requests += usize::from(refused.flip.is_some());
-                        cell.blockers.push(format!("{check:?}"));
+                        cell.flip_requests +=
+                            usize::from(matches!(exit, crate::host::Exit::Retire(_)));
+                        cell.blockers.push(super::owners::blocker(&exit, refusal));
                         if held {
                             (cell.holder, cell.blocked) = (member, true);
                             self.reread_hosts(at);
                         }
                         return Ok(());
                     }
+                    super::owners::Incarnation::Waits(_) => {
+                        slots.put_back(member, ground.0);
+                        return Ok(());
+                    }
+                    // A failed role read is the shard's blocker, which the settle check reads.
+                    super::owners::Incarnation::Unread(error) => {
+                        slots.put_back(member, ground.0);
+                        self.cells[at].blockers.push(format!("{error:?}"));
+                        return Ok(());
+                    }
                 }
+            }
+            super::owners::Stood::Ended(exit, refusal) => {
+                slots.put_back(member, ground.0);
+                // The wait goes on in place. `Stopped` ends a period that started no takeover, or whose takeover
+                // refused with its compare-and-swap uncommitted and no device command issued. `Rerun(RoleChanged)` and
+                // `Rerun(Records)` end a period at its role read, before any takeover; the production supervisor then
+                // runs the standby process again. The fleet models that rerun as the continued wait: it logs the
+                // attempt, and the period of the host's next nomination opens its own store client over the host's
+                // durable watermark log and begins with the role read. The owner recovery of a `RoleChanged` rerun
+                // stays unmodelled here; every period of the fleet's cases ends with a tenure, `Rerun(Takeover)` or
+                // `Stopped`. A takeover that unwound fails the period in `owners::stand_by`.
+                if exit != crate::host::Exit::Stopped {
+                    self.log
+                        .takeovers
+                        .push(attempt(Some(super::owners::blocker(&exit, refusal))));
+                } else if self.record_now(at).owner != of.host {
+                    self.log.takeovers.push(attempt(Some("Stopped".to_owned())));
+                }
+                return Ok(());
             }
         };
         drop(client);
@@ -2496,19 +2547,24 @@ impl<'c> Fleet<'c> {
         });
         self.log.loads_beside_service += u32::from(serving_own);
         self.cells[at].holder = member;
-        let ground = slots.take(member);
         let lost_at = self.cells[at].lost_at.unwrap_or(self.round);
-        let session_value = restarted.session().get();
         self.loading = Some(at);
         self.offer_beside(live, at);
-        let tenure = self.bring_up(live, ground, at, restarted);
+        let rose = self.rise(
+            live,
+            ground,
+            (at, pair),
+            (*tenure, control, now),
+            super::Source::Named,
+        );
         self.loading = None;
-        let tenure = tenure?;
-        if self.config.planted_at(Plant::TwinStart, at) {
-            let tenure = super::tenure_of(session_value);
+        let tenure = rose?;
+        if self.config.planted_at(Plant::TwinStart, at)
+            && let Some(tenure) = tenure
+        {
             let attempts = u32::try_from(tenure.a / 2 - 1).expect("an attempt count");
             let session = crate::storage::session_at(tenure.g, attempts);
-            assert_eq!(session.get(), session_value);
+            assert_eq!(super::tenure_of(session.get()), tenure);
             let _twin = crate::storage::ServingAuthority::fixture_under(session);
             let owner = self.cells[at].placement.owner;
             let other = (0..self.topology.members.len())

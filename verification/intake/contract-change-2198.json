@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2198",
+  "kind": "contract-change",
+  "pull_request": 2198,
+  "changed": "The transition, the invariant and the reference of the obligation record fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure. A nomination the agent addresses to the standby process runs one host::stand_by view period, whose takeover drives a host::Fencer over the standby's device double, where the fleet called Takeover::run on a takeover card. The CAS-BEFORE-DEVICE judgment is the period's assertion over the shard record the fencer's connect met, made once host::stand_by returns, where it was the card's first-command assertion. The fleet reads Takeover::nominated's acceptance of a nomination once for its lapse count and the period reads it again inside host::stand_by, where the fleet read it once.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure",
+    "reason": "Its transition and invariant state the new contract: the standby's view period of host::stand_by runs the takeover, the period asserts that its first device call followed the committed takeover, and both reads of Takeover::nominated use the witness and the time of the turn the agent addressed it. Its control a_device_command_before_the_takeover_write_fails_the_standby_periods_assertion fails that assertion under the plant EarlyDevice."
+  }
+}

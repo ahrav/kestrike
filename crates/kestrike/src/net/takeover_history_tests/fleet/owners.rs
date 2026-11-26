@@ -17,6 +17,7 @@ use crate::failover::evidence::Pair;
 use crate::failover::fresh::{LocalRecords, Refusals};
 use crate::failover::poll::Holder;
 use crate::failover::record::LocalRecord;
+use crate::failover::records::{Host, Record, ShardRecord};
 use crate::failover::report::{RecoveryCheck, RecoveryRefusal};
 use crate::failover::restart::tests::Stored;
 use crate::failover::restart::{Local, LocalSource};
@@ -102,6 +103,24 @@ pub(super) enum Incarnation<'w> {
     Ended(Exit, Option<RecoveryRefusal>),
     Waits(Role),
     Unread(StoreError),
+}
+
+/// The names of the reservation commands `table` logged from `from` on, in order.
+pub(super) fn commands_since(
+    table: &crate::storage::gate_fixture::Control,
+    from: usize,
+) -> Vec<&'static str> {
+    use crate::storage::ReservationCommand as C;
+    (table.borrow().log[from..].iter())
+        .map(|command| match command {
+            C::Register { .. } => "register",
+            C::Report { .. } => "report",
+            C::Acquire { .. } => "acquire",
+            C::PreemptAndAbort(_) => "preempt",
+            C::PreemptLineage(_) => "lineage",
+            C::PreemptEnded(_) => "ended",
+        })
+        .collect()
 }
 
 /// The device double of the host issuing as `pair` on `cell`'s media and reservation table. A pair the table holds
@@ -199,7 +218,7 @@ where
             // A table that still owns a command ends through the proven stop, which returns its buffers to the
             // arena the slot's next tenure attaches over.
             if let host::fencer::Release::Outstanding(table) = device {
-                stop(table, &control);
+                stop_table(table, &control);
             }
             // `recover` contains its sequence's unwind and ends `Rerun(Unwound)`. The incarnation fails here, outside
             // that boundary, so a sequence that panicked fails its test.
@@ -215,6 +234,131 @@ where
             Incarnation::Ended(exit, refusal)
         }
         Recovery::Waits => Incarnation::Waits(role),
+    }
+}
+
+/// What one view period of a standby's or unnamed host's wait returned.
+pub(super) enum Stood<'w> {
+    /// The tenure the period's takeover acquired, its device's control, and its serving clock's true-time cell.
+    Tenure(
+        Box<host::Tenure<'w, TestPlatform, Reserving>>,
+        SimControl,
+        Rc<Slot<u64>>,
+    ),
+    /// The exit the wait ended with: `Exit::Stopped` once the period passed with no takeover that acquired a tenure
+    /// or ended the incarnation.
+    Ended(Exit, Option<RecoveryRefusal>),
+}
+
+/// One view period of the wait of the owner process of `of`, issuing as `pair`, for `cell` at fleet round `round`:
+/// `host::stand_by` over `client` and `local`, whose `period` returns once and sets the stop flag on its next call.
+/// The period reads `witness` at the time it carries, and the takeover it starts runs through a fencer over the host's device double on the arena and clock of
+/// `grounds`. Its connect records whether the shard record already names `of`'s host owner with no standby, read
+/// from `store` with no request, and once `host::stand_by` returns the period asserts that every device call
+/// followed the committed takeover (CAS-BEFORE-DEVICE) and that no takeover unwound. Under `early`, the fencer
+/// starts the device before the period runs, while the record still names the lost owner.
+pub(super) fn stand_by<'w, S, L>(
+    (cell, of, pair): (&Cell, Member, Pair),
+    (round, store): (u64, &crate::storage::store::sim::Shared),
+    grounds: &'w Grounds,
+    (client, local): (&mut Client<S, L>, &Stored),
+    (witness, early): (
+        Option<(crate::failover::detect::host::Revalidated, u64)>,
+        bool,
+    ),
+    persist: impl FnMut(crate::failover::identity::Key) -> Result<LocalRecord, AdmissionError>,
+) -> Stood<'w>
+where
+    S: Store,
+    L: WatermarkLog,
+{
+    let volume = cell.placement.volume;
+    let holder = crate::failover::takeover::tests::holder_on(volume, of.host, of.instance);
+    let shard = cell.placement.shard;
+    let inputs = host::Inputs::new(shard, holder, cell.world.bounds, limits(), 4)
+        .expect("limits that agree with the bounds");
+    let now = Rc::new(Slot::new(round * ROUND_US));
+    let clock = OwnerClock {
+        strategy: cell.world.strategy,
+        now: Rc::clone(&now),
+    };
+    let (disk, control) = device(cell, pair);
+    grounds.fencer.drive(&control);
+    let gate = HostGate::qualified();
+    let (store, host) = (store.clone(), of.host);
+    // The record a device call met before the committed takeover, judged once `host::stand_by` returns, outside
+    // its unwind boundary.
+    let early_call: Slot<Option<(Host, Option<Host>)>> = Slot::new(None);
+    let connect = || {
+        let record = {
+            let store = store.0.borrow();
+            let item = store.current(&crate::storage::store::Key::Shard(shard));
+            ShardRecord::decode(&item.expect("a stored shard record").value)
+                .expect("a shard record")
+        };
+        if (record.owner, record.standby) != (host, None) {
+            early_call.set(Some((record.owner, record.standby)));
+        }
+        Ok((disk, pair))
+    };
+    let mut fencer =
+        host::fencer::Fencer::new(&gate, connect, limits(), &grounds.buffers, &grounds.fencer);
+    if early {
+        let _ = crate::failover::takeover::Device::start(&mut fencer);
+    }
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let periods = Slot::new(0_u32);
+    let period = || {
+        periods.set(periods.get() + 1);
+        if periods.get() > 1 {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    };
+    let read_at = witness.as_ref().map_or(round * ROUND_US, |(_, at)| *at);
+    let mut witness = witness.map(|(witness, _)| witness);
+    let signals = host::Signals {
+        stop: &stop,
+        period,
+        nominations: || witness.take(),
+        now: || read_at,
+    };
+    let standby = crate::failover::reconcile::StandbyGate::qualified();
+    let stood = host::stand_by(
+        (&gate, &standby),
+        (&inputs, &fleet_instance),
+        client,
+        local,
+        persist,
+        fencer,
+        Box::new(clock),
+        signals,
+    );
+    grounds.fencer.release();
+    assert_eq!(
+        early_call.get(),
+        None,
+        "the first device call follows the committed takeover"
+    );
+    match stood {
+        Ok(tenure) => Stood::Tenure(tenure, control, now),
+        Err(ended) => {
+            let host::recover::Ended {
+                exit,
+                device,
+                refusal,
+            } = *ended;
+            if let host::fencer::Release::Outstanding(table) = device {
+                stop_table(table, &control);
+            }
+            // `host::stand_by` contains a takeover's unwind and ends `Rerun(Unwound)`. The period fails here,
+            // outside that boundary.
+            assert_ne!(
+                exit,
+                Exit::Rerun(host::Rerun::Unwound),
+                "the takeover unwound"
+            );
+            Stood::Ended(exit, refusal)
+        }
     }
 }
 
@@ -291,7 +435,7 @@ impl Fleet<'_> {
 }
 
 /// Resets `control`'s device and drains `table`, which then holds no command.
-fn stop(mut table: crate::storage::CommandTable<'_, Reserving>, control: &SimControl) {
+fn stop_table(mut table: crate::storage::CommandTable<'_, Reserving>, control: &SimControl) {
     use crate::storage::{QuiesceProgress, Quiesced};
     control.set_quiesce(crate::storage::device::sim::QuiesceMode::Reset);
     let mut out = Vec::with_capacity(8);

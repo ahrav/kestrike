@@ -111,7 +111,8 @@ fn a_host_lost_in_several_roles_hands_its_shards_to_their_named_standbys_warm_on
         assert_eq!((report.takeovers, report.crashes), (3, 1));
         for attempt in &report.hosts.takeovers {
             let at = |command| attempt.commands.iter().position(|c| *c == command);
-            let (register, preempt) = (at("register"), at("preempt"));
+            // The named standby preempts the recorded lineage it read (`PreemptLineage`).
+            let (register, preempt) = (at("register"), at("lineage"));
             assert!(
                 register.is_some() && register < preempt,
                 "the named standby registers before it preempts: {:?}",
@@ -352,12 +353,45 @@ fn each_required_outcome_of_a_host_scenario_fails_by_its_rule_and_the_unaltered_
     assert_eq!(hosts::expected(&uncontested), veto);
 }
 
-/// CAS-BEFORE-DEVICE control: the host that takes s0 over issues its card's first device command before
-/// `Takeover::run`, while the record still names H0 owner, and the card's first-command assertion panics.
+/// CAS-BEFORE-DEVICE control: the host that takes s0 over starts its fencer's device before its standby's view
+/// period, while the record still names H0 owner. The fencer's connect records that record, and the assertion the
+/// period makes once `host::stand_by` returns, the one that judges every takeover, panics.
 #[test]
 #[should_panic(expected = "the first device call follows the committed takeover")]
-fn a_device_command_before_the_takeover_write_fails_the_cards_first_command_assertion() {
+fn a_device_command_before_the_takeover_write_fails_the_standby_periods_assertion() {
     let _ = run(&Config::host_loss(1).hostile(Plant::EarlyDevice, 0));
+}
+
+/// A takeover that unwinds fails its standby's view period. `host::stand_by` contains the unwind of s0's standby,
+/// whose store unwinds at the takeover's compare-and-swap, and ends `Rerun(Unwound)`; the period asserts outside
+/// that boundary that no takeover unwound.
+#[test]
+#[should_panic(expected = "the takeover unwound")]
+fn a_takeover_that_unwinds_inside_the_standbys_view_period_fails_the_period() {
+    let config = Config::host_loss(1);
+    let (fleet, _draws) = hosted(&config);
+    let cell = &fleet.cells[0];
+    let member = cell.placement.standby;
+    let (pair, local) = cell.local_of(member).expect("the standby's local record");
+    let grounds = Grounds::over(storage_shared(1, fleet.share_on(member)));
+    let witness = crate::failover::detect::host::Revalidated {
+        shard: cell.placement.shard,
+        target: crate::failover::retire::Target::of(&fleet.record_now(0)),
+        until_us: u64::MAX,
+    };
+    let store = super::tests::Unwinding(fleet.store.clone());
+    let log = fleet.hosts[member].log.clone();
+    let mut client =
+        crate::storage::store::Client::open(store, log).expect("a host's store client");
+    let persist = |_| Ok(local.0.clone().expect("the standby's local record"));
+    let _ = owners::stand_by(
+        (cell, fleet.topology.members[member], pair),
+        (fleet.round, &fleet.store),
+        &grounds,
+        (&mut client, &local),
+        (Some((witness, 0)), false),
+        persist,
+    );
 }
 
 /// A host scenario runs no reconciler, so its settle check stays unrun, except that a tenure no fault deposed
