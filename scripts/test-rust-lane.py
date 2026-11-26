@@ -2956,6 +2956,8 @@ class LaneCancellation(unittest.TestCase):
         evidence = self.dir / "evidence"
         evidence.mkdir()
         (evidence / "exit.txt").write_text("0\n")
+        # The loom steps read the matrix module from the job environment.
+        self.assertIn("      MODULE: ${{ matrix.module }}\n", workflow_jobs(WORKFLOW.read_text())["loom"])
         self.assertEqual(self.cancel("loom", self.commands["loom"]), [])
         self.assertIn("- loom v0.7.2", self.pins_written())
 
@@ -4497,7 +4499,7 @@ class EventPolicy(unittest.TestCase):
         self.assertRegex(WORKFLOW.read_text(), r"^name: agent-checks\n")
         self.assertEqual(re.findall(r"(?m)^  ([\w-]+):", jobs), ["agent-checks-close-signal"])
         self.assertIn("if: github.event.action != 'closed'", jobs)
-        self.assertIn("runs-on: ubuntu-latest", jobs)
+        self.assertIn("runs-on: ubuntu-24.04\n", jobs)
         self.assertIn("timeout-minutes: 5", jobs)
         self.assertIn('      - run: ":"', jobs)
         for forbidden in ("uses:", "secrets.", "self-hosted", "rust-gate:", "    concurrency:", "    permissions:"):
