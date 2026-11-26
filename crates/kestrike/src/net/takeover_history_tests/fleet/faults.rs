@@ -57,6 +57,10 @@ pub(crate) enum Action {
     /// `Partition` cuts the links between the scope and every host outside it; a scope of one host is an isolation.
     Partition,
     Store(Arm),
+    /// `StoreWrite` queues the arm for each scoped actor's next write; its reads pass it by, so the arm reaches the
+    /// first write of a recovery, such as a takeover's compare-and-swap, past the waits' and the agent's reads. Its
+    /// heal takes each of its arms that no write took off its actor's queue, as the heal of `Store` does.
+    StoreWrite(Arm),
     Outage,
     /// An unknown registrant joins the reservation table of the shard at this cell index.
     Register(usize),
@@ -137,10 +141,11 @@ impl Kind {
             Action::Delay(..) => Self::Delay,
             Action::Partition if episode.scope.len() == 1 => Self::Isolation,
             Action::Partition => Self::Partition,
-            Action::Store(Arm::LostWrite | Arm::DoubleWin | Arm::StaleCurrentRead) => {
+            Action::Store(Arm::LostWrite | Arm::DoubleWin | Arm::StaleCurrentRead)
+            | Action::StoreWrite(Arm::LostWrite | Arm::DoubleWin | Arm::StaleCurrentRead) => {
                 Self::Hostile(Hostile::StoreKill)
             }
-            Action::Store(_) => Self::StoreArm,
+            Action::Store(_) | Action::StoreWrite(_) => Self::StoreArm,
             Action::Outage => Self::StoreOutage,
             Action::Register(_) => Self::Hostile(Hostile::ForeignRegistrant),
             Action::Stall(_) | Action::LoseVolume(_) | Action::Impair(_) => Self::Volume,
@@ -436,10 +441,14 @@ impl Faults {
                 self.links.delay_by(&pairs, *rounds, on);
                 Vec::new()
             }
-            Action::Store(arm) => {
+            Action::Store(arm) | Action::StoreWrite(arm) => {
                 let mut store = self.store.borrow_mut();
                 if on {
-                    let tickets = scope.map(|actor| store.arm(actor as u32, *arm));
+                    let write = matches!(episode.action, Action::StoreWrite(_));
+                    let tickets = scope.map(|actor| match write {
+                        true => store.arm_write(actor as u32, *arm),
+                        false => store.arm(actor as u32, *arm),
+                    });
                     self.armed[at] = tickets.collect();
                 } else {
                     for (actor, ticket) in scope.zip(std::mem::take(&mut self.armed[at])) {

@@ -332,18 +332,21 @@ impl Fleet<'_> {
         let ended = super::owners::incarnate(cell, self.round, ground.0, &mut client, sources);
         slots.put_back(member, ground.0);
         // A restart over a device that completes no reservation command acquires no tenure. A failed role read, or
-        // a role that names another owner, is the shard's blocker and publishes no hold; only a sequence refusal
-        // holds. The loss opens whichever check ended the incarnation.
+        // a role that names another owner, is the shard's blocker; an incarnation that ended `Exit::Held` holds with
+        // its refusal's class. The loss opens whichever check ended the incarnation.
         match ended {
             super::owners::Incarnation::Ended(exit, refusal) => {
                 let flip = matches!(exit, crate::host::Exit::Retire(_));
                 self.cells[at].refuse(super::owners::blocker(&exit, refusal), flip);
-                if let Some(refusal) = refusal {
+                if let (crate::host::Exit::Held { .. }, Some(refusal)) = (&exit, refusal) {
                     self.held(at, member, Held::of_restart(refusal));
                 }
+                self.queue_rerun(at, member, &exit, true);
             }
             super::owners::Incarnation::Unread(error) => {
                 self.cells[at].refuse(format!("{error:?}"), false);
+                let records = crate::host::Exit::Rerun(crate::host::Rerun::Records);
+                self.queue_rerun(at, member, &records, true);
             }
             super::owners::Incarnation::Waits(role) => {
                 self.cells[at].refuse(format!("{role:?}"), false);
@@ -418,7 +421,9 @@ impl Fleet<'_> {
 
     /// The restart of the host that cell `at`'s record names owner, after the stall cleared. A restart that returns
     /// loads warm, and it ends the member's device hold; a successor that held before its preempt returns through
-    /// the restart's lineage arm. A refusal holds, `RecordedHolder` as `RecordedHolderHold`.
+    /// the restart's lineage arm. An incarnation that ends `Exit::Held` holds, `RecordedHolder` as
+    /// `RecordedHolderHold`; a failed role read and an exit that names a rerun queue the next incarnation
+    /// ([`Fleet::queue_rerun`]).
     pub(super) fn restart_named<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -462,11 +467,64 @@ impl Fleet<'_> {
         restarted.map(|_| ())
     }
 
+    /// The next incarnation of `member`'s process for cell `at`, whose restart ended with an exit that names a rerun
+    /// ([`Fleet::queue_rerun`]): its role read and `host::recover` through [`Fleet::restart_by`], on a free tenure
+    /// slot of the host, while the host runs and serves no tenure of the cell. The next incarnation of a returned
+    /// host's restart ([`Fleet::returning`]) runs through [`Fleet::restart_returned`], which completes the return. A
+    /// role read that names the member standby of another owner makes the process wait there (a retake). The next
+    /// incarnation of a serving tenure's rerun ([`Fleet::rerun_starts`]) counts its recovery's rounds from the round
+    /// that tenure ended, as [`Fleet::rerun`] does. An incarnation that ends with a rerun exit again is queued as a
+    /// refusal that recurred ([`Fleet::recurred`]) and records no wait. A rerun of a host that stopped, already
+    /// serves the cell or has the cell's restart queued as its return, and one with no free slot, runs no
+    /// incarnation and is counted, as [`Fleet::rerun`] counts its own.
+    pub(super) fn rerun_refused<'w>(
+        &mut self,
+        live: &mut Live<'w>,
+        slots: &mut Slots<'w>,
+        (at, member, after_loss): (usize, usize, bool),
+    ) -> Result<(), Stopped> {
+        let returning = self.returning.remove(&(at, member));
+        let ended = self.rerun_starts.remove(&(at, member));
+        self.recurred.remove(&(at, member));
+        // A host that stopped runs no incarnation, and one that already serves the cell needs none. A host that
+        // crashed and returned since the refusal runs the cell's restart as its return, which is queued.
+        let serves = live[at].is_some() && self.cells[at].holder == member;
+        let returns = self.returns.contains(&(at, member));
+        if self.hosts[member].up != Up::Running || serves || returns {
+            self.log.rerun_dropped += 1;
+            return Ok(());
+        }
+        if !slots.free(member) {
+            self.log.unslotted += 1;
+            return Ok(());
+        }
+        self.log.refused_reruns += 1;
+        self.cells[at].rerun_from = ended;
+        let restarted = if returning {
+            self.restart_returned(live, slots, (at, member))
+        } else {
+            (self.restart_by(live, slots, (at, after_loss), member)).map(|_| ())
+        };
+        self.cells[at].rerun_from = None;
+        restarted?;
+        if self.refused.contains_key(&(at, member)) {
+            // The incarnation ended with a rerun exit of its own: the refusal recurred.
+            self.recurred.insert((at, member));
+        } else {
+            // The incarnation's own role read decides: a record that names another owner makes it wait, and
+            // `retake` records the wait when that record names the member standby.
+            self.retake(at, member);
+        }
+        Ok(())
+    }
+
     /// `member`'s incarnation for cell `at`, its role read and then `host::recover`, with the shard record read just
     /// before it. When that record names another owner the attempt returns [`Restarted::Deposed`] with the waiting
     /// role from the read, the refusal's blocker or the read error, or `None` for an incarnation that acquired a
-    /// tenure. The fleet drops that incarnation unserved and leaves the cell unchanged. On any other refusal or
-    /// failed role read, the fleet holds the restart as [`Fleet::restart_named`] states.
+    /// tenure. The fleet drops that incarnation unserved and leaves the cell unchanged. Under a record that names
+    /// the member's host a refusal is the cell's blocker: an incarnation that ended `Exit::Held` holds as
+    /// [`Fleet::restart_named`] states. An exit that names a rerun and a failed role read queue the next incarnation
+    /// under either record ([`Fleet::queue_rerun`]).
     pub(super) fn restart_by<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -514,6 +572,9 @@ impl Fleet<'_> {
             }
             super::owners::Incarnation::Ended(exit, refusal) => {
                 slots.put_back(member, ground.0);
+                // An exit that names a rerun ends the process under either record: its next incarnation reads its
+                // role again.
+                self.queue_rerun(at, member, &exit, after_loss);
                 if before.owner != of.host {
                     let flip = matches!(exit, crate::host::Exit::Retire(_));
                     self.cells[at].flip_requests += usize::from(flip);
@@ -521,17 +582,22 @@ impl Fleet<'_> {
                     let attempts = before.attempts;
                     return Ok(Restarted::Deposed { check, attempts });
                 }
+                self.depose_other(live, at, member);
                 self.cells[at].holder = member;
                 let flip = matches!(exit, crate::host::Exit::Retire(_));
                 self.cells[at].refuse(super::owners::blocker(&exit, refusal), flip);
-                if let Some(refusal) = refusal {
+                if let (crate::host::Exit::Held { .. }, Some(refusal)) = (&exit, refusal) {
                     self.held(at, member, Held::of_restart(refusal));
                 }
                 return Ok(Restarted::Held);
             }
+            // A failed role read ends the incarnation with `Rerun::Records`, whichever owner the record names: the
+            // process read no role, so its next incarnation runs.
             super::owners::Incarnation::Unread(error) => {
                 slots.put_back(member, ground.0);
                 let check = format!("{error:?}");
+                let records = crate::host::Exit::Rerun(crate::host::Rerun::Records);
+                self.queue_rerun(at, member, &records, after_loss);
                 if before.owner != of.host {
                     let attempts = before.attempts;
                     return Ok(Restarted::Deposed {
@@ -543,6 +609,7 @@ impl Fleet<'_> {
                 return Ok(Restarted::Held);
             }
         };
+        self.depose_other(live, at, member);
         self.cells[at].holder = member;
         self.cells[at].blocked = false;
         let lost_at = (self.cells[at].rerun_from)
@@ -575,6 +642,19 @@ impl Fleet<'_> {
         Ok(Restarted::Served { tenure, from })
     }
 
+    /// Moves a live tenure of cell `at` that another member holds to the deposed slots, as `Fleet::take_over` does
+    /// before its tenure rises. The record names `member`'s host owner, so that tenure is deposed: it steps under its
+    /// own host until it withdraws, and the run's end counts it if it never does.
+    fn depose_other<'w>(&mut self, live: &mut Live<'w>, at: usize, member: usize) {
+        let holder = self.cells[at].holder;
+        if holder != member
+            && let Some(deposed) = live[at].take()
+        {
+            live.push(Some(deposed));
+            self.deposed.push((at, holder));
+        }
+    }
+
     /// Drops the held entry of cell `at`'s holder once its tenure serves.
     fn unhold(&mut self, at: usize) {
         let holder = self.cells[at].holder;
@@ -583,7 +663,9 @@ impl Fleet<'_> {
 
     /// The cell whose record names a volume other than the one its cell runs, at `E = 0` with its owner running: a
     /// flip made the replacement active and its owner has not activated. A cell whose fresh activation's role read
-    /// failed in an earlier round is due again over its installed replacement.
+    /// failed, or whose activation ended with an exit that names a rerun, in an earlier round is due again over its
+    /// installed replacement while the record's owner is the member that began the activation. That exit can follow
+    /// the activation's own bump, so the retry is due at any `E`, and its role read finds the record's current one.
     pub(super) fn fresh_due(&self) -> Option<usize> {
         let activated = self.volumes.cold.len() + self.volumes.fresh_refused.len();
         if self.store.0.borrow().flips.len() <= activated {
@@ -592,20 +674,21 @@ impl Fleet<'_> {
         (0..self.cells.len()).find(|&at| {
             let record = self.record_now(at);
             let owner = self.member_of(record.owner);
-            // An activation whose role read failed stays due over its installed replacement, from a later round.
-            let retry = (self.cells[at].fresh_unread).is_some_and(|round| self.round > round);
-            let pending =
-                record.active != self.cells[at].placement.volume && !self.cells[at].fresh_refused;
-            (pending || retry)
-                && record.attempts == 0
-                && owner.is_some_and(|owner| self.hosts[owner].up == Up::Running)
+            let cell = &self.cells[at];
+            let retry = (cell.fresh_unread).is_some_and(|round| self.round > round)
+                && owner == Some(cell.holder);
+            let pending = record.active != cell.placement.volume
+                && !cell.fresh_refused
+                && record.attempts == 0;
+            (pending || retry) && owner.is_some_and(|owner| self.hosts[owner].up == Up::Running)
         })
     }
 
     /// The owner's fresh activation on cell `at`'s replacement volume: the cell moves to the replacement's blank
     /// media and empty reservation table, `Fresh::run` activates `E = 1` over the zone double's listing, and the
-    /// tenure attaches cold and sweeps, with no object counted as retained. A retry after a failed role read keeps
-    /// the installed media, reservation table and local record.
+    /// tenure attaches cold and sweeps, with no object counted as retained. A retry after a failed role read or an
+    /// exit that names a rerun keeps the installed media, reservation table and local record; a retry that follows
+    /// the activation's bump reads the restart role, and its tenure attaches cold as the activation's would.
     pub(super) fn activate_fresh<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -626,7 +709,13 @@ impl Fleet<'_> {
         let record = self.record_now(at);
         let member = self.member_of(record.owner).expect("a running owner");
         let of = self.topology.members[member];
-        // A retry after a failed role read keeps the replacement's media, reservation table and local record.
+        // A retry's refusal is one that recurred; a first activation's refusal holds the host loop for its retry's
+        // turn (`Fleet::fresh_first`).
+        match self.cells[at].fresh_unread {
+            Some(_) => self.recurred.insert((at, member)),
+            None => self.recurred.remove(&(at, member)),
+        };
+        // A retry keeps the replacement's media, reservation table and local record.
         let local = match self.cells[at].fresh_unread.take() {
             Some(_) => (self.cells[at].local.0.clone()).expect("the replacement's local record"),
             None => {
@@ -678,6 +767,14 @@ impl Fleet<'_> {
         let shard = self.cells[at].placement.shard.get();
         let (tenure, control, now) = match incarnation {
             super::owners::Incarnation::Tenure(tenure, control, now) => (tenure, control, now),
+            // An exit that names a rerun keeps the activation due, as a failed role read does; any other exit ends
+            // the replacement's activation.
+            super::owners::Incarnation::Ended(exit @ crate::host::Exit::Rerun(_), refusal) => {
+                slots.put_back(member, ground.0);
+                self.cells[at].refuse(super::owners::blocker(&exit, refusal), false);
+                self.cells[at].fresh_unread = Some(self.round);
+                return Ok(());
+            }
             super::owners::Incarnation::Ended(exit, refusal) => {
                 slots.put_back(member, ground.0);
                 let check = super::owners::blocker(&exit, refusal);

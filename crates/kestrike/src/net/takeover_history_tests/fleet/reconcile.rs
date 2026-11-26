@@ -1775,10 +1775,11 @@ impl Fleet<'_> {
         let cell = cell.map(|(cell, _)| cell);
         let key = Key::Volume(placement.volume);
         let before = self.store.0.borrow().commit_count(&key);
-        if let Some(cell) = cell {
+        // The cell's arm stands behind every write arm an episode queued for the member, under its own ticket.
+        let armed = cell.map(|cell| {
             let mut faults = self.faults.store.borrow_mut();
-            faults.arm_write(member as u32, cell.ending.arm());
-        }
+            faults.arm_write(member as u32, cell.ending.arm())
+        });
         let holder = holder_on(placement.volume, of.host, of.instance);
         let (gate, bounds) = (StandbyGate::qualified(), bounds());
         let mut client = self.enroll_client(member);
@@ -1793,14 +1794,11 @@ impl Fleet<'_> {
             persist,
         );
         drop(client);
-        if let Some(cell) = cell {
-            let untaken = self.faults.store.borrow().queued(member as u32) > 0;
-            if untaken {
-                self.faults
-                    .store
-                    .borrow_mut()
-                    .withdraw_writes(member as u32);
-            } else {
+        if let (Some(cell), Some(ticket)) = (cell, armed) {
+            // The enrollment took the cell's arm when its ticket is gone from the queue. An arm it left is
+            // withdrawn by that ticket, and an episode's arms for the member stay queued.
+            let untaken = (self.faults.store.borrow_mut()).withdraw(member as u32, ticket);
+            if !untaken {
                 let after = self.store.0.borrow().commit_count(&key);
                 self.recon.crashed.push(cell.name());
                 self.recon.crash_writes.push((before, after));

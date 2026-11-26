@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2229",
+  "kind": "contract-change",
+  "pull_request": 2229,
+  "changed": "The invariants of the obligation records fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure and fleet-zone-repair-and-host-scenarios-pass-on-their-second-root. The host-loss record gains three clauses. A takeover whose compare-and-swap reply is unknown no longer ends the run with its shard unserved: when the write did not commit, the next incarnation waits as the shard's standby and the agent's next witness starts a second takeover that commits and serves; when it committed, the next incarnation restarts through the lineage arm with its own bump. A restart that ends with an exit naming a rerun runs again from the round after, where the fleet ran no next incarnation before. A standby's view period that ends Rerun(Records) or Rerun(RoleChanged) at its role read runs the process's next incarnation from the round after, where the base logs the refused attempt and continues the wait in place. The scheduled repair and host case counts one check and one line more than its base's, the committed sibling takeover-unknown-committed on root 1.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure",
+    "reason": "Its invariant states the new contract in the three clauses that begin \"when H5's takeover of s2 times out at its compare-and-swap\", \"a restart that ends with an exit naming a rerun\" and \"a view period that ends Rerun(Records) or Rerun(RoleChanged)\". The first is the agent's repeated witness over an unknown takeover reply: the host loop runs on while the named standby waits on its retake, so the second takeover serves s2, and the committed sibling ends served by H5 through the restart's lineage arm, which the run records and the test asserts. The second is the supervisor's rerun of a refused restart: each next incarnation runs its own role read and recovery a round after the one that ended, and the one after the outage heals restarts s3 warm on H3 with no takeover. The third is the next incarnation of a standby period that ended at its role read, with the case in which H1's next incarnation restarts s5. The record fleet-zone-repair-and-host-scenarios-pass-on-their-second-root names the committed sibling as a check of the scheduled row and counts it."
+  }
+}

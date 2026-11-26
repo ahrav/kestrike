@@ -793,7 +793,7 @@ fn every_host_scenario_prints_its_host_line_with_the_exempt_shards() {
 fn the_digest_of_a_host_run_changes_with_every_field_of_its_host_log() {
     let report = passing(&Config::host_loss(1));
     type Edit = fn(&mut hosts::HostLog);
-    let edits: [(&str, Edit); 26] = [
+    let edits: [(&str, Edit); 27] = [
         ("nominations", |log| log.nominations += 1),
         ("addressed", |log| log.addressed += 1),
         ("unmatched probes", |log| log.unmatched_probes += 1),
@@ -804,6 +804,7 @@ fn the_digest_of_a_host_run_changes_with_every_field_of_its_host_log() {
         ("lapsed", |log| log.lapsed += 1),
         ("unslotted", |log| log.unslotted += 1),
         ("rerun dropped", |log| log.rerun_dropped += 1),
+        ("refused reruns", |log| log.refused_reruns += 1),
         ("takeovers", |log| log.takeovers[0].commands.push("ready")),
         ("reports", |log| log.reports += 1),
         ("refused", |log| log.refused += 1),
@@ -1063,54 +1064,82 @@ fn a_heal_leaves_a_host_in_the_state_its_other_episodes_hold_it_in() {
 }
 
 /// A store arm's heal takes the arm off its actor's queue when no request took it, and an arm with no heal stays
-/// queued.
+/// queued. A write arm heals the same way.
 #[test]
 fn a_store_arm_that_heals_untaken_leaves_its_actors_queue() {
-    let arm = |member: usize, heal: Option<u64>| Episode {
-        trigger: Trigger::AtTime(0),
-        scope: vec![member],
-        action: Action::Store(Arm::Unavailable),
-        heal,
-    };
-    let mut faults = Faults::new(vec![arm(3, Some(2)), arm(4, None)], 6);
-    let mut queued = |round: u64| {
-        let due = |trigger: &Trigger| matches!(*trigger, Trigger::AtTime(at) if round >= at);
-        assert_eq!(faults.step(round, due), []);
-        let store = faults.store.borrow();
-        (store.queued(3), store.queued(4))
-    };
-    assert_eq!(queued(0), (1, 1));
-    assert_eq!(queued(1), (1, 1));
-    assert_eq!(queued(2), (0, 1), "H3's arm healed untaken");
+    for action in [
+        Action::Store(Arm::Unavailable),
+        Action::StoreWrite(Arm::Unavailable),
+    ] {
+        let arm = |member: usize, heal: Option<u64>| Episode {
+            trigger: Trigger::AtTime(0),
+            scope: vec![member],
+            action: action.clone(),
+            heal,
+        };
+        let mut faults = Faults::new(vec![arm(3, Some(2)), arm(4, None)], 6);
+        let mut queued = |round: u64| {
+            let due = |trigger: &Trigger| matches!(*trigger, Trigger::AtTime(at) if round >= at);
+            assert_eq!(faults.step(round, due), []);
+            let store = faults.store.borrow();
+            (store.queued(3), store.queued(4))
+        };
+        assert_eq!(queued(0), (1, 1), "{action:?}");
+        assert_eq!(queued(1), (1, 1), "{action:?}");
+        assert_eq!(queued(2), (0, 1), "H3's arm healed untaken: {action:?}");
+    }
 }
 
 /// A request takes the arm of H3's first episode before a second episode queues an equal arm. The first
-/// episode's heal finds its own arm taken and leaves the second episode's arm queued.
+/// episode's heal finds its own arm taken and leaves the second episode's arm queued. A write arm heals the same
+/// way: a read passes it by, and a write takes it.
 #[test]
 fn a_store_arm_that_heals_taken_leaves_an_equal_arm_of_another_episode_queued() {
-    let arm = |from: u64, heal: Option<u64>| Episode {
-        trigger: Trigger::AtTime(from),
-        scope: vec![3],
-        action: Action::Store(Arm::Unavailable),
-        heal,
-    };
-    let mut faults = Faults::new(vec![arm(0, Some(5)), arm(2, None)], 6);
-    let step = |faults: &mut Faults, round: u64| {
-        let due = |trigger: &Trigger| matches!(*trigger, Trigger::AtTime(at) if round >= at);
-        assert_eq!(faults.step(round, due), []);
-        faults.store.borrow().queued(3)
-    };
-    assert_eq!(step(&mut faults, 0), 1);
-    let mut faulted = crate::storage::store::sim::Faulted {
-        inner: crate::storage::store::sim::Shared::new(),
-        actor: 3,
-        faults: faults.store.clone(),
-    };
-    let key = crate::storage::store::Key::Shard(crate::storage::store_tests::shard());
-    let read = crate::storage::store::Store::read(&mut faulted, &key);
-    assert!(read.is_err(), "the read took the first episode's arm");
-    assert_eq!(step(&mut faults, 2), 1, "the second episode's arm");
-    assert_eq!(step(&mut faults, 5), 1, "the first episode healed");
+    use crate::storage::store::{Outcome, Store, Write};
+    for action in [
+        Action::Store(Arm::Unavailable),
+        Action::StoreWrite(Arm::Unavailable),
+    ] {
+        let arm = |from: u64, heal: Option<u64>| Episode {
+            trigger: Trigger::AtTime(from),
+            scope: vec![3],
+            action: action.clone(),
+            heal,
+        };
+        let mut faults = Faults::new(vec![arm(0, Some(5)), arm(2, None)], 6);
+        let step = |faults: &mut Faults, round: u64| {
+            let due = |trigger: &Trigger| matches!(*trigger, Trigger::AtTime(at) if round >= at);
+            assert_eq!(faults.step(round, due), []);
+            faults.store.borrow().queued(3)
+        };
+        assert_eq!(step(&mut faults, 0), 1, "{action:?}");
+        let mut faulted = crate::storage::store::sim::Faulted {
+            inner: crate::storage::store::sim::Shared::new(),
+            actor: 3,
+            faults: faults.store.clone(),
+        };
+        let key = crate::storage::store::Key::Shard(crate::storage::store_tests::shard());
+        let read = faulted.read(&key);
+        match action {
+            Action::Store(_) => assert!(read.is_err(), "the read took the first episode's arm"),
+            _ => {
+                assert_eq!(read, Ok(None), "the read passed the write arm by");
+                let written = faulted.write(&key, &Write::Create(vec![1]));
+                assert_eq!(written, Outcome::Unknown, "the write took the arm");
+            }
+        }
+        assert_eq!(faults.store.borrow().queued(3), 0, "{action:?}");
+        assert_eq!(
+            step(&mut faults, 2),
+            1,
+            "{action:?}: the second episode's arm"
+        );
+        assert_eq!(
+            step(&mut faults, 5),
+            1,
+            "{action:?}: the first episode healed"
+        );
+    }
 }
 
 /// An episode with a heal of zero rounds fires and heals in one step of the script.
@@ -1962,6 +1991,727 @@ fn a_holder_hosts_store_outage_stops_its_tenures_duties_and_no_other_hosts() {
         none.write(&key, &create),
         Outcome::Committed(crate::storage::store::Version::FIRST)
     );
+}
+
+/// A takeover whose compare-and-swap reply is unknown is taken again: H0 is lost, and H5's takeover of s2 times
+/// out at its compare-and-swap with a write that did not commit. The takeover ends `Rerun::Takeover`, the next
+/// incarnation reads H0's record and waits as s2's standby, and the agent, which keeps the nomination while the
+/// records name its target, sends its next witness within a window; H5's second takeover then commits and serves.
+/// The host loop runs on while the standby waits on its retake, so the run cannot end with s2 unserved while the
+/// agent still nominates its target. The scheduled case runs the committed sibling, whose next incarnation reads H5
+/// named owner and serves through the restart's lineage arm, which the run records (`VolumeLog::arm`).
+#[test]
+fn a_takeover_whose_swap_reply_is_unknown_is_taken_again_on_the_next_witness_or_restarted() {
+    a_takeover_whose_swap_reply_is_unknown_recovers_on(false);
+}
+
+/// The checks of the test above with a swap that committed (`commit`) or did not.
+pub(super) fn a_takeover_whose_swap_reply_is_unknown_recovers_on(commit: bool) {
+    let mut script = Scenario::HostLoss.episodes(false);
+    script.push(Episode {
+        scope: vec![5],
+        action: Action::StoreWrite(Arm::Timeout { commit }),
+        heal: None,
+        ..script[0].clone()
+    });
+    let report = scripted(&Config::host_loss(1), script);
+    assert_eq!(
+        taken(&report),
+        [(1, H3), (2, H3), (3, H5)],
+        "commit {commit}"
+    );
+    let s2: Vec<_> = (report.hosts.takeovers.iter())
+        .filter(|attempt| attempt.shard == 3)
+        .map(|attempt| attempt.refused.as_deref())
+        .collect();
+    let expected: &[Option<&str>] = match commit {
+        false => &[Some("TakeOver"), None],
+        true => &[None],
+    };
+    assert_eq!(s2, expected, "commit {commit}");
+    // The period whose swap reply was unknown issued no device command.
+    let unknown = (report.hosts.takeovers.iter()).find(|attempt| attempt.shard == 3);
+    let commands = unknown.map(|attempt| attempt.commands.clone());
+    assert_eq!(commands, Some(Vec::new()), "commit {commit}");
+    // The swap's write is told apart by the record: H5's owner change, and after a committed swap the next
+    // incarnation's own bump one attempt above it, which a clean takeover makes no.
+    let h5 = crate::failover::records::Host::new(H5).unwrap();
+    let mut held: Vec<u32> = (report.evidence.histories[2].1.iter())
+        .filter(|record| record.owner == h5)
+        .map(|record| record.attempts)
+        .collect();
+    held.dedup();
+    let taken = held.first().copied().expect("H5's owner change");
+    let expected = match commit {
+        true => vec![taken, taken + 1],
+        false => vec![taken],
+    };
+    assert_eq!(held, expected, "commit {commit}");
+    // After a committed swap the next incarnation serves through the restart's lineage arm; a second takeover
+    // serves through none.
+    let arms: Vec<(u32, u64)> = (report.volumes.arm.iter())
+        .map(|&(shard, host, _)| (shard, host))
+        .collect();
+    let expected = match commit {
+        true => vec![(3, H5)],
+        false => Vec::new(),
+    };
+    assert_eq!(arms, expected, "commit {commit}");
+    assert_eq!(
+        report.credit(),
+        Verdict::Pass,
+        "commit {commit}: {}",
+        report.summary()
+    );
+}
+
+/// The retake stays pending while the isolated owner's own tenure still fills the cell. H0 is isolated with no heal,
+/// so its tenure of s2 stays live and unreachable, and H5's takeover of s2 times out at its compare-and-swap with a
+/// write that did not commit. H5's next incarnation waits on its retake under H0's tenure, the host loop runs on,
+/// and the agent's next witness starts the takeover that commits and serves.
+#[test]
+fn a_retake_under_an_isolated_owners_tenure_keeps_the_run_open_for_the_next_witness() {
+    let mut script = Scenario::OwnerIsolation.episodes(false);
+    script[0].heal = None;
+    script.push(Episode {
+        scope: vec![5],
+        action: Action::StoreWrite(Arm::Timeout { commit: false }),
+        heal: None,
+        ..script[0].clone()
+    });
+    let report = scripted(&Config::owner_isolation(1), script);
+    let s2: Vec<_> = (report.hosts.takeovers.iter())
+        .filter(|attempt| attempt.shard == 3)
+        .map(|attempt| attempt.refused.as_deref())
+        .collect();
+    assert_eq!(s2, [Some("TakeOver"), None], "{}", report.summary());
+    assert_eq!(taken(&report), [(1, H3), (2, H3), (3, H5)]);
+    assert_eq!(report.credit(), Verdict::Pass, "{}", report.summary());
+}
+
+/// A fresh activation whose Confirm reply is unknown ends `Rerun(Unactivated)` after its bump committed, and the
+/// next incarnation reads the record at `E = 1`. s3's volume is lost alone, H0 takes the shard over, and the
+/// reconciler replaces the volume and flips. H0's fresh activation commits its enrollment write and its bump, and
+/// its Confirm times out. The activation stays due: the next incarnation takes the restart role over the
+/// replacement, bumps to `E = 2` and serves the shard cold, the shard keeps the `Confirm` blocker of the incarnation
+/// that ended, and the lone loss earns its credit.
+#[test]
+fn a_fresh_activation_whose_confirm_reply_is_unknown_after_its_bump_runs_again_and_serves_cold() {
+    let mut script = Scenario::LostAlone.episodes(false);
+    // The activation's writes are H0's next three: the enrollment, the bump and the Confirm.
+    let writes = [Arm::Pass, Arm::Pass, Arm::Timeout { commit: false }];
+    script.extend(writes.map(|arm| Episode {
+        trigger: Trigger::When(|fleet| fleet.fresh_due().is_some()),
+        scope: vec![0],
+        action: Action::StoreWrite(arm),
+        heal: None,
+    }));
+    let report = scripted(&Config::lost_alone(1), script);
+    let s3 = &report.shards[hosts::FAULTED];
+    assert_eq!(s3.blockers.last().map(String::as_str), Some("Confirm"));
+    let shard = hosts::FAULTED as u32 + 1;
+    let volumes = &report.volumes;
+    assert_eq!(
+        (&volumes.cold, &volumes.fresh_refused),
+        (&vec![shard], &vec![])
+    );
+    let last = *report.evidence.histories[hosts::FAULTED].1.last().unwrap();
+    assert_eq!((last.owner.get(), last.attempts), (H0, 2));
+    let cold = s3.recoveries.last().expect("the replacement's recovery");
+    assert_eq!((cold.host, cold.sweep), (last.owner, Some((0, 0))));
+    assert_eq!(report.credit(), Verdict::Pass, "{}", report.summary());
+}
+
+/// A restart whose incarnation ends with an exit that names a rerun runs again: H3, the owner of s3 alone, crashes
+/// and returns two rounds later, before a suspicion, under a store outage of its own requests. Each restart's role
+/// read fails, which ends the incarnation `Rerun::Records`, and the host loop runs the next incarnation from the
+/// round after, as the process's supervisor starts it. Once the outage heals, the next incarnation restarts s3 warm
+/// on H3, and no takeover starts. That incarnation completes H3's return as a restart that served at once does: the
+/// zone log records the restart at its tenure, and the tenure acknowledges its FILL and its INVALIDATE.
+#[test]
+fn a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage() {
+    let mut script = Scenario::HostLoss.episodes(false);
+    script[0].scope = vec![3];
+    script[0].heal = Some(2);
+    script.push(Episode {
+        scope: vec![3],
+        action: Action::Outage,
+        heal: Some(20),
+        ..script[0].clone()
+    });
+    let report = scripted(&Config::host_loss(1), script);
+    assert!(
+        report.hosts.takeovers.is_empty(),
+        "{:?}",
+        report.hosts.takeovers
+    );
+    let reruns = report.hosts.refused_reruns;
+    assert!(reruns >= 10, "one rerun a round over the outage: {reruns}");
+    let s3 = &report.shards[3];
+    let last = s3.recoveries.last().expect("a recovery");
+    assert_eq!((s3.recoveries.len(), last.host.get()), (2, H3));
+    assert!(last.after_crash);
+    let returned: Vec<_> = (report.zones.restarts.iter())
+        .map(|&(shard, host, tenure, _)| (shard, host, tenure))
+        .collect();
+    assert_eq!(returned, [(4, H3, last.tenure)]);
+    assert_eq!(report.zones.acknowledged, 1);
+    assert!(
+        last.sweep
+            .is_some_and(|(of, served)| of > 0 && of == served),
+        "s3 restarts warm: {:?}",
+        last.sweep
+    );
+    assert!(
+        s3.blockers.iter().all(|check| check == "Unavailable") && !s3.blockers.is_empty(),
+        "{:?}",
+        s3.blockers
+    );
+    assert_eq!(report.verdicts.untouched, Verdict::Pass);
+}
+
+/// A serving tenure's rerun that is itself refused keeps the round its tenure ended. The run has no loss: s3's boot
+/// tenure on H3 names `Rerun(Withdrawn)`. In the first run the rerun restarts s3 on H3 at once. In the second, H3's
+/// store requests fail for `OUTAGE` rounds from the step that queues the rerun: the rerun's role read fails in the
+/// round the tenure ended, each next incarnation runs a round later, and the first one after the heal restarts s3
+/// on H3. That recovery counts the first run's rounds and one more for each refused rerun the host loop ran.
+#[test]
+fn a_serving_tenures_rerun_refused_under_an_outage_counts_its_rounds_from_the_round_its_tenure_ended()
+ {
+    const OUTAGE: u64 = 8;
+    let rerun = |script: Vec<Episode>| {
+        let config = Config::host_loss(1);
+        let mut draws = Draws::record(config.root);
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(script, fleet.topology.members.len());
+        let _inline = Inline::set();
+        let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+            for _ in 0..hosts::TAIL_ROUNDS {
+                fleet.turn(live);
+            }
+            let serving = live[3].as_mut().expect("the boot tenure");
+            serving.duty_exit = Some(crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn));
+            fleet.run_hosts(live, slots)
+        });
+        let report = ran.expect("a run inside the limits");
+        let s3 = &report.shards[3];
+        let last = *s3.recoveries.last().expect("a recovery");
+        assert_eq!((s3.recoveries.len(), last.host.get()), (2, H3));
+        assert!(!last.after_crash);
+        (last.rounds, u64::from(report.hosts.refused_reruns))
+    };
+    let outage = Episode {
+        trigger: Trigger::When(|fleet| !fleet.reruns.is_empty()),
+        scope: vec![3],
+        action: Action::Outage,
+        heal: Some(OUTAGE),
+    };
+    let (direct, none) = rerun(Vec::new());
+    let (refused, reruns) = rerun(vec![outage]);
+    assert_eq!(none, 0);
+    assert!(
+        reruns >= OUTAGE,
+        "one rerun a round over the outage: {reruns}"
+    );
+    assert_eq!(refused, direct + reruns);
+}
+
+/// A process refused for the first time in a round the faults are settled in still gets its next incarnation's
+/// turn, and a refusal that recurs holds no run open. H3's store requests fail from the first host round with no
+/// heal, so the fault is settled once the tail rounds pass. s3's boot tenure on H3 then names `Rerun(Withdrawn)`: its
+/// rerun's role read fails and queues the next incarnation. The host loop runs one more round for it, that
+/// incarnation's role read fails again, and the run ends there with s3 unserved and its blocker named.
+#[test]
+fn a_restart_refused_after_the_tail_rounds_runs_its_next_incarnation_once_before_the_run_ends() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    let outage = Episode {
+        trigger: Trigger::AtTime(0),
+        scope: vec![3],
+        action: Action::Outage,
+        heal: None,
+    };
+    fleet.faults = Faults::new(vec![outage], fleet.topology.members.len());
+    let _inline = Inline::set();
+    let mut ended = 0;
+    let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+        fleet.episodes(live, slots)?;
+        for _ in 0..hosts::TAIL_ROUNDS {
+            fleet.turn(live);
+        }
+        assert!(fleet.faults.settled());
+        let serving = live[3].as_mut().expect("the boot tenure");
+        serving.duty_exit = Some(crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn));
+        ended = fleet.round;
+        fleet.run_hosts(live, slots)
+    });
+    let report = ran.expect("a run that ends before the horizon");
+    let s3 = &report.shards[3];
+    assert_eq!(
+        (s3.recoveries.len(), report.hosts.refused_reruns),
+        (1, 1),
+        "{}",
+        report.summary()
+    );
+    assert_eq!(s3.blockers, ["Unavailable", "Unavailable"]);
+    assert!(
+        report.rounds <= ended + 4,
+        "{} rounds after {ended}",
+        report.rounds
+    );
+}
+
+/// A refused rerun whose role read fails under a record that names another owner runs again, and the wait on a
+/// retake is recorded from the role the next incarnation read. s3's record names another owner with H3 its standby,
+/// and H3's store requests fail for the first rerun: its role read fails, the next incarnation is queued and no
+/// retake is recorded. With the outage over, the next incarnation reads the standby role and waits on its retake.
+#[test]
+fn a_refused_rerun_whose_role_read_fails_under_another_owners_record_runs_again_before_it_waits() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.start_hosts();
+    let (at, member) = (3, 3);
+    assert_eq!(fleet.cells[at].placement.owner, member);
+    fleet.hosts[member].up = hosts::Up::Running;
+    let members = &fleet.topology.members;
+    let (host, successor) = (members[member].host, members[member + 1].host);
+    let key = Key::Shard(fleet.cells[at].placement.shard);
+    let item = (fleet.store.0.borrow().current(&key).cloned()).expect("a stored shard record");
+    let before = fleet.record_now(at);
+    let taken = ShardRecord {
+        owner: successor,
+        standby: Some(host),
+        attempts: before.attempts + 1,
+        ..before
+    };
+    let write = Write::Exact {
+        expect: item.version,
+        value: taken.encode(),
+    };
+    let committed = Store::write(&mut fleet.store.clone(), &key, &write);
+    assert!(matches!(committed, Outcome::Committed(_)));
+    fleet
+        .faults
+        .store
+        .borrow_mut()
+        .outage(Some(member as u32), 0, 1);
+    let grounds = [Grounds::over(storage_shared(1, fleet.share(at)))];
+    let pools = [Pools::new(&grounds[0])];
+    let mut slots = Slots {
+        grounds: &grounds,
+        pools: &pools,
+        members: vec![member],
+        used: vec![false],
+    };
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let rerun = fleet.rerun_refused(&mut live, &mut slots, (at, member, true));
+    rerun.expect("a rerun that stops on no wait");
+    assert!(
+        fleet.refused.contains_key(&(at, member)),
+        "{:?}",
+        fleet.refused
+    );
+    assert!(fleet.retakes.is_empty(), "{:?}", fleet.retakes);
+
+    fleet.faults.store.borrow_mut().set_now(1);
+    fleet.refused.remove(&(at, member));
+    let rerun = fleet.rerun_refused(&mut live, &mut slots, (at, member, true));
+    rerun.expect("a rerun that stops on no wait");
+    assert!(fleet.refused.is_empty(), "{:?}", fleet.refused);
+    assert_eq!(fleet.retakes.get(&at), Some(&member));
+    assert_eq!(fleet.log.refused_reruns, 2);
+    assert_eq!(slots.used, [false]);
+}
+
+/// A returned host whose role read fails under a record that names another owner keeps its return open for the
+/// next incarnation. s3's record names another owner and H3's store requests fail for its first restart: the zone
+/// log lists the return with the read's error, which is no deposed host's end, and the next incarnation is queued as
+/// a returning one. With the outage over it reads its role, and the zone log lists the role H3 waits in.
+#[test]
+fn a_returned_hosts_failed_role_read_under_another_owners_record_completes_its_return_on_the_rerun()
+{
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.start_hosts();
+    let (at, member) = (3, 3);
+    fleet.hosts[member].up = hosts::Up::Running;
+    let members = &fleet.topology.members;
+    let successor = members[member + 1].host;
+    let key = Key::Shard(fleet.cells[at].placement.shard);
+    let item = (fleet.store.0.borrow().current(&key).cloned()).expect("a stored shard record");
+    let before = fleet.record_now(at);
+    let taken = ShardRecord {
+        owner: successor,
+        attempts: before.attempts + 1,
+        ..before
+    };
+    let write = Write::Exact {
+        expect: item.version,
+        value: taken.encode(),
+    };
+    let committed = Store::write(&mut fleet.store.clone(), &key, &write);
+    assert!(matches!(committed, Outcome::Committed(_)));
+    fleet
+        .faults
+        .store
+        .borrow_mut()
+        .outage(Some(member as u32), 0, 1);
+    let grounds = [Grounds::over(storage_shared(1, fleet.share(at)))];
+    let pools = [Pools::new(&grounds[0])];
+    let mut slots = Slots {
+        grounds: &grounds,
+        pools: &pools,
+        members: vec![member],
+        used: vec![false],
+    };
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let returned = fleet.restart_returned(&mut live, &mut slots, (at, member));
+    returned.expect("a return that stops on no wait");
+    let accepted = |fleet: &Fleet<'_>| -> Vec<bool> {
+        (fleet.zone_log.deposed.iter())
+            .map(|(.., check, _)| super::zones::deposed(check))
+            .collect()
+    };
+    assert_eq!(accepted(&fleet), [false]);
+    assert!(
+        fleet.refused.contains_key(&(at, member)),
+        "{:?}",
+        fleet.refused
+    );
+    // The zone's settlement waits for the queued incarnation of the return.
+    fleet.returned_at = Some(fleet.round);
+    fleet.zone_settled(&live);
+    assert_eq!(fleet.zone_log.settled_in, None);
+
+    fleet.faults.store.borrow_mut().set_now(1);
+    fleet.refused.remove(&(at, member));
+    let rerun = fleet.rerun_refused(&mut live, &mut slots, (at, member, true));
+    rerun.expect("a rerun that stops on no wait");
+    assert_eq!(
+        accepted(&fleet),
+        [false, true],
+        "{:?}",
+        fleet.zone_log.deposed
+    );
+    fleet.zone_settled(&live);
+    assert_eq!(fleet.zone_log.settled_in, Some(0));
+    assert!(fleet.refused.is_empty() && fleet.returning.is_empty());
+    assert_eq!(slots.used, [false]);
+}
+
+/// An incarnation that ends with a rerun exit under a record that names another owner still queues its next one.
+/// s3's record names another owner with H3 its standby. H3's role read returns the record's previous version, which
+/// names H3 owner, so the incarnation starts a restart, and that restart's next record read fails: the incarnation
+/// ends `Rerun(Records)`. The attempt reads deposed, since the record names another owner, and the next incarnation
+/// is queued; with no fault left it reads the standby role and waits on its retake.
+#[test]
+fn a_rerun_exit_under_another_owners_record_queues_the_next_incarnation() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.start_hosts();
+    let (at, member) = (3, 3);
+    fleet.hosts[member].up = hosts::Up::Running;
+    let members = &fleet.topology.members;
+    let (host, successor) = (members[member].host, members[member + 1].host);
+    let key = Key::Shard(fleet.cells[at].placement.shard);
+    let item = (fleet.store.0.borrow().current(&key).cloned()).expect("a stored shard record");
+    let before = fleet.record_now(at);
+    let taken = ShardRecord {
+        owner: successor,
+        standby: Some(host),
+        attempts: before.attempts + 1,
+        ..before
+    };
+    let write = Write::Exact {
+        expect: item.version,
+        value: taken.encode(),
+    };
+    let committed = Store::write(&mut fleet.store.clone(), &key, &write);
+    assert!(matches!(committed, Outcome::Committed(_)));
+    // The role read's volume record passes, its shard record reads stale, and the restart's next read fails.
+    for arm in [Arm::Pass, Arm::StaleCurrentRead, Arm::Unavailable] {
+        fleet.faults.store.borrow_mut().arm(member as u32, arm);
+    }
+    let grounds = [Grounds::over(storage_shared(1, fleet.share(at)))];
+    let pools = [Pools::new(&grounds[0])];
+    let mut slots = Slots {
+        grounds: &grounds,
+        pools: &pools,
+        members: vec![member],
+        used: vec![false],
+    };
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let restarted = fleet.restart_by(&mut live, &mut slots, (at, true), member);
+    let check = match restarted.expect("a restart that stops on no wait") {
+        super::volumes::Restarted::Deposed { check, .. } => check,
+        _ => panic!("the record names another owner"),
+    };
+    assert_eq!(check.as_deref(), Some("Records"));
+    assert_eq!(fleet.faults.store.borrow().queued(member as u32), 0);
+    assert!(
+        fleet.refused.contains_key(&(at, member)),
+        "{:?}",
+        fleet.refused
+    );
+    let cell = &fleet.cells[at];
+    assert_eq!((cell.blocked, cell.blockers.len()), (false, 0));
+
+    fleet.refused.remove(&(at, member));
+    let rerun = fleet.rerun_refused(&mut live, &mut slots, (at, member, true));
+    rerun.expect("a rerun that stops on no wait");
+    assert!(fleet.refused.is_empty(), "{:?}", fleet.refused);
+    assert_eq!(fleet.retakes.get(&at), Some(&member));
+    assert_eq!(slots.used, [false]);
+}
+
+/// A standby's view period that ends with a rerun exit at its role read ends the process, and the host loop runs
+/// its next incarnation. s5's record is rewritten to name H1, its standby, owner at the next attempt, as a takeover
+/// whose reply H1 never read leaves it, and a witness for s5 then reaches H1's wait. The period's role read finds
+/// the restart role and ends `Rerun(RoleChanged)` with the attempt logged refused. The next round's incarnation
+/// reads the same role and runs H1's restart of s5, which serves; in the second run H1's bump times out and the
+/// restart holds. In both runs H4's boot tenure, which still held the cell, moves to the deposed slots when H1's
+/// incarnation takes the cell: it ends `Deposed` at its next record view and counts as a withdrawal.
+#[test]
+fn a_standby_period_that_ends_at_a_changed_role_runs_its_next_incarnation() {
+    let (at, member) = (5, 1);
+    let run = |script: Vec<Episode>| {
+        let config = Config::host_loss(1);
+        let mut draws = Draws::record(config.root);
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(script, fleet.topology.members.len());
+        let _inline = Inline::set();
+        let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+            for _ in 0..hosts::TAIL_ROUNDS {
+                fleet.turn(live);
+            }
+            assert_eq!(fleet.cells[at].placement.standby, member);
+            let host = fleet.topology.members[member].host;
+            let key = Key::Shard(fleet.cells[at].placement.shard);
+            let item =
+                (fleet.store.0.borrow().current(&key).cloned()).expect("a stored shard record");
+            let before = fleet.record_now(at);
+            let taken = ShardRecord {
+                owner: host,
+                standby: None,
+                attempts: before.attempts + 1,
+                ..before
+            };
+            let write = Write::Exact {
+                expect: item.version,
+                value: taken.encode(),
+            };
+            let committed = Store::write(&mut fleet.store.clone(), &key, &write);
+            assert!(matches!(committed, Outcome::Committed(_)));
+            let witness = crate::failover::detect::host::Revalidated {
+                shard: before.shard,
+                target: crate::failover::retire::Target::of(&before),
+                until_us: u64::MAX,
+            };
+            (fleet.nominated).push_back((member, before.active, witness, 0));
+            fleet.run_hosts(live, slots)
+        });
+        let report = ran.expect("a run inside the limits");
+        let attempts: Vec<_> = (report.hosts.takeovers.iter())
+            .map(|attempt| (attempt.shard, attempt.host, attempt.refused.as_deref()))
+            .collect();
+        assert_eq!(attempts, [(6, H1, Some("Rerun(RoleChanged)"))]);
+        assert_eq!(report.hosts.refused_reruns, 1, "{}", report.summary());
+        // H4's boot tenure left through its own `Deposed` exit.
+        let exits: Vec<_> = (report.duties.exits.iter())
+            .map(|(shard, _, exit)| (*shard, exit.clone()))
+            .collect();
+        assert_eq!(exits, [(6, crate::host::Exit::Deposed)]);
+        let withdrawn: Vec<u32> = (report.hosts.withdrawals.iter())
+            .map(|&(shard, _)| shard)
+            .collect();
+        assert_eq!((withdrawn, report.hosts.unwithdrawn), (vec![6], 0));
+        let served: Vec<u64> = (report.shards[at].recoveries.iter())
+            .map(|recovered| recovered.host.get())
+            .collect();
+        (served, report.shards[at].blockers.clone())
+    };
+    let (served, blockers) = run(Vec::new());
+    assert_eq!(served, [1005, H1], "H4's boot tenure, then H1's restart");
+    assert_eq!(blockers, [] as [&str; 0]);
+
+    let timeout = Episode {
+        trigger: Trigger::AtTime(0),
+        scope: vec![member],
+        action: Action::StoreWrite(Arm::Timeout { commit: false }),
+        heal: None,
+    };
+    let (served, blockers) = run(vec![timeout]);
+    assert_eq!(served, [1005], "H1's restart holds at its bump");
+    assert_eq!(blockers, ["Bump"]);
+}
+
+/// A fresh activation refused for the first time in a round the run is settled in still gets its retry's turn, and
+/// a retry that is refused again holds no run open. s3's volume is lost alone and H0 takes the shard over; H0 is
+/// paused from the step after the flip with no heal, so the replacement stays unactivated and the host loop ends
+/// past the settle bound. H0 then resumes with its next write armed to time out, and the host loop runs again: the
+/// activation's enrollment write times out and ends `Rerun(Unactivated)` in a round every other end condition
+/// holds in. With one armed write the retry runs a round later and serves the shard cold. With two, the retry is
+/// refused again and the loop ends in that round.
+#[test]
+fn a_fresh_activation_refused_in_a_settled_round_runs_its_retry_once_before_the_run_ends() {
+    let resumed = |timeouts: usize| {
+        let mut script = Scenario::LostAlone.episodes(false);
+        script.push(Episode {
+            trigger: Trigger::When(|fleet| !fleet.store.0.borrow().flips.is_empty()),
+            scope: vec![0],
+            action: Action::Pause,
+            heal: None,
+        });
+        let config = Config::lost_alone(1);
+        let mut draws = Draws::record(config.root);
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(script, fleet.topology.members.len());
+        let _inline = Inline::set();
+        let mut rounds = 0;
+        let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+            fleet.run_hosts(live, slots)?;
+            assert!(fleet.recon.settled && fleet.faults.settled());
+            assert_eq!(fleet.fresh_due(), None, "H0 is paused");
+            fleet.hosts[0].up = hosts::Up::Running;
+            for _ in 0..timeouts {
+                (fleet.faults.store.borrow_mut()).arm_write(0, Arm::Timeout { commit: false });
+            }
+            assert_eq!(fleet.fresh_due(), Some(hosts::FAULTED));
+            let from = fleet.round;
+            let ran = fleet.run_hosts(live, slots);
+            rounds = fleet.round - from;
+            ran
+        });
+        let report = ran.expect("a run inside the limits");
+        let blockers = report.shards[hosts::FAULTED].blockers.clone();
+        (report.volumes.cold.clone(), blockers, rounds)
+    };
+    let shard = hosts::FAULTED as u32 + 1;
+    let (cold, blockers, _) = resumed(1);
+    assert_eq!(cold, [shard], "the retry served the replacement");
+    assert_eq!(blockers.last().map(String::as_str), Some("EnrollWrite"));
+
+    let (cold, blockers, rounds) = resumed(2);
+    assert_eq!(cold, [] as [u32; 0]);
+    assert_eq!(
+        blockers[blockers.len() - 2..],
+        ["EnrollWrite", "EnrollWrite"]
+    );
+    assert_eq!(
+        rounds, 1,
+        "the first refusal's retry ran a round later, and the run ended there"
+    );
+}
+
+/// A refused rerun of a serving tenure waits, as the rerun did, until each open loss has sent its drawn GETs. s3's
+/// boot tenure on H3 names `Rerun(Withdrawn)` and H3's store requests fail from the step that queues its rerun, so
+/// the rerun is refused. H4 then crashes, which opens a loss with drawn GETs. Two episodes mark rounds: one fires
+/// at the first refused rerun the host loop ran, the other once the open loss has sent every drawn GET. The first
+/// refused rerun runs no earlier than that round.
+#[test]
+fn a_refused_rerun_of_a_serving_tenure_waits_for_an_open_losss_drawn_gets() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    let mark = |trigger: Trigger| Episode {
+        trigger,
+        scope: vec![2],
+        action: Action::Store(Arm::Pass),
+        heal: None,
+    };
+    let script = vec![
+        Episode {
+            trigger: Trigger::When(|fleet| !fleet.reruns.is_empty()),
+            scope: vec![3],
+            action: Action::Outage,
+            heal: Some(12),
+        },
+        Episode {
+            trigger: Trigger::When(|fleet| !fleet.rerun_starts.is_empty()),
+            scope: vec![4],
+            action: Action::Crash,
+            heal: None,
+        },
+        mark(Trigger::When(|fleet| fleet.log.refused_reruns > 0)),
+        mark(Trigger::When(|fleet| {
+            let due = |loss: &hosts::Loss| !loss.episode.due.is_empty();
+            !fleet.losses.is_empty() && !fleet.losses.iter().any(due)
+        })),
+    ];
+    fleet.faults = Faults::new(script, fleet.topology.members.len());
+    let _inline = Inline::set();
+    let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+        for _ in 0..hosts::TAIL_ROUNDS {
+            fleet.turn(live);
+        }
+        let serving = live[3].as_mut().expect("the boot tenure");
+        serving.duty_exit = Some(crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn));
+        fleet.run_hosts(live, slots)
+    });
+    let report = ran.expect("a run inside the limits");
+    let [_, Some(lost), Some(rerun), Some(sent)] = report.hosts.fired[..] else {
+        panic!("every episode fires: {:?}", report.hosts.fired);
+    };
+    assert!(
+        lost < sent,
+        "the loss's GETs take rounds to send: {lost} and {sent}"
+    );
+    assert!(
+        rerun >= sent,
+        "the first refused rerun ran in round {rerun}, the GETs were sent by {sent}"
+    );
+}
+
+/// A crash that returns in the step it fires in supersedes the rerun queued for the same process. H3 crashes and
+/// returns under a store outage of its own requests, so its restart of s3 is refused and rerun each round. In the
+/// first step after the outage H3 crashes again and returns at once: the return queues the restart of s3, and the
+/// rerun queued for the crashed process is dropped. s3 is restarted once, by the return.
+#[test]
+fn a_crash_that_returns_at_once_supersedes_the_rerun_queued_for_its_process() {
+    const OUTAGE: u64 = 20;
+    let mut script = Scenario::HostLoss.episodes(false);
+    script[0].scope = vec![3];
+    script[0].heal = Some(2);
+    script.push(Episode {
+        scope: vec![3],
+        action: Action::Outage,
+        heal: Some(OUTAGE),
+        ..script[0].clone()
+    });
+    script.push(Episode {
+        trigger: Trigger::AtTime(OUTAGE),
+        scope: vec![3],
+        action: Action::Crash,
+        heal: Some(0),
+    });
+    let report = scripted(&Config::host_loss(1), script);
+    let s3 = &report.shards[3];
+    let hosts: Vec<u64> = (s3.recoveries.iter())
+        .map(|recovered| recovered.host.get())
+        .collect();
+    assert_eq!(
+        hosts,
+        [H3, H3],
+        "the boot tenure and one restart: {}",
+        report.summary()
+    );
+    assert_eq!(report.hosts.rerun_dropped, 1);
+    let returned: Vec<_> = (report.zones.restarts.iter())
+        .map(|&(shard, host, tenure, _)| (shard, host, tenure))
+        .collect();
+    assert_eq!(returned, [(4, H3, s3.recoveries[1].tenure)]);
 }
 
 /// The standby outage provides the baseline because every boot tenure belongs to another host. Each record view

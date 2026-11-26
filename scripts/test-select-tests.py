@@ -240,13 +240,14 @@ ROW_LINES = {
         *(f"fleet: scheduled repair-and-host {check}: pass"
           for check in ("census-and-settle-siblings root 1", "census-and-settle-siblings root 2",
                         "standby-need-dropped root 2", "pinned root 2", "unknown-confirm-committed root 1",
-                        "unknown-reserve-committed root 1", "unknown-reserve-lost root 1", "unknown-page-lost root 1")),
+                        "unknown-reserve-committed root 1", "unknown-reserve-lost root 1", "unknown-page-lost root 1",
+                        "takeover-unknown-committed root 1")),
         *(f"fleet: scheduled repair-and-host {kind}-{call}-{ending} root 1: pass"
           for kind in ("enroll", "fresh")
           for index, call in enumerate(("reserve", "record", "attach", "enroll", "designate"))
           for at, ending in enumerate(("acknowledged", "committed", "lost"))
           if not (at == index % 3 and (kind == "fresh") == (index % 2 == 1))),
-        "fleet: scheduled repair-and-host: 29 checks and 25 crash cells passed",
+        "fleet: scheduled repair-and-host: 30 checks and 25 crash cells passed",
     ],
     "slot-reuse-cycles": [
         *(f"cycles: seed {seed} cycles 24: safety pass; containment pass; retention pass; progress pass; quiescent conservation pass; "
@@ -1802,7 +1803,7 @@ class SelectTests(unittest.TestCase):
         rows = INVENTORY["qualified"]["search-nightly"]["rows"]
         others = [line for row in rows if row["id"] != "fleet-scheduled-roots" for line in ROW_LINES[row["id"]]]
         scheduled = ROW_LINES["fleet-scheduled-roots"]
-        self.assertEqual(len(scheduled), 91)
+        self.assertEqual(len(scheduled), 92)
         witnesses = next(row for row in rows if row["id"] == "fleet-scheduled-roots")["witnesses"]
         code, report, blocked = self.blocked("search-nightly", lines=others + scheduled)
         self.assertEqual((code, blocked), (0, {}), report)
@@ -1819,7 +1820,7 @@ class SelectTests(unittest.TestCase):
             ("a short zone count", [line.replace("zone: 3 checks", "zone: 2 checks") for line in scheduled], f"missing witness {witnesses[1]!r}"),
             ("a skipped enrollment cell", [line for line in scheduled if " fresh-designate-committed " not in line],
              "skipped members ['repair-and-host fresh-designate-committed root 1']"),
-            ("a short repair count", [line.replace("host: 29 checks", "host: 28 checks") for line in scheduled],
+            ("a short repair count", [line.replace("host: 30 checks", "host: 29 checks") for line in scheduled],
              f"missing witness {witnesses[2]!r}"),
         ):
             with self.subTest(edit=name):

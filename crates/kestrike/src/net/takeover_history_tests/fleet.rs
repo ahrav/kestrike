@@ -726,7 +726,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v19-inbox";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v20-inbox";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1065,7 +1065,7 @@ impl Report {
         if self.config.scenario.hosted() {
             let log = &self.hosts;
             lines.push(format!(
-                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} boot {:?} fired {:?} arrivals {:?}",
+                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} refused-reruns {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} boot {:?} fired {:?} arrivals {:?}",
                 log.nominations,
                 log.addressed,
                 log.vetoes,
@@ -1077,6 +1077,7 @@ impl Report {
                 log.lapsed,
                 log.unslotted,
                 log.rerun_dropped,
+                log.refused_reruns,
                 log.reports,
                 log.refused,
                 log.exempt,
@@ -1481,7 +1482,8 @@ struct Cell {
     /// Whether the cell runs a replacement volume, which retains nothing.
     cold: bool,
     fresh_refused: bool,
-    /// The round of a fresh activation whose role read failed; the activation retries from a later round.
+    /// The round of a fresh activation whose role read failed or whose incarnation ended with an exit that names a
+    /// rerun; the activation retries from a later round.
     fresh_unread: Option<u64>,
     /// Each host the loop's status first named in an enrollment of the shard, and whether the active volume held its
     /// live attach then.
@@ -2013,6 +2015,28 @@ struct Fleet<'c> {
     /// it ended, until that restart runs. The host loop runs each once every open loss has sent its drawn GETs, so a
     /// rerun's load and sweep take no round from them, and while its host is not paused (`Fleet::rerun_due`).
     reruns: std::collections::BTreeMap<usize, (usize, Tenure, u64)>,
+    /// The entries of `refused` whose restart was a returned host's (`Fleet::restart_returned`), by cell and member.
+    /// The next incarnation runs as that restart again, so a tenure it serves, or a record that deposes it,
+    /// completes the return in the zone log.
+    returning: std::collections::BTreeSet<(usize, usize)>,
+    /// The entries of `refused` that a serving tenure's rerun queued (`Fleet::rerun`), by cell and member, with the
+    /// round that tenure ended. The next incarnation's recovery counts its rounds from that round.
+    rerun_starts: std::collections::BTreeMap<(usize, usize), u64>,
+    /// The refusals that recurred, by cell and member: an entry of `refused` that the rerun of a refused incarnation
+    /// queued, and a fresh activation's retry that was refused again. The host loop runs on for a refusal outside
+    /// this set until its next incarnation's turn, and ends over one inside it.
+    recurred: std::collections::BTreeSet<(usize, usize)>,
+    /// The processes whose restart, takeover or standby view period ended with an exit that names a rerun
+    /// (`host::Exit::Rerun`, or a role read that failed), by cell and member, with the round it ended and whether it
+    /// followed a loss. The host loop runs the next incarnation from the round after that, as the process's
+    /// supervisor starts it.
+    refused: std::collections::BTreeMap<(usize, usize), (u64, bool)>,
+    /// The cells whose named standby waits again as a standby, by that standby's member: `Fleet::retake` records the
+    /// wait after the next incarnation of a takeover that ended `Rerun::Takeover`, and after each rerun of a refused
+    /// restart. While the record still names the member standby of an owner other than its host and the cell holds
+    /// no tenure, or only the tenure an open loss took from it, the host loop runs on, so the agent's next witness
+    /// reaches the wait; the agent sends one a window while the records name its target.
+    retakes: std::collections::BTreeMap<usize, usize>,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2145,6 +2169,11 @@ impl<'c> Fleet<'c> {
             faulted_withdrawal: None,
             torn: Vec::new(),
             reruns: std::collections::BTreeMap::new(),
+            returning: std::collections::BTreeSet::new(),
+            rerun_starts: std::collections::BTreeMap::new(),
+            recurred: std::collections::BTreeSet::new(),
+            refused: std::collections::BTreeMap::new(),
+            retakes: std::collections::BTreeMap::new(),
             standby_extra: None,
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));

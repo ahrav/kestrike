@@ -652,6 +652,68 @@ fn crash_cells_converge(call: reconcile::Call) {
     assert_eq!(cells.len(), 1, "{cells:?}");
 }
 
+/// A crash cell's cleanup withdraws its own armed write and leaves the write arms an episode queued for the
+/// enrolling host. The enrollment crash cell runs with no, one and two episodes that arm H3's next write to time out
+/// uncommitted. H3 is the host the cell enrolls: each armed timeout meets one enrollment write, which leaves H3
+/// unenrolled for the next scan, and the cell's own arm meets the write after them. So each episode delays the run
+/// by one scan, every episode's arm is taken, and the cell crashes once and converges each time.
+#[test]
+fn a_crash_cells_cleanup_leaves_the_write_arms_an_episode_queued_for_the_enrolling_host() {
+    use super::faults::{Action, Episode, Faults, Trigger};
+    use crate::storage::store::sim::Arm;
+    const ENROLLING: usize = 3;
+    let cell = CrashCell {
+        fresh: false,
+        call: reconcile::Call::Enroll,
+        ending: reconcile::Ending::Lost,
+    };
+    let rounds = |timeouts: usize| {
+        let config = Config::crash(1, cell);
+        let mut script = config.scenario.episodes(false);
+        script.extend((0..timeouts).map(|_| Episode {
+            trigger: Trigger::AtTime(0),
+            scope: vec![ENROLLING],
+            action: Action::StoreWrite(Arm::Timeout { commit: false }),
+            heal: None,
+        }));
+        let mut draws = Draws::record(config.root);
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(script, fleet.topology.members.len());
+        let _inline = Inline::set();
+        let mut queued = 0;
+        let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+            let ran = fleet.run_hosts(live, slots);
+            queued = fleet.faults.store.borrow().queued(ENROLLING as u32);
+            ran
+        });
+        let report = ran.expect("a run inside the limits");
+        assert_eq!(
+            queued, 0,
+            "{timeouts} timeouts: every armed write was taken"
+        );
+        assert_eq!(report.recon.crashed, [cell.name()], "{timeouts} timeouts");
+        assert_eq!(report.recon.crash_writes.len(), 1, "{timeouts} timeouts");
+        assert_eq!(
+            report.verdicts.census,
+            Some(Verdict::Pass),
+            "{timeouts} timeouts"
+        );
+        report.rounds
+    };
+    let (none, one, two) = (rounds(0), rounds(1), rounds(2));
+    let scan = one - none;
+    assert!(
+        scan > 0,
+        "a timed-out enrollment write costs a scan: {none} and {one} rounds"
+    );
+    assert_eq!(
+        two,
+        one + scan,
+        "the second episode's arm met the second enrollment write"
+    );
+}
+
 #[test]
 fn one_crash_cell_after_a_reservation_is_reached_and_converges() {
     crash_cells_converge(reconcile::Call::Reserve);
@@ -1233,9 +1295,9 @@ fn a_replayed_forced_decision_holds_the_recorded_index() {
 /// `host_tests` and one in `tests`); the fast tier runs them on root 1. The scheduled case also runs the census and
 /// settle controls and the dropped standby need's control on root 2, the census and settle siblings with the
 /// stranded-s5 control on roots 1 and 2, the pinned runs on root 2, the four store-result cells of the serving duties
-/// the fast tier leaves out on root 1, every store-result cell and both regressed reads on root 2, and the scheduled
-/// tier's 25 enrollment crash cells on root 1. Each passing check or cell prints one line, and the last line counts
-/// the checks and the cells.
+/// the fast tier leaves out on root 1, every store-result cell and both regressed reads on root 2, the committed
+/// sibling of the unknown takeover swap on root 1, and the scheduled tier's 25 enrollment crash cells on root 1. Each
+/// passing check or cell prints one line, and the last line counts the checks and the cells.
 #[test]
 #[ignore = "repair and host scenarios and the census and settle controls on their second root and the enrollment crash cells of the scheduled tier; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
 fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
@@ -1243,7 +1305,7 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
     use super::hosts::Unknown;
     /// A scenario's name, the root it runs on and the check that runs it on a root.
     type Check = (&'static str, u64, fn(u64));
-    let checks: [Check; 18] = [
+    let checks: [Check; 19] = [
         (
             "settle",
             2,
@@ -1322,6 +1384,9 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
             standby_need_dropped_on(root, oracles::UNSETTLED)
         }),
         ("pinned", 2, super::tests::pinned_runs_repeat_their_digests),
+        ("takeover-unknown-committed", 1, |_| {
+            host_tests::a_takeover_whose_swap_reply_is_unknown_recovers_on(true)
+        }),
     ];
     for (name, root, check) in checks {
         check(root);

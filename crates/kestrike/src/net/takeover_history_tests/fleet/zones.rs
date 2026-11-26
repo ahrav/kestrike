@@ -241,7 +241,11 @@ impl Fleet<'_> {
     }
 
     /// `member`'s restart of cell `at` after its return. A tenure that served then acknowledges one FILL of a new
-    /// object and one INVALIDATE of its second checkpoint object.
+    /// object and one INVALIDATE of its second checkpoint object. A restart whose incarnation queued its next one
+    /// ([`Fleet::queue_rerun`]) leaves the return open, and [`Fleet::rerun_refused`] runs that incarnation through
+    /// this restart again: after a held restart, and after a failed role read under a record that names another
+    /// owner, which the zone log lists with the read's error until the next incarnation's role read lists the role
+    /// it waits in.
     pub(super) fn restart_returned<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -255,9 +259,17 @@ impl Fleet<'_> {
             Restarted::Deposed { check, attempts } => {
                 let check = check.unwrap_or_else(|| RESTARTED.to_owned());
                 (self.zone_log.deposed).push((shard, host, check, attempts));
+                if self.refused.contains_key(&(at, member)) {
+                    self.returning.insert((at, member));
+                }
                 return Ok(());
             }
-            Restarted::Held => return Ok(()),
+            Restarted::Held => {
+                if self.refused.contains_key(&(at, member)) {
+                    self.returning.insert((at, member));
+                }
+                return Ok(());
+            }
         };
         self.zone_log.restarts.push((shard, host, tenure, from));
         let fill = self.config.shape.objects + 2;
@@ -271,7 +283,9 @@ impl Fleet<'_> {
         let Some(returned) = self.returned_at else {
             return;
         };
-        if self.zone_log.settled_in.is_some() || !self.returns.is_empty() {
+        // A returned host's restart that queued its next incarnation is still to run.
+        let queued = !self.returns.is_empty() || !self.returning.is_empty();
+        if self.zone_log.settled_in.is_some() || queued {
             return;
         }
         let down = &self.zone_log.down;

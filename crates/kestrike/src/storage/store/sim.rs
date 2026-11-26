@@ -352,8 +352,9 @@ pub(crate) struct ActorFaults {
     arms: BTreeMap<u32, VecDeque<(u64, Arm)>>,
     /// The tickets given so far.
     tickets: u64,
-    /// Arms that only a write takes, after the arms of `arms`.
-    writes: BTreeMap<u32, VecDeque<Arm>>,
+    /// Arms that only a write takes, after the arms of `arms`, each with the ticket [`ActorFaults::arm_write`]
+    /// returned for it.
+    writes: BTreeMap<u32, VecDeque<(u64, Arm)>>,
     /// Each window's actor, `None` for every actor, and its half-open span `[from, until)`.
     outages: Vec<(Option<u32>, u64, u64)>,
     now: u64,
@@ -368,21 +369,28 @@ impl ActorFaults {
         self.tickets
     }
 
-    /// Queues `arm` for `actor`'s next write that finds no earlier arm of its own; reads pass it by.
-    pub(crate) fn arm_write(&mut self, actor: u32, arm: Arm) {
-        self.writes.entry(actor).or_default().push_back(arm);
+    /// Queues `arm` for `actor`'s next write that finds no earlier arm of its own, and returns the arm's ticket;
+    /// reads pass the arm by.
+    pub(crate) fn arm_write(&mut self, actor: u32, arm: Arm) -> u64 {
+        self.tickets += 1;
+        let queue = self.writes.entry(actor).or_default();
+        queue.push_back((self.tickets, arm));
+        self.tickets
     }
 
-    /// Drops the write arms `actor` has yet to take.
-    pub(crate) fn withdraw_writes(&mut self, actor: u32) {
-        self.writes.remove(&actor);
-    }
-
-    /// Takes the arm of `ticket` off `actor`'s queue when no request took it.
-    pub(crate) fn withdraw(&mut self, actor: u32, ticket: u64) {
-        if let Some(queue) = self.arms.get_mut(&actor) {
-            queue.retain(|(of, _)| *of != ticket);
+    /// Takes the arm of `ticket` off `actor`'s queue, or off its write arms, when no request took it, and returns
+    /// whether it was still queued. A ticket names one arm of one queue, so an equal arm under another ticket stays
+    /// queued.
+    pub(crate) fn withdraw(&mut self, actor: u32, ticket: u64) -> bool {
+        let mut queued = false;
+        for queues in [&mut self.arms, &mut self.writes] {
+            if let Some(queue) = queues.get_mut(&actor) {
+                let before = queue.len();
+                queue.retain(|(of, _)| *of != ticket);
+                queued |= queue.len() < before;
+            }
         }
+        queued
     }
 
     /// Stops `actor`'s requests, every actor's for `None`, from `from` until `until`.
@@ -409,10 +417,11 @@ impl ActorFaults {
 
     fn take(&mut self, actor: u32, write: bool) -> Option<Arm> {
         let taken = self.arms.get_mut(&actor).and_then(VecDeque::pop_front);
-        match (taken, write) {
+        let taken = match (taken, write) {
             (None, true) => self.writes.get_mut(&actor).and_then(VecDeque::pop_front),
-            (taken, _) => taken.map(|(_, arm)| arm),
-        }
+            (taken, _) => taken,
+        };
+        taken.map(|(_, arm)| arm)
     }
 }
 
