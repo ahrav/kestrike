@@ -2,7 +2,7 @@
 name = "kestrike"
 version = "0.1.0"
 edition = "2024"
-description = "A hardware-oriented image cache whose objects live on a block device."
+description = "A hardware-oriented cache whose objects live on a block device."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ahrav/kestrike"
 publish = false

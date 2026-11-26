@@ -1,4 +1,4 @@
-//! A hardware-oriented image cache whose objects live on a block device.
+//! A hardware-oriented cache whose objects live on a block device.
 //!
 //! The [`storage`] module holds storage for one device volume: validated
 //! configuration, checked record layout, capacity accounting and finite

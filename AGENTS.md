@@ -1,7 +1,7 @@
 # AGENTS.md
 
 Rust workspace, edition 2024. The main crate, `crates/kestrike`, implements
-Kestrike, a hardware-oriented image cache whose objects live on an EBS-backed
+Kestrike, a hardware-oriented cache whose objects live on an EBS-backed
 block device.
 
 - Never stash or discard working changes. Preserve concurrent user edits.
