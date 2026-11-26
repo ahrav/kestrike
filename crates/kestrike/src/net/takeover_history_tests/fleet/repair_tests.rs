@@ -1067,9 +1067,6 @@ fn each_blocker_is_backed_by_its_own_typed_refusal_alone() {
     ]
     .into_iter()
     .chain(Blocker::ALL.into_iter().map(Refused::row))
-    .chain([Refused::Enroll(
-        crate::failover::reconcile::StandbyRefusal::Tenure,
-    )])
     .collect();
     let populations = |blocker| match blocker {
         Blocker::CensusFull => vec![0],

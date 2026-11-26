@@ -516,6 +516,52 @@ impl<S: Store> Store for Returning<S> {
     }
 }
 
+/// A store that lists the key of each read whose returned value fails the store client's decode for that key: the
+/// record's own decode, and for a volume record or a shard record the key the decoded record names. A read of any
+/// other key kind is listed whatever it returns, since the layer holds no decode for it.
+pub(crate) struct Decoding<S> {
+    pub(crate) inner: S,
+    pub(crate) failed: Rc<RefCell<Vec<crate::storage::store::Key>>>,
+}
+
+impl<S: Store> Store for Decoding<S> {
+    fn read(
+        &mut self,
+        key: &crate::storage::store::Key,
+    ) -> Result<Option<crate::storage::store::Item>, crate::storage::store::Unavailable> {
+        use crate::failover::records::CoveragePage;
+        use crate::storage::store::Key;
+        let read = self.inner.read(key);
+        if let Ok(Some(item)) = &read {
+            let named = match key {
+                Key::Volume(_) => (VolumeRecord::decode(&item.value).ok())
+                    .map(|record| Key::Volume(record.volume)),
+                Key::Shard(_) => {
+                    (ShardRecord::decode(&item.value).ok()).map(|record| Key::Shard(record.shard))
+                }
+                Key::Page(..) => CoveragePage::decode(&item.value).ok().map(|_| *key),
+                _ => None,
+            };
+            if named != Some(*key) {
+                self.failed.borrow_mut().push(*key);
+            }
+        }
+        read
+    }
+
+    fn write(
+        &mut self,
+        key: &crate::storage::store::Key,
+        write: &crate::storage::store::Write,
+    ) -> crate::storage::store::Outcome {
+        self.inner.write(key, write)
+    }
+
+    fn namespace(&self) -> crate::failover::records::Namespace {
+        self.inner.namespace()
+    }
+}
+
 /// The check `refusal`'s class names, as a held restart's status reads it.
 pub(super) fn check_of(refusal: RecoveryRefusal) -> Option<RecoveryCheck> {
     super::volumes::Held::of_restart(refusal)
@@ -640,6 +686,135 @@ impl Fleet<'_> {
                 cell.waiting = None;
             } else {
                 self.publish_read(at, member, &counts.returned);
+            }
+        }
+    }
+
+    /// One view period of the wait of each attached host that the shard's volume record does not enroll: a running
+    /// host of the shard's zone whose live attach the record binds to its own instance and whose instance the zone
+    /// double lists attached, so its owner process runs for the volume. The period is `host::stand_by` with no
+    /// witness over the host's enrollment client (`Fleet::enroll_client`), whose requests the untouched-shard rule
+    /// counts as the reconcilers' and enrollments'. Its unnamed or standby arm calls `enroll_standby` when the role
+    /// read's records admit the host, and `persist` makes the host's local record durable before that call's
+    /// enrollment write. Once the volume record enrolls the pair the persisted record carries, the cell keeps it as
+    /// the host's local record. In an enrollment crash cell the period's enrollment write, the one write a wait
+    /// issues, ends as the cell names when the cell is the repaired one and the host the one the loop's status names
+    /// for its need.
+    pub(super) fn unnamed_waits(&mut self) {
+        use super::hosts::{Scenario, Up};
+        use super::reconcile::{Call, Status};
+        let mut due = Vec::new();
+        for at in 0..self.cells.len() {
+            let placement = self.cells[at].placement;
+            let volume = self.volume_now(at);
+            let unenrolled = (volume.live_hosts())
+                .filter(|&host| volume.enrolled(host).is_none())
+                .filter_map(|host| {
+                    let member = self.member_of(host)?;
+                    let of = self.topology.members[member];
+                    let seq = volume.live(host)?;
+                    let bound =
+                        volume.event(seq).and_then(|entry| entry.instance) == Some(of.instance);
+                    let running = self.hosts[member].up == Up::Running;
+                    (bound && running && of.zone == placement.zone).then_some((member, of.instance))
+                });
+            let unenrolled: Vec<_> = unenrolled.collect();
+            if unenrolled.is_empty() {
+                continue;
+            }
+            let double = self
+                .double(placement.zone)
+                .expect("a repairing fleet's zone double");
+            let listed = ControlPlane::attachments(double, &placement.volume).unwrap_or_default();
+            for (member, instance) in unenrolled {
+                if listed.iter().any(|attached| attached == instance.as_str()) {
+                    due.push((at, member));
+                }
+            }
+        }
+        for (at, member) in due {
+            let of = self.topology.members[member];
+            let placement = self.cells[at].placement;
+            let aimed = || {
+                let (repaired, need) = self.repaired()?;
+                let named = (self.cells[at].planned.iter()).any(|(host, _)| *host == of.host);
+                (repaired == at && named).then_some(need)
+            };
+            let cell = match self.config.scenario {
+                Scenario::Crash(cell)
+                    if cell.call == Call::Enroll
+                        && self.recon.crashed.is_empty()
+                        && self.log.host_losses > 0
+                        && self.reconcilers[0].status == Status::Running =>
+                {
+                    aimed().map(|need| (cell, need))
+                }
+                _ => None,
+            };
+            if let Some((_, need)) = cell {
+                self.recon.crash_aim = Some((placement.shard.get(), need));
+            }
+            let cell = cell.map(|(cell, _)| cell);
+            let key = crate::storage::store::Key::Volume(placement.volume);
+            let before = self.store.0.borrow().commit_count(&key);
+            // The cell's arm stands behind every write arm an episode queued for the member, under its own ticket.
+            let armed = cell.map(|cell| {
+                let mut faults = self.faults.store.borrow_mut();
+                faults.arm_write(member as u32, cell.ending.arm())
+            });
+            // A host with no local record reads `Absent` until its enrollment's `persist`; the pair is the fencer's
+            // issuing pair, which a period with no witness never connects with.
+            let held = self.cells[at].local_of(member);
+            let (pair, local) = match held {
+                Some(held) => held,
+                None => (self.cells[at].pair, Stored(Err(Local::Absent))),
+            };
+            let failed = Rc::new(RefCell::new(Vec::new()));
+            let mut client = self.enroll_client(member, &failed);
+            let mut persisted = None;
+            let persist = |key| Ok(persisted.insert(self.local_record(at, member, key)).clone());
+            let stood = WAITS.with(|grounds| {
+                stand_by(
+                    (&self.cells[at], of, pair),
+                    (self.round, &self.store),
+                    grounds,
+                    (&mut client, &local),
+                    (None, false),
+                    persist,
+                )
+            });
+            assert!(
+                !client.withdrawn(),
+                "host {member}'s enrollment client of s{at} was withdrawn"
+            );
+            drop(client);
+            let Stood::Ended(..) = stood else {
+                panic!("an unnamed host's view period with no witness acquired a tenure");
+            };
+            assert!(
+                failed.borrow().is_empty(),
+                "host {member}'s view period of s{at} read values the layer cannot decode under their keys: {:?}",
+                failed.borrow()
+            );
+            if let (Some(cell), Some(ticket)) = (cell, armed) {
+                // The period's enrollment took the cell's arm when its ticket is gone from the queue. An arm it left
+                // is withdrawn by that ticket, and an episode's arms for the member stay queued.
+                let untaken = (self.faults.store.borrow_mut()).withdraw(member as u32, ticket);
+                if !untaken {
+                    let after = self.store.0.borrow().commit_count(&key);
+                    self.recon.crashed.push(cell.name());
+                    self.recon.crash_writes.push((before, after));
+                    self.drop_loop(0);
+                }
+            }
+            // The host persists its local record before the volume write. Once the volume record enrolls the pair
+            // that record carries, after an acknowledged write or one whose unknown reply committed, the cell keeps
+            // it; an uncommitted write leaves the host unenrolled for a later period.
+            let pair = self.volume_now(at).enrolled(of.host);
+            if let (Some(local), Some(pair)) = (persisted, pair)
+                && local.pair() == pair
+            {
+                self.cells[at].enrolled(member, pair, Stored(Ok(local)));
             }
         }
     }

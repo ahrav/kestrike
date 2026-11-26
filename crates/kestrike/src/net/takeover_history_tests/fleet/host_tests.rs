@@ -3443,3 +3443,102 @@ fn a_hosts_store_outage_stops_the_record_views_of_its_boot_tenure() {
         held.rounds
     );
 }
+
+/// The settle fleet with its hosts started and s0's standby, host 3, removed from the volume record's pairs, so
+/// that host's unnamed wait is due.
+fn unenrolled(config: &Config) -> Fleet<'_> {
+    let (fleet, _draws) = hosted(config);
+    let standby = (fleet.record_now(0).standby).and_then(|host| fleet.member_of(host));
+    assert_eq!(standby, Some(3));
+    let mut volume = fleet.volume_now(0);
+    let host = fleet.topology.members[3].host;
+    volume.pairs.retain(|recorded| recorded.host != host);
+    commit(&fleet, Key::Volume(volume.volume), volume.encode());
+    fleet
+}
+
+/// An unnamed host's enrollment client reads under the host's watermark log. A view period whose shard read returns
+/// the version before the one the host's log holds withdraws that client, and the period fails the run by name.
+#[test]
+#[should_panic(expected = "host 3's enrollment client of s0 was withdrawn")]
+fn an_unnamed_period_whose_shard_read_regresses_fails_the_run_by_name() {
+    let config = Config::settle(1);
+    let mut fleet = unenrolled(&config);
+    let read = fleet.record_now(0);
+    let bumped = ShardRecord {
+        attempts: read.attempts + 1,
+        ..read
+    };
+    commit_shard(&fleet, &bumped);
+    fleet.read_record(3, 0);
+    let (volume_read, shard_read) = (Arm::Pass, Arm::StaleRead);
+    for arm in [volume_read, shard_read] {
+        fleet.faults.store.borrow_mut().arm(3, arm);
+    }
+    fleet.unnamed_waits();
+}
+
+/// A shard record version above the host's watermark that fails to decode gives the period's role read a codec
+/// error, which leaves the enrollment client in service. The period judges each record its reads returned, and the
+/// returned version fails the run.
+#[test]
+#[should_panic(
+    expected = "host 3's view period of s0 read values the layer cannot decode under their keys"
+)]
+fn an_unnamed_period_over_a_shard_record_that_fails_to_decode_fails_the_run() {
+    let config = Config::settle(1);
+    let mut fleet = unenrolled(&config);
+    let shard = fleet.record_now(0).shard;
+    commit(&fleet, Key::Shard(shard), vec![0; 4]);
+    fleet.unnamed_waits();
+}
+
+/// A shard record stored under another shard's key gives the period's role read the same codec error. The period
+/// compares the key each returned record names with the key it was read under, and the mismatch fails the run.
+#[test]
+#[should_panic(
+    expected = "host 3's view period of s0 read values the layer cannot decode under their keys"
+)]
+fn an_unnamed_period_over_a_shard_record_that_names_another_shard_fails_the_run() {
+    let config = Config::settle(1);
+    let mut fleet = unenrolled(&config);
+    let shard = fleet.record_now(0).shard;
+    let other = fleet.record_now(1);
+    assert_ne!(other.shard, shard);
+    commit(&fleet, Key::Shard(shard), other.encode());
+    fleet.unnamed_waits();
+}
+
+/// A stale shard read returns a version above the host's watermark that fails to decode, while the store's current
+/// version decodes. The period judges the returned version, which fails the run.
+#[test]
+#[should_panic(
+    expected = "host 3's view period of s0 read values the layer cannot decode under their keys"
+)]
+fn an_unnamed_period_whose_stale_read_returns_a_record_that_fails_to_decode_fails_the_run() {
+    let config = Config::settle(1);
+    let mut fleet = unenrolled(&config);
+    let read = fleet.record_now(0);
+    commit(&fleet, Key::Shard(read.shard), vec![0; 4]);
+    commit_shard(&fleet, &read);
+    let (volume_read, shard_read) = (Arm::Pass, Arm::StaleRead);
+    for arm in [volume_read, shard_read] {
+        fleet.faults.store.borrow_mut().arm(3, arm);
+    }
+    fleet.unnamed_waits();
+}
+
+/// The period's enrollment reads coverage page 0 once the role read's records admit the host. A page version that
+/// fails to decode gives that read a codec error, which leaves the enrollment client in service, and the returned
+/// page fails the run.
+#[test]
+#[should_panic(
+    expected = "host 3's view period of s0 read values the layer cannot decode under their keys"
+)]
+fn an_unnamed_period_over_a_coverage_page_that_fails_to_decode_fails_the_run() {
+    let config = Config::settle(1);
+    let mut fleet = unenrolled(&config);
+    let shard = fleet.record_now(0).shard;
+    commit(&fleet, Key::Page(shard, 0), vec![0; 4]);
+    fleet.unnamed_waits();
+}

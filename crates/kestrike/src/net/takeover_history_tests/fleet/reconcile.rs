@@ -1,6 +1,7 @@
 //! The fleet's reconciler actors. Each [`ReconcilerActor`] keeps a `ZoneLoop` in `zone_loop`; `Fleet::survey_turn`
-//! calls its `tick` and `Fleet::actuate_turn` calls `ZoneLoop::actuate` with `StandbyGate::qualified()`, and [`Fleet::enroll_round`] calls
-//! each host's `enroll_standby`. [`Fleet::collect`] logs each status row's changed blocker behind that row as its
+//! calls its `tick` and `Fleet::actuate_turn` calls `ZoneLoop::actuate` with `StandbyGate::qualified()`, and [`Fleet::unnamed_waits`] runs
+//! the production wait (`host::stand_by`) of each attached host the volume record does not enroll, whose unnamed or
+//! standby arm calls `enroll_standby`. [`Fleet::collect`] logs each status row's changed blocker behind that row as its
 //! refusal in [`ReconLog`]. [`Crashing`] and [`Effects`] apply a crash-table cell's arm to its effect and then set
 //! `Effected::dead`.
 
@@ -12,13 +13,13 @@ use std::rc::Rc;
 use crate::failover::attachments::{ControlPlane, InstanceId, Unlisted};
 use crate::failover::bounds::Bounds;
 use crate::failover::loss::{CreateError, Provider};
-use crate::failover::reconcile::{Reconciler, StandbyGate, StandbyRefusal, enroll_standby};
+use crate::failover::reconcile::{Reconciler, StandbyGate};
 use crate::failover::records::{
     Host, Layout, Namespace, Record, ShardRecord, VolumeId, VolumeRecord,
 };
 use crate::failover::report::ReportKey;
 use crate::failover::standbys::{Census, Need, Refusal, Zone, need};
-use crate::failover::takeover::tests::{bound_record, holder_on};
+use crate::failover::takeover::tests::bound_record;
 use crate::failover::zone_loop::ZoneLoop;
 use crate::failover::zone_loop::actuate::{Discard, Outcome, Reason, Verdict};
 use crate::failover::zone_loop::config::{
@@ -43,7 +44,8 @@ use crate::storage::store::{
 use super::super::ROUND_US;
 use super::draws::{self, Draws, Tag};
 use super::hosts::{REPORT_ROUNDS, Scenario, Up, host_key};
-use super::{FIRST_HOST_ID, Fleet, Plant, Stored};
+use super::owners::Decoding;
+use super::{FIRST_HOST_ID, Fleet, Plant};
 
 /// The rounds between two ticks of a reconciler's loop.
 pub(crate) const TICK_ROUNDS: u64 = 2;
@@ -217,7 +219,6 @@ impl ReconcilerActor {
 pub(crate) enum Refused {
     Status(ShardState, Blocker),
     Step(Step, Verdict),
-    Enroll(StandbyRefusal),
     Discarded(Step, Discard),
 }
 
@@ -868,7 +869,12 @@ impl Fleet<'_> {
         Reconciler::new(client.expect("a reconciler's store client"))
     }
 
-    pub(super) fn enroll_client(&self, member: usize) -> Client<Faulted<Counted<Shared>>, MemLog> {
+    /// `member`'s enrollment client, whose reads list in `failed` each key whose returned value fails its decode.
+    pub(super) fn enroll_client(
+        &self,
+        member: usize,
+        failed: &Rc<RefCell<Vec<Key>>>,
+    ) -> Client<Decoding<Faulted<Counted<Shared>>>, MemLog> {
         let store = Faulted {
             inner: Counted {
                 inner: self.store.clone(),
@@ -876,6 +882,10 @@ impl Fleet<'_> {
             },
             actor: member as u32,
             faults: self.faults.store.clone(),
+        };
+        let store = Decoding {
+            inner: store,
+            failed: failed.clone(),
         };
         Client::open(store, self.hosts[member].log.clone()).expect("a host's store client")
     }
@@ -1131,7 +1141,7 @@ impl Fleet<'_> {
             self.actuate_turn(r, survey);
             self.check_census(r);
         }
-        self.enroll_round();
+        self.unnamed_waits();
         self.provided();
         let breaks: usize = self.zones.iter().map(|double| double.breaks.len()).sum();
         self.recon.unordered = breaks as u32;
@@ -1304,7 +1314,7 @@ impl Fleet<'_> {
         }
     }
 
-    fn drop_loop(&mut self, r: usize) {
+    pub(super) fn drop_loop(&mut self, r: usize) {
         let until = self.round + RESTART_ROUNDS;
         let actor = &mut self.reconcilers[r];
         actor.zone_loop = None;
@@ -1334,7 +1344,7 @@ impl Fleet<'_> {
 
     /// The cell of loop 0's zone whose record shows the first need after the loss, and that need: the repair a
     /// crash-table cell cuts.
-    fn repaired(&self) -> Option<(usize, Need)> {
+    pub(super) fn repaired(&self) -> Option<(usize, Need)> {
         let zone = self.reconcilers.first()?.zone;
         (self.zone_cells(zone).into_iter())
             .find_map(|at| Some((at, need(&self.record_now(at), |host| self.lost(host))?)))
@@ -1712,131 +1722,6 @@ impl Fleet<'_> {
             .enter(shard, Refused::Status(state, blocker), blocker);
         self.cells[at].blocker = Some(blocker);
         self.volumes.retained += u32::from(blocker == Blocker::VolumeImpaired);
-    }
-
-    pub(super) fn enroll_round(&mut self) {
-        let mut due = Vec::new();
-        for at in 0..self.cells.len() {
-            let placement = self.cells[at].placement;
-            let volume = self.volume_now(at);
-            let unenrolled = (volume.live_hosts())
-                .filter(|&host| volume.enrolled(host).is_none())
-                .filter_map(|host| {
-                    let member = self.member_of(host)?;
-                    let of = self.topology.members[member];
-                    let seq = volume.live(host)?;
-                    let bound =
-                        volume.event(seq).and_then(|entry| entry.instance) == Some(of.instance);
-                    let running = self.hosts[member].up == Up::Running;
-                    (bound && running && of.zone == placement.zone).then_some((member, of.instance))
-                });
-            let unenrolled: Vec<_> = unenrolled.collect();
-            if unenrolled.is_empty() {
-                continue;
-            }
-            let double = self
-                .double(placement.zone)
-                .expect("a repairing fleet's zone double");
-            let listed = ControlPlane::attachments(double, &placement.volume).unwrap_or_default();
-            for (member, instance) in unenrolled {
-                if listed.iter().any(|attached| attached == instance.as_str()) {
-                    due.push((at, member));
-                }
-            }
-        }
-        for (at, member) in due {
-            self.enroll(at, member);
-        }
-    }
-
-    /// Runs `member`'s `enroll_standby` for cell `at`. In an enrollment crash cell the host's write ends as the cell
-    /// names when `at` is the repaired cell and `member` the host the loop's status names for its need.
-    fn enroll(&mut self, at: usize, member: usize) {
-        let of = self.topology.members[member];
-        let placement = self.cells[at].placement;
-        let aimed = || {
-            let (repaired, need) = self.repaired()?;
-            let named = (self.cells[at].planned.iter()).any(|(host, _)| *host == of.host);
-            (repaired == at && named).then_some(need)
-        };
-        let cell = match self.config.scenario {
-            Scenario::Crash(cell)
-                if cell.call == Call::Enroll
-                    && self.recon.crashed.is_empty()
-                    && self.log.host_losses > 0
-                    && self.reconcilers[0].status == Status::Running =>
-            {
-                aimed().map(|need| (cell, need))
-            }
-            _ => None,
-        };
-        if let Some((_, need)) = cell {
-            self.recon.crash_aim = Some((placement.shard.get(), need));
-        }
-        let cell = cell.map(|(cell, _)| cell);
-        let key = Key::Volume(placement.volume);
-        let before = self.store.0.borrow().commit_count(&key);
-        // The cell's arm stands behind every write arm an episode queued for the member, under its own ticket.
-        let armed = cell.map(|cell| {
-            let mut faults = self.faults.store.borrow_mut();
-            faults.arm_write(member as u32, cell.ending.arm())
-        });
-        let holder = holder_on(placement.volume, of.host, of.instance);
-        let (gate, bounds) = (StandbyGate::qualified(), bounds());
-        let mut client = self.enroll_client(member);
-        let mut persisted = None;
-        let persist = |key| Ok(persisted.insert(self.local_record(at, member, key)).clone());
-        let enrolled = enroll_standby(
-            &gate,
-            placement.shard,
-            &holder,
-            &bounds,
-            &mut client,
-            persist,
-        );
-        drop(client);
-        if let (Some(cell), Some(ticket)) = (cell, armed) {
-            // The enrollment took the cell's arm when its ticket is gone from the queue. An arm it left is
-            // withdrawn by that ticket, and an episode's arms for the member stay queued.
-            let untaken = (self.faults.store.borrow_mut()).withdraw(member as u32, ticket);
-            if !untaken {
-                let after = self.store.0.borrow().commit_count(&key);
-                self.recon.crashed.push(cell.name());
-                self.recon.crash_writes.push((before, after));
-                self.drop_loop(0);
-            }
-        }
-        // The host persists its local record before the volume write. A refusal after a write that committed, a lost
-        // reply or a failed confirming read, leaves the pair enrolled, and no later scan offers the host again, so
-        // the cell keeps the record the host holds; an uncommitted write leaves the host unenrolled for the next scan.
-        if enrolled.is_err() {
-            let pair = self.volume_now(at).enrolled(of.host);
-            if let (Some(local), Some(pair)) = (persisted.clone(), pair)
-                && local.pair() == pair
-            {
-                self.cells[at].enrolled(member, pair, Stored(Ok(local)));
-            }
-        }
-        match enrolled {
-            Ok(pair) => {
-                let local = persisted.expect("an enrollment persists its record");
-                self.cells[at].enrolled(member, pair, Stored(Ok(local)));
-            }
-            Err(StandbyRefusal::Write(_)) => {}
-            Err(StandbyRefusal::Records(error)) => {
-                use crate::storage::store::StoreError;
-                let unread = matches!(error, StoreError::Unavailable | StoreError::Absent);
-                assert!(
-                    unread,
-                    "host {member}'s enrollment read of s{}: {error:?}",
-                    at
-                );
-            }
-            Err(other) => {
-                let shard = placement.shard.get();
-                self.recon.refuse(shard, Refused::Enroll(other));
-            }
-        }
     }
 
     pub(super) fn reread(&mut self, at: usize) {
