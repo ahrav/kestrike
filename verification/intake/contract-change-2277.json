@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2277",
+  "kind": "contract-change",
+  "pull_request": 2277,
+  "changed": "The zone loop's blocker table gains QuorumUnreachable (label quorum-unreachable), so Blocker::COUNT is 18 and a status part is 552 bytes, where it was 548; the status contract's labels, wire table, layout and fixtures change with it at schema 1, and the alarm catalog pins the new contract digest and gains the paging row quorum-unreachable. ONE-STATE in failover/zone_loop/status.rs: a Protected shard whose owner reads lost and whose named standby reports no self-suspicion carries QuorumUnreachable when the standby's possible probers span fewer than arbiter::QUORUM_MIN partitions (QUORUM-PREMISE in failover/zone_loop/plan.rs), ahead of the lost owner's last RecordedHolderHold or DeviceFailureHold.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "zone-loop-names-quorum-unreachable-for-a-lost-owner",
+    "reason": "Its invariant states the new rule: a lost owner whose standby's possible probers stand in one partition reads quorum-unreachable, its twin with probers in two partitions carries no blocker, a host read unknown counts as a possible prober, and the alarm row pages on the count. Before this change such a shard read Protected with no blocker."
+  }
+}

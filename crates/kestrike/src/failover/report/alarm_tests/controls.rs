@@ -366,6 +366,11 @@ pub(crate) fn replacement_exhausted() -> Twin<u32> {
     Twin { fault: 1, clean: 0 }
 }
 
+/// One shard whose lost owner's standby cannot gather a detector quorum, and none.
+pub(crate) fn quorum_unreachable() -> Twin<u32> {
+    Twin { fault: 1, clean: 0 }
+}
+
 /// One lost active volume, and none.
 pub(crate) fn volume_lost() -> Twin<u32> {
     Twin { fault: 1, clean: 0 }
@@ -598,7 +603,7 @@ type Build = fn(&Value, bool) -> Vec<Step>;
 /// The history builder of each row's control, keyed by the name the row's `control` field holds; its clean twin is
 /// the same builder under the name the row's `clean` field holds.
 pub(crate) fn builders() -> BTreeMap<&'static str, Build> {
-    let rows: [(&'static str, Build); 54] = [
+    let rows: [(&'static str, Build); 55] = [
         ("store_regression", |row, f| {
             entries(span(row), |_, e| e.watermark = store_regression().pick(f))
         }),
@@ -775,6 +780,11 @@ pub(crate) fn builders() -> BTreeMap<&'static str, Build> {
             let exhausted = replacement_exhausted().pick(f);
             let at = Blocker::ReplacementExhausted.position();
             zones(span(row), |_, z| z.blockers[at] = exhausted)
+        }),
+        ("quorum_unreachable", |row, f| {
+            let unreachable = quorum_unreachable().pick(f);
+            let at = Blocker::QuorumUnreachable.position();
+            zones(span(row), |_, z| z.blockers[at] = unreachable)
         }),
         ("volume_lost", |row, f| {
             let lost = volume_lost().pick(f);

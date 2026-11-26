@@ -7,6 +7,9 @@
 //! - UNKNOWN-BLOCKS: `Zone::choose` considers only `Live` candidates whose host differs from `record.owner`. A
 //!   standby need whose owner reads other than live gives `OwnerNotReady`, and a named standby or slot incumbent that
 //!   reads unknown or in conflict gives `LossUnconfirmed`; neither plans a step.
+//! - QUORUM-PREMISE: a shard whose owner reads `Lost` while its named standby's possible probers span fewer than
+//!   [`QUORUM_MIN`] partitions carries `Blocker::QuorumUnreachable` (`Zone::quorum_unreachable`) in state
+//!   `Protected`. The blocker names the condition and plans no step.
 //! - ATTACH-EVIDENCE: host evidence and the active volume's record determine standby need. `Zone::protected` requires
 //!   a live attach between the named standby and the active volume. A named standby whose attach of the active
 //!   volume is ended and not yet gone loses its census slot to another candidate regardless of its host evidence;
@@ -89,6 +92,7 @@
 use core::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::failover::arbiter::QUORUM_MIN;
 use crate::failover::attachments::InstanceId;
 use crate::failover::loss::{self, Decision, Health, Phase, Receipt};
 use crate::failover::reconcile::{end_ready, relist_ready, reservable};
@@ -291,6 +295,12 @@ mod unverified_plant {
 
 #[cfg(test)]
 pub(crate) use unverified_plant::AS_DEVICE as UNVERIFIED_AS_DEVICE;
+
+#[cfg(test)]
+thread_local! {
+    /// When true, QUORUM-PREMISE counts hosts that read `Lost` among the possible probers.
+    pub(crate) static LOST_PROBERS_COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 fn device_hold(entry: &VolumeEntry) -> bool {
     let unheld = withdrawn(entry.withdrawal) == Withdrawn::Records
@@ -563,7 +573,6 @@ impl<'a> Zone<'a> {
     }
 
     fn host_side(&self, records: &ShardRecords, owner: Option<&VolumeEntry>) -> Option<Blocker> {
-        let record = &records.record;
         let owner_side = owner.and_then(|entry| {
             if recorded_holder(entry) {
                 Some(Blocker::RecordedHolderHold)
@@ -571,6 +580,13 @@ impl<'a> Zone<'a> {
                 device_hold(entry).then_some(Blocker::DeviceFailureHold)
             }
         });
+        owner_side.or(self.standby_side(records))
+    }
+
+    /// The named standby's host-side blocker: `SelfSuspect` while its fresh report shows a self-suspicion dwell and
+    /// the owner reads other than live or reports itself unhealthy.
+    fn standby_side(&self, records: &ShardRecords) -> Option<Blocker> {
+        let record = &records.record;
         let standby = record.standby.and_then(|standby| self.hosts.get(&standby));
         let live = standby.filter(|view| view.verdict == HostEvidence::Live);
         let report = live.and_then(|view| view.report.as_ref());
@@ -579,9 +595,62 @@ impl<'a> Zone<'a> {
         let unhealthy = (owner.and_then(|view| view.report.as_ref()))
             .is_some_and(|report| report.host.health == Some(HostHealth::Unhealthy));
         let takes_over = self.verdict(record.owner) != HostEvidence::Live || unhealthy;
-        let standby_side =
-            (takes_over && suspecting.is_some_and(|left| left > 0)).then_some(Blocker::SelfSuspect);
-        owner_side.or(standby_side)
+        (takes_over && suspecting.is_some_and(|left| left > 0)).then_some(Blocker::SelfSuspect)
+    }
+
+    /// QUORUM-PREMISE: true when the record's owner reads `Lost` and its named standby's possible probers span
+    /// fewer than [`QUORUM_MIN`] partitions. A possible prober is a host of this zone's directory view outside the
+    /// owner's partition, other than the owner and the standby, whose verdict is other than `Lost`. That set holds
+    /// every host the standby's agent can draw probers from (`host::agent`) when the agent's synced placement is
+    /// the zone's directory and a host read `Lost` answers no probe; the loop reads neither the configured quorum
+    /// `k`, the agent's probe keys nor its accepted placement. Every valid quorum counts at least [`QUORUM_MIN`]
+    /// partitions, so a true result shows that no nomination of the standby can form; a false result shows no
+    /// quorum. An owner the view does not list gives false.
+    fn quorum_unreachable(&self, record: &ShardRecord) -> bool {
+        let (Some(standby), Some(owner)) = (record.standby, self.hosts.get(&record.owner)) else {
+            return false;
+        };
+        if owner.verdict != HostEvidence::Lost {
+            return false;
+        }
+        #[cfg(test)]
+        let counted = LOST_PROBERS_COUNTED.get();
+        #[cfg(not(test))]
+        let counted = false;
+        let excluded = owner.entry.placement.partition;
+        let mut seen = [None; QUORUM_MIN];
+        let mut distinct = 0;
+        for view in &self.view.hosts {
+            let host = view.entry.host;
+            let partition = view.entry.placement.partition;
+            let prober = host != record.owner
+                && host != standby
+                && (view.verdict != HostEvidence::Lost || counted)
+                && partition != excluded;
+            if prober && !seen[..distinct].contains(&Some(partition)) {
+                seen[distinct] = Some(partition);
+                distinct += 1;
+                if distinct == QUORUM_MIN {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The blocker of a `Protected` shard: under QUORUM-PREMISE the standby's own `SelfSuspect`, else
+    /// `QuorumUnreachable`, so a lost owner's last held entry gives no label; otherwise the host-side blocker.
+    fn protected_blocker(
+        &self,
+        records: &ShardRecords,
+        host_side: Option<Blocker>,
+    ) -> Option<Blocker> {
+        match self.quorum_unreachable(&records.record) {
+            true => self
+                .standby_side(records)
+                .or(Some(Blocker::QuorumUnreachable)),
+            false => host_side,
+        }
     }
 
     /// DEVICE-HOLD-GUARD: true while another attached host reports the device-failure hold for the shard's active
@@ -687,7 +756,10 @@ impl<'a> Zone<'a> {
             None if self.reenrolling(records) || self.displaced(records).is_some() => Need::Standby,
             None => {
                 return match protected {
-                    true => done(ShardState::Protected, host_side),
+                    true => done(
+                        ShardState::Protected,
+                        self.protected_blocker(records, host_side),
+                    ),
                     false => done(ShardState::StandbyUnknown, Some(Blocker::LossUnconfirmed)),
                 };
             }

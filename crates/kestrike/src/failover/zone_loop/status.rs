@@ -16,7 +16,9 @@
 //!   step or a start to plan and no other blocker carries `ControlPlaneUnavailable` while its active volume's health
 //!   is unknown, and the plan withholds that step. `Protected` and `Enrolling` otherwise carry
 //!   the shard's host-side blocker, `RecordedHolderHold`, `DeviceFailureHold` or `SelfSuspect`, when it has one. A
-//!   census slot host that reports the device-failure hold on the active volume gives its `Enrolling` shard
+//!   `Protected` shard whose owner reads lost carries `QuorumUnreachable` when its named standby's possible probers
+//!   span fewer partitions than any detector quorum counts (QUORUM-PREMISE in `plan`), after the standby's own
+//!   `SelfSuspect` and ahead of the owner-side holds of the lost owner's last report. A census slot host that reports the device-failure hold on the active volume gives its `Enrolling` shard
 //!   `DeviceFailureHold`, after `ControlPlaneUnavailable` and ahead of the host-side blocker. A census slot host that
 //!   displaces a live named standby (SLOT-HOST in `plan`) gives its `Enrolling` shard the blocker `Zone::choose`
 //!   returns for that host, after `DeviceFailureHold` and ahead of the host-side blocker. An `Enrolling` shard in
@@ -157,11 +159,16 @@ pub enum Blocker {
     Placement,
     /// Every candidate holds `standbys_per_host_max` census entries or `host_roles_max` roles.
     PerHostCap,
+    /// The owner reads lost, and the named standby's possible probers, counted from the zone's directory and this
+    /// tick's verdicts, span fewer than [`QUORUM_MIN`](crate::failover::arbiter::QUORUM_MIN) partitions, so no
+    /// detector quorum can nominate the standby's takeover (QUORUM-PREMISE in `plan`, which states what the count
+    /// leaves out).
+    QuorumUnreachable,
 }
 
 impl Blocker {
     /// The number of blockers.
-    pub const COUNT: usize = 17;
+    pub const COUNT: usize = 18;
 
     /// Every blocker, at its [`Blocker::position`].
     pub const ALL: [Self; Self::COUNT] = [
@@ -182,6 +189,7 @@ impl Blocker {
         Self::OwnerNotReady,
         Self::Placement,
         Self::PerHostCap,
+        Self::QuorumUnreachable,
     ];
 
     /// The blocker's position in [`Blocker::ALL`], the closed table the reconciler status counts blockers by. The
@@ -206,6 +214,7 @@ impl Blocker {
             owner_not_ready,
             placement,
             per_host_cap,
+            quorum_unreachable,
         ] = positions::<{ Self::COUNT }>();
         match self {
             Self::CensusFull => census_full,
@@ -225,6 +234,7 @@ impl Blocker {
             Self::OwnerNotReady => owner_not_ready,
             Self::Placement => placement,
             Self::PerHostCap => per_host_cap,
+            Self::QuorumUnreachable => quorum_unreachable,
         }
     }
 }

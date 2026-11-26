@@ -51,12 +51,15 @@ pub enum Decline {
     ClockUntrusted,
 }
 
+/// The fewest placement partitions a nomination's quorum counts: [`ArbiterBounds::validate`] refuses a `k` below it.
+pub const QUORUM_MIN: usize = 2;
+
 impl ArbiterBounds {
     pub fn validate(self) -> Result<Self, Decline> {
         if self.h == 0 || self.dwell < self.h {
             return Err(Decline::Dwell);
         }
-        if self.k < 2
+        if self.k < QUORUM_MIN
             || self.k > self.hosts
             || self.rounds == 0
             || self.holder_grace == 0

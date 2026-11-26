@@ -994,6 +994,28 @@ fn host_side_labels_give_their_shard_its_blocker() {
     assert_eq!(blocker, None);
 }
 
+/// QUORUM-PREMISE: hosts 11, 15 and 18 read lost, so the possible probers of standby 12 stand in partition 1 alone.
+#[test]
+fn a_self_suspecting_standby_outranks_quorum_unreachable() {
+    let cut_off = |dwell: Option<u64>| {
+        let mut scene = Scene::new(vec![records(1, OWNER, Some(12), volume_record())]);
+        for lost in [OWNER, 15, 18] {
+            scene.verdicts.insert(lost, HostEvidence::Lost);
+        }
+        scene
+            .reports
+            .get_mut(&12)
+            .unwrap()
+            .host
+            .detector
+            .self_suspect_us = dwell;
+        state_of(&scene.plan(), 1)
+    };
+    let at = |blocker| (ShardState::Protected, Some(blocker));
+    assert_eq!(cut_off(Some(5 * S)), at(Blocker::SelfSuspect));
+    assert_eq!(cut_off(None), at(Blocker::QuorumUnreachable));
+}
+
 #[test]
 fn a_flip_request_at_the_current_tenure_plans_no_step() {
     let mut scene = Scene::standby_needs(1);

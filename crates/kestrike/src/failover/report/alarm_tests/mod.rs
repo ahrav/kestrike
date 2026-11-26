@@ -1320,7 +1320,7 @@ fn fired(row: &Value, steps: &[controls::Step]) -> Vec<Fired> {
 fn the_shipped_catalog_validates() {
     let catalog = catalog();
     assert_eq!(validate(&catalog, &controls::names()), []);
-    assert_eq!(catalog["rows"].as_array().unwrap().len(), 54);
+    assert_eq!(catalog["rows"].as_array().unwrap().len(), 55);
     let routes = catalog["routes"].as_array().unwrap();
     assert_eq!(routes.len(), 9, "nine route classes");
 }
@@ -1342,6 +1342,7 @@ const PAGING: &[&str] = &[
     "self-suspect-host",
     "replacement-held",
     "replacement-exhausted",
+    "quorum-unreachable",
     "volume-lost",
     "report-forged",
     "stale-serving",
@@ -3522,7 +3523,8 @@ fn record_fed() -> Vec<String> {
 }
 
 /// For the record-fed status rows tested here, the store guard preserves the firing state across a store-false tick
-/// that reports the clean value: the row fires once, and twice without the guard.
+/// that reports the clean value, as the instance guard does across an instances-false tick for a row that carries
+/// it: the row fires once, and twice without its completeness guards.
 #[test]
 fn each_record_fed_status_row_holds_an_inconclusive_tick() {
     let families = record_fed();
@@ -3543,10 +3545,22 @@ fn each_record_fed_status_row_holds_an_inconclusive_tick() {
             panic!("a status row")
         };
         parts[0].flags.store = false;
-        let steps = [control.clone(), vec![gap], control].concat();
+        let steps = [control.clone(), vec![gap], control.clone()].concat();
         assert_eq!(fired(row, &steps).len(), 1, "{signal}");
+        if filters(&row["guard"])
+            .iter()
+            .any(|f| f["field"] == "zones.flags.instances")
+        {
+            let mut gap = controls::history(row, row["clean"].as_str().unwrap()).remove(0);
+            let controls::Step::Status(parts) = &mut gap else {
+                panic!("a status row")
+            };
+            parts[0].flags.instances = false;
+            let unlisted = [control.clone(), vec![gap], control.clone()].concat();
+            assert_eq!(fired(row, &unlisted).len(), 1, "{signal} instances unread");
+        }
         let mut unguarded = row.clone();
-        let store = |filter: &&Value| filter["field"] != "zones.flags.store";
+        let store = |filter: &&Value| !COMPLETENESS.contains(&filter["field"].as_str().unwrap());
         let kept: Vec<Value> = filters(&row["guard"])
             .iter()
             .filter(store)
@@ -3556,7 +3570,7 @@ fn each_record_fed_status_row_holds_an_inconclusive_tick() {
         assert_eq!(fired(&unguarded, &steps).len(), 2, "{signal} unguarded");
         covered.push(row["id"].as_str().unwrap());
     }
-    assert_eq!(covered.len(), 12, "{covered:?}");
+    assert_eq!(covered.len(), 13, "{covered:?}");
     for signal in unread {
         let rows = catalog["rows"].as_array().unwrap();
         let row = rows.iter().find(|row| row["signal"] == signal).unwrap();
