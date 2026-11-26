@@ -1024,6 +1024,7 @@
             "alarms-partition-repair root 1",
             "alarms-partition-repair-at root 1",
             "alarms-census-full root 1",
+            "alarms-past-target root 1",
             "alarms-attach-survivor root 1",
             "alarms-attach-closed root 1",
             "alarms-foreign root 1",
@@ -1071,14 +1072,15 @@
             "alarms-fresh-designate-committed root 1",
             "alarms-fresh-designate-lost root 1",
             "alarms-control-missing-row root 1",
-            "alarms-control-extra-row root 1"
+            "alarms-control-extra-row root 1",
+            "alarms-control-past-target-row root 1"
           ],
           "witnesses": [
             "^fleet: scheduled volume: 11 checks and 21 crash cells passed$",
             "^fleet: scheduled zone: 3 checks passed$",
             "^fleet: scheduled repair-and-host: 40 checks and 25 crash cells passed$",
             "^fleet: scheduled roots-and-replays: 6 checks passed$",
-            "^fleet: scheduled alarms: 64 sets passed, 1 not run, 27 not judged, 2 controls failed by the rule$"
+            "^fleet: scheduled alarms: 65 sets passed, 1 not run, 27 not judged, 3 controls failed by the rule$"
           ]
         }
       ]

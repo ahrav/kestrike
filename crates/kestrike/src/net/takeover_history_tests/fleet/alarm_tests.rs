@@ -157,6 +157,8 @@ fn a_run_with_no_sealed_record_is_not_run_and_a_scenario_with_no_set_makes_the_f
     assert_eq!(alarms::expected(&Config::az_settle(1)), Expected::Rows(&[]));
     assert_eq!(capped(Config::census_full(1), 6), Expected::NotJudged);
     assert!(stated(alarms::expected(&Config::census_full(1))));
+    assert_eq!(capped(Config::past_target(1), 6), Expected::NotJudged);
+    assert!(stated(alarms::expected(&Config::past_target(1))));
     assert!(stated(capped(Config::settle(1), 5)) && stated(capped(Config::host_loss(1), 5)));
     assert_eq!(not_judged, Verdict::Unrun(alarms::NOT_JUDGED));
     let planted = Config::settle(1).hostile(Plant::DropNeed, 0);
@@ -179,7 +181,7 @@ fn scenarios() -> Vec<(String, Config)> {
     use super::hosts::Unknown;
     use super::reconcile::CrashCell;
     use super::volumes::ReplaceCell;
-    let named: [(&str, Config); 35] = [
+    let named: [(&str, Config); 36] = [
         ("restarts", Config::six(1)),
         ("host-loss", Config::host_loss(1)),
         ("partition-loss", Config::partition_loss(1)),
@@ -199,6 +201,7 @@ fn scenarios() -> Vec<(String, Config)> {
         ("partition-repair", Config::partition_repair(1)),
         ("partition-repair-at", Config::partition_repair_at(1)),
         ("census-full", Config::census_full(1)),
+        ("past-target", Config::past_target(1)),
         ("attach-survivor", Config::attach_survivor(1)),
         ("attach-closed", Config::attach_closed(1)),
         ("foreign", Config::foreign(1)),
@@ -232,10 +235,11 @@ fn scenarios() -> Vec<(String, Config)> {
 /// Every scenario of the fleet on root 1, each run once: a scenario that states its set fires exactly it, holds its
 /// required outcome and witnesses (`hosts::expected`) on the same report, and prints one line; the restart scenario, whose hosts run no agent and seal no report, reads not run; the volume cases and
 /// the replacement cells read not judged. The fleet verdict over all of them reads incomplete, and over the scenarios
-/// that state a set and sealed records it passes. Two controls then fail by `ALARM_SET`: the double loss judged
+/// that state a set and sealed records it passes. Three controls then fail by `ALARM_SET`: the double loss judged
 /// against its set widened by `volume-lost` reads that row missing, and a settle under a census cap of five read
 /// through `Report::alarms` under the clean settle's configuration, whose set is empty, reads its two census rows
-/// extra. The scenarios' names and configuration identities are distinct. The last line counts the three kinds and
+/// extra; the standby-target scenario judged under a catalog without `no-standby-past-target` reads that row
+/// missing. The scenarios' names and configuration identities are distinct. The last line counts the three kinds and
 /// the controls.
 #[test]
 #[ignore = "every fleet scenario's alarm set on root 1; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
@@ -281,7 +285,7 @@ fn every_scenario_fires_its_expected_alarm_set_on_its_scheduled_root() {
         Verdict::Unrun(alarms::INCOMPLETE)
     );
     assert_eq!(alarms::fleet_verdict(&passed), Verdict::Pass);
-    assert_eq!((passed.len(), not_run, not_judged), (64, 1, 27));
+    assert_eq!((passed.len(), not_run, not_judged), (65, 1, 27));
     // A wrong expected set fails by the rule text: a fault scenario's set with a row its run does not fire, and the
     // clean scenario's empty set over a settle whose census cap lies below its shard count.
     let text = "the fired alarm rows differ from the scenario's expected set";
@@ -307,8 +311,20 @@ fn every_scenario_fires_its_expected_alarm_set_on_its_scheduled_root() {
     let at = "missing [] extra [\"census-cap-below-shards\", \"census-near-cap\"]".to_owned();
     assert_eq!(relabelled.alarms(), Verdict::Fail(text, at));
     println!("fleet: scheduled alarms-control-extra-row root 1: pass");
+    // The standby-target scenario judged under a catalog without `no-standby-past-target` reads that row missing.
+    let past = run_shared(&Config::past_target(1)).expect("a run that ends");
+    let expected = alarms::expected(&Config::past_target(1));
+    let judged = alarms::judged(
+        &past.alarm_log,
+        &without("no-standby-past-target"),
+        expected,
+        true,
+    );
+    let at = "missing [\"no-standby-past-target\"] extra []".to_owned();
+    assert_eq!(judged, Verdict::Fail(text, at));
+    println!("fleet: scheduled alarms-control-past-target-row root 1: pass");
     println!(
-        "fleet: scheduled alarms: {} sets passed, {not_run} not run, {not_judged} not judged, 2 controls failed by the rule",
+        "fleet: scheduled alarms: {} sets passed, {not_run} not run, {not_judged} not judged, 3 controls failed by the rule",
         passed.len()
     );
 }
@@ -354,6 +370,91 @@ fn a_sealer_counts_an_early_tick_apart_from_any_other_refusal() {
     wide.rows = vec![row.expect("premise: the part holds a row"); rows];
     sealers.seal(0, &wide, 2_000, &mut log);
     assert_eq!((log.sealed.len(), log.unsealed, log.unsealable), (1, 1, 1));
+}
+
+/// The catalog rows, in catalog order, that no judged scenario's expected set holds: the fleet's alarm oracle
+/// judges each of them by its absence alone, as an extra row of a run that fires it.
+const UNJUDGED: [&str; 41] = [
+    "store-instance-change",
+    "hold-recorded-holder",
+    "hold-no-holder",
+    "hold-device",
+    "hold-store",
+    "unknown-recovery-write",
+    "suffix-only",
+    "load-refused",
+    "enumeration-foreign",
+    "retention-damage",
+    "read-defect",
+    "chain-at-cap",
+    "handoff-due",
+    "exit-restarting",
+    "exit-stuck",
+    "coverage-saturated",
+    "first-hit-slow",
+    "recovery-stuck",
+    "store-unknown-rate",
+    "mutation-backlog-full",
+    "suffix-backlog-full",
+    "publication-stuck",
+    "enumeration-unlisted",
+    "replacement-held",
+    "replacement-exhausted",
+    "quorum-unreachable",
+    "volume-lost",
+    "volume-unnamed",
+    "report-forged",
+    "report-schema",
+    "stale-serving",
+    "store-unread",
+    "sources-unread",
+    "attach-failed",
+    "status-absent",
+    "budget-attempts",
+    "budget-generation",
+    "store-regression-reconciler",
+    "store-instance-change-reconciler",
+    "store-unknown-rate-reconciler",
+    "registrant-ended",
+];
+
+/// The shipped catalog's rows, in catalog order, that no expected set of `listed` holds.
+fn unjudged(listed: &[(String, Config)]) -> Vec<String> {
+    let stated: BTreeSet<&str> = (listed.iter())
+        .filter_map(|(_, config)| match alarms::expected(config) {
+            Expected::Rows(rows) => Some(rows.iter().copied()),
+            Expected::NotJudged => None,
+        })
+        .flatten()
+        .collect();
+    let shipped = catalog();
+    let rows = shipped["rows"].as_array().expect("the catalog's rows");
+    (rows.iter())
+        .map(|row| row["id"].as_str().expect("a row id"))
+        .filter(|id| !stated.contains(id))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The catalog rows that no judged scenario's expected set holds, computed from `alarms::expected` over every
+/// scenario's root-1 configuration, are the written list `UNJUDGED`, so a catalog row that enters or leaves the union
+/// of the stated sets, a new row no set states included, changes the list by name. The control drops the
+/// standby-target scenario, the one scenario whose set holds `no-standby-past-target`, and the computed list gains
+/// exactly that row.
+#[test]
+fn the_catalog_rows_no_judged_scenario_expects_are_the_written_list() {
+    let listed = scenarios();
+    assert_eq!(unjudged(&listed), UNJUDGED);
+    let without: Vec<(String, Config)> = (listed.into_iter())
+        .filter(|(_, config)| config.scenario != Scenario::PastTarget)
+        .collect();
+    let widened = unjudged(&without);
+    let gained: Vec<&String> = (widened.iter())
+        .filter(|row| !UNJUDGED.contains(&row.as_str()))
+        .collect();
+    let violation = "the list gains exactly no-standby-past-target";
+    assert_eq!(gained, ["no-standby-past-target"], "{violation}");
+    assert_eq!(widened.len(), UNJUDGED.len() + 1);
 }
 
 /// Every statement of the fleet's modules that replaces a fleet's fault script (`fleet.faults = ..`) is followed,

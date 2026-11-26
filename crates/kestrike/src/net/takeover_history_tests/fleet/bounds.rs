@@ -80,8 +80,8 @@ pub(crate) fn requests(count: u32) -> Result<(), Refused> {
 impl Shape {
     /// `Shape::check` reports the first invalid `Shape` field in declaration order. Each zone needs at least two
     /// hosts for distinct owner and standby assignments and at most one partition per host. A fixed layout needs
-    /// the counts it places, the self-suspicion threshold lies in `2..=hosts`, the census cap in `1..=shards` and the
-    /// roles bound in `1..=LIMITS.roles`.
+    /// the counts it places, the census cap lies in `1..=shards`, the roles bound in `1..=LIMITS.roles` and the
+    /// recovery share in `1..=SHARE_BYTES`.
     pub(crate) fn check(&self) -> Result<(), Refused> {
         let within = |count: u64, limit: u64| (1..=limit).contains(&count);
         if !within(u64::from(self.zones), u64::from(LIMITS.zones)) {

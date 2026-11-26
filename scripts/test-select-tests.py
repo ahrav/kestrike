@@ -256,15 +256,15 @@ ROW_LINES = {
                         "repair-replay root 1", "impaired-replay root 1")),
         "fleet: scheduled roots-and-replays: 6 checks passed",
         *(f"fleet: scheduled alarms-{scenario} root 1: pass"
-          for scenario in ("host-loss", "partition-loss", "partition-loss-at", "false-suspicion", "owner-pause", "owner-isolation", "page-regressed", "record-regressed", "settle", "tiny-settle", "az-settle", "reenroll", "standby-loss", "standby-silent", "double-loss", "partition-repair", "partition-repair-at", "census-full", "attach-survivor", "attach-closed", "foreign", "racing", "slot-moved", "handoff", "handoff-ended", "zone-loss", "zone-impaired", "zone-deposed")),
+          for scenario in ("host-loss", "partition-loss", "partition-loss-at", "false-suspicion", "owner-pause", "owner-isolation", "page-regressed", "record-regressed", "settle", "tiny-settle", "az-settle", "reenroll", "standby-loss", "standby-silent", "double-loss", "partition-repair", "partition-repair-at", "census-full", "past-target", "attach-survivor", "attach-closed", "foreign", "racing", "slot-moved", "handoff", "handoff-ended", "zone-loss", "zone-impaired", "zone-deposed")),
         *(f"fleet: scheduled alarms-unknown-{write}-{ending} root 1: pass"
           for write in ("confirm", "reserve", "page") for ending in ("committed", "lost")),
         *(f"fleet: scheduled alarms-{kind}-{call}-{ending} root 1: pass"
           for kind in ("enroll", "fresh")
           for call in ("reserve", "record", "attach", "enroll", "designate")
           for ending in ("acknowledged", "committed", "lost")),
-        *(f"fleet: scheduled alarms-control-{control}-row root 1: pass" for control in ("missing", "extra")),
-        "fleet: scheduled alarms: 64 sets passed, 1 not run, 27 not judged, 2 controls failed by the rule",
+        *(f"fleet: scheduled alarms-control-{control}-row root 1: pass" for control in ("missing", "extra", "past-target")),
+        "fleet: scheduled alarms: 65 sets passed, 1 not run, 27 not judged, 3 controls failed by the rule",
     ],
     "slot-reuse-cycles": [
         *(f"cycles: seed {seed} cycles 24: safety pass; containment pass; retention pass; progress pass; quiescent conservation pass; "
@@ -1830,7 +1830,7 @@ class SelectTests(unittest.TestCase):
         rows = INVENTORY["qualified"]["search-nightly"]["rows"]
         others = [line for row in rows if row["id"] != "fleet-scheduled-roots" for line in ROW_LINES[row["id"]]]
         scheduled = ROW_LINES["fleet-scheduled-roots"]
-        self.assertEqual(len(scheduled), 177)
+        self.assertEqual(len(scheduled), 179)
         witnesses = next(row for row in rows if row["id"] == "fleet-scheduled-roots")["witnesses"]
         code, report, blocked = self.blocked("search-nightly", lines=others + scheduled)
         self.assertEqual((code, blocked), (0, {}), report)
@@ -1858,7 +1858,7 @@ class SelectTests(unittest.TestCase):
              "skipped members ['alarms-census-full root 1']"),
             ("a skipped alarm control", [line for line in scheduled if " alarms-control-extra-row " not in line],
              "skipped members ['alarms-control-extra-row root 1']"),
-            ("a short alarm count", [line.replace("alarms: 64 sets", "alarms: 63 sets") for line in scheduled],
+            ("a short alarm count", [line.replace("alarms: 65 sets", "alarms: 64 sets") for line in scheduled],
              f"missing witness {witnesses[4]!r}"),
         ):
             with self.subTest(edit=name):

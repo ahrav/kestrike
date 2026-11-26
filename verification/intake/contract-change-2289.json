@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2289",
+  "kind": "contract-change",
+  "pull_request": 2289,
+  "changed": "The invariants of fleet-reconciler-keeps-the-census-under-its-cap-and-converges-on-one-designation (the fixpoint count stays open across later plans and fails on the writes or calls they make, a count an unsettled sample ends keeps its writes or calls as a breach through every later interruption, and a short count reads Unrun only where no rule has failed), fleet-repair-settles-every-shard-or-names-a-backed-blocker (a foreign registrant's retired tenure ends through serve's teardown and its parked process publishes the flip request, with a new control), fleet-handoff-target-reads-its-role-and-an-ended-target-parks-until-the-designated-host-takes-over (PARKED_STATUS judges a parked restart's statuses and reads no retired serving tenure's park, which publishes its last status as Parked), fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure (the refused-input count leaves out an untracked placed peer's heartbeat only when it authenticates under that peer's key), fleet-alarm-sets-match-on-root-1-of-every-scenario (65 judged sets with the standby-target scenario, and a third control) and fleet-alarm-oracle-judges-every-scenario-on-its-sealed-reports-and-statuses (the standby-target scenario is judged on its fixture's cap of five and reads not judged off it, as the full census does); and one new record, fleet-alarm-rows-no-judged-scenario-expects.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-repair-settles-every-shard-or-names-a-backed-blocker",
+    "reason": "Its invariant states the new contract for a serving tenure's Retire exit: the fleet ends the tenure through serve's teardown with its owner's parts returned, parks its process with that exit, and the parked process publishes the tenure's last status as host::link::Status::parked, which keeps the entry and its flip flag, so s0's RetirementRequested comes from the parked process (repair_tests::a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create); with the parked process publishing nothing, s0 raises no blocker and F5 fails it unsettled (repair_tests::a_retired_tenures_parked_process_that_publishes_nothing_leaves_s0_unsettled). The fixpoint record's sentences now state what ReconLog::sample and hosts::expected do, which the breach test checks over two interruptions; the alarm records add a scenario and a computed list and keep every earlier assertion."
+  }
+}

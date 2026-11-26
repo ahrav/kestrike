@@ -148,6 +148,10 @@ pub(crate) enum Scenario {
     /// parks, every agent takes the scaled restart grace, and the host the zone loop designates takes the shard
     /// over.
     HandoffEnded,
+    /// s5 starts with no standby under a census cap of five and no fault, so its `Standby` need refuses `CensusFull`
+    /// while it serves; the run stays settled until a reconciler status counts s5 served with no standby past the
+    /// zone's standby target.
+    PastTarget,
 }
 
 /// The cell whose boot tenure's serving duties the store-result scenarios fault: s4, owned by H2, which H0's loss
@@ -260,6 +264,7 @@ impl Scenario {
             Self::RecordRegressed => 33,
             Self::Handoff => 34,
             Self::HandoffEnded => 35,
+            Self::PastTarget => 36,
         };
         let cell = match self {
             Self::Crash(cell) => cell.code(),
@@ -354,7 +359,7 @@ impl Scenario {
 
     /// How the scenario seeds cell `at`.
     pub(crate) fn seed(self, at: usize) -> super::Seed {
-        let standby = !(self == Self::CensusFull && at == 5);
+        let standby = !(matches!(self, Self::CensusFull | Self::PastTarget) && at == 5);
         let third = matches!(self, Self::AttachSurvivor | Self::AttachClosed) && at == ATTACH_CELL;
         super::Seed {
             standby,
@@ -398,7 +403,7 @@ impl Scenario {
             | Self::PartitionLossAt
             | Self::OwnerPause
             | Self::OwnerIsolation => verdict != "settle or blocker",
-            Self::Settle | Self::Handoff | Self::HandoffEnded => {
+            Self::Settle | Self::PastTarget | Self::Handoff | Self::HandoffEnded => {
                 verdict != "volume kept" && verdict != "untouched shards"
             }
             Self::ImpairedBrief | Self::StandbySilent => verdict != "untouched shards",
@@ -435,7 +440,7 @@ impl Scenario {
             heal: Some(ZONE_DOWN_ROUNDS),
         };
         let script = match self {
-            Self::Restarts | Self::Settle => Vec::new(),
+            Self::Restarts | Self::Settle | Self::PastTarget => Vec::new(),
             Self::ZoneLoss => vec![zone(Trigger::When(booted))],
             Self::ZoneImpaired => {
                 let impair = |at| Episode {
@@ -722,10 +727,10 @@ pub(crate) struct HostLog {
     pub(crate) gray: std::collections::BTreeSet<(u64, u64)>,
     pub(crate) takeovers: Vec<Attempt>,
     pub(crate) reports: u32,
-    /// The inputs a host's own agent or the report reader refused: a heartbeat or a probe message the agent refused,
-    /// a seal its writer refused and a sealed report the reader refused. A heartbeat refused `Sender` whose sender
-    /// is a placed peer the receiver tracks no row for stays out, and so does a probe message that `stale_replies`
-    /// or `unmatched_probes` counts.
+    /// The inputs a host's own agent or the report reader refused: a heartbeat, a probe message, a record sync or a
+    /// watch tick the agent refused, a seal its writer refused and a sealed report the reader refused. A heartbeat
+    /// refused `Sender` that authenticates under the key of a placed peer the receiver tracks no row for stays out,
+    /// and so does a probe message that `stale_replies` or `unmatched_probes` counts.
     pub(crate) refused: u32,
     /// Probe replies a detector refused as stale.
     pub(crate) stale_replies: u32,
@@ -759,9 +764,10 @@ pub(crate) struct HostLog {
     pub(crate) held: Vec<(u64, u64, u32)>,
     pub(crate) handoffs: Vec<super::handoff::Handed>,
     pub(crate) parks: Vec<super::handoff::Park>,
-    /// Each status a parked process published while its park stood: the round since the hosts started, the host and
+    /// Each status a parked restart published while its park stood: the round since the hosts started, the host and
     /// the shard. The `Withdrawn` the fleet publishes once for the ended wait's publication that stopped is the
-    /// wait's and is not listed.
+    /// wait's and is not listed. A retired serving tenure's park publishes its last status as `Parked` and is not
+    /// listed.
     pub(crate) parked_published: Vec<(u64, u64, u32)>,
     /// Each standby wait that read its host named owner, ended `Rerun::RoleChanged` and queued its process's next
     /// incarnation: the round since the hosts started, the shard and the host. A wait of a process whose next
@@ -863,6 +869,7 @@ pub(crate) const SELF_SUSPECT: &str = "witness self-suspect-blockers missing";
 pub(crate) const FIVE_DESIGNATIONS: &str = "witness five-designations missing";
 pub(crate) const AT_CAP: &str = "witness census-at-cap missing";
 pub(crate) const REFUSED_FULL: &str = "witness refused-full missing";
+pub(crate) const PAST_TARGET: &str = "witness standby-past-target missing";
 pub(crate) const REDESIGNATED: &str = "witness redesignated-attached-host missing";
 pub(crate) const ATTACH_CLOSED: &str = "witness attach-ended missing";
 pub(crate) const RETIREMENT: &str = "witness retirement-requested missing";
@@ -1371,6 +1378,10 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
             (recon.at_cap >= 1, AT_CAP),
             (recon.refused_full >= 2, REFUSED_FULL),
             (fresh_hosts >= 1, FRESH_HOSTS),
+        ],
+        Scenario::PastTarget => vec![
+            (recon.refused_full >= 1, REFUSED_FULL),
+            (recon.past_target >= 1, PAST_TARGET),
         ],
         Scenario::AttachSurvivor => {
             let again = (recon.designations.iter())
@@ -1881,15 +1892,17 @@ impl<'c> Fleet<'c> {
                 )
             })
             .count();
-        // `beat::decode` hands a well-formed heartbeat's sender field to its key lookup before any tag check.
+        // The placed senders of the heartbeats that authenticate under their sender's key.
         let senders: Vec<Host> = (heartbeats.iter())
             .filter_map(|(_, bytes)| {
-                let mut sender = None;
-                let _ = beat::decode(bytes, own, |field| {
-                    sender = Some(field);
-                    None
-                });
-                sender.filter(|field| peers.contains(field))
+                let key = |field: Host| {
+                    peers
+                        .contains(&field)
+                        .then(|| BeatKey::derive(&host_key(field)))
+                };
+                beat::decode(bytes, own, key)
+                    .ok()
+                    .map(|(header, _)| header.host)
             })
             .collect();
         let heartbeat_bytes: Vec<&[u8]> = heartbeats.iter().map(|(_, b)| b.as_slice()).collect();
@@ -2219,6 +2232,8 @@ impl<'c> Fleet<'c> {
     /// - each tenure that runs on the host, a deposed one included, with its authority's phase, tenure and ages and
     ///   its report entry, as the serving duties publish it;
     /// - each restart or takeover of the host that holds ([`Fleet::holds`]), with `Held` and its held entry;
+    /// - each retired serving tenure's parked process (`Fleet::park_retired`), with the tenure's last status as
+    ///   `Parked`, its entry and flip flag kept, on a volume no tenure or hold of the host publishes;
     /// - a standby wait, `Standby` with the target its last role read returned, in a view period of the wait, in a
     ///   takeover's period with its witness that ended `Exit::Stopped`, or in the incarnation that began the wait
     ///   ([`Cell::waiting`](super::Cell), [`Fleet::publish_read`], [`Fleet::publish_role`]), for each shard the host
@@ -2226,12 +2241,10 @@ impl<'c> Fleet<'c> {
     /// - under the enroll-back plant, an entryless `Withdrawn` status for the hidden hold;
     /// - and an entryless `Withdrawn` status, once, for a process that published last turn and runs no more.
     pub(super) fn statuses(&mut self, live: &Live<'_>, member: usize, t: u64) -> Vec<LinkStatus> {
-        use crate::failover::serving::State;
         // The flat-progress plant freezes the counters of each tenure status the host publishes, with one command
         // pending, from its first turn.
         let flat = self.config.planted_at(Plant::FlatProgress, member);
         let pid = |at: usize| (member * 100 + at) as u32;
-        let count = self.round;
         let cells = self.cells.len();
         let mut statuses: Vec<LinkStatus> = Vec::new();
         for (slot, serving) in live.iter().enumerate() {
@@ -2242,31 +2255,7 @@ impl<'c> Fleet<'c> {
             let Some(serving) = serving.as_ref().filter(|_| runs_on == member) else {
                 continue;
             };
-            let owner = &serving.owner;
-            let authority = owner.authority_report();
-            let phase = match owner.authority_state() {
-                State::PreBoundary | State::Recovering => OwnerPhase::Recovering,
-                State::Serving => OwnerPhase::Serving,
-                State::Withdrawn => OwnerPhase::Withdrawn,
-                State::Closed => OwnerPhase::Closing,
-            };
-            // The serving duties hold the store client's tally and alarm and the listing result; a tenure with no
-            // duties holds none.
-            let observed =
-                (serving.duties.as_ref()).map_or(report::Observed::UNAVAILABLE, |d| d.observed());
-            let entry = owner.report_entry_at(authority, t, &observed);
-            let placement = &self.cells[at].placement;
-            let volume = entry.map_or(placement.volume, |entry| entry.volume);
-            statuses.push(LinkStatus {
-                tenure: Some(authority.tenure),
-                report_age_us: authority.report_age_us,
-                read_age_us: authority.freshness_age_us,
-                io: if flat { 0 } else { count },
-                completions: if flat { 0 } else { count },
-                pending: u64::from(flat),
-                entry,
-                ..LinkStatus::idle(placement.shard, volume, pid(at), phase)
-            });
+            statuses.push(self.serving_status(serving, (at, member), t, flat));
             self.planted |= flat;
         }
         let mut hidden = Vec::new();
@@ -2294,8 +2283,20 @@ impl<'c> Fleet<'c> {
                 ..LinkStatus::idle(shard, volume, pid(at), OwnerPhase::Held)
             });
         }
-        let mut published = false;
+        // A retired serving tenure's parked process publishes its last status as parked, with its entry and flip flag.
         for parked in self.parks.iter().filter(|parked| parked.member == member) {
+            let Some(last) = parked.last.filter(|_| !self.park_unpublished) else {
+                continue;
+            };
+            let exit = &self.log.parks[parked.entry].exit;
+            if !statuses.iter().any(|status| status.volume == last.volume) {
+                statuses.push(last.parked(exit));
+            }
+        }
+        let mut published = false;
+        let restarts =
+            |parked: &&super::handoff::Parked| parked.member == member && parked.last.is_none();
+        for parked in self.parks.iter().filter(restarts) {
             let cell = &self.cells[parked.at];
             let (shard, volume) = (cell.placement.shard, cell.placement.volume);
             if self.config.planted_at(Plant::ParkedWithdraws, parked.at) {
@@ -2359,7 +2360,9 @@ impl<'c> Fleet<'c> {
             .map(|status| (status.shard, status.volume, status.pid, status.phase))
             .collect();
         let since = self.round - self.host_start;
-        for parked in self.parks.iter().filter(|parked| parked.member == member) {
+        let restarts =
+            |parked: &&super::handoff::Parked| parked.member == member && parked.last.is_none();
+        for parked in self.parks.iter().filter(restarts) {
             let shard = self.cells[parked.at].placement.shard;
             let pid = pid(parked.at);
             // The `Withdrawn` that follows the ended wait's last status is the wait's, not the park's.
@@ -2370,6 +2373,45 @@ impl<'c> Fleet<'c> {
             }
         }
         statuses
+    }
+
+    /// The status `serving`, a tenure of cell `at` on `member`, publishes at `t`: its authority's phase, tenure and
+    /// ages and its report entry, as the serving duties publish it. Under the flat-progress plant its counters stay
+    /// at zero with one command pending.
+    pub(super) fn serving_status(
+        &self,
+        serving: &super::Serving<'_>,
+        (at, member): (usize, usize),
+        t: u64,
+        flat: bool,
+    ) -> LinkStatus {
+        use crate::failover::serving::State;
+        let count = self.round;
+        let owner = &serving.owner;
+        let authority = owner.authority_report();
+        let phase = match owner.authority_state() {
+            State::PreBoundary | State::Recovering => OwnerPhase::Recovering,
+            State::Serving => OwnerPhase::Serving,
+            State::Withdrawn => OwnerPhase::Withdrawn,
+            State::Closed => OwnerPhase::Closing,
+        };
+        // The serving duties hold the store client's tally and alarm and the listing result; a tenure with no
+        // duties holds none.
+        let observed =
+            (serving.duties.as_ref()).map_or(report::Observed::UNAVAILABLE, |d| d.observed());
+        let entry = owner.report_entry_at(authority, t, &observed);
+        let placement = &self.cells[at].placement;
+        let volume = entry.map_or(placement.volume, |entry| entry.volume);
+        LinkStatus {
+            tenure: Some(authority.tenure),
+            report_age_us: authority.report_age_us,
+            read_age_us: authority.freshness_age_us,
+            io: if flat { 0 } else { count },
+            completions: if flat { 0 } else { count },
+            pending: u64::from(flat),
+            entry,
+            ..LinkStatus::idle(placement.shard, volume, (member * 100 + at) as u32, phase)
+        }
     }
 
     /// The cells whose restart or takeover on `member` holds and which `member` does not serve, each with the hold
@@ -2849,7 +2891,9 @@ impl<'c> Fleet<'c> {
         let window = u64::from(super::reconcile::FIXPOINT_TICKS) * super::reconcile::TICK_ROUNDS;
         let counted = self.recon.fixpoint_ticks >= super::reconcile::FIXPOINT_TICKS;
         let long = settled.is_some_and(|first| turns - first >= 4 * window);
-        self.recon.settled = (done && (counted || long)) || turns > REPAIR_SETTLE_ROUNDS;
+        // The standby-target scenario stays settled until a status counts s5 past the zone's standby target.
+        let past = self.config.scenario != Scenario::PastTarget || self.recon.past_target > 0;
+        self.recon.settled = (done && (counted || long) && past) || turns > REPAIR_SETTLE_ROUNDS;
         let quiet = self.quiet();
         self.recon.sample(done, quiet);
     }

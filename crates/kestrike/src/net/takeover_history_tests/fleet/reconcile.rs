@@ -326,6 +326,8 @@ pub(crate) struct ReconLog {
     pub(crate) retired: Vec<u64>,
     pub(crate) effects: (u64, u64),
     pub(crate) cap_below: Option<(usize, usize)>,
+    /// The ticks whose status part counted a shard with no live named standby past the zone's standby target.
+    pub(crate) past_target: u32,
     settled_effects: Option<(u64, u64)>,
     seq: u64,
 }
@@ -1218,6 +1220,8 @@ impl Fleet<'_> {
         };
         // The actor seals the tick's status part as the service shell does, before the plant and the actuation.
         (self.sealers).seal(r, &tick.part, now, &mut self.alarms);
+        let past = crate::failover::report::status::Standby::Past as usize;
+        self.recon.past_target += u32::from(tick.part.standby[past] > 0);
         let mut survey = tick.survey;
         self.plant_survey(&mut survey);
         survey

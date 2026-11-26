@@ -242,15 +242,11 @@ where
                 stop_table(table, &control);
             }
             // `recover` contains its sequence's unwind and ends `Rerun(Unwound)`. The incarnation fails here, outside
-            // that boundary, so a sequence that panicked fails its test.
-            let sequence = match role {
-                Role::Fresh => "fresh activation",
-                _ => "restart",
-            };
+            // that boundary, so a sequence that panicked fails its test; the message names the role read.
             assert_ne!(
                 exit,
                 Exit::Rerun(host::Rerun::Unwound),
-                "the {sequence} unwound"
+                "the {role:?} sequence unwound"
             );
             Incarnation::Ended(exit, refusal)
         }

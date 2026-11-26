@@ -1169,7 +1169,7 @@ impl Store for Unwinding {
 /// unwinds at the restart's first write, and ends `Rerun(Unwound)`; `owners::incarnate` fails the incarnation on
 /// that exit, outside that boundary, for each of the fleet's restarts and fresh activations.
 #[test]
-#[should_panic(expected = "the restart unwound")]
+#[should_panic(expected = "the Restart sequence unwound")]
 fn a_restart_that_unwinds_inside_recover_fails_the_incarnation() {
     let config = Config::six(1);
     let fleet = seeded(&config);

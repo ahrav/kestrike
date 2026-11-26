@@ -128,7 +128,8 @@ fn a_store_write_of_a_settled_zone_fails_the_fixpoint_rule_and_the_quiet_sibling
 }
 
 /// A fixpoint count that held a store write keeps it as a breach of LOOP-FIXPOINT when a later unsettled sample ends
-/// the count, and the rule fails by name after the fleet settles again over a quiet count. A write a loop makes in
+/// the count, and the rule fails by name after the fleet settles again over a quiet count, and again after a second
+/// unsettled sample and a second quiet count. A write a loop makes in
 /// the round whose sample finds a shard unsettled answers that shard, and the rule passes.
 #[test]
 fn an_unsettled_sample_keeps_the_breach_its_fixpoint_count_held() {
@@ -150,6 +151,9 @@ fn an_unsettled_sample_keeps_the_breach_its_fixpoint_count_held() {
     resettled(&mut written.recon);
     let failed = Verdict::Fail(fixpoint, "1 writes, 0 calls".into());
     assert_eq!(hosts::expected(&written), failed);
+    // A second unsettled sample over the quiet count keeps the breach the first count held.
+    resettled(&mut written.recon);
+    assert_eq!(hosts::expected(&written), failed, "a second interruption");
 
     let mut answered = quiet.clone();
     answered.recon.effects.0 += 1;
@@ -451,7 +455,9 @@ fn a_volume_at_three_attaches_redesignates_its_surviving_attached_host_or_closes
 }
 
 /// An unknown registrant on s0's reservation makes the owner withdraw with a flip request; s0 carries
-/// `RetirementRequested`, nothing flips, nothing is created, and the summary names the hostile profile.
+/// `RetirementRequested`, nothing flips, nothing is created, and the summary names the hostile profile. The tenure
+/// ends `Retire` through its teardown with its parts returned, and its process parks with that exit and publishes
+/// the tenure's last status as parked, which carries the flip request.
 #[test]
 fn a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create() {
     a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create_on(1);
@@ -479,6 +485,37 @@ fn a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create_o
             .ends_with("; profile hostile:foreign-registrant")
     );
     assert_eq!(report.credit().rule(), Some(oracles::FLIP_REQUEST));
+    // s0's serving tenure ends `Retire` through its teardown, with its owner's parts returned, and its process parks
+    // with that exit; the parked process publishes the status that carries the flip request.
+    let (shard, tenure, exit, _) = report.duties.exits.first().expect("s0's exit").clone();
+    assert!(matches!(exit, crate::host::Exit::Retire(_)), "{exit:?}");
+    assert_eq!(report.duties.torn, [(shard, tenure, true)]);
+    let park = report
+        .hosts
+        .parks
+        .first()
+        .expect("the retired process's park");
+    assert_eq!((park.shard, &park.exit, &park.left), (shard, &exit, &None));
+    assert!(park.periods > 0);
+}
+
+/// The retired-park control: with its parked process publishing no status, the retired s0 raises no
+/// `RetirementRequested`, and F5 fails it unsettled.
+#[test]
+fn a_retired_tenures_parked_process_that_publishes_nothing_leaves_s0_unsettled() {
+    let config = Config::foreign(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.park_unpublished = true;
+    fleet.alarms.scripted = true;
+    let report = fleet.play_script(draws).expect("a run inside the limits");
+    assert_eq!(blocked(&report, 1), None);
+    let unsettled = "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound";
+    assert_eq!(
+        report.verdicts.settles,
+        Verdict::Fail(unsettled, "shard 1".into())
+    );
 }
 
 /// Two reconcilers after H0's loss: reconciler 1's actuation inside reconciler 0's census read of its first

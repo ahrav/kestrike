@@ -282,8 +282,9 @@ const ZONE_LOST: &[&str] = &["host-silent", "need-fresh", "shard-silent"];
 /// The rows each scenario's run fires on its fixture shape, by the scenario and, for a one-zone settle, the census
 /// cap of its shape; a hostile store or registrant profile admits its scenario's own episodes and changes no set.
 /// The volume cases and the replacement cells have no expected set here. A one-zone repair scenario other than the
-/// settle and the full census has none under a census cap below its shard count, and the full census and every
-/// two-zone scenario have none under a cap other than their fixture's.
+/// settle, the full census and the standby-target scenario has none under a census cap below its shard count, and
+/// the full census, the standby-target scenario and every two-zone scenario have none under a cap other than their
+/// fixture's.
 ///
 /// The status rows fire only where reconciler actors run and seal a status, so a host scenario's lost host fires
 /// none of them. An isolated owner's host, H0, counts its three unreachable probers' partitions suspect and reads
@@ -294,6 +295,8 @@ const ZONE_LOST: &[&str] = &["host-silent", "need-fresh", "shard-silent"];
 /// three lost hosts of one zone bring every survivor to its self-suspicion threshold (`self-suspect-host` on the
 /// survivors' reports, `self-suspect-zone` on the status). A census cap below the zone's
 /// shard count raises `census-cap-below-shards` and, with the census listing every slot it holds, `census-near-cap`.
+/// A shard that the full census leaves with no standby serves past the zone's standby target in the standby-target
+/// scenario, which raises `no-standby-past-target` beside its census rows.
 /// A standby-enrollment crash cell loses a standby's host alone (`host-silent`); a fresh-host cell loses owner and
 /// standby, and where the crash cuts a designation whose write landed the restarted loop reads the volume's attach
 /// slots closed on one status before the enrollment settles (`attach-closed`), as the slot-moved case does while the
@@ -322,6 +325,7 @@ pub(crate) fn expected(config: &super::Config) -> Expected {
     let cap_below = config.shape.zones == 1 && u32::from(cap) < config.shape.shards;
     let off_fixture = match config.scenario {
         CensusFull => cap != super::Config::census_full(root).shape.cap,
+        PastTarget => cap != super::Config::past_target(root).shape.cap,
         Settle if config.shape.zones == 1 => false,
         scenario if config.shape.zones > 1 => cap != super::Config::az(root, scenario).shape.cap,
         scenario => cap_below && scenario.repairs(),
@@ -379,6 +383,12 @@ pub(crate) fn expected(config: &super::Config) -> Expected {
         ],
         SlotMoved => &["attach-closed", "host-silent"],
         Handoff => &[],
+        PastTarget => &[
+            "census-cap-below-shards",
+            "census-near-cap",
+            "census-refused-full",
+            "no-standby-past-target",
+        ],
         HandoffEnded => &["need-fresh", "producer-missing", "shard-silent"],
         ZoneLoss | ZoneDeposed => ZONE_LOST,
         ZoneImpaired => &["host-silent", "need-fresh", "shard-blocked", "shard-silent"],

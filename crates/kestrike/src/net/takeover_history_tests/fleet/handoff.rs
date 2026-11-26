@@ -9,8 +9,12 @@
 //! In the ended-target form the target's attach entry turns `Ended` between the transfer's reads and its write. The
 //! target's restart then refuses at its record reads and parks: the process keeps the tenure slot its incarnation
 //! took and runs one `host::serve::wait` period per view period until that wait reads another role or its host
-//! crashes. A parked process issues no reservation command and publishes no status; the host rules
+//! crashes. A parked restart issues no reservation command and publishes no status; the host rules
 //! `PARKED_DEVICE` and `PARKED_STATUS` judge both on every run.
+//!
+//! A serving tenure that a `Retire` exit ended parks too (`Fleet::park_retired`). Its process runs the same view
+//! periods and publishes the tenure's last status as `host::link::Status::parked`, which `PARKED_STATUS` sets aside.
+//! The slot of its torn-down tenure stays taken, and the park frees no slot when it ends.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -45,19 +49,21 @@ pub(crate) struct Handed {
     pub(crate) refused: Option<String>,
 }
 
-/// One park as the host log lists it, from the restart that ended with a parking exit to the park's end.
+/// One park as the host log lists it, from its start to its end: a restart that ended with a parking exit, or a
+/// serving tenure that a `Retire` exit ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Park {
     /// The round since the hosts started at which the park began.
     pub(crate) round: u64,
     pub(crate) shard: u32,
     pub(crate) host: u64,
-    /// The restart's parking exit.
+    /// The parking exit: the restart's, or the serving tenure's `Retire`.
     pub(crate) exit: Exit,
     /// The view periods of `host::serve::wait` the park ran.
     pub(crate) periods: u32,
     /// The reservation commands the cell's table logged during the restart that parked and during each view period
-    /// of the park. Commands other hosts issue on the volume between two periods are theirs and are not listed.
+    /// of the park; a retired serving tenure's park lists those of its view periods alone. Commands other hosts
+    /// issue on the volume between two periods are theirs and are not listed.
     pub(crate) commands: Vec<&'static str>,
     /// The round since the hosts started at which the park ended, and the exit of its last view period, or `None`
     /// for a crash of its host.
@@ -69,10 +75,14 @@ pub(crate) struct Park {
 pub(crate) struct Parked {
     pub(crate) at: usize,
     pub(crate) member: usize,
-    /// The tenure slot the parked process holds.
-    pub(crate) slot: usize,
+    /// The tenure slot a parked restart holds and frees when its park ends; a retired serving tenure's process keeps
+    /// the slot of its torn-down tenure, which no later tenure takes.
+    pub(crate) slot: Option<usize>,
     /// Its entry in [`super::hosts::HostLog::parks`].
     pub(crate) entry: usize,
+    /// The last status a retired serving tenure published, which the parked process publishes as
+    /// `host::link::Status::parked` of its exit; a parked restart publishes none.
+    pub(crate) last: Option<crate::host::link::Status>,
 }
 
 impl<'c> Fleet<'c> {
@@ -237,8 +247,38 @@ impl<'c> Fleet<'c> {
         self.parks.push(Parked {
             at,
             member,
-            slot,
+            slot: Some(slot),
             entry,
+            last: None,
+        });
+    }
+
+    /// Parks the process of cell `at`'s serving tenure on `member`, which `exit` (a `Retire`) ended and
+    /// `Fleet::tear_down` tore down, as `serve` parks it: the process runs the restart role's view periods
+    /// ([`Fleet::park_periods`]) and publishes `last.parked(exit)`, the tenure's last status with its entry and flip
+    /// flag, until a period's role read ends the park.
+    pub(super) fn park_retired(
+        &mut self,
+        (at, member): (usize, usize),
+        exit: &Exit,
+        last: Option<crate::host::link::Status>,
+    ) {
+        let entry = self.log.parks.len();
+        self.log.parks.push(Park {
+            round: self.round - self.host_start,
+            shard: self.cells[at].placement.shard.get(),
+            host: self.topology.members[member].host.get(),
+            exit: exit.clone(),
+            periods: 0,
+            commands: Vec::new(),
+            left: None,
+        });
+        self.parks.push(Parked {
+            at,
+            member,
+            slot: None,
+            entry,
+            last,
         });
     }
 
@@ -312,14 +352,14 @@ impl<'c> Fleet<'c> {
         }
     }
 
-    /// Ends the park at `index` with its last period's `exit`, or with `None` at a crash of its host. The park's
-    /// tenure slot is freed before the host loop's next step, and a park that ended with an exit queues the
-    /// process's next incarnation from the round before this one, so the host loop runs it in this round.
+    /// Ends the park at `index` with its last period's `exit`, or with `None` at a crash of its host. The tenure slot
+    /// a parked restart holds is freed before the host loop's next step, and a park that ended with an exit queues
+    /// the process's next incarnation from the round before this one, so the host loop runs it in this round.
     pub(super) fn leave_park(&mut self, index: usize, exit: Option<Exit>) {
         let parked = self.parks.remove(index);
         let rerun = exit.is_some();
         self.log.parks[parked.entry].left = Some((self.round - self.host_start, exit));
-        self.unparked.push(parked.slot);
+        self.unparked.extend(parked.slot);
         if rerun {
             let (key, ended) = ((parked.at, parked.member), self.round.saturating_sub(1));
             self.refused.insert(key, (ended, false));

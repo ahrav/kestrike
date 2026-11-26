@@ -589,6 +589,13 @@ impl Config {
         config
     }
 
+    /// `small` with a census cap of five, where s5 starts with no standby and no fault follows.
+    pub(crate) fn past_target(root: u64) -> Self {
+        let mut config = Self::repair(root, Scenario::PastTarget);
+        config.shape.cap = 5;
+        config
+    }
+
     /// `small` where s2's volume holds a third attach, of H1; H0 and H5 crash and H1 survives.
     pub(crate) fn attach_survivor(root: u64) -> Self {
         Self::repair(root, Scenario::AttachSurvivor)
@@ -841,7 +848,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v32-rest";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v33";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1235,7 +1242,7 @@ impl Report {
         if self.config.scenario.repairs() {
             let recon = &self.recon;
             lines.push(format!(
-                "fleet: {id} reconciler ticks {} orders {} incarnations {:?} reservations {} contended {} at-cap {} refused-full {} condition {} stale {} releases {} reclaims {:?} restarts {} crashed {:?} crash-writes {:?} crash-aim {:?} unordered {} rewrites {} after-settle {:?} fixpoint-ticks {} cap-below {:?} uncovered {:?} settle {:?} designations {:?} blockers {:?} refusals {:?} census {:?}",
+                "fleet: {id} reconciler ticks {} orders {} incarnations {:?} reservations {} contended {} at-cap {} refused-full {} condition {} stale {} releases {} reclaims {:?} restarts {} crashed {:?} crash-writes {:?} crash-aim {:?} unordered {} rewrites {} after-settle {:?} breach {:?} fixpoint-ticks {} cap-below {:?} uncovered {:?} settle {:?} designations {:?} blockers {:?} refusals {:?} census {:?}",
                 recon.calls,
                 recon.orders,
                 recon.incarnations,
@@ -1254,6 +1261,7 @@ impl Report {
                 recon.unordered,
                 recon.rewrites,
                 recon.after_settle,
+                recon.breach,
                 recon.fixpoint_ticks,
                 recon.cap_below,
                 recon.uncovered,
@@ -2336,6 +2344,8 @@ struct Fleet<'c> {
     /// The kept-owner case's knob: every teardown after a `Rerun` or `Held` exit reads as one whose owner kept its
     /// custody, as a teardown that ran past its patience does.
     kept_owner: bool,
+    /// The retired-park control's knob: a retired serving tenure's parked process publishes no status.
+    park_unpublished: bool,
     /// The held witness: the entry the standby's period read out of its inbox, and the round of that read. The
     /// inbox holds no entry for its member and volume from then on, so `Fleet::deliver` queues a later witness
     /// behind it and replaces nothing.
@@ -2353,8 +2363,11 @@ struct Fleet<'c> {
     /// Whether [`Fleet::runnable`] records the round's runnable actors: true in every run but the replay control's
     /// sibling, which shows the decision is what refuses another set of actors.
     record_actors: bool,
-    /// The processes parked after a restart that ended with a parking exit (`host::Exit::parks`), each holding the
-    /// tenure slot its incarnation took until a view period of its park (`host::serve::wait`) ends it.
+    /// The parked processes, each until a view period of its park (`host::serve::wait`) ends it. One parked after a
+    /// restart that ended with a parking exit (`host::Exit::parks`) holds the tenure slot its incarnation took and
+    /// publishes no status. One parked after a serving tenure's `Retire` exit (`Fleet::park_retired`) publishes the
+    /// tenure's last status as `Parked`; the slot of its torn-down tenure stays taken, and the park frees no slot when
+    /// it ends.
     parks: Vec<handoff::Parked>,
     /// The tenure slots of parks that ended since the host loop last ran, which it frees before its next step.
     unparked: Vec<usize>,
@@ -2521,6 +2534,7 @@ impl<'c> Fleet<'c> {
             horizon: hosts::HORIZON_ROUNDS,
             witness_hold: None,
             kept_owner: false,
+            park_unpublished: false,
             held_witness: None,
             actor_turns: 0,
             record_actors: true,
@@ -3044,16 +3058,18 @@ impl<'c> Fleet<'c> {
         }
     }
 
-    /// Ends each shard's current tenure whose serving turn named a `Rerun` or a `Deposed` exit, as `serve` does
-    /// ([`Fleet::tear_down`]). A tenure with a GET in flight waits for the GET's outcome. A `Retire`, `Refused`,
-    /// `Retired` or `Stopped` exit keeps the tenure in its slot. After a `Rerun` exit, when the owner shut down and the
-    /// shard record still names the tenure's host owner, the process's next incarnation is queued (`Fleet::reruns`):
-    /// its role read and `host::recover`, which the host loop runs once every open loss has sent its drawn GETs and
-    /// its host is not paused (`Fleet::rerun`, `Fleet::rerun_due`). A `Deposed` exit queues none: a later tenure owns the shard. Each open loss drops its watch
-    /// of the shard, which serves through no loss once its tenure ended. The cell's close counts no withdrawal for
-    /// the tenure (`Settle::withdrawals`): its exit is in `DutyLog::exits`, and `Report::credit` fails first on an
-    /// exit the scenario does not script (`hosts::unscripted_exit`), so the withdrawn rule judges the tenures whose
-    /// duties named no such exit. A deposed tenure in a slot past the cells ends through [`Fleet::withdraw`].
+    /// Ends each shard's current tenure whose serving turn named a `Rerun`, a `Deposed` or a `Retire` exit, as `serve`
+    /// does ([`Fleet::tear_down`]). A tenure with a GET in flight waits for the GET's outcome. A `Stopped` exit keeps
+    /// the tenure in its slot. After a `Retire` exit whose owner shut down, the process parks with the tenure's last
+    /// status (`Fleet::park_retired`), which carries the flip request. After a `Rerun` exit, when the owner shut down
+    /// and the shard record still names the tenure's host owner, the process's next incarnation is queued
+    /// (`Fleet::reruns`): its role read and `host::recover`, which the host loop runs once every open loss has sent
+    /// its drawn GETs and its host is not paused (`Fleet::rerun`, `Fleet::rerun_due`). A `Deposed` exit queues none:
+    /// a later tenure owns the shard. Each open loss drops its watch of the shard, which serves through no loss once
+    /// its tenure ended. The cell's close counts no withdrawal for the tenure (`Settle::withdrawals`): its exit is in
+    /// `DutyLog::exits`, and `Report::credit` fails first on an exit the scenario does not script
+    /// (`hosts::unscripted_exit`), so the withdrawn rule judges the tenures whose duties named no such exit. A
+    /// deposed tenure in a slot past the cells ends through [`Fleet::withdraw`].
     fn tear_down_ended(&mut self, live: &mut Live<'_>) {
         let ended: Vec<usize> = (0..self.cells.len())
             .filter(|&at| live[at].as_ref().is_some_and(awaits_teardown))
@@ -3067,12 +3083,23 @@ impl<'c> Fleet<'c> {
             }
             let serving = live[at].take().expect("the ended tenure");
             let reruns = matches!(serving.duty_exit, Some(crate::host::Exit::Rerun(_)));
+            let retire = (serving.duty_exit.clone())
+                .filter(|exit| matches!(exit, crate::host::Exit::Retire(_)));
+            // The process's last status is the one its owner holds at the exit, flip flag included.
+            let member = self.cells[at].holder;
+            let t = self.detector_now() + self.agent_phase(member);
+            let flat = self.config.planted_at(Plant::FlatProgress, member);
+            let last = retire
+                .is_some()
+                .then(|| self.serving_status(&serving, (at, member), t, flat));
             let tenure = serving.tenure;
             let shut = self.tear_down(at, serving);
             self.release_watches(at);
             // A kept owner holds its custody: `serve` returns it as `Served::Kept`, and its process neither parks nor
             // reruns. The fleet's device double needs no proven stop, so the kept owner drops here.
-            let member = self.cells[at].holder;
+            if let Some(exit) = retire.filter(|_| shut) {
+                self.park_retired((at, member), &exit, last);
+            }
             if reruns && shut && self.record_now(at).owner == self.topology.members[member].host {
                 self.reruns.insert(at, (member, tenure, self.round));
             }
@@ -4284,12 +4311,15 @@ fn capture_policy(now_us: u64) -> crate::storage::CapturePolicy {
         .expect("the fleet's capture policy")
 }
 
-/// Whether `serving`'s turn named an exit that ends its process with no park, a rerun or `Deposed`, which the fleet
-/// tears down as `serve` does. `serve::ended` and `Duties::turn` name `Stopped`, `Deposed`, `Retire` or `Rerun`; a
+/// Whether `serving`'s turn named an exit whose tenure the fleet tears down as `serve` does: a rerun, `Deposed`, or
+/// `Retire`, whose process then parks. `serve::ended` and `Duties::turn` name `Stopped`, `Deposed`, `Retire` or `Rerun`; a
 /// `Held` exit comes from a bring-up or a recovery, before the tenure serves.
 fn awaits_teardown(serving: &Serving<'_>) -> bool {
     use crate::host::Exit;
-    matches!(serving.duty_exit, Some(Exit::Rerun(_) | Exit::Deposed))
+    matches!(
+        serving.duty_exit,
+        Some(Exit::Rerun(_) | Exit::Deposed | Exit::Retire(_))
+    )
 }
 
 /// Steps `serving` with its serving duties, at most [`OPEN_ROUNDS`] rounds, until an exit ends them.

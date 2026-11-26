@@ -666,6 +666,8 @@ fn a_host_scenario_fails_a_tenure_that_stopped_serving_with_no_fault_deposing_it
 /// s5's owner and standby, which are placed in its zone and still send it heartbeats: its agent refuses them
 /// `Sender` and the fleet counts none of them as a refused input. A heartbeat of H0 whose tag has one bit flipped
 /// counts one, and so does a heartbeat whose sender the zone does not place, which the agent also refuses `Sender`.
+/// A heartbeat that names the untracked H4 with its last byte flipped authenticates to no key and counts one, beside
+/// an unplaced sender's in the same round.
 #[test]
 fn a_refused_heartbeat_counts_unless_a_placed_peer_the_receiver_tracks_no_row_for_sent_it() {
     use crate::failover::detect::beat::{self, BeatKey, Header};
@@ -697,7 +699,6 @@ fn a_refused_heartbeat_counts_unless_a_placed_peer_the_receiver_tracks_no_row_fo
     let due = fleet.hosts[3].inbox.len();
     assert!(due >= 1, "H4 turned after H3: {due} heartbeats wait");
     assert_eq!(round(&mut fleet), 0, "heartbeats of H1 and H4, untracked");
-
     let sealed = |sender: u64| {
         let header = Header {
             host: host(sender),
@@ -717,18 +718,31 @@ fn a_refused_heartbeat_counts_unless_a_placed_peer_the_receiver_tracks_no_row_fo
         bytes.truncate(len);
         bytes
     };
+    // A forged heartbeat that names an untracked placed peer authenticates to no key, so it counts, and it hides no
+    // other refusal of its round.
+    let mut forged = sealed(H4);
+    *forged.last_mut().unwrap() ^= 1;
+    let at = fleet.round;
+    fleet.hosts[3].inbox.push((at, forged));
+    fleet.hosts[3].inbox.push((at, sealed(H5 + 1)));
+    assert_eq!(
+        round(&mut fleet),
+        2,
+        "a forged untracked peer and an unplaced sender"
+    );
+
     let mut forged = sealed(H0);
     *forged.last_mut().unwrap() ^= 1;
     let at = fleet.round;
     fleet.hosts[3].inbox.push((at, forged));
-    assert_eq!(round(&mut fleet), 1, "a heartbeat whose tag fails");
+    assert_eq!(round(&mut fleet), 3, "a heartbeat whose tag fails");
 
     let unplaced = H5 + 1;
     assert!(fleet.member_of(host(unplaced)).is_none());
     let at = fleet.round;
     fleet.hosts[3].inbox.push((at, sealed(unplaced)));
-    assert_eq!(round(&mut fleet), 2, "a sender the zone does not place");
-    assert_eq!(round(&mut fleet), 2);
+    assert_eq!(round(&mut fleet), 4, "a sender the zone does not place");
+    assert_eq!(round(&mut fleet), 4);
 }
 
 /// The fleet's nomination queue keeps, for each standby process, the witness a production link inbox keeps. The
