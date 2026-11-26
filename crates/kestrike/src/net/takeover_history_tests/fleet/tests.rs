@@ -29,38 +29,45 @@ fn assert_two_swept_recoveries(report: &Report, objects: u32) {
     }
 }
 
+/// Six hosts restart their six shards warm with no takeover on roots 1 and 2. Root 2's report is the shared run
+/// that `a_run_with_no_credit_or_no_report_stops_the_pinned_case_and_the_root_sweep` reads, so the second root adds
+/// no fleet run to the fast tier. The scheduled case runs roots 2 and 3.
 #[test]
-fn six_hosts_restart_six_shards_warm_with_no_takeover_on_three_roots() {
-    for root in [1, 2, 3] {
-        let report = passing(&Config::six(root));
-        assert_eq!((report.takeovers, report.crashes), (0, 6));
-        let surveyed = Reconciled {
-            ticks: 24,
-            unnamed: 0,
-        };
-        assert_eq!(report.reconciled, surveyed);
-        let owners: BTreeSet<u64> = (report.shards.iter())
-            .map(|shard| shard.owner.get())
-            .collect();
-        assert_eq!(owners.len(), 6, "each host owns one shard");
-        assert_two_swept_recoveries(&report, 8);
-        for shard in &report.shards {
-            assert_eq!(shard.attempts, 6, "two restarts from E = 4");
-            let tenures: Vec<u64> = shard.recoveries.iter().map(|r| r.tenure.a).collect();
-            assert_eq!(tenures, [10, 12]);
-        }
-        let (offered, served) = (report.shards.iter()).fold((0, 0), |sum, shard| {
-            (
-                sum.0 + shard.neighbour.offered,
-                sum.1 + shard.neighbour.served,
-            )
-        });
-        assert_eq!(
-            (offered, served),
-            (12, 12),
-            "two requests in each of six recoveries"
-        );
+fn six_hosts_restart_six_shards_warm_with_no_takeover() {
+    for root in [1, 2] {
+        six_hosts_restart_six_shards_warm_with_no_takeover_on(root);
     }
+}
+
+pub(super) fn six_hosts_restart_six_shards_warm_with_no_takeover_on(root: u64) {
+    let report = passing(&Config::six(root));
+    assert_eq!((report.takeovers, report.crashes), (0, 6));
+    let surveyed = Reconciled {
+        ticks: 24,
+        unnamed: 0,
+    };
+    assert_eq!(report.reconciled, surveyed);
+    let owners: BTreeSet<u64> = (report.shards.iter())
+        .map(|shard| shard.owner.get())
+        .collect();
+    assert_eq!(owners.len(), 6, "each host owns one shard");
+    assert_two_swept_recoveries(&report, 8);
+    for shard in &report.shards {
+        assert_eq!(shard.attempts, 6, "two restarts from E = 4");
+        let tenures: Vec<u64> = shard.recoveries.iter().map(|r| r.tenure.a).collect();
+        assert_eq!(tenures, [10, 12]);
+    }
+    let (offered, served) = (report.shards.iter()).fold((0, 0), |sum, shard| {
+        (
+            sum.0 + shard.neighbour.offered,
+            sum.1 + shard.neighbour.served,
+        )
+    });
+    assert_eq!(
+        (offered, served),
+        (12, 12),
+        "two requests in each of six recoveries"
+    );
 }
 
 #[test]
@@ -1601,10 +1608,10 @@ fn the_pinned_runs_pass_and_the_root_sweep_prints_one_line_a_run() {
         table, line,
         "the crash table's digest hashes its cells' digests in order"
     );
-    let lines = roots(1..=2).expect("roots 1 and 2 pass");
-    assert_eq!(lines.len(), 5);
-    let settle = lines[4]
-        .strip_prefix("fleet: roots: 4 runs passed, 0 takeovers, settle at most ")
+    let lines = roots(1..=1).expect("root 1 passes");
+    assert_eq!(lines.len(), 3);
+    let settle = lines[2]
+        .strip_prefix("fleet: roots: 2 runs passed, 0 takeovers, settle at most ")
         .and_then(|rest| rest.strip_suffix(" of 64 rounds"))
         .expect("the closing line");
     let slowest: u64 = settle.parse().expect("a round count");
@@ -1696,4 +1703,44 @@ fn the_inventory_rows_list_the_pinned_runs_and_the_swept_roots() {
         })
         .collect();
     assert_eq!(members("long-run", "fleet-roots"), swept);
+}
+
+/// The fast tier's further roots and replays, each check printing one line and the last line counting them: the
+/// six-host restart on roots 2 and 3, the host loss in several roles on root 2, the host loss run again, replayed with
+/// its digest and run with one request on root 3, the two-reconciler and owner-and-standby repair runs replayed with a
+/// short tape on root 1, and the impaired volume's replay with its short tape on root 1.
+#[test]
+#[ignore = "the restart run on roots 2 and 3, the host loss on root 2, and the host-loss, repair and volume replays and short tapes; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
+fn the_restart_host_loss_and_replay_checks_pass_on_their_scheduled_roots() {
+    type Check = (&'static str, u64, fn(u64));
+    let checks: [Check; 6] = [
+        ("restarts-six", 2, six_hosts_restart_six_shards_warm_with_no_takeover_on),
+        ("restarts-six", 3, six_hosts_restart_six_shards_warm_with_no_takeover_on),
+        (
+            "host-loss",
+            2,
+            super::host_tests::a_host_lost_in_several_roles_hands_its_shards_to_their_named_standbys_warm_on,
+        ),
+        (
+            "host-loss-replay",
+            3,
+            super::host_tests::a_host_loss_replays_its_recording_and_an_extra_arrival_moves_no_other_decision_on,
+        ),
+        (
+            "repair-replay",
+            1,
+            super::repair_tests::a_repair_run_replays_its_recording_and_a_short_tape_is_refused_on,
+        ),
+        ("impaired-replay", 1, |root| {
+            super::volume_tests::replays_and_refuses_a_short_tape(&Config::impaired(root))
+        }),
+    ];
+    for (name, root, check) in checks {
+        check(root);
+        println!("fleet: scheduled roots-and-replays {name} root {root}: pass");
+    }
+    println!(
+        "fleet: scheduled roots-and-replays: {} checks passed",
+        checks.len()
+    );
 }

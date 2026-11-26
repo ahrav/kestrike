@@ -111,71 +111,80 @@ fn a_host_with_no_serving_tenure_counts_each_live_attach_unbound_and_its_roles_o
     }
 }
 
+/// A host lost in several roles hands its three shards to their named standbys warm, on roots 1 and 2. Root 2's
+/// report is the shared run that `host_loss_under_the_4_mib_share_fails_the_limiter_check_with_no_refused_charge`
+/// reads, so the second root adds no fleet run to the fast tier. The scheduled case runs root 2 as well.
 #[test]
-fn a_host_lost_in_several_roles_hands_its_shards_to_their_named_standbys_warm_on_two_roots() {
+fn a_host_lost_in_several_roles_hands_its_shards_to_their_named_standbys_warm() {
     for root in [1, 2] {
-        let report = passing(&Config::host_loss(root));
-        assert_eq!(taken(&report), [(1, H3), (2, H3), (3, H5)]);
-        assert_eq!((report.takeovers, report.crashes), (3, 1));
-        for attempt in &report.hosts.takeovers {
-            let at = |command| attempt.commands.iter().position(|c| *c == command);
-            // The named standby preempts the recorded lineage it read (`PreemptLineage`).
-            let (register, preempt) = (at("register"), at("lineage"));
-            assert!(
-                register.is_some() && register < preempt,
-                "the named standby registers before it preempts: {:?}",
-                attempt.commands
-            );
+        a_host_lost_in_several_roles_hands_its_shards_to_their_named_standbys_warm_on(root);
+    }
+}
+
+pub(super) fn a_host_lost_in_several_roles_hands_its_shards_to_their_named_standbys_warm_on(
+    root: u64,
+) {
+    let report = passing(&Config::host_loss(root));
+    assert_eq!(taken(&report), [(1, H3), (2, H3), (3, H5)]);
+    assert_eq!((report.takeovers, report.crashes), (3, 1));
+    for attempt in &report.hosts.takeovers {
+        let at = |command| attempt.commands.iter().position(|c| *c == command);
+        // The named standby preempts the recorded lineage it read (`PreemptLineage`).
+        let (register, preempt) = (at("register"), at("lineage"));
+        assert!(
+            register.is_some() && register < preempt,
+            "the named standby registers before it preempts: {:?}",
+            attempt.commands
+        );
+    }
+    let log = &report.hosts;
+    assert_eq!(log.host_losses, 1);
+    assert!(log.loads_beside_service >= 1);
+    assert!(
+        log.served_beside_load >= 1,
+        "a shard of a loading host serves a GET while the load runs"
+    );
+    assert_eq!((log.lapsed, log.stale_hits, log.exempt.len()), (0, 0, 0));
+    assert_eq!((log.refused, log.stale_replies), (0, 0));
+    assert!(log.reports > 0);
+    // H3's first sealed report counts s3, which it serves, through its bind mapping and the standby attaches
+    // of s0 and s1 unbound, so a served volume counted twice or left out reads other than 3; its reports read
+    // the recovery slot held while a takeover's load runs and free once the loads end.
+    let (used, roles) = (Gauge::known, u64::from(ROLES_MAX));
+    let h3 = log.sealed(H3);
+    assert_eq!(h3[0], [used(3, 64), used(3, roles), used(0, 1)]);
+    assert!(
+        h3.iter()
+            .all(|gauges| gauges[..2] == [used(3, 64), used(3, roles)])
+    );
+    assert!(h3.iter().any(|gauges| gauges[2] == used(1, 1)), "{h3:?}");
+    assert_eq!(h3.last().map(|gauges| gauges[2]), Some(used(0, 1)));
+    assert_eq!(report.evidence.volumes, Volumes::default());
+    for (shard, versions) in &report.evidence.histories {
+        let first = versions.first().expect("a seeded record");
+        for version in versions {
+            let kept = (version.generation, version.active, version.checkpoint);
+            assert_eq!(kept, (first.generation, first.active, first.checkpoint));
         }
-        let log = &report.hosts;
-        assert_eq!(log.host_losses, 1);
-        assert!(log.loads_beside_service >= 1);
-        assert!(
-            log.served_beside_load >= 1,
-            "a shard of a loading host serves a GET while the load runs"
+        let at = (shard.get() - 1) as usize;
+        let recovered = &report.shards[at].recoveries;
+        assert_eq!(
+            (&report.shards[at].invalidated, &report.shards[at].unserved),
+            (&BTreeSet::from([1]), &Vec::new()),
+            "shard {} acknowledges the INVALIDATE of object 1, and each sweep serves every object it counts",
+            shard.get()
         );
-        assert_eq!((log.lapsed, log.stale_hits, log.exempt.len()), (0, 0, 0));
-        assert_eq!((log.refused, log.stale_replies), (0, 0));
-        assert!(log.reports > 0);
-        // H3's first sealed report counts s3, which it serves, through its bind mapping and the standby attaches
-        // of s0 and s1 unbound, so a served volume counted twice or left out reads other than 3; its reports read
-        // the recovery slot held while a takeover's load runs and free once the loads end.
-        let (used, roles) = (Gauge::known, u64::from(ROLES_MAX));
-        let h3 = log.sealed(H3);
-        assert_eq!(h3[0], [used(3, 64), used(3, roles), used(0, 1)]);
-        assert!(
-            h3.iter()
-                .all(|gauges| gauges[..2] == [used(3, 64), used(3, roles)])
-        );
-        assert!(h3.iter().any(|gauges| gauges[2] == used(1, 1)), "{h3:?}");
-        assert_eq!(h3.last().map(|gauges| gauges[2]), Some(used(0, 1)));
-        assert_eq!(report.evidence.volumes, Volumes::default());
-        for (shard, versions) in &report.evidence.histories {
-            let first = versions.first().expect("a seeded record");
-            for version in versions {
-                let kept = (version.generation, version.active, version.checkpoint);
-                assert_eq!(kept, (first.generation, first.active, first.checkpoint));
-            }
-            let at = (shard.get() - 1) as usize;
-            let recovered = &report.shards[at].recoveries;
-            assert_eq!(
-                (&report.shards[at].invalidated, &report.shards[at].unserved),
-                (&BTreeSet::from([1]), &Vec::new()),
-                "shard {} acknowledges the INVALIDATE of object 1, and each sweep serves every object it counts",
-                shard.get()
+        if at < 3 {
+            let last = recovered.last().expect("a takeover");
+            assert_eq!(last.host, report.shards[at].standby);
+            assert_eq!(last.sweep, Some((7, 7)), "the invalidated object misses");
+            assert_eq!(last.tenure.a, recovered[0].tenure.a + 2);
+            assert!(
+                last.read_bytes > 0,
+                "the device double counted the load's reads"
             );
-            if at < 3 {
-                let last = recovered.last().expect("a takeover");
-                assert_eq!(last.host, report.shards[at].standby);
-                assert_eq!(last.sweep, Some((7, 7)), "the invalidated object misses");
-                assert_eq!(last.tenure.a, recovered[0].tenure.a + 2);
-                assert!(
-                    last.read_bytes > 0,
-                    "the device double counted the load's reads"
-                );
-            } else {
-                assert_eq!(recovered.len(), 1, "shard {} keeps its tenure", shard.get());
-            }
+        } else {
+            assert_eq!(recovered.len(), 1, "shard {} keeps its tenure", shard.get());
         }
     }
 }
@@ -626,15 +635,17 @@ fn host_loss_controls_fail_retention_and_untouched_shards_and_a_removed_crash_re
     assert_eq!((none.takeovers, none.hosts.host_losses), (0, 0));
 }
 
+/// A host-loss tape replayed under a shape of more objects is refused at its first changed candidate set, on root 1;
+/// the scheduled case runs the host loss again on root 3, replays it to an equal report and digest, and keeps the
+/// first arrival's draws in a run of one request.
 #[test]
-fn a_host_loss_replays_its_recording_and_an_extra_arrival_moves_no_other_decision() {
-    let config = Config::host_loss(3);
-    let report = passing(&config);
-    assert_eq!(run(&config).as_ref(), Ok(&report));
-    let replayed = replay(&config, &report.recording()).expect("the recording replays");
-    assert_eq!((&replayed, replayed.digest()), (&report, report.digest()));
+fn a_host_loss_tape_replayed_under_more_objects_is_refused_at_its_candidates() {
+    a_tape_replayed_under_more_objects_is_refused_at_its_candidates(&Config::host_loss(1));
+}
 
-    let mut fuller = config;
+fn a_tape_replayed_under_more_objects_is_refused_at_its_candidates(config: &Config) {
+    let report = passing(config);
+    let mut fuller = *config;
     fuller.shape.objects = 9;
     let recording = Recording {
         identity: fuller.identity(),
@@ -646,6 +657,17 @@ fn a_host_loss_replays_its_recording_and_an_extra_arrival_moves_no_other_decisio
         }
         other => panic!("{other:?}"),
     }
+}
+
+pub(super) fn a_host_loss_replays_its_recording_and_an_extra_arrival_moves_no_other_decision_on(
+    root: u64,
+) {
+    let config = Config::host_loss(root);
+    let report = passing(&config);
+    assert_eq!(run(&config).as_ref(), Ok(&report));
+    let replayed = replay(&config, &report.recording()).expect("the recording replays");
+    assert_eq!((&replayed, replayed.digest()), (&report, report.digest()));
+    a_tape_replayed_under_more_objects_is_refused_at_its_candidates(&config);
 
     let one = passing(&Config {
         requests: 1,
@@ -702,6 +724,8 @@ fn a_crash_drops_the_deposed_tenures_of_its_host() {
     });
     let report = scripted(&Config::owner_pause(1), script);
     assert_eq!(taken(&report), [(1, H3), (2, H3), (3, H5)]);
+    // The run carries the scripted mark, so the alarm oracle reads it as a run with no expected set.
+    assert_eq!(report.alarms(), Verdict::Unrun(alarms::NOT_JUDGED));
     let log = &report.hosts;
     assert_eq!((log.unwithdrawn, log.withdrawals.len()), (0, 0));
     let withdrawn = Verdict::Unrun("witness withdrawn missing");
@@ -2298,9 +2322,24 @@ fn host_loss_under_the_4_mib_share_fails_the_limiter_check_with_no_refused_charg
 /// s2 times out at its compare-and-swap with a write that did not commit, H5 waits as s2's standby again and no agent
 /// addresses it a second witness. The run stops at the host loop's horizon, and the stall names s2 and the resend
 /// rule: the record still names the target of the standby's one witness, and no witness followed in the windows
-/// since its wait began. Without the plant the same script and horizon serve s2 on the second witness.
+/// since its wait began. Without the plant the same script and horizon serve s2 on the second witness; the scheduled
+/// case runs that sibling (`emit_once_played(.., false)`).
 #[test]
 fn an_agent_that_sends_a_nomination_once_strands_a_retaken_shard_and_stalls_the_run() {
+    let (stalled, dropped) = emit_once_played(1, true);
+    assert!(dropped, "the mutant dropped a kept nomination");
+    let Err(Stopped::Stalled(stall)) = stalled.map(|report| report.summary()) else {
+        panic!("the run settles without a second witness");
+    };
+    let rule = "a kept nomination was not sent again while its target stayed in the records";
+    assert_eq!(rule, hosts::RESEND);
+    assert_eq!((stall.waited, stall.shard), (rule, Some(3)));
+}
+
+/// The `EmitOnce` control's script on `root` under a horizon of 600 rounds: the host loss with H5's takeover of s2
+/// timed out at its compare-and-swap with a write that did not commit, under plant `EmitOnce` when `planted`.
+/// Returns how the run ended and whether the agent's plant dropped a kept nomination.
+fn emit_once_played(root: u64, planted: bool) -> (Result<Report, Stopped>, bool) {
     let mut script = Scenario::HostLoss.episodes(false);
     script.push(Episode {
         scope: vec![5],
@@ -2309,29 +2348,30 @@ fn an_agent_that_sends_a_nomination_once_strands_a_retaken_shard_and_stalls_the_
         ..script[0].clone()
     });
     // Both runs stop at 600 rounds; the unplanted one takes s2 again within a few windows of the timeout.
-    let played = |config: &Config| {
-        let mut draws = Draws::record(config.root);
-        let seeded = Fleet::seeded(config, &mut draws, WAIT_ROUNDS);
-        let mut fleet = seeded.expect("a recorded topology");
-        fleet.faults = Faults::new(script.clone(), fleet.topology.members.len());
-        fleet.alarms.scripted = true;
-        fleet.horizon = 600;
-        let _agent = super::AgentPlant::set(config);
-        let _inline = Inline::set();
-        let ended = fleet.play_script(draws);
-        (ended, super::AgentPlant::fired(config))
+    let config = match planted {
+        true => Config::host_loss(root).hostile(Plant::EmitOnce, 0),
+        false => Config::host_loss(root),
     };
-    let (resent, _) = played(&Config::host_loss(1));
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.faults = Faults::new(script, fleet.topology.members.len());
+    fleet.alarms.scripted = true;
+    fleet.horizon = 600;
+    let _agent = super::AgentPlant::set(&config);
+    let _inline = Inline::set();
+    let ended = fleet.play_script(draws);
+    (ended, super::AgentPlant::fired(&config))
+}
+
+/// The `EmitOnce` control's unplanted sibling: the agents re-send the kept nomination, so H5 takes s2 again within
+/// the 600 rounds.
+pub(super) fn an_agent_that_resends_a_kept_nomination_takes_the_retaken_shard_within_the_horizon_on(
+    root: u64,
+) {
+    let (resent, _) = emit_once_played(root, false);
     let resent = resent.expect("the unplanted run settles within 600 rounds");
     assert_eq!(taken(&resent), [(1, H3), (2, H3), (3, H5)]);
-    let (stalled, dropped) = played(&Config::host_loss(1).hostile(Plant::EmitOnce, 0));
-    assert!(dropped, "the mutant dropped a kept nomination");
-    let Err(Stopped::Stalled(stall)) = stalled.map(|report| report.summary()) else {
-        panic!("the run settles without a second witness");
-    };
-    let rule = "a kept nomination was not sent again while its target stayed in the records";
-    assert_eq!(rule, hosts::RESEND);
-    assert_eq!((stall.waited, stall.shard), (rule, Some(3)));
 }
 
 /// The resend rule's reading of the witnesses the agents addressed: it names a cell whose standby has waited, with
@@ -2463,7 +2503,9 @@ fn a_health_rule_that_reads_any_hold_unhealthy_moves_shards_whose_volumes_are_he
 /// the one planted activation, beside the boot's at that tenure. The plant appends that entry to the driver's
 /// activation log once the incarnation returned and starts no session, so it shows the check that judges such an
 /// activation, not a session the sequence would open. Sibling: the same crash, return and outage with no plant
-/// passes the one-owner check (`a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage`).
+/// passes the one-owner check (`a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage`). The
+/// scheduled case runs H3's crash and return with no outage and no plant
+/// (`a_restart_after_a_crash_and_return_activates_from_its_own_bump_on`).
 #[test]
 fn an_activation_from_the_role_read_fails_the_one_owner_rule() {
     let planted = scripted(
@@ -2490,6 +2532,32 @@ fn an_activation_from_the_role_read_fails_the_one_owner_rule() {
         Some(reactivated),
         "{}",
         planted.summary()
+    );
+}
+
+/// H3 crashes once H0 acknowledged its workload and returns two rounds later, before a suspicion.
+fn h3_crash_and_return() -> Vec<Episode> {
+    let mut script = Scenario::HostLoss.episodes(false);
+    script[0].scope = vec![3];
+    script[0].heal = Some(2);
+    script
+}
+
+/// H3's crash and return with no outage and no plant, beside the role-read control: the restart of s3 activates from
+/// H3's own bump and passes the one-owner rule.
+pub(super) fn a_restart_after_a_crash_and_return_activates_from_its_own_bump_on(root: u64) {
+    let unplanted = scripted(&Config::host_loss(root), h3_crash_and_return());
+    assert_eq!(unplanted.verdicts.one_owner, Verdict::Pass);
+    let recovered = &unplanted.shards[3].recoveries;
+    assert_eq!(
+        recovered.len(),
+        2,
+        "H3's boot and its restart: {recovered:?}"
+    );
+    assert!(recovered.iter().all(|recovery| recovery.host.get() == H3));
+    assert!(
+        recovered[1].tenure.a > recovered[0].tenure.a,
+        "{recovered:?}"
     );
 }
 
@@ -2564,19 +2632,17 @@ fn a_wait_whose_fencer_holds_a_device_ends_fault_and_fails_the_waiting_phase_rul
 /// suspicion, and its restart's bump of s3 times out with no commit. H3's host reads itself unhealthy (s3 exempt),
 /// since s3's record names H0 standby elsewhere. `Held::status` builds the recovery of the published entry, and the
 /// case reads it three ways: its check names the bump, H3's accepted report carries s3's entry in phase `Held`, and its
-/// next step holds H3's recovery slot in H3's last sealed report.
-#[test]
-fn a_held_restart_publishes_its_held_status_in_a_host_scenario() {
-    let mut script = Scenario::HostLoss.episodes(false);
-    script[0].scope = vec![3];
-    script[0].heal = Some(2);
+/// next step holds H3's recovery slot in H3's last sealed report. The scheduled case runs the whole test: it has no
+/// planted control, and it left the fast tier.
+pub(super) fn a_held_restart_publishes_its_held_status_in_a_host_scenario_on(root: u64) {
+    let mut script = h3_crash_and_return();
     script.push(Episode {
         scope: vec![3],
         action: Action::StoreWrite(Arm::Timeout { commit: false }),
         heal: None,
         ..script[0].clone()
     });
-    let report = scripted(&Config::host_loss(1), script);
+    let report = scripted(&Config::host_loss(root), script);
     let s3 = &report.shards[3];
     assert!(
         s3.blockers.iter().any(|check| check.contains("Bump")),
@@ -3836,33 +3902,52 @@ fn a_hosts_store_outage_stops_the_record_views_of_its_boot_tenure() {
 /// actors, every running host, every tenure that steps and every running reconciler, as one forced decision at
 /// `draws::ACTORS`. The host-loss recording replays to an equal report. Control: the same tape replayed under a
 /// script that also crashes H1, which holds no tenure, so its crash opens no loss and draws nothing, is refused with
-/// `Candidates` in the round after the crash, before any actor of that round steps. Sibling: with the actor decision
-/// off in the recording and in the replay, the same extra crash replays with no refusal, so the refusal comes from
-/// the actor decision and from no other draw. The candidates are those three kinds: a standby's or an unnamed host's
-/// wait and the owner processes the host loop runs between rounds (a queued takeover, restart or rerun, a fresh
-/// activation) are not among them, so this test shows no refusal for a change in those alone.
+/// `Candidates` in the round after the crash, before any actor of that round steps. The scheduled case runs the
+/// equal replay and the sibling (`actor_replay_siblings_on`): with the actor decision off in the recording and in
+/// the replay, the same extra crash replays with no refusal, so the refusal comes from the actor decision and from no
+/// other draw. The candidates are those three kinds: a standby's or an unnamed host's wait and the owner processes
+/// the host loop runs between rounds (a queued takeover, restart or rerun, a fresh activation) are not among them,
+/// so this test shows no refusal for a change in those alone.
 #[test]
 fn a_tape_recorded_with_another_set_of_runnable_actors_is_refused_before_its_round_steps() {
-    let config = Config::host_loss(1);
-    let script = || {
-        let mut script = Scenario::HostLoss.episodes(false);
-        script.push(Episode {
-            trigger: Trigger::AtTime(5),
-            scope: vec![1],
-            action: Action::Crash,
-            heal: None,
-        });
-        script
+    let (recorded, played) = actor_tape(1);
+    let refused = played(Draws::replay(recorded.tape.clone()), actor_script(), true);
+    let Err(Stopped::Choice(refusal)) = refused.map(|report| report.summary()) else {
+        panic!("another set of runnable actors replays");
     };
-    let played = |mut draws: Draws, script: Vec<Episode>, actors: bool| {
-        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
-        let mut fleet = seeded.expect("a recorded topology");
-        fleet.faults = Faults::new(script, fleet.topology.members.len());
-        fleet.alarms.scripted = true;
-        fleet.record_actors = actors;
-        let _inline = Inline::set();
-        fleet.play_script(draws)
-    };
+    assert_eq!(refusal.error, crate::sim::choice::ChoiceError::Candidates);
+    assert!(refusal.applied < recorded.decisions, "{refusal:?}");
+}
+
+/// The host-loss script with a crash of H1, which holds no tenure, at round 5.
+fn actor_script() -> Vec<Episode> {
+    let mut script = Scenario::HostLoss.episodes(false);
+    script.push(Episode {
+        trigger: Trigger::AtTime(5),
+        scope: vec![1],
+        action: Action::Crash,
+        heal: None,
+    });
+    script
+}
+
+/// A host-loss run on `root` that plays `script` from `draws`, recording each round's runnable actors when `actors`.
+type ActorPlay = Box<dyn Fn(Draws, Vec<Episode>, bool) -> Result<Report, Stopped>>;
+
+/// The host-loss run on `root` with its actor decisions recorded, and the player the replays use.
+fn actor_tape(root: u64) -> (Report, ActorPlay) {
+    let config = Config::host_loss(root);
+    let played: ActorPlay = Box::new(
+        move |mut draws: Draws, script: Vec<Episode>, actors: bool| {
+            let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+            let mut fleet = seeded.expect("a recorded topology");
+            fleet.faults = Faults::new(script, fleet.topology.members.len());
+            fleet.alarms.scripted = true;
+            fleet.record_actors = actors;
+            let _inline = Inline::set();
+            fleet.play_script(draws)
+        },
+    );
     let recorded = played(
         Draws::record(config.root),
         Scenario::HostLoss.episodes(false),
@@ -3870,6 +3955,13 @@ fn a_tape_recorded_with_another_set_of_runnable_actors_is_refused_before_its_rou
     );
     let recorded = recorded.expect("a run inside the limits");
     assert!(recorded.actor_turns > 0);
+    (recorded, played)
+}
+
+/// The actor-replay control's unplanted siblings: the recording replays to an equal digest, and with the actor
+/// decision off in the recording and in the replay the extra crash replays with no refusal.
+pub(super) fn actor_replay_siblings_on(root: u64) {
+    let (recorded, played) = actor_tape(root);
     let replayed = played(
         Draws::replay(recorded.tape.clone()),
         Scenario::HostLoss.episodes(false),
@@ -3879,14 +3971,7 @@ fn a_tape_recorded_with_another_set_of_runnable_actors_is_refused_before_its_rou
         replayed.map(|report| report.digest()),
         Ok(recorded.digest())
     );
-
-    let refused = played(Draws::replay(recorded.tape.clone()), script(), true);
-    let Err(Stopped::Choice(refusal)) = refused.map(|report| report.summary()) else {
-        panic!("another set of runnable actors replays");
-    };
-    assert_eq!(refusal.error, crate::sim::choice::ChoiceError::Candidates);
-    assert!(refusal.applied < recorded.decisions, "{refusal:?}");
-
+    let config = Config::host_loss(root);
     let unrecorded = played(
         Draws::record(config.root),
         Scenario::HostLoss.episodes(false),
@@ -3894,12 +3979,316 @@ fn a_tape_recorded_with_another_set_of_runnable_actors_is_refused_before_its_rou
     );
     let unrecorded = unrecorded.expect("a run inside the limits");
     assert_eq!(unrecorded.actor_turns, 0);
-    let unrefused = played(Draws::replay(unrecorded.tape.clone()), script(), false);
+    let unrefused = played(
+        Draws::replay(unrecorded.tape.clone()),
+        actor_script(),
+        false,
+    );
     assert!(
         unrefused.is_ok(),
         "{:?}",
         unrefused.map(|report| report.summary())
     );
+}
+
+/// The declared-hold cases' judgment: the silent host is nominated while two declarations stand, so declarations
+/// stay out of the self-suspicion count (DECLARED-FRESH), and no detector nominates while three declarations stand
+/// (DECLARED-BRAKE). The scheduled case passes these texts to the cases' controls.
+pub(super) const DECLARED_COUNTED: &str =
+    "two standing declarations and a silent host put the observers in self-suspicion";
+pub(super) const DECLARED_UNBRAKED: &str = "a detector nominated while three declarations stood";
+
+/// The rounds since the hosts started at which the declared-hold script's volumes stalled and healed, at which a
+/// detector first published a nomination (`ReconLog::first_nomination`), and, when the script crashes a host, at
+/// whose start a witness for s5 first waited in its standby's queue and at whose start such a witness first waited
+/// while the agents of s3's and s4's owners both read their hosts unhealthy on a hold. The last round lies past
+/// twice the stall's length when no witness waited under both declarations before it. A script with no crash
+/// records the round at whose start the three stalled shards' owners had all declared (`three_declared`), which
+/// lies past twice the stall's length when they never did.
+pub(super) struct Declared {
+    pub(super) report: Report,
+    pub(super) stalled: u64,
+    pub(super) healed: u64,
+    pub(super) nominated: Option<u64>,
+    pub(super) s5_witnessed: Option<u64>,
+    pub(super) s5_under_two: Option<u64>,
+    pub(super) three_declared: Option<u64>,
+}
+
+impl std::fmt::Debug for Declared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            stalled,
+            healed,
+            nominated,
+            s5_witnessed,
+            s5_under_two,
+            three_declared,
+            ..
+        } = self;
+        write!(
+            f,
+            "stalled {stalled} healed {healed} nominated {nominated:?} s5 witnessed {s5_witnessed:?} under two declarations {s5_under_two:?} three declared {three_declared:?}: {}",
+            self.report.summary()
+        )
+    }
+}
+
+/// Runs `small` under `Config::stall(root)`, with one GET a loss, under a script that stalls the volumes of the shards
+/// at `stalled` (each owner's restart then ends `Exit::Held` and its agent declares its host unhealthy) and crashes
+/// the hosts at `crashed`, all once every owner acknowledged its workload. When the script crashes a host (s5's
+/// owner, the one crash scripted here), two last episodes with no effect mark rounds: one fires at the first round a
+/// witness for s5 waits in its standby's queue, and the other at the first round such a witness waits while the
+/// agents of s3's and s4's owners both read their hosts unhealthy on a hold, or once the hosts ran twice the stall's
+/// length. A script with no crash (the three-declarations case) marks one round the same way: the first at whose
+/// start the agents of s3's, s4's and s5's owners all read their hosts unhealthy on a hold, or once the hosts ran
+/// twice the stall's length. Each marker fires in every run of its script. With `defect`, the detector runs with
+/// that planted defect of `failover::detect` for the whole run.
+///
+/// One GET a loss: with two GETs, the losses the stalls and the crash open together send more GETs to one owner than
+/// one peer's allowance, and the owner answers one with request pressure, which the untouched check reads unserved.
+pub(super) fn declared(
+    root: u64,
+    stalled: &[usize],
+    crashed: &[usize],
+    defect: Option<&'static str>,
+) -> Declared {
+    fn up(fleet: &Fleet<'_>) -> bool {
+        fleet.booted_all() && fleet.cells.iter().all(|cell| cell.acknowledged)
+    }
+    fn s5_witnessed(fleet: &Fleet<'_>) -> bool {
+        let shard = fleet.cells[5].placement.shard;
+        (fleet.nominated.iter()).any(|(_, _, witness, _)| witness.shard == shard)
+    }
+    // The agents of the owners of the shards at `cells` all read their hosts unhealthy on a hold. The reading is
+    // taken at time zero, where the health rule's silent and unreported clauses are off.
+    fn declared_by(fleet: &Fleet<'_>, cells: &[usize]) -> bool {
+        cells.iter().all(|&at| {
+            let agent = fleet.hosts[fleet.cells[at].placement.owner].agent.as_ref();
+            agent.is_some_and(|agent| !agent.healthy(0))
+        })
+    }
+    // The hosts ran twice the stall's length. As an alternative of a marker's trigger it lets the episode fire in
+    // every run, so the fault script settles.
+    fn late(fleet: &Fleet<'_>) -> bool {
+        fleet.round - fleet.host_start > 2 * hosts::STALL_ROUNDS
+    }
+    fn s5_witnessed_under_two(fleet: &Fleet<'_>) -> bool {
+        (s5_witnessed(fleet) && declared_by(fleet, &[3, 4])) || late(fleet)
+    }
+    fn three_declared(fleet: &Fleet<'_>) -> bool {
+        declared_by(fleet, &[3, 4, 5]) || late(fleet)
+    }
+    let mut script: Vec<Episode> = (stalled.iter())
+        .map(|&at| Episode {
+            trigger: Trigger::When(up),
+            scope: Vec::new(),
+            action: Action::Stall(at),
+            heal: Some(hosts::STALL_ROUNDS),
+        })
+        .collect();
+    if !crashed.is_empty() {
+        script.push(Episode {
+            trigger: Trigger::When(up),
+            scope: crashed.to_vec(),
+            action: Action::Crash,
+            heal: None,
+        });
+    }
+    let markers: &[fn(&Fleet<'_>) -> bool] = match crashed.is_empty() {
+        true => &[three_declared],
+        false => &[s5_witnessed, s5_witnessed_under_two],
+    };
+    for &marker in markers {
+        script.push(Episode {
+            trigger: Trigger::When(marker),
+            scope: Vec::new(),
+            action: Action::Delay(Vec::new(), 0),
+            heal: Some(0),
+        });
+    }
+    let config = Config {
+        requests: 1,
+        ..Config::stall(root)
+    };
+    let run = || scripted_with(&config, script, false);
+    let report = match defect {
+        Some(defect) => crate::failover::detect::tests::planted(defect, run),
+        None => run(),
+    };
+    let fired = &report.hosts.fired;
+    let stalled = fired[0].expect("the stalls fired");
+    let last = fired[fired.len() - 1];
+    let (s5_witnessed, s5_under_two, three_declared) = match crashed.is_empty() {
+        true => (None, None, last),
+        false => (fired[fired.len() - 2], last, None),
+    };
+    Declared {
+        healed: stalled + hosts::STALL_ROUNDS,
+        stalled,
+        nominated: report.recon.first_nomination,
+        s5_witnessed,
+        s5_under_two,
+        three_declared,
+        report,
+    }
+}
+
+/// The owner changes each shard's record history commits, in shard order.
+fn shard_owner_changes(report: &Report) -> Vec<u32> {
+    (report.evidence.histories.iter())
+        .map(|(_, versions)| owner_changes(versions))
+        .collect()
+}
+
+/// Whether the declared-hold judgment holds for two declarations and a silent host: a witness for the silent owner's
+/// shard s5 reaches its standby while both declarations stand, and no observer reports a repair demand. The first
+/// round a witness for s5 waits lies between the stall and its heal, and in that round both declared owners' agents
+/// read their hosts unhealthy on a hold.
+pub(super) fn two_declared_judged(run: &Declared) -> Result<(), &'static str> {
+    let early = (run.s5_witnessed).is_some_and(|round| run.stalled < round && round < run.healed);
+    let standing = early && run.s5_under_two == run.s5_witnessed;
+    match standing && run.report.hosts.repair_demands == 0 {
+        true => Ok(()),
+        false => Err(DECLARED_COUNTED),
+    }
+}
+
+/// Whether the brake's judgment holds for three declarations: no nomination is published while all three stand. A
+/// first nomination breaks it when it comes at or after the round in which all three owners had declared and before
+/// the stall's heal.
+pub(super) fn three_declared_judged(run: &Declared) -> Result<(), &'static str> {
+    let standing = run.three_declared.zip(run.nominated);
+    match standing
+        .is_some_and(|(declared, nominated)| declared <= nominated && nominated < run.healed)
+    {
+        true => Err(DECLARED_UNBRAKED),
+        false => Ok(()),
+    }
+}
+
+/// Two held hosts and a silent one at the agent's threshold of three: on `small`, s3's and s4's volumes stall, so
+/// H3's and H2's restarts end `Exit::Held` and both agents declare their hosts unhealthy (s3 and s4 exempt), and H4,
+/// s5's owner, crashes. A fresh declaration stays out of the self-suspicion count, so no observer suspects itself
+/// and no repair demand is raised: while both declarations stand, the detectors nominate s5's owner, H1 takes s5
+/// over and serves it, and H0's takeover of s3 commits and holds at its device step on the stalled volume. s4 keeps
+/// its owner on this layout because H4's crash leaves s4's standby H5 with probers in one partition alone (H5's
+/// partition holds no other host), not by a rule of the declarations. The control, run by the scheduled case, plants
+/// `declared-counts`; under it s5 is taken over only after the stalls heal.
+pub(super) fn two_held_hosts_and_a_silent_one_at_a_threshold_of_three_nominate_the_silent_one_on(
+    root: u64,
+) {
+    let run = declared(root, &[3, 4], &[4], None);
+    let report = &run.report;
+    assert_eq!(two_declared_judged(&run), Ok(()), "{run:?}");
+    assert_eq!(report.hosts.exempt, BTreeSet::from([4, 5]));
+    assert_eq!(report.hosts.repair_demands, 0);
+    assert_eq!(taken(report), [(6, H1)], "H1 takes s5 over and serves it");
+    assert_eq!(shard_owner_changes(report), [0, 0, 0, 1, 0, 1]);
+    let s3 = (report.hosts.takeovers.iter()).find(|attempt| attempt.shard == 4);
+    let s3 = s3.expect("H0's takeover of s3");
+    assert_eq!(s3.host, H0);
+    assert!(s3.refused.is_some(), "H0's takeover holds: {s3:?}");
+    let s3_last = report.evidence.histories[3].1.last().unwrap();
+    assert_eq!(s3_last.owner.get(), H0, "H0's compare-and-swap committed");
+    held_once_by(report, 4, [H0, H3]);
+    let s5 = report.shards[5].recoveries.last().expect("H1's recovery");
+    assert_eq!(s5.host.get(), H1);
+    assert!(s5.sweep.is_some_and(|(of, served)| of > 0 && of == served));
+    passes_its_fleet_checks(report);
+}
+
+/// Each start of `shard`'s entry in phase `Held` as its report round and its host, in the order the fleet received
+/// the sealed reports. A host whose entry starts twice is listed twice.
+fn held_starts(report: &Report, shard: u32) -> Vec<(u64, u64)> {
+    let held = (report.hosts.held.iter()).filter(|(.., of)| *of == shard);
+    held.map(|(round, host, _)| (*round, *host)).collect()
+}
+
+/// Asserts that `shard`'s entry in phase `Held` starts exactly once in the sealed reports of each host of `holders`,
+/// both in one report round. `holders` is in member order, the order in which the fleet receives a round's reports:
+/// the owner's restart and the standby's takeover both hold before the first report round after the stall, so the
+/// reports order the two starts by member alone.
+fn held_once_by(report: &Report, shard: u32, holders: [u64; 2]) {
+    let starts = held_starts(report, shard);
+    let round = starts.first().map_or(0, |(round, _)| *round);
+    assert_eq!(
+        starts,
+        holders.map(|host| (round, host)),
+        "the starts of shard {shard}'s Held entry"
+    );
+}
+
+/// The fleet checks that judge a declared-hold script: one owner per tenure, the volume check, the retained set, the
+/// host share and the untouched shards. The stall scenario's settle verdict and credit judge one stalled volume, so
+/// a second stalled or a crashed owner's shard reads to them as a healthy volume that changed hands.
+fn passes_its_fleet_checks(report: &Report) {
+    let verdicts = &report.verdicts;
+    let judged = [
+        &verdicts.one_owner,
+        &verdicts.keeps_volume,
+        &verdicts.retained,
+        &verdicts.within_share,
+        &verdicts.untouched,
+    ];
+    assert!(
+        judged.iter().all(|verdict| **verdict == Verdict::Pass),
+        "{}",
+        report.summary()
+    );
+}
+
+/// The control of the two-held case: with fresh declarations counted toward self-suspicion (`declared-counts`), the
+/// two declarations and the silent host reach the threshold, the observers suspect themselves and report repair
+/// demands, and no nomination comes while the declarations stand: s3 never moves, and s5 is taken over only after
+/// the stalls heal and the held owners recover.
+pub(super) fn the_two_held_case_fails_when_declarations_count_on(root: u64, rule: &'static str) {
+    assert_eq!(rule, DECLARED_COUNTED);
+    let run = declared(root, &[3, 4], &[4], Some("declared-counts"));
+    assert_eq!(two_declared_judged(&run), Err(rule), "{run:?}");
+    assert!(run.report.hosts.repair_demands > 0);
+    assert!(
+        run.nominated.is_some_and(|round| round >= run.healed),
+        "{run:?}"
+    );
+    assert_eq!(shard_owner_changes(&run.report)[3], 0, "s3 never moves");
+    assert_eq!(taken(&run.report), [(6, H1)], "H1 takes s5 after the heal");
+}
+
+/// Three hosts that declare at once: on `small`, s3's, s4's and s5's volumes stall together, so H3, H2 and H4 each
+/// hold and declare, and the three declarations brake nominations on declared evidence (DECLARED-BRAKE): no detector
+/// publishes a nomination while all three stand, so no takeover starts and no shard changes hands during the stall.
+/// After the stall heals, the fleet reruns the held processes one at a time; H3 recovers s3 first, and while H4's
+/// and H2's reruns wait behind it their two declarations still stand, which nominate (two declarations brake
+/// nothing): H1 takes s5 over and H5 takes s4. The control, run by the scheduled case, plants `unbraked`.
+pub(super) fn three_declaring_hosts_nominate_none_on_declared_evidence_on(root: u64) {
+    let run = declared(root, &[3, 4, 5], &[], None);
+    let report = &run.report;
+    assert_eq!(three_declared_judged(&run), Ok(()), "{run:?}");
+    assert_eq!(report.hosts.exempt, BTreeSet::from([4, 5, 6]));
+    assert_eq!(report.hosts.repair_demands, 0);
+    let nominated = run.nominated.expect("a nomination after the heal");
+    assert!(nominated >= run.healed, "{run:?}");
+    assert_eq!(shard_owner_changes(report), [0, 0, 0, 0, 1, 1]);
+    assert_eq!(taken(report), [(5, H5), (6, H1)]);
+    passes_its_fleet_checks(report);
+}
+
+/// The control of the three-declarations case: with the brake removed (`unbraked`), the detectors nominate the three
+/// declared owners during the stall, and the three takeovers commit and hold on the stalled volumes.
+pub(super) fn the_three_declarations_case_fails_without_the_brake_on(
+    root: u64,
+    rule: &'static str,
+) {
+    assert_eq!(rule, DECLARED_UNBRAKED);
+    let run = declared(root, &[3, 4, 5], &[], Some("unbraked"));
+    assert_eq!(three_declared_judged(&run), Err(rule), "{run:?}");
+    assert!(run.nominated.is_some_and(|round| round < run.healed));
+    assert_eq!(shard_owner_changes(&run.report), [0, 0, 0, 1, 1, 1]);
+    assert!(taken(&run.report).is_empty(), "every takeover holds");
+    for (shard, holders) in [(4, [H0, H3]), (5, [1003, H5]), (6, [H1, 1005])] {
+        held_once_by(&run.report, shard, holders);
+    }
 }
 
 /// A refused runnable-actor decision steps no actor of its round. One recorded round of the host-loss fleet names

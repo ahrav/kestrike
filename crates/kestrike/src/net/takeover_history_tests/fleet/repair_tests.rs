@@ -1091,12 +1091,16 @@ fn each_blocker_is_backed_by_its_own_typed_refusal_alone() {
 }
 
 /// A repair run draws decisions beyond the host-loss run's, each round's runnable-actor decision left out of both
-/// counts, replays its tape to an equal report, and a tape one byte short is refused.
+/// counts, on root 1; the scheduled case replays both runs to equal reports and refuses a tape one byte short.
 #[test]
-fn a_repair_run_replays_its_recording_and_a_short_tape_is_refused() {
-    let unrepaired = passing(&Config::host_loss(1));
+fn a_repair_run_draws_its_reconcilers_order_beyond_the_host_loss_decisions() {
+    a_repair_run_draws_its_reconcilers_order_beyond_the_host_loss_decisions_on(1);
+}
+
+fn a_repair_run_draws_its_reconcilers_order_beyond_the_host_loss_decisions_on(root: u64) {
+    let unrepaired = passing(&Config::host_loss(root));
     let unrepaired = unrepaired.decisions - unrepaired.actor_turns;
-    for config in [Config::racing(1), Config::double_loss(1)] {
+    for config in [Config::racing(root), Config::double_loss(root)] {
         let report = passing(&config);
         let reconcilers = config.shape.reconcilers;
         let drawn_here = report.decisions - report.actor_turns;
@@ -1107,6 +1111,15 @@ fn a_repair_run_replays_its_recording_and_a_short_tape_is_refused() {
         );
         let drawn = u64::from(report.recon.orders);
         assert_eq!(drawn_here, unrepaired + drawn);
+    }
+}
+
+/// The checks of the test above on one root, then each run replayed to an equal report and a tape one byte short
+/// refused.
+pub(super) fn a_repair_run_replays_its_recording_and_a_short_tape_is_refused_on(root: u64) {
+    a_repair_run_draws_its_reconcilers_order_beyond_the_host_loss_decisions_on(root);
+    for config in [Config::racing(root), Config::double_loss(root)] {
+        let report = passing(&config);
         assert_eq!(replay(&config, &report.recording()), Ok(report.clone()));
         let mut short = report.recording();
         short.tape.truncate(short.tape.len() - 1);
@@ -1298,10 +1311,13 @@ fn a_replayed_forced_decision_holds_the_recorded_index() {
 /// The scheduled case runs the thirteen repair and host scenario tests on root 2 (nine in this module, three in
 /// `host_tests` and one in `tests`); the fast tier runs them on root 1. The scheduled case also runs the census and
 /// settle controls and the dropped standby need's control on root 2, the census and settle siblings with the
-/// stranded-s5 control on roots 1 and 2, the pinned runs on root 2, the four store-result cells of the serving duties
-/// the fast tier leaves out on root 1, every store-result cell and both regressed reads on root 2, the committed
-/// sibling of the unknown takeover swap on root 1, and the scheduled tier's 25 enrollment crash cells on root 1. Each
-/// passing check or cell prints one line, and the last line counts the checks and the cells.
+/// stranded-s5 control on roots 1 and 2, the pinned runs on root 2, the planned handoff and its ended-target form on
+/// root 2, on root 1 the unplanted siblings of three fast tests (the `EmitOnce` and role-read controls, and the actor
+/// decision's equal replay with its sibling) and the Held status in a host scenario, a whole test with no planted
+/// control, the two declared-hold cases with their controls on root 1, the four store-result cells of the serving
+/// duties the fast tier leaves out on root 1, every store-result cell and both regressed reads on root 2, the
+/// committed sibling of the unknown takeover swap on root 1, and the scheduled tier's 25 enrollment crash cells on
+/// root 1. Each passing check or cell prints one line, and the last line counts the checks and the cells.
 #[test]
 #[ignore = "repair and host scenarios and the census and settle controls on their second root and the enrollment crash cells of the scheduled tier; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
 fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
@@ -1309,7 +1325,7 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
     use super::hosts::Unknown;
     /// A scenario's name, the root it runs on and the check that runs it on a root.
     type Check = (&'static str, u64, fn(u64));
-    let checks: [Check; 21] = [
+    let checks: [Check; 29] = [
         (
             "settle",
             2,
@@ -1399,6 +1415,40 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
             2,
             super::handoff_tests::a_transfer_to_an_ended_target_parks_it_and_the_designated_host_takes_the_shard_over_warm_on,
         ),
+        (
+            "emit-once-sibling",
+            1,
+            host_tests::an_agent_that_resends_a_kept_nomination_takes_the_retaken_shard_within_the_horizon_on,
+        ),
+        (
+            "role-read-sibling",
+            1,
+            host_tests::a_restart_after_a_crash_and_return_activates_from_its_own_bump_on,
+        ),
+        (
+            "held-status",
+            1,
+            host_tests::a_held_restart_publishes_its_held_status_in_a_host_scenario_on,
+        ),
+        ("actor-replay-siblings", 1, host_tests::actor_replay_siblings_on),
+        (
+            "declared-two-held",
+            1,
+            host_tests::two_held_hosts_and_a_silent_one_at_a_threshold_of_three_nominate_the_silent_one_on,
+        ),
+        ("declared-two-held-control", 1, |root| {
+            let rule = "two standing declarations and a silent host put the observers in self-suspicion";
+            host_tests::the_two_held_case_fails_when_declarations_count_on(root, rule)
+        }),
+        (
+            "declared-three",
+            1,
+            host_tests::three_declaring_hosts_nominate_none_on_declared_evidence_on,
+        ),
+        ("declared-three-control", 1, |root| {
+            let rule = "a detector nominated while three declarations stood";
+            host_tests::the_three_declarations_case_fails_without_the_brake_on(root, rule)
+        }),
     ];
     for (name, root, check) in checks {
         check(root);

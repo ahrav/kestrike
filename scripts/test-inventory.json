@@ -894,6 +894,7 @@
             "net::takeover_history_tests::fleet::volume_tests::the_volume_scenarios_pass_on_their_scheduled_roots_and_every_crash_cell",
             "net::takeover_history_tests::fleet::zone_tests::the_zone_scenarios_pass_on_their_scheduled_roots",
             "net::takeover_history_tests::fleet::repair_tests::the_repair_and_host_scenarios_pass_on_their_scheduled_roots",
+            "net::takeover_history_tests::fleet::tests::the_restart_host_loss_and_replay_checks_pass_on_their_scheduled_roots",
             "net::takeover_history_tests::fleet::alarm_tests::every_scenario_fires_its_expected_alarm_set_on_its_scheduled_root"
           ],
           "member": "^fleet: scheduled (\\S.* root [0-9]+): pass$",
@@ -965,6 +966,14 @@
           "repair-and-host takeover-unknown-committed root 1",
           "repair-and-host handoff root 2",
           "repair-and-host handoff-ended root 2",
+          "repair-and-host emit-once-sibling root 1",
+          "repair-and-host role-read-sibling root 1",
+          "repair-and-host held-status root 1",
+          "repair-and-host actor-replay-siblings root 1",
+          "repair-and-host declared-two-held root 1",
+          "repair-and-host declared-two-held-control root 1",
+          "repair-and-host declared-three root 1",
+          "repair-and-host declared-three-control root 1",
             "repair-and-host enroll-reserve-committed root 1",
             "repair-and-host enroll-reserve-lost root 1",
             "repair-and-host enroll-record-acknowledged root 1",
@@ -990,6 +999,12 @@
             "repair-and-host fresh-designate-acknowledged root 1",
             "repair-and-host fresh-designate-committed root 1",
             "repair-and-host fresh-designate-lost root 1",
+            "roots-and-replays restarts-six root 2",
+            "roots-and-replays restarts-six root 3",
+            "roots-and-replays host-loss root 2",
+            "roots-and-replays host-loss-replay root 3",
+            "roots-and-replays repair-replay root 1",
+            "roots-and-replays impaired-replay root 1",
             "alarms-host-loss root 1",
             "alarms-partition-loss root 1",
             "alarms-partition-loss-at root 1",
@@ -1060,7 +1075,8 @@
           "witnesses": [
             "^fleet: scheduled volume: 11 checks and 21 crash cells passed$",
             "^fleet: scheduled zone: 3 checks passed$",
-            "^fleet: scheduled repair-and-host: 32 checks and 25 crash cells passed$",
+            "^fleet: scheduled repair-and-host: 40 checks and 25 crash cells passed$",
+            "^fleet: scheduled roots-and-replays: 6 checks passed$",
             "^fleet: scheduled alarms: 64 sets passed, 1 not run, 27 not judged, 2 controls failed by the rule$"
           ]
         }

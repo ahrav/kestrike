@@ -975,21 +975,30 @@ fn a_generation_rise_onto_a_host_other_than_the_spares_fails_the_named_successor
     assert_ne!(onto_the_spare.rule(), Some(hosts::UNNAMED_SUCCESSOR));
 }
 
-/// A volume run draws the loss window's GETs, replays its tape to an equal report, and a tape one byte short is
-/// refused.
+/// A volume run's tape one byte short is refused, on root 1; the scheduled case replays the run to an equal report.
 #[test]
-fn a_volume_run_replays_its_recording_and_a_short_tape_is_refused() {
-    replays_and_refuses_a_short_tape(&Config::impaired(1));
+fn a_volume_run_s_tape_one_byte_short_is_refused() {
+    let config = Config::impaired(1);
+    refuses_a_short_tape(&config, passing(&config).recording());
+}
+
+/// `short`, a recording of `config`'s run, is refused as `Short` once its tape lacks its last byte.
+fn refuses_a_short_tape(config: &Config, mut short: Recording) {
+    short.tape.truncate(short.tape.len() - 1);
+    let refused = replay(config, &short);
+    let short = crate::sim::choice::ChoiceError::Short;
+    assert!(
+        matches!(&refused, Err(Stopped::Choice(refusal)) if refusal.error == short),
+        "{refused:?}"
+    );
 }
 
 /// `config`'s run replays its tape to an equal report, and a tape one byte short is refused.
-fn replays_and_refuses_a_short_tape(config: &Config) {
+pub(super) fn replays_and_refuses_a_short_tape(config: &Config) {
     let report = passing(config);
-    assert_eq!(replay(config, &report.recording()), Ok(report.clone()));
-    let mut short = report.recording();
-    short.tape.truncate(short.tape.len() - 1);
-    let refused = replay(config, &short);
-    assert!(matches!(refused, Err(Stopped::Choice(_))), "{refused:?}");
+    let recording = report.recording();
+    assert_eq!(replay(config, &recording), Ok(report));
+    refuses_a_short_tape(config, recording);
 }
 
 /// F5 lets a served shard carry `VolumeImpaired`, the reconciler's retention of an impaired volume its tenure serves

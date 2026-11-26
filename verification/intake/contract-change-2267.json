@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2267",
+  "kind": "contract-change",
+  "pull_request": 2267,
+  "changed": "The invariant of fleet-zone-loss-retains-every-volume-and-each-returning-owner-fences-before-its-first-admission, whose store-history clause now allows a volume-record commit of zone 1 that ends a non-role host's attach (decision L413); the invariants of fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure, fleet-host-driver-keeps-no-epoch-reuse-one-exit-named-standby-and-the-health-rule and fleet-zone-repair-and-host-scenarios-pass-on-their-second-root, whose limits name the checks that moved to the search-nightly row fleet-scheduled-roots and, for the first two, the search-nightly records that credit them; and two new records, fleet-restart-host-loss-and-replay-checks-pass-on-their-scheduled-roots and fleet-declared-holds-leave-the-self-suspicion-count-and-brake-nominations-at-three.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-zone-loss-retains-every-volume-and-each-returning-owner-fences-before-its-first-admission",
+    "reason": "Its invariant states the new contract: while zone 1 is down the store history holds no commit of a shard record or replacement receipt of zone 1 and no volume-record commit of zone 1 other than the end of a non-role host's attach, which FP-LOOP-10 permits because it holds new attaches only. The record states that no scenario on this tree ends such an attach inside the outage and that the rule DOWN_ZONE_WRITE still fails every volume-record commit, so the zone-loss case on root 1 passes under the narrower and the wider clause alike; the other changed invariants move checks between tiers and keep their assertions."
+  }
+}
