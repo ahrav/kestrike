@@ -56,6 +56,8 @@ pub(crate) enum Refused {
     Cap(u16),
     /// A roles bound outside `1..=LIMITS.roles`.
     RolesMax(u32),
+    /// A host share outside `1..=SHARE_BYTES`, the design's share.
+    ShareBytes(u64),
 }
 
 /// Refuses a tenure count outside `1..=LIMITS.tenures`: the tenure slots a repair scenario allocates, whose count
@@ -111,6 +113,9 @@ impl Shape {
         }
         if !(1..=LIMITS.roles).contains(&self.roles_max) {
             return Err(Refused::RolesMax(self.roles_max));
+        }
+        if !(1..=super::SHARE_BYTES).contains(&self.share_bytes) {
+            return Err(Refused::ShareBytes(self.share_bytes));
         }
         Ok(())
     }

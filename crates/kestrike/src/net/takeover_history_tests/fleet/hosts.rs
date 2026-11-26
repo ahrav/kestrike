@@ -2942,7 +2942,8 @@ impl<'c> Fleet<'c> {
         let objects = self.config.shape.objects;
         let first = (1..=objects).find(|n| !self.cells[at].invalidated.contains(n));
         let serving = live[at].as_mut().expect("the recovered tenure");
-        let peak_bytes = serving.owner.recovery_report().io_peak_bytes;
+        let recovery = serving.owner.recovery_report();
+        let (peak_bytes, saturated) = (recovery.io_peak_bytes, recovery.io_saturated_windows);
         let share = share_of(serving.storage);
         let mut read_bytes = super::device_reads(serving);
         if after_loss
@@ -2993,6 +2994,7 @@ impl<'c> Fleet<'c> {
             share,
             peak_bytes,
             read_bytes,
+            saturated,
         });
         Ok(())
     }

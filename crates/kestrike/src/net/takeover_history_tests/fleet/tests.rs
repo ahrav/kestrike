@@ -345,10 +345,11 @@ fn a_topology_past_a_limit_is_refused_before_any_draw_or_allocation() {
         placing: Placing::Drawn,
         cap: 32,
         roles_max: LIMITS.roles,
+        share_bytes: super::SHARE_BYTES,
     };
     assert_eq!(largest.check(), Ok(()));
     type Case = (fn(&mut Shape), Refused);
-    let cases: [Case; 19] = [
+    let cases: [Case; 21] = [
         (|s| s.zones = 3, Refused::Zones(3)),
         (|s| s.zones = 0, Refused::Zones(0)),
         (|s| s.partitions = 8, Refused::Partitions(8)),
@@ -370,6 +371,11 @@ fn a_topology_past_a_limit_is_refused_before_any_draw_or_allocation() {
         (|s| s.cap = 33, Refused::Cap(33)),
         (|s| s.roles_max = 0, Refused::RolesMax(0)),
         (|s| s.roles_max = 65, Refused::RolesMax(65)),
+        (|s| s.share_bytes = 0, Refused::ShareBytes(0)),
+        (
+            |s| s.share_bytes = super::SHARE_BYTES + 1,
+            Refused::ShareBytes(super::SHARE_BYTES + 1),
+        ),
         (
             |s| s.placing = Placing::Tiny,
             Refused::Placing(Placing::Tiny),
@@ -424,7 +430,7 @@ fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_45_and_50_to_56
 #[test]
 fn the_identity_changes_with_every_field_of_a_configuration() {
     let base = Config::six(1).hostile(Plant::TwinTenure, 0);
-    let edits: [fn(&mut Config); 16] = [
+    let edits: [fn(&mut Config); 17] = [
         |c| c.root = 2,
         |c| c.shape.zones = 2,
         |c| c.shape.partitions = 2,
@@ -439,6 +445,7 @@ fn the_identity_changes_with_every_field_of_a_configuration() {
         |c| c.profile = Profile::Arm(faults::Hostile::Clock),
         |c| c.shape.cap = 5,
         |c| c.shape.roles_max = 5,
+        |c| c.shape.share_bytes = 24_576,
         |c| c.scenario = hosts::Scenario::Reenroll,
         |c| {
             let cell = super::reconcile::CrashCell::all()[1];
@@ -451,7 +458,7 @@ fn the_identity_changes_with_every_field_of_a_configuration() {
         edit(&mut config);
         identities.insert(config.identity());
     }
-    assert_eq!(identities.len(), 17);
+    assert_eq!(identities.len(), 18);
     let cells = super::reconcile::CrashCell::all().into_iter();
     let crashes: BTreeSet<String> = cells
         .map(|cell| Config::crash(1, cell).identity())
@@ -1059,6 +1066,7 @@ fn a_swept_tenure_is_accounted_only_with_every_object_served_and_none_excused() 
         },
         peak_bytes: 1,
         read_bytes: 0,
+        saturated: 0,
     };
     let whole = Preserved {
         tenure,
@@ -1529,6 +1537,7 @@ fn each_placement_takes_a_least_loaded_owner_and_a_standby_outside_its_partition
         placing: Placing::Drawn,
         cap: 4,
         roles_max: super::ROLES_MAX,
+        share_bytes: super::SHARE_BYTES,
     };
     for root in [1, 2, 3] {
         let topology = Topology::draw(&shape, &mut Draws::record(root)).unwrap();

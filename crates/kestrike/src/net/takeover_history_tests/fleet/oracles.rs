@@ -41,6 +41,9 @@ pub(crate) const WITHDRAWN: &str = "a tenure that no fault deposed stopped servi
 pub(crate) const ROLES: &str = "a host's roles exceed the owners its recovery share divides over";
 pub(crate) const READS: &str = "a host's recovery reads passed twice its share";
 pub(crate) const UNCHARGED: &str = "no recovery charged its share";
+pub(crate) const UNREFUSED: &str =
+    "a recovery load met no share window whose limiter refused a charge";
+pub(crate) const NO_LOAD: &str = "no recovery load was judged against its limiter";
 
 pub(crate) const STORE_REQUEST: &str =
     "an untouched shard's records took a store request other than its own record views";
@@ -324,6 +327,21 @@ pub(crate) fn within_share(hosts: &[HostUse]) -> Verdict {
     }
     if hosts.iter().all(|host| host.peak_bytes == 0) {
         return Verdict::Unrun(UNCHARGED);
+    }
+    Verdict::Pass
+}
+
+/// Judges recovery loads that a scenario sizes above their owner's part of the host share: each reports a share
+/// window in which its limiter refused a charge. A load whose limiter admitted every charge fails by `UNREFUSED`,
+/// and an empty list is `Unrun`.
+pub(crate) fn meets_limiter(loads: &[super::Recovered]) -> Verdict {
+    if let Some(load) = loads.iter().find(|load| load.saturated == 0) {
+        let (host, share) = (load.host.get(), load.share);
+        let at = format!("host {host} share {} over {}", share.bytes, share.owners);
+        return fail(UNREFUSED, at);
+    }
+    if loads.is_empty() {
+        return Verdict::Unrun(NO_LOAD);
     }
     Verdict::Pass
 }

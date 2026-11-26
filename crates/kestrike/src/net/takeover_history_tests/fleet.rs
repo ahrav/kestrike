@@ -129,7 +129,9 @@ pub(crate) const SETTLE_ROUNDS: u64 = 64;
 const WAIT_ROUNDS: u32 = 8_000;
 const FIRST_KEY_EPOCH: u64 = 16;
 const FIRST_HOST_ID: u8 = 0x40;
-const SHARE_BYTES: u64 = 1 << 22;
+pub(crate) const SHARE_BYTES: u64 = 1 << 22;
+/// The host share of [`Config::limited`], under which a takeover's recovery load meets its limiter.
+pub(crate) const LIMITED_SHARE_BYTES: u64 = 32_768;
 const SHARE_INTERVAL_US: u64 = 10 * ROUND_US;
 /// The tenure slots each host holds beyond its seeded roles when reconcilers run, for loads of shards it was
 /// designated for during the run.
@@ -315,6 +317,7 @@ impl Config {
             placing: Placing::Drawn,
             cap: 6,
             roles_max: ROLES_MAX,
+            share_bytes: SHARE_BYTES,
         };
         Self {
             root,
@@ -337,6 +340,7 @@ impl Config {
             placing: Placing::Drawn,
             cap: 4,
             roles_max: ROLES_MAX,
+            share_bytes: SHARE_BYTES,
         };
         Self {
             shape,
@@ -356,6 +360,7 @@ impl Config {
             placing: Placing::Small,
             cap: 6,
             roles_max: ROLES_MAX,
+            share_bytes: SHARE_BYTES,
         };
         Self {
             shape,
@@ -388,6 +393,7 @@ impl Config {
             placing: Placing::Tiny,
             cap: 2,
             roles_max: ROLES_MAX,
+            share_bytes: SHARE_BYTES,
         };
         Self {
             shape,
@@ -408,6 +414,7 @@ impl Config {
             placing: Placing::Az,
             cap: 6,
             roles_max: ROLES_MAX,
+            share_bytes: SHARE_BYTES,
         };
         Self {
             shape,
@@ -614,6 +621,17 @@ impl Config {
         }
     }
 
+    /// [`Config::host_loss`] under a host share of 32 KiB a share interval, [`LIMITED_SHARE_BYTES`] in place of
+    /// [`SHARE_BYTES`]'s 4 MiB. H3, which takes s0 and s1 over and owns s3, divides it over its three roles, so each
+    /// owner's part is 10,922 bytes an interval, and a takeover's recovery reads more than that. A share whose part
+    /// falls below a recovery's largest bulk charge plus the reserve refuses the attach
+    /// (`AttachError::RecoveryLimits`): 24 KiB over H0's four roles does, and the run never acknowledges its boot.
+    pub(crate) fn limited(root: u64) -> Self {
+        let mut config = Self::host_loss(root);
+        config.shape.share_bytes = LIMITED_SHARE_BYTES;
+        config
+    }
+
     /// `small`'s two-host partition loss ([`Scenario::PartitionLoss`]), below the host agent's self-suspicion
     /// threshold.
     pub(crate) fn partition_loss(root: u64) -> Self {
@@ -700,6 +718,7 @@ impl Config {
                     placing,
                     cap,
                     roles_max,
+                    share_bytes,
                 },
             requests,
             profile,
@@ -714,6 +733,7 @@ impl Config {
         bytes.extend([objects, reconcilers, placing.code()]);
         bytes.extend(cap.to_le_bytes());
         bytes.extend(roles_max.to_le_bytes());
+        bytes.extend(share_bytes.to_le_bytes());
         bytes.extend(requests.to_le_bytes());
         bytes.extend(scenario.code());
         match profile {
@@ -737,7 +757,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v21-inbox";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v22-inbox";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -755,6 +775,8 @@ pub(crate) struct Recovered {
     pub(crate) peak_bytes: u64,
     /// The read bytes the device double accepted from the attach until the client session opened.
     pub(crate) read_bytes: u64,
+    /// The share windows in which the owner's recovery limiter refused a charge (`io_saturated_windows`).
+    pub(crate) saturated: u64,
 }
 
 /// The GETs drawn for a shard while another shard recovered, and those it served with exact bytes.
@@ -2500,7 +2522,7 @@ impl<'c> Fleet<'c> {
     fn share_of(&self, member: usize, index: usize) -> HostShare {
         let whole = self.config.planted_at(Plant::WholeShare, index);
         HostShare {
-            bytes: SHARE_BYTES,
+            bytes: self.config.shape.share_bytes,
             interval: SHARE_INTERVAL_US,
             owners: match whole {
                 true => 1,

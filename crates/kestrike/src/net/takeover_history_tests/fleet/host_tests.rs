@@ -2222,6 +2222,64 @@ fn a_flat_progress_plant_on_a_host_with_no_tenure_changes_nothing() {
     assert!(matches!(report.credit(), Verdict::Unrun(_)));
 }
 
+/// H3's takeovers of s0 and s1 in a host-loss run, each the last recovery of its shard.
+fn h3_takeovers(report: &Report) -> [Recovered; 2] {
+    assert_eq!(taken(report), [(1, H3), (2, H3), (3, H5)]);
+    [0, 1].map(|at| {
+        let recovery = *report.shards[at].recoveries.last().unwrap();
+        assert_eq!(recovery.host.get(), H3, "s{at}");
+        assert_eq!(recovery.share.owners, 3, "s{at}");
+        recovery
+    })
+}
+
+/// `Shape::share_bytes` sets each host's share per interval: 32 KiB with `Config::limited`. H3 splits its 32 KiB
+/// share among three roles, giving each owner a budget of 10,922 bytes per share interval. Under that budget each
+/// of H3's takeovers of s0 and s1 reports a share window in which its limiter refused a charge, so the limiter check
+/// passes for both. Both takeovers serve their full sweeps. Roots 1 and 2 give the same result.
+#[test]
+fn a_recovery_load_above_its_part_of_a_small_host_share_meets_a_refused_charge_and_still_loads_warm()
+ {
+    for root in [1, 2] {
+        let limited = passing(&Config::limited(root));
+        let loads = h3_takeovers(&limited);
+        for (at, recovery) in loads.iter().enumerate() {
+            assert_eq!(recovery.share.bytes, 32_768, "root {root} s{at}");
+            assert!(
+                recovery
+                    .sweep
+                    .is_some_and(|(of, served)| of > 0 && of == served),
+                "root {root} s{at}: {recovery:?}"
+            );
+        }
+        let met = oracles::meets_limiter(&loads);
+        assert_eq!(met, Verdict::Pass, "root {root}");
+        let within = &limited.verdicts.within_share;
+        assert_eq!(within, &Verdict::Pass, "root {root}");
+    }
+}
+
+/// Under `Config::host_loss`'s 4 MiB share the limiter admits every charge of the same two takeovers, so each
+/// reports zero windows with a refused charge and fails the limiter check by its rule, on roots 1 and 2. The check
+/// is unrun over no load.
+#[test]
+fn host_loss_under_the_4_mib_share_fails_the_limiter_check_with_no_refused_charge() {
+    let unrefused = "a recovery load met no share window whose limiter refused a charge";
+    for root in [1, 2] {
+        let unlimited = passing(&Config::host_loss(root));
+        for (at, free) in h3_takeovers(&unlimited).iter().enumerate() {
+            assert_eq!(free.share.bytes, SHARE_BYTES, "root {root} s{at}");
+            assert_eq!(free.saturated, 0, "root {root} s{at}: {free:?}");
+            let failed = oracles::meets_limiter(std::slice::from_ref(free));
+            let at_host = format!("host {H3} share {SHARE_BYTES} over 3");
+            let rule = Verdict::Fail(unrefused, at_host);
+            assert_eq!(failed, rule, "root {root} s{at}");
+        }
+    }
+    let unrun = Verdict::Unrun("no recovery load was judged against its limiter");
+    assert_eq!(oracles::meets_limiter(&[]), unrun);
+}
+
 /// A restart whose bump's reply is unknown ends `Exit::Held`, and the process publishes the `Held` status with its
 /// refusal's class in a host scenario with no reconciler too: H3 crashes and returns two rounds later, before a
 /// suspicion, and its restart's bump of s3 times out with no commit. H3's host reads itself unhealthy (s3 exempt),

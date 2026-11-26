@@ -17,6 +17,8 @@ use super::draws::{self, Draws, Refusal, Tag};
 /// placed. `cap` limits the number of shards each zone's standby census lists. `roles_max` is the one static bound
 /// on a host's roles, owned shards and census entries together: it divides the host's recovery share in a
 /// reconciler scenario and sets the zone directory's `host_roles_max`.
+/// `share_bytes` is each host's recovery device bytes per share interval (`HostShare::bytes`), which the host's
+/// owners divide: [`SHARE_BYTES`](super::SHARE_BYTES) in every layout but the limited one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Shape {
     pub(crate) zones: u16,
@@ -28,6 +30,7 @@ pub(crate) struct Shape {
     pub(crate) placing: Placing,
     pub(crate) cap: u16,
     pub(crate) roles_max: u32,
+    pub(crate) share_bytes: u64,
 }
 
 /// How [`Topology::draw`] places the shards.

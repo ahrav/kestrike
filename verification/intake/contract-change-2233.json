@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2233",
+  "kind": "contract-change",
+  "pull_request": 2233,
+  "changed": "The invariant of the obligation record fleet-host-loss-keeps-each-hosts-recovery-reads-within-its-share. It gains the limited shape: under Shape::share_bytes of 32 KiB a share interval, where every other layout holds 4 MiB, H3 divides its share over three roles and each of H3's takeovers of s0 and s1 meets a share window whose limiter refused a charge, which the limiter check oracles::meets_limiter judges, while each still loads warm and serves and the host-share check passes. The same two takeovers under the 4 MiB share fail the limiter check by the rule \"a recovery load met no share window whose limiter refused a charge\". The LIMITS state that the host-share check sums each host's largest load against twice its share and judges no single share window, that outside the limited shape a limiter that admits every charge passes it, that the limited shape's loads run one at a time on H3, that the limiter check's control is the 4 MiB twin, and that the check reads the owner's own count of refused windows and derives no refusal from the device double's capture.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-host-loss-keeps-each-hosts-recovery-reads-within-its-share",
+    "reason": "Its invariant states the new contract: a recovery load sized above its owner's part of the host share meets a share window whose limiter refused a charge and still loads warm. Before this change the invariant credited the owner count each tenure attaches under and the summed reads against twice the share, and no run brought a load to its limiter. The record's controls name the 4 MiB control host_loss_under_the_4_mib_share_fails_the_limiter_check_with_no_refused_charge with that rule text."
+  }
+}
