@@ -735,20 +735,37 @@ pub(crate) fn pairs_committed(histories: &[VolumeHistory], read: &PairRead) -> V
     fail(UNCOMMITTED_PAIRS, at)
 }
 
-/// Whether a committed version of the volume record ends `host`'s live attach in place: the host's live attach entry
-/// in one version is its entry at the same sequence number with kind `Ended` in the next. A detach, a force detach,
-/// a direct `Gone` or a removed entry ends no attach here, and neither does the end of another host's entry.
+/// Whether a committed version of the volume record ends `host`'s live attach in place: its live attach entry in
+/// one version is its entry at the same sequence number with kind `Ended` in the next. A detach, a force detach, a
+/// direct `Gone`, a removed entry and another host's entry end no attach here.
 pub(crate) fn attach_ended(versions: &[(u64, VolumeRecord)], host: Host) -> bool {
     versions.windows(2).any(|pair| {
         let (before, after) = (&pair[0].1, &pair[1].1);
-        let seq = before.live(host);
-        seq.is_some()
-            && (after.events.iter()).any(|event| {
-                Some(event.seq) == seq
+        before.live(host).is_some_and(|seq| {
+            (after.events.iter()).any(|event| {
+                event.seq == seq
                     && event.host == host
                     && event.kind == crate::failover::records::EventKind::Ended
             })
+        })
     })
+}
+
+/// The host of the first committed version's live attach outside the roles of `record`, the shard record seeded
+/// with it: the third attach of a seeded volume. `None` unless that version is `record`'s active volume and holds
+/// exactly three live attaches, the owner's and the named standby's among them.
+pub(crate) fn third_attach(versions: &[(u64, VolumeRecord)], record: &ShardRecord) -> Option<Host> {
+    let (_, first) = versions.first()?;
+    let standby = record.standby?;
+    let live: Vec<Host> = first.live_hosts().collect();
+    let seeded = first.volume == record.active
+        && live.len() == 3
+        && live.contains(&record.owner)
+        && live.contains(&standby);
+    let third = live
+        .into_iter()
+        .find(|&host| host != record.owner && host != standby);
+    third.filter(|_| seeded)
 }
 
 /// The most live attaches over the committed versions of `volume`, zero when the history lacks it.

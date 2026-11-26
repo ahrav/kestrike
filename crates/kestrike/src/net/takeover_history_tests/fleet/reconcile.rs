@@ -268,8 +268,7 @@ pub(crate) struct SettlePhase {
 }
 
 /// Tuple fields, by position:
-/// `reclaims` (shard, phase); `ended` (shard, host) of each `End` step that advanced; `refusals` (sequence, shard,
-/// outcome); `blockers` (sequence, shard, blocker, the
+/// `reclaims` (shard, phase, host of the step); `refusals` (sequence, shard, outcome); `blockers` (sequence, shard, blocker, the
 /// sequence of the refusal it names); `crash_writes` (count before, count at the crash) of the cut effect, in commits
 /// of the written key for a store write and in attachment-listing length for an attach request; `fulls` (shard,
 /// need, whether the zone double lists the owner running, census length) at the first `CensusFull` row of each need;
@@ -289,8 +288,7 @@ pub(crate) struct ReconLog {
     pub(crate) refused_full: u32,
     pub(crate) condition: u32,
     pub(crate) releases: u32,
-    pub(crate) reclaims: Vec<(u32, Reclaim)>,
-    pub(crate) ended: Vec<(u32, u64)>,
+    pub(crate) reclaims: Vec<(u32, Reclaim, u64)>,
     pub(crate) designations: Vec<Designation>,
     pub(crate) refusals: Vec<(u64, u32, Refused)>,
     pub(crate) blockers: Vec<(u64, u32, Blocker, Option<u64>)>,
@@ -1434,7 +1432,8 @@ impl Fleet<'_> {
     fn retire_lost(&mut self) {
         let shard = super::hosts::ATTACH_CELL as u32 + 1;
         let acted = match self.config.scenario {
-            Scenario::AttachClosed => self.recon.reclaims.contains(&(shard, Reclaim::End)),
+            Scenario::AttachClosed => (self.recon.reclaims.iter())
+                .any(|&(of, phase, _)| of == shard && phase == Reclaim::End),
             _ => false,
         };
         let due = self.recon.zone_held >= RETIRE_TICKS && acted && self.recon.retired.is_empty();
@@ -1681,14 +1680,13 @@ impl Fleet<'_> {
                 }
                 (Step::Release { .. }, Verdict::Advance) => self.recon.releases += 1,
                 (Step::End { host, .. }, Verdict::Advance) => {
-                    self.recon.reclaims.push((shard.get(), Reclaim::End));
-                    self.recon.ended.push((shard.get(), host.get()));
+                    (self.recon.reclaims).push((shard.get(), Reclaim::End, host.get()));
                 }
-                (Step::Detach { .. }, Verdict::Advance) => {
-                    self.recon.reclaims.push((shard.get(), Reclaim::Detach));
+                (Step::Detach { host, .. }, Verdict::Advance) => {
+                    (self.recon.reclaims).push((shard.get(), Reclaim::Detach, host.get()));
                 }
-                (Step::ReleaseAttach { .. }, Verdict::Advance) => {
-                    self.recon.reclaims.push((shard.get(), Reclaim::Release));
+                (Step::ReleaseAttach { host, .. }, Verdict::Advance) => {
+                    (self.recon.reclaims).push((shard.get(), Reclaim::Release, host.get()));
                 }
                 (step, verdict @ (Verdict::Wait(_) | Verdict::Alarm(_)))
                     if !matches!(verdict, Verdict::Wait(Reason::Budget | Reason::Settling)) =>

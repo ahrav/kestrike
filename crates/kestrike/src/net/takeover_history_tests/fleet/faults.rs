@@ -76,6 +76,10 @@ pub(crate) enum Action {
     /// The stalled volume of the shard at this cell index completes commands again, and each process of the shard
     /// that ended `Exit::Held` runs its next incarnation at once, as its supervisor starts it.
     Rerun(usize),
+    /// The device of the volume of the shard at this cell index keeps one command of the next recovery fencer that
+    /// builds its table there: that fencer's release submits a Report first, so a sequence that succeeds ends
+    /// `Exit::Held` with no refusal (DEVICE-FAILURE-HOLD in `host::recover`), and the table goes to the proven stop.
+    KeepCommand(usize),
     /// The planned handoff of the shard at this cell index: its serving owner withdraws for a planned exit and the
     /// transfer to its named standby commits (`Fleet::hand_off`). With `ended`, the standby's attach ends after the
     /// transfer's reads and before its write, so the committed record names an ended target.
@@ -160,9 +164,11 @@ impl Kind {
             Action::Store(_) | Action::StoreWrite(_) => Self::StoreArm,
             Action::Outage => Self::StoreOutage,
             Action::Register(_) => Self::Hostile(Hostile::ForeignRegistrant),
-            Action::Stall(_) | Action::LoseVolume(_) | Action::Impair(_) | Action::Rerun(_) => {
-                Self::Volume
-            }
+            Action::Stall(_)
+            | Action::LoseVolume(_)
+            | Action::Impair(_)
+            | Action::Rerun(_)
+            | Action::KeepCommand(_) => Self::Volume,
             Action::Release(_) => Self::OperatorRelease,
             Action::Handoff { .. } => Self::Handoff,
         }
@@ -298,6 +304,7 @@ pub(crate) enum Effect {
     Impair(usize, bool),
     Release(usize),
     Rerun(usize),
+    KeepCommand(usize),
     /// The planned handoff of the cell at the index; `true` ends the target's attach inside the transfer.
     Handoff(usize, bool),
 }
@@ -489,11 +496,13 @@ impl Faults {
             Action::Impair(at) => vec![Effect::Impair(*at, on)],
             Action::Release(at) if on => vec![Effect::Release(*at)],
             Action::Rerun(at) if on => vec![Effect::Rerun(*at)],
+            Action::KeepCommand(at) if on => vec![Effect::KeepCommand(*at)],
             Action::Handoff { at, ended } if on => vec![Effect::Handoff(*at, *ended)],
             Action::Register(_)
             | Action::LoseVolume(_)
             | Action::Release(_)
             | Action::Rerun(_)
+            | Action::KeepCommand(_)
             | Action::Handoff { .. } => Vec::new(),
         }
     }

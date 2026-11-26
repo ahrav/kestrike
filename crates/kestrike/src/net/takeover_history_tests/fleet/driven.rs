@@ -923,7 +923,7 @@ fn a_hold_after_a_recovery_that_served_counts_both_attempts() {
             });
             let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
             for attempts in [2, 3] {
-                fleet.held(0, member, super::volumes::Held::of_restart(refusal));
+                fleet.held(0, member, super::volumes::Held::of_restart(Some(refusal)));
                 let (_, held, _) = fleet.holds(&live, member).next().expect("the hold");
                 assert_eq!(held.status().recovery(0).attempts, Some(attempts));
             }

@@ -181,7 +181,7 @@ fn scenarios() -> Vec<(String, Config)> {
     use super::hosts::Unknown;
     use super::reconcile::CrashCell;
     use super::volumes::ReplaceCell;
-    let named: [(&str, Config); 36] = [
+    let named: [(&str, Config); 37] = [
         ("restarts", Config::six(1)),
         ("host-loss", Config::host_loss(1)),
         ("partition-loss", Config::partition_loss(1)),
@@ -198,6 +198,7 @@ fn scenarios() -> Vec<(String, Config)> {
         ("standby-loss", Config::standby_loss(1)),
         ("standby-silent", Config::standby_silent(1)),
         ("double-loss", Config::double_loss(1)),
+        ("quorum-loss", Config::quorum_loss(1)),
         ("partition-repair", Config::partition_repair(1)),
         ("partition-repair-at", Config::partition_repair_at(1)),
         ("census-full", Config::census_full(1)),
@@ -235,12 +236,12 @@ fn scenarios() -> Vec<(String, Config)> {
 /// Every scenario of the fleet on root 1, each run once: a scenario that states its set fires exactly it, holds its
 /// required outcome and witnesses (`hosts::expected`) on the same report, and prints one line; the restart scenario, whose hosts run no agent and seal no report, reads not run; the volume cases and
 /// the replacement cells read not judged. The fleet verdict over all of them reads incomplete, and over the scenarios
-/// that state a set and sealed records it passes. Three controls then fail by `ALARM_SET`: the double loss judged
+/// that state a set and sealed records it passes. Four controls then fail by `ALARM_SET`: the double loss judged
 /// against its set widened by `volume-lost` reads that row missing, and a settle under a census cap of five read
 /// through `Report::alarms` under the clean settle's configuration, whose set is empty, reads its two census rows
 /// extra; the standby-target scenario judged under a catalog without `no-standby-past-target` reads that row
-/// missing. The scenarios' names and configuration identities are distinct. The last line counts the three kinds and
-/// the controls.
+/// missing; and the quorum loss under `LostProbersCounted` (code 99) reads `quorum-unreachable` missing. The scenarios'
+/// names and configuration identities are distinct. The last line counts the three kinds and the controls.
 #[test]
 #[ignore = "every fleet scenario's alarm set on root 1; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
 fn every_scenario_fires_its_expected_alarm_set_on_its_scheduled_root() {
@@ -285,7 +286,7 @@ fn every_scenario_fires_its_expected_alarm_set_on_its_scheduled_root() {
         Verdict::Unrun(alarms::INCOMPLETE)
     );
     assert_eq!(alarms::fleet_verdict(&passed), Verdict::Pass);
-    assert_eq!((passed.len(), not_run, not_judged), (65, 1, 27));
+    assert_eq!((passed.len(), not_run, not_judged), (66, 1, 27));
     // A wrong expected set fails by the rule text: a fault scenario's set with a row its run does not fire, and the
     // clean scenario's empty set over a settle whose census cap lies below its shard count.
     let text = "the fired alarm rows differ from the scenario's expected set";
@@ -323,10 +324,42 @@ fn every_scenario_fires_its_expected_alarm_set_on_its_scheduled_root() {
     let at = "missing [\"no-standby-past-target\"] extra []".to_owned();
     assert_eq!(judged, Verdict::Fail(text, at));
     println!("fleet: scheduled alarms-control-past-target-row root 1: pass");
+    quorum_unreachable_control_on(1);
+    println!("fleet: scheduled alarms-control-quorum-unreachable-row root 1: pass");
     println!(
-        "fleet: scheduled alarms: {} sets passed, {not_run} not run, {not_judged} not judged, 3 controls failed by the rule",
+        "fleet: scheduled alarms: {} sets passed, {not_run} not run, {not_judged} not judged, 4 controls failed by the rule",
         passed.len()
     );
+}
+
+/// The quorum-loss scenario under `LostProbersCounted` (code 99): the zone loop counts the lost H4 among s2's
+/// possible probers, so its status names no `quorum-unreachable` blocker, and the run's records judged against the
+/// scenario's set read that row missing.
+fn quorum_unreachable_control_on(root: u64) {
+    let text = "the fired alarm rows differ from the scenario's expected set";
+    let config = Config::quorum_loss(root).hostile(Plant::LostProbersCounted, 0);
+    let planted = run_shared(&config).expect("a run that ends");
+    let expected = alarms::expected(&Config::quorum_loss(root));
+    let judged = alarms::judged(&planted.alarm_log, &catalog(), expected, true);
+    let at = "missing [\"quorum-unreachable\"] extra []".to_owned();
+    assert_eq!(judged, Verdict::Fail(text, at));
+}
+
+/// The quorum-loss scenario fires its stated set, `quorum-unreachable` among it, and holds its outcome and
+/// witnesses on root 1. Its live control, `quorum_unreachable_control_on`, runs in the scheduled alarm case.
+#[test]
+fn the_quorum_loss_scenario_fires_its_set_with_quorum_unreachable() {
+    let report = run_shared(&Config::quorum_loss(1)).expect("a run that ends");
+    assert_eq!(report.alarms(), Verdict::Pass, "{}", report.summary());
+    assert_eq!(report.credit(), Verdict::Pass, "{}", report.summary());
+    assert_eq!(
+        hosts::expected(&report),
+        Verdict::Pass,
+        "{}",
+        report.summary()
+    );
+    let stated = alarms::expected(&Config::quorum_loss(1));
+    assert!(matches!(stated, Expected::Rows(rows) if rows.contains(&"quorum-unreachable")));
 }
 
 /// The report's digest covers the alarm log: an edit of one sealed byte, of either refused-seal count or of the
@@ -374,7 +407,7 @@ fn a_sealer_counts_an_early_tick_apart_from_any_other_refusal() {
 
 /// The catalog rows, in catalog order, that no judged scenario's expected set holds: the fleet's alarm oracle
 /// judges each of them by its absence alone, as an extra row of a run that fires it.
-const UNJUDGED: [&str; 41] = [
+const UNJUDGED: [&str; 40] = [
     "store-instance-change",
     "hold-recorded-holder",
     "hold-no-holder",
@@ -400,7 +433,6 @@ const UNJUDGED: [&str; 41] = [
     "enumeration-unlisted",
     "replacement-held",
     "replacement-exhausted",
-    "quorum-unreachable",
     "volume-lost",
     "volume-unnamed",
     "report-forged",

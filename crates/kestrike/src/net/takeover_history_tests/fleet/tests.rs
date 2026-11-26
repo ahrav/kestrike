@@ -418,21 +418,21 @@ fn a_request_count_past_one_peers_allowance_is_refused_before_any_draw() {
 }
 
 #[test]
-fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_to_45_50_to_59_95_to_97_118_and_119()
+fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_to_45_50_to_59_95_to_99_118_and_119()
  {
     let codes: Vec<u8> = Plant::ALL.iter().map(|plant| plant.code()).collect();
     assert_eq!(
         codes,
         [
             13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 95, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53,
-            54, 55, 56, 57, 58, 59, 41, 42, 43, 44, 96, 119, 118, 97
+            54, 55, 56, 57, 58, 59, 41, 42, 43, 44, 96, 119, 118, 97, 98, 99
         ]
     );
     let identities: BTreeSet<String> = (Plant::ALL.iter())
         .map(|plant| Config::six(1).hostile(*plant, 0).identity())
         .chain([Config::six(1).identity()])
         .collect();
-    assert_eq!(identities.len(), 37);
+    assert_eq!(identities.len(), 39);
 }
 
 #[test]
@@ -1677,6 +1677,18 @@ fn a_run_refuses_an_armed_fault_control_by_name_and_restores_inline_recovery() {
         refused.contains("a host agent plant is armed"),
         "fresh-latch: {refused}"
     );
+    crate::host::fencer::KEEPS_COMMAND.with(|keeps| keeps.set(true));
+    let refused = message(&|| run(&config));
+    crate::host::fencer::KEEPS_COMMAND.with(|keeps| keeps.set(false));
+    assert!(refused.contains("KEEPS_COMMAND is armed"), "{refused}");
+    let lost = &crate::failover::zone_loop::plan::LOST_PROBERS_COUNTED;
+    lost.with(|counted| counted.set(true));
+    let refused = message(&|| run(&config));
+    lost.with(|counted| counted.set(false));
+    assert!(
+        refused.contains("LOST_PROBERS_COUNTED is armed"),
+        "{refused}"
+    );
     crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(true));
     let refused = message(&|| run(&config));
     crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(false));
@@ -2397,39 +2409,59 @@ fn the_attach_closed_witness_needs_the_committed_end_of_a_host_the_loop_ended() 
     assert_eq!(hosts::expected(&foreign), unrun);
 }
 
-/// The attach-closed witness reads the committed history of s2's volume: the run's history ends a live attach in
-/// place, the same versions with that entry detached, force-detached or gone instead end none, and
-/// the report altered to that history up to the version before the one that ends it reads the witness `Unrun`,
-/// though the loop's log still holds its `End` step.
+/// The attach-closed witness reads the committed history of s2's volume and the loop's log, both bound to the host
+/// of the third attach, H1: the run's history ends H1's live attach in place and the loop logs its `End` of H1. The
+/// same versions with that entry detached, force-detached or gone instead end none; an owner or standby attach the
+/// loss ends later is no third attach; the report altered to that history up to the version before the one that
+/// ends it reads the witness `Unrun`, though the loop's log still holds its `End` step; and the report whose loop
+/// logs the `End` under another host reads it `Unrun` too.
 #[test]
-fn the_attach_closed_witness_needs_a_committed_version_that_ends_the_attach() {
+fn the_attach_closed_witness_needs_a_committed_version_that_ends_the_third_attach() {
+    use crate::failover::records::{EventKind, Host, VolumeRecord};
     let closed = passing(&Config::attach_closed(1));
     assert_eq!(hosts::expected(&closed), Verdict::Pass);
     let volume = closed.shards[hosts::ATTACH_CELL].placement.volume;
     let at = (closed.evidence.volume_histories.iter()).position(|(of, _)| *of == volume);
     let at = at.expect("s2's volume history");
-    let shard = hosts::ATTACH_CELL as u32 + 1;
-    let ended = (closed.recon.ended.iter()).find(|(of, _)| *of == shard);
-    let host = Host::new(ended.expect("the loop's End step for s2").1).unwrap();
-    let histories = &closed.evidence.volume_histories;
-    assert!(oracles::attach_ended(&histories[at].1, host));
+    let history = &closed.evidence.volume_histories[at].1;
+    let (_, records) = &closed.evidence.histories[hosts::ATTACH_CELL];
+    let h1 = Host::new(1002).expect("a host");
+    assert_eq!(oracles::third_attach(history, &records[0]), Some(h1));
+    let ending_of = |versions: &[(u64, VolumeRecord)], host| {
+        (1..=versions.len()).find(|&len| oracles::attach_ended(&versions[..len], host))
+    };
+    let h1_ends = ending_of(history, h1).expect("the version that ends H1's attach");
+    let others: Vec<Host> = (history[0].1.live_hosts())
+        .filter(|&host| host != h1)
+        .collect();
+    assert_eq!(others.len(), 2, "the owner's and the standby's attaches");
+    for host in others {
+        let other = ending_of(&history[..h1_ends], host);
+        assert_eq!(other, None, "{host:?} ends no attach up to H1's end");
+    }
     let mut unended = closed.clone();
     let versions = &mut unended.evidence.volume_histories[at].1;
-    let first = (1..=versions.len()).find(|&len| oracles::attach_ended(&versions[..len], host));
-    let ending = first.expect("the version that ends the attach") - 1;
-    // The ending version with the entry detached, force-detached or gone in place of ended ends no attach.
-    use crate::failover::records::EventKind;
+    let ending = h1_ends - 1;
+    // The ending version with H1's entry detached, force-detached or gone in place of ended ends no attach of H1.
     for kind in [EventKind::Detach, EventKind::Force, EventKind::Gone] {
         let mut other = versions[..=ending].to_vec();
-        let ended =
-            (other[ending].1.events.iter_mut()).filter(|event| event.kind == EventKind::Ended);
+        let ended = (other[ending].1.events.iter_mut())
+            .filter(|event| event.kind == EventKind::Ended && event.host == h1);
         ended.for_each(|event| event.kind = kind);
-        assert!(!oracles::attach_ended(&other, host), "{kind:?}");
+        assert!(!oracles::attach_ended(&other, h1), "{kind:?}");
     }
     versions.truncate(ending);
-    assert!(!oracles::attach_ended(versions, host));
+    assert!(!oracles::attach_ended(versions, h1));
     // The reads of the versions the edit removed would fail their binding first; the edit judges the witness alone.
     unended.evidence.pair_reads.clear();
     let unrun = Verdict::Unrun("witness attach-ended missing");
     assert_eq!(hosts::expected(&unended), unrun);
+    // The loop's `End` of s2 logged under another host binds no step to H1.
+    let mut misnamed = closed.clone();
+    for entry in &mut misnamed.recon.reclaims {
+        if (entry.0, entry.1) == (3, super::reconcile::Reclaim::End) {
+            entry.2 = 1001;
+        }
+    }
+    assert_eq!(hosts::expected(&misnamed), unrun);
 }

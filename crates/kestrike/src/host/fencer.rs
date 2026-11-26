@@ -58,6 +58,25 @@ use crate::storage::{
     SelfPreempt, ServingClock, Terminal,
 };
 
+#[cfg(test)]
+thread_local! {
+    /// Whether the next [`Fencer::release`] of a fencer whose table is built submits one Report before it releases,
+    /// so the table it returns still owns that command. The release takes the flag.
+    pub(crate) static KEEPS_COMMAND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `table` with one Report submitted at `ordinal` when [`KEEPS_COMMAND`] is set. The flag clears once the table
+/// admitted the Report, and a refused submit leaves it set.
+#[cfg(test)]
+fn kept<D: Disk>(mut table: CommandTable<'_, D>, ordinal: u64) -> CommandTable<'_, D> {
+    if KEEPS_COMMAND.with(std::cell::Cell::get) {
+        let report = ReservationCommand::Report { not_before: 0 };
+        let admitted = table.submit_reservation(report, ordinal).is_ok();
+        KEEPS_COMMAND.with(|keeps| keeps.set(!admitted));
+    }
+    table
+}
+
 /// The device half of one recovery sequence while the sequence's volume is unattached.
 pub struct Fencer<'a, P: Platform, D: Disk, C> {
     arena: &'a BufferArena<P>,
@@ -163,13 +182,17 @@ impl<'a, P: Platform, D: Disk, C: FnOnce() -> Connected<D>> Fencer<'a, P, D, C> 
         match self.state {
             State::Unconnected(_) | State::Barred(_) => Release::Unconnected,
             State::Unready(disk) | State::Connected { disk, .. } => Release::Driver(disk),
-            State::Ready { table, .. } => match table.release_idle() {
-                Ok(disk) => Release::Driver(disk),
-                Err(mut table) => {
-                    table.close();
-                    Release::Outstanding(table)
+            State::Ready { table, .. } => {
+                #[cfg(test)]
+                let table = kept(table, self.ordinal);
+                match table.release_idle() {
+                    Ok(disk) => Release::Driver(disk),
+                    Err(mut table) => {
+                        table.close();
+                        Release::Outstanding(table)
+                    }
                 }
-            },
+            }
         }
     }
 

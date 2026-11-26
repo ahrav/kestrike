@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2298",
+  "kind": "contract-change",
+  "pull_request": 2298,
+  "changed": "The invariants of six records change. fleet-held-and-standby-statuses-come-from-the-owner-processes-and-a-gray-owner-is-not-nominated gains the held exit with no refusal (a restart and a takeover whose fencer keeps a command hold with no check and rerun; plant UnrefusedHold, code 98) and the standby status the production wait publishes, entry included. fleet-zone-repair-and-host-scenarios-pass-on-their-second-root gains the live UnrefusedHold control (51 repair-and-host checks, was 50; 81 member lines, was 80). fleet-alarm-sets-match-on-root-1-of-every-scenario gains the quorum-loss set and its LostProbersCounted (code 99) control (66 sets, was 65; 4 controls, was 3). fleet-alarm-oracle-judges-every-scenario-on-its-sealed-reports-and-statuses gains the quorum-loss case's fast test. fleet-alarm-rows-no-judged-scenario-expects drops quorum-unreachable from its list (40 rows, was 41). fleet-evidence-binds-each-volume-record-read-to-a-committed-version binds the attach-closed witness to the third attach's host.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-held-and-standby-statuses-come-from-the-owner-processes-and-a-gray-owner-is-not-nominated",
+    "reason": "Every Exit::Held is a hold whether or not its sequence refused, quorum-unreachable is judged in a scenario with a planted control, the attach-closed witness names the host whose attach ends, and the standby status the fleet sends is the one the production wait published."
+  }
+}

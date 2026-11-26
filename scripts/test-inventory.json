@@ -982,6 +982,7 @@
           "repair-and-host emit-once-sibling root 1",
           "repair-and-host role-read-sibling root 1",
           "repair-and-host held-status root 1",
+          "repair-and-host held-unrefused-control root 1",
           "repair-and-host actor-replay-siblings root 1",
           "repair-and-host declared-two-held root 1",
           "repair-and-host declared-two-held-control root 1",
@@ -1034,6 +1035,7 @@
             "alarms-standby-loss root 1",
             "alarms-standby-silent root 1",
             "alarms-double-loss root 1",
+            "alarms-quorum-loss root 1",
             "alarms-partition-repair root 1",
             "alarms-partition-repair-at root 1",
             "alarms-census-full root 1",
@@ -1086,14 +1088,15 @@
             "alarms-fresh-designate-lost root 1",
             "alarms-control-missing-row root 1",
             "alarms-control-extra-row root 1",
-            "alarms-control-past-target-row root 1"
+            "alarms-control-past-target-row root 1",
+            "alarms-control-quorum-unreachable-row root 1"
           ],
           "witnesses": [
             "^fleet: scheduled volume: 11 checks and 21 crash cells passed$",
             "^fleet: scheduled zone: 5 checks passed$",
-            "^fleet: scheduled repair-and-host: 50 checks and 25 crash cells passed$",
+            "^fleet: scheduled repair-and-host: 51 checks and 25 crash cells passed$",
             "^fleet: scheduled roots-and-replays: 7 checks passed$",
-            "^fleet: scheduled alarms: 65 sets passed, 1 not run, 27 not judged, 3 controls failed by the rule$"
+            "^fleet: scheduled alarms: 66 sets passed, 1 not run, 27 not judged, 4 controls failed by the rule$"
           ]
         }
       ]

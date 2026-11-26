@@ -248,6 +248,7 @@ ROW_LINES = {
                         "handoff-parked-withdraws root 1", "untouched-controls root 1", "whole-share root 1",
                         "host-loss-retention-controls root 1", "host-share-controls root 1",
                         "emit-once-sibling root 1", "role-read-sibling root 1", "held-status root 1",
+                        "held-unrefused-control root 1",
                         "actor-replay-siblings root 1", "declared-two-held root 1", "declared-two-held-control root 1",
                         "declared-three root 1", "declared-three-control root 1")),
         *(f"fleet: scheduled repair-and-host {kind}-{call}-{ending} root 1: pass"
@@ -255,21 +256,21 @@ ROW_LINES = {
           for index, call in enumerate(("reserve", "record", "attach", "enroll", "designate"))
           for at, ending in enumerate(("acknowledged", "committed", "lost"))
           if not (at == index % 3 and (kind == "fresh") == (index % 2 == 1))),
-        "fleet: scheduled repair-and-host: 50 checks and 25 crash cells passed",
+        "fleet: scheduled repair-and-host: 51 checks and 25 crash cells passed",
         *(f"fleet: scheduled roots-and-replays {check}: pass"
           for check in ("restarts-six root 2", "restarts-six root 3", "host-loss root 2", "host-loss-replay root 3",
                         "repair-replay root 1", "impaired-replay root 1", "hostile-profiles root 1")),
         "fleet: scheduled roots-and-replays: 7 checks passed",
         *(f"fleet: scheduled alarms-{scenario} root 1: pass"
-          for scenario in ("host-loss", "partition-loss", "partition-loss-at", "false-suspicion", "owner-pause", "owner-isolation", "page-regressed", "record-regressed", "settle", "tiny-settle", "az-settle", "reenroll", "standby-loss", "standby-silent", "double-loss", "partition-repair", "partition-repair-at", "census-full", "past-target", "attach-survivor", "attach-closed", "foreign", "racing", "slot-moved", "handoff", "handoff-ended", "zone-loss", "zone-impaired", "zone-deposed")),
+          for scenario in ("host-loss", "partition-loss", "partition-loss-at", "false-suspicion", "owner-pause", "owner-isolation", "page-regressed", "record-regressed", "settle", "tiny-settle", "az-settle", "reenroll", "standby-loss", "standby-silent", "double-loss", "quorum-loss", "partition-repair", "partition-repair-at", "census-full", "past-target", "attach-survivor", "attach-closed", "foreign", "racing", "slot-moved", "handoff", "handoff-ended", "zone-loss", "zone-impaired", "zone-deposed")),
         *(f"fleet: scheduled alarms-unknown-{write}-{ending} root 1: pass"
           for write in ("confirm", "reserve", "page") for ending in ("committed", "lost")),
         *(f"fleet: scheduled alarms-{kind}-{call}-{ending} root 1: pass"
           for kind in ("enroll", "fresh")
           for call in ("reserve", "record", "attach", "enroll", "designate")
           for ending in ("acknowledged", "committed", "lost")),
-        *(f"fleet: scheduled alarms-control-{control}-row root 1: pass" for control in ("missing", "extra", "past-target")),
-        "fleet: scheduled alarms: 65 sets passed, 1 not run, 27 not judged, 3 controls failed by the rule",
+        *(f"fleet: scheduled alarms-control-{control}-row root 1: pass" for control in ("missing", "extra", "past-target", "quorum-unreachable")),
+        "fleet: scheduled alarms: 66 sets passed, 1 not run, 27 not judged, 4 controls failed by the rule",
     ],
     "slot-reuse-cycles": [
         *(f"cycles: seed {seed} cycles 24: safety pass; containment pass; retention pass; progress pass; quiescent conservation pass; "
@@ -1835,7 +1836,7 @@ class SelectTests(unittest.TestCase):
         rows = INVENTORY["qualified"]["search-nightly"]["rows"]
         others = [line for row in rows if row["id"] != "fleet-scheduled-roots" for line in ROW_LINES[row["id"]]]
         scheduled = ROW_LINES["fleet-scheduled-roots"]
-        self.assertEqual(len(scheduled), 192)
+        self.assertEqual(len(scheduled), 195)
         witnesses = next(row for row in rows if row["id"] == "fleet-scheduled-roots")["witnesses"]
         code, report, blocked = self.blocked("search-nightly", lines=others + scheduled)
         self.assertEqual((code, blocked), (0, {}), report)
@@ -1852,7 +1853,7 @@ class SelectTests(unittest.TestCase):
             ("a short zone count", [line.replace("zone: 5 checks", "zone: 4 checks") for line in scheduled], f"missing witness {witnesses[1]!r}"),
             ("a skipped enrollment cell", [line for line in scheduled if " fresh-designate-committed " not in line],
              "skipped members ['repair-and-host fresh-designate-committed root 1']"),
-            ("a short repair count", [line.replace("host: 50 checks", "host: 49 checks") for line in scheduled],
+            ("a short repair count", [line.replace("host: 51 checks", "host: 50 checks") for line in scheduled],
              f"missing witness {witnesses[2]!r}"),
             ("a skipped declared-hold control", [line for line in scheduled if " declared-three-control " not in line],
              "skipped members ['repair-and-host declared-three-control root 1']"),
@@ -1863,7 +1864,7 @@ class SelectTests(unittest.TestCase):
              "skipped members ['alarms-census-full root 1']"),
             ("a skipped alarm control", [line for line in scheduled if " alarms-control-extra-row " not in line],
              "skipped members ['alarms-control-extra-row root 1']"),
-            ("a short alarm count", [line.replace("alarms: 65 sets", "alarms: 64 sets") for line in scheduled],
+            ("a short alarm count", [line.replace("alarms: 66 sets", "alarms: 65 sets") for line in scheduled],
              f"missing witness {witnesses[4]!r}"),
         ):
             with self.subTest(edit=name):

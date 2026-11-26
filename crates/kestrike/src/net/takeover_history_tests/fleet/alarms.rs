@@ -349,6 +349,7 @@ pub(crate) fn expected(config: &super::Config) -> Expected {
         PartitionRepair | Racing => &["host-silent"],
         AttachSurvivor => SILENT,
         DoubleLoss => FRESH,
+        QuorumLoss => &["host-silent", "quorum-unreachable", "shard-silent"],
         Crash(cell) if !cell.fresh => &["host-silent"],
         Crash(cell) if cell.call == Call::Designate && cell.ending != Ending::Lost => {
             &["attach-closed", "host-silent", "need-fresh", "shard-silent"]

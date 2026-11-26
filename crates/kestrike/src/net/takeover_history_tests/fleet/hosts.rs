@@ -34,7 +34,7 @@ use crate::storage::warm_sim::share_of;
 use super::super::super::client::SessionState;
 use super::super::ROUND_US;
 use super::faults::{Action, Effect, Episode, Faults, Pattern, Trigger};
-use super::reconcile::{REPAIR_SETTLE_ROUNDS, ReconcilerActor, Repair, Status};
+use super::reconcile::{REPAIR_SETTLE_ROUNDS, Reclaim, ReconcilerActor, Repair, Status};
 use super::zones::ZONE_DOWN_ROUNDS;
 use super::{Fleet, Live, Plant, Purpose, Recovered, Slots, Stopped};
 use crate::failover::standbys::{Need, Zone};
@@ -79,6 +79,11 @@ pub(crate) enum Scenario {
     StandbySilent,
     /// H0 and H3 crash, so s0, s1 and s3 need a fresh host.
     DoubleLoss,
+    /// H0 and H4 crash, and H4 returns [`QUORUM_DOWN_ROUNDS`] rounds later, with the reconciler running. While H4 is
+    /// down, the possible probers of s2's standby H5 stand in one partition, (H2, H3), so the zone loop names s2's
+    /// blocker `quorum-unreachable` (QUORUM-PREMISE in `failover::zone_loop::plan`); once H4 returns, H5's agent
+    /// gathers its quorum and H5 takes s2 over.
+    QuorumLoss,
     /// H0 and H1 crash, as in [`Scenario::PartitionLoss`], with the reconciler running. The reconciler designates new
     /// standbys after the takeovers.
     PartitionRepair,
@@ -223,6 +228,10 @@ pub(crate) const HANDOFF_CELL: usize = 5;
 pub(crate) const STALL_ROUNDS: u64 = 160;
 pub(crate) const BRIEF_ROUNDS: u64 = 2;
 pub(crate) const IMPAIRED_ROUNDS: u64 = 40;
+/// The rounds H4 stays down in [`Scenario::QuorumLoss`].
+pub(crate) const QUORUM_DOWN_ROUNDS: u64 = 60;
+/// The cell of s2, whose standby [`Scenario::QuorumLoss`] leaves without a quorum while H4 is down.
+pub(crate) const QUORUM_CELL: usize = 2;
 
 impl Scenario {
     /// The scenario's identity bytes: its code and a crash-table cell's code.
@@ -265,6 +274,7 @@ impl Scenario {
             Self::Handoff => 34,
             Self::HandoffEnded => 35,
             Self::PastTarget => 36,
+            Self::QuorumLoss => 37,
         };
         let cell = match self {
             Self::Crash(cell) => cell.code(),
@@ -377,6 +387,7 @@ impl Scenario {
                 | Self::SlotMoved
                 | Self::StandbyLoss
                 | Self::DoubleLoss
+                | Self::QuorumLoss
                 | Self::PartitionRepair
                 | Self::PartitionRepairAt
                 | Self::CensusFull
@@ -475,6 +486,13 @@ impl Scenario {
                 heal: Some(PAUSE_ROUNDS),
             }],
             Self::DoubleLoss => vec![crash(vec![0, 3], Trigger::When(booted))],
+            Self::QuorumLoss => vec![
+                crash(vec![0], Trigger::When(booted)),
+                Episode {
+                    heal: Some(QUORUM_DOWN_ROUNDS),
+                    ..crash(vec![4], Trigger::When(booted))
+                },
+            ],
             Self::PartitionRepair => vec![crash(vec![0, 1], Trigger::When(booted))],
             Self::PartitionRepairAt => vec![crash(
                 super::topology::Placing::TRIO_LOST.to_vec(),
@@ -677,7 +695,7 @@ pub(crate) struct HostActor {
     /// Each process status the latest turn passed to the agent: its shard, volume, process id and phase.
     published: Vec<(crate::net::ownership::Shard, VolumeId, u32, OwnerPhase)>,
     /// The shards whose entry the host's last accepted report carried in phase `Held`.
-    held: Vec<u32>,
+    pub(super) held: Vec<u32>,
     pub(super) log: MemLog,
 }
 
@@ -865,6 +883,7 @@ pub(crate) const FULL_CENSUS: &str = "witness census-lists-every-shard missing";
 pub(crate) const REENROLLED: &str = "witness reenrolled missing";
 pub(crate) const REPLACED: &str = "witness standby-replaced missing";
 pub(crate) const FRESH_HOSTS: &str = "witness fresh-hosts missing";
+pub(crate) const QUORUM_UNREACHABLE: &str = "witness quorum-unreachable missing";
 pub(crate) const SELF_SUSPECT: &str = "witness self-suspect-blockers missing";
 pub(crate) const FIVE_DESIGNATIONS: &str = "witness five-designations missing";
 pub(crate) const AT_CAP: &str = "witness census-at-cap missing";
@@ -1380,6 +1399,16 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
         Scenario::SlotMoved => vec![(recon.slot_moved.is_some(), SLOT_MOVED)],
         Scenario::StandbyLoss => vec![(after_loss(Repair::Need(Need::Standby)) >= 1, REPLACED)],
         Scenario::DoubleLoss => vec![(fresh_hosts >= 2, FRESH_HOSTS)],
+        Scenario::QuorumLoss => {
+            let s2 = QUORUM_CELL as u32 + 1;
+            let named = (recon.blockers.iter()).any(|&(_, shard, blocker, _)| {
+                shard == s2 && blocker == Blocker::QuorumUnreachable
+            });
+            let (_, versions) = &report.evidence.histories[QUORUM_CELL];
+            let standby = versions.first().and_then(|first| first.standby);
+            let moved = standby.is_some_and(|host| taken.contains(&(s2, host.get())));
+            vec![(named, QUORUM_UNREACHABLE), (moved, TAKEOVERS)]
+        }
         Scenario::PartitionRepairAt => vec![
             (suspected == BTreeSet::from([1, 2]), SELF_SUSPECT),
             (taken.len() >= 2, TAKEOVERS),
@@ -1406,10 +1435,15 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
             let shard = ATTACH_CELL as u32 + 1;
             let volume = report.shards[ATTACH_CELL].placement.volume;
             let versions = super::oracles::versions_of(&report.evidence.volume_histories, volume);
-            // The host an `End` step of the loop named, with that host's attach ended in a committed version.
-            let ended = (recon.ended.iter()).any(|&(of, host)| {
-                let host = Host::new(host).expect("a logged host");
-                of == shard && super::oracles::attach_ended(versions, host)
+            let (_, records) = &report.evidence.histories[ATTACH_CELL];
+            let third =
+                (records.first()).and_then(|first| super::oracles::third_attach(versions, first));
+            // The loop's `End` step and an in-place `Ended` commit both name the third attach's host.
+            let ended = third.is_some_and(|third| {
+                let step = (recon.reclaims.iter()).any(|&(of, phase, host)| {
+                    (of, phase, host) == (shard, Reclaim::End, third.get())
+                });
+                step && super::oracles::attach_ended(versions, third)
             });
             vec![(ended, ATTACH_CLOSED)]
         }
@@ -2345,7 +2379,9 @@ impl<'c> Fleet<'c> {
             published = true;
         }
         self.planted |= published || !hidden.is_empty();
-        // Each standby process publishes `Standby` from its own wait, with the target its last role read returned.
+        // Each standby process publishes `Standby` from its own wait: the status the production wait published at
+        // its last view period with the target the fleet's rules read (`Cell::waiting`), entry included, and before
+        // its first period the target its incarnation's role read returned, with no entry.
         for at in 0..cells {
             let Some((of, target, volume)) = self.cells[at].waiting else {
                 continue;
@@ -2359,10 +2395,20 @@ impl<'c> Fleet<'c> {
                 continue;
             }
             let shard = self.cells[at].placement.shard;
-            statuses.push(LinkStatus {
-                target: Some(target),
-                ..LinkStatus::idle(shard, volume, pid(at), OwnerPhase::Standby)
-            });
+            let host = self.topology.members[member].host;
+            let waited = (self.cells[at].published.borrow().iter())
+                .find_map(|&(of, status)| (of == host).then_some(status));
+            let status = match waited {
+                Some(status) if status.target == Some(target) => LinkStatus {
+                    pid: pid(at),
+                    ..status
+                },
+                _ => LinkStatus {
+                    target: Some(target),
+                    ..LinkStatus::idle(shard, volume, pid(at), OwnerPhase::Standby)
+                },
+            };
+            statuses.push(status);
         }
         for status in hidden {
             if !statuses
@@ -2514,6 +2560,7 @@ impl<'c> Fleet<'c> {
                 Effect::Impair(at, on) => self.impair(at, on),
                 Effect::Release(at) => self.release_hold(at),
                 Effect::Rerun(at) => self.rerun_held(at),
+                Effect::KeepCommand(at) => self.cells[at].keeps.set(true),
                 Effect::Handoff(at, ended) => self.hand_off(live, at, ended)?,
                 Effect::Crash(member) if self.hosts[member].up == Up::Down => {}
                 Effect::Crash(member) => {
@@ -2981,6 +3028,15 @@ impl<'c> Fleet<'c> {
         if (self.cells[at].waiting).is_some_and(|(of, ..)| of == member) {
             self.cells[at].waiting = None;
         }
+        self.forget_published(at, member);
+    }
+
+    /// Forgets the status `member`'s wait published for cell `at` (`Cell::published`): its wait ended, or a new
+    /// incarnation of its process publishes from its own role read.
+    pub(super) fn forget_published(&mut self, at: usize, member: usize) {
+        let host = self.topology.members[member].host;
+        let mut published = self.cells[at].published.borrow_mut();
+        published.retain(|(of, _)| *of != host);
     }
 
     /// The wait of `member`'s incarnation for cell `at` publishes `Standby` with the target its role read
@@ -2992,6 +3048,7 @@ impl<'c> Fleet<'c> {
         member: usize,
         target: crate::failover::retire::Target,
     ) {
+        self.forget_published(at, member);
         let versions = self.cells[at].history(&self.store);
         let read = (versions.iter().rev())
             .find(|record| crate::failover::retire::Target::of(record) == target)
@@ -3243,7 +3300,7 @@ impl<'c> Fleet<'c> {
                         let held = self.cells[at].device != super::volumes::Device::Up
                             && self.record_now(at).owner == of.host;
                         self.queue_rerun(at, member, &exit, true);
-                        if let (crate::host::Exit::Held { .. }, Some(refusal)) = (&exit, refusal) {
+                        if let crate::host::Exit::Held { .. } = exit {
                             self.held(at, member, super::volumes::Held::of_restart(refusal));
                         }
                         let cell = &mut self.cells[at];
@@ -3292,6 +3349,10 @@ impl<'c> Fleet<'c> {
                         self.log
                             .takeovers
                             .push(attempt(Some(super::owners::blocker(&exit, refusal))));
+                    }
+                    // A takeover that ends `Exit::Held` holds the shard as a held restart does.
+                    if let crate::host::Exit::Held { .. } = exit {
+                        self.held(at, member, super::volumes::Held::of_takeover(refusal));
                     }
                 } else {
                     // The wait goes on, and its status comes from the role read this period made.

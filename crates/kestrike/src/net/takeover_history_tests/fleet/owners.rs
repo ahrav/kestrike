@@ -218,14 +218,16 @@ where
         plane,
         refusals,
     };
-    let recovered = host::recover(
-        &gate,
-        role,
-        (&inputs, &peers),
-        sources,
-        fencer,
-        Box::new(clock),
-    );
+    let (recovered, kept) = keeping(cell, || {
+        host::recover(
+            &gate,
+            role,
+            (&inputs, &peers),
+            sources,
+            fencer,
+            Box::new(clock),
+        )
+    });
     // The fencer reads its clock only inside `recover`.
     grounds.fencer.release();
     let incarnation = match recovered {
@@ -239,7 +241,7 @@ where
             // A table that still owns a command ends through the proven stop, which returns its buffers to the
             // arena the slot's next tenure attaches over.
             if let host::fencer::Release::Outstanding(table) = device {
-                stop_table(table, &control);
+                stop_kept(table, &control, cell, kept);
             }
             // `recover` contains its sequence's unwind and ends `Rerun(Unwound)`. The incarnation fails here, outside
             // that boundary, so a sequence that panicked fails its test; the message names the role read.
@@ -253,6 +255,46 @@ where
         Recovery::Waits => Incarnation::Waits(role),
     };
     (incarnation, named)
+}
+
+/// Runs `recovery` with the fencer's `KEEPS_COMMAND` set from `cell`'s kept command, through a guard that clears the
+/// flag and returns an untaken arm to the cell on return and on unwind. A fencer that built no table, or whose table
+/// refused the Report, leaves the arm for the cell's next recovery. Once a release took it, the device completes no
+/// further command, so the kept command stays outstanding until the proven stop, and the returned budget is the one
+/// [`stop_kept`] restores after that stop; `None` when no release took the arm.
+fn keeping<T>(cell: &Cell, recovery: impl FnOnce() -> T) -> (T, Option<Option<usize>>) {
+    struct Armed<'c>(&'c Cell);
+    impl Drop for Armed<'_> {
+        fn drop(&mut self) {
+            let untaken = host::fencer::KEEPS_COMMAND.replace(false);
+            self.0.keeps.set(self.0.keeps.get() || untaken);
+        }
+    }
+    let keeps = cell.keeps.take();
+    host::fencer::KEEPS_COMMAND.set(keeps);
+    let armed = Armed(cell);
+    let recovered = recovery();
+    let untaken = host::fencer::KEEPS_COMMAND.get();
+    drop(armed);
+    let kept = (keeps && !untaken).then(|| {
+        let mut table = cell.world.reservation.borrow_mut();
+        table.budget.replace(0)
+    });
+    (recovered, kept)
+}
+
+/// Ends `table` through the proven stop, then restores the reservation budget `kept` saved when a kept command held
+/// the device ([`keeping`]).
+fn stop_kept(
+    table: crate::storage::CommandTable<'_, Reserving>,
+    control: &SimControl,
+    cell: &Cell,
+    kept: Option<Option<usize>>,
+) {
+    stop_table(table, control);
+    if let Some(budget) = kept {
+        cell.world.reservation.borrow_mut().budget = budget;
+    }
 }
 
 /// What one view period of a standby's or unnamed host's wait returned.
@@ -270,8 +312,9 @@ pub(super) enum Stood<'w> {
 
 /// One view period of the wait of the owner process of `of`, issuing as `pair`, for `cell` at fleet round `round`:
 /// `host::stand_by` over `client` and `local`, whose `period` passes at each call and sets the stop flag on its
-/// second. The wait publishes its status to a cell of this period that no agent takes: `Fleet::statuses` builds the
-/// status the host's agent turns over. The period reads `witness` at the time it carries, and the takeover it starts
+/// second. The wait publishes its status to a cell of this period, and the period keeps the last one under `of`'s
+/// host in the cell's `published`, which `Fleet::statuses` turns over to that host's agent. The period reads
+/// `witness` at the time it carries, and the takeover it starts
 /// runs through a fencer over the host's device double on the arena and clock of `grounds`. Its connect records
 /// whether the shard record already names `of`'s host owner with no standby, read from `store` with no request, and,
 /// with `acked`, whether the period's own last write of the shard record had an acknowledged `Committed` reply;
@@ -364,17 +407,25 @@ where
         window_us: ROUND_US,
     };
     let standby = crate::failover::reconcile::StandbyGate::qualified();
-    let stood = host::stand_by(
-        (&gate, &standby),
-        (&inputs, &fleet_instance),
-        client,
-        local,
-        persist,
-        fencer,
-        Box::new(clock),
-        signals,
-    );
+    let (stood, kept) = keeping(cell, || {
+        host::stand_by(
+            (&gate, &standby),
+            (&inputs, &fleet_instance),
+            client,
+            local,
+            persist,
+            fencer,
+            Box::new(clock),
+            signals,
+        )
+    });
     grounds.fencer.release();
+    // The status the wait published last: the host's agent turns it over through `Fleet::statuses`.
+    if let Some(status) = status.take() {
+        let mut published = cell.published.borrow_mut();
+        published.retain(|(host, _)| *host != of.host);
+        published.push((of.host, status));
+    }
     // A wait with no witness whose fencer already held a device returns it with `Exit::Fault` before any period, the
     // production refusal of a waiting phase that holds a device; the caller lists that exit.
     let refused =
@@ -396,7 +447,8 @@ where
                 refusal,
             } = *ended;
             if let host::fencer::Release::Outstanding(table) = device {
-                stop_table(table, control.as_ref().expect("a connected device"));
+                let control = control.as_ref().expect("a connected device");
+                stop_kept(table, control, cell, kept);
             }
             // `host::stand_by` contains a takeover's unwind and ends `Rerun(Unwound)`. The period fails here,
             // outside that boundary.
@@ -947,7 +999,7 @@ impl<S: Store> Store for Decoding<S> {
 
 /// The check `refusal`'s class names, as a held restart's status reads it.
 pub(super) fn check_of(refusal: RecoveryRefusal) -> Option<RecoveryCheck> {
-    super::volumes::Held::of_restart(refusal)
+    super::volumes::Held::of_restart(Some(refusal))
         .status()
         .recovery(0)
         .check

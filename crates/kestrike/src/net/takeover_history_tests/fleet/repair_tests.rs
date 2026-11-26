@@ -258,7 +258,8 @@ fn after_owner_and_standby_loss_fresh_hosts_take_the_retained_volumes_over_warm_
     assert!(report.evidence.attached.iter().all(|(_, live)| *live <= 3));
     for shard in [1, 2, 4] {
         assert!(
-            report.recon.reclaims.contains(&(shard, Reclaim::End)),
+            (report.recon.reclaims.iter())
+                .any(|&(of, phase, _)| (of, phase) == (shard, Reclaim::End)),
             "shard {shard}"
         );
         assert_eq!(blocked(&report, shard), None, "shard {shard}");
@@ -431,7 +432,7 @@ fn a_volume_at_three_attaches_redesignates_its_surviving_attached_host_or_closes
     // host's start until the operator retires the lost hosts in the directory; H2 then attaches, enrolls, is
     // designated and takes s2 over warm, with no volume created.
     let closed = passing(&Config::attach_closed(root));
-    assert!(closed.recon.reclaims.contains(&(3, Reclaim::End)));
+    assert!(closed.recon.reclaims.contains(&(3, Reclaim::End, H1)));
     let retired: BTreeSet<u64> = closed.recon.retired.iter().copied().collect();
     assert_eq!(retired, BTreeSet::from([H0, H1, H5]));
     let fresh = (closed.recon.designations.iter())
@@ -1413,7 +1414,7 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
     use super::hosts::Unknown;
     /// A scenario's name, the root it runs on and the check that runs it on a root.
     type Check = (&'static str, u64, fn(u64));
-    let checks: [Check; 39] = [
+    let checks: [Check; 40] = [
         (
             "settle",
             2,
@@ -1531,6 +1532,11 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
             "held-status",
             1,
             host_tests::a_held_restart_publishes_its_held_status_in_a_host_scenario_on,
+        ),
+        (
+            "held-unrefused-control",
+            1,
+            host_tests::an_unrefused_hold_the_fleet_drops_stalls_the_settle_on,
         ),
         ("actor-replay-siblings", 1, host_tests::actor_replay_siblings_on),
         (

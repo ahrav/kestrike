@@ -275,10 +275,18 @@ pub(crate) enum Plant {
     /// would; a host or reconciler scenario fails it by `UNCOMMITTED_PAIRS`, and a restart run, which judges no
     /// logged read, reads `Unrun` as every hostile run does.
     UncommittedPairs,
+    /// `Fleet::held` keeps no hold of the shard at the index for an incarnation whose `Exit::Held` carries no
+    /// refusal, so that process publishes no `Held` entry and no recovery slot, and `Fleet::rerun_held` never runs its
+    /// next incarnation.
+    UnrefusedHold,
+    /// The zone loop's QUORUM-PREMISE counts hosts that read `Lost` among a standby's possible probers
+    /// (`zone_loop::plan::LOST_PROBERS_COUNTED`) for the whole run, so its status names no `quorum-unreachable`
+    /// blocker for a lost owner whose standby cannot gather a quorum. The plant counts as planted for the whole run.
+    LostProbersCounted,
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 36] = [
+    pub(crate) const ALL: [Self; 38] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -315,6 +323,8 @@ impl Plant {
         Self::ParkedCommand,
         Self::ParkedWithdraws,
         Self::UncommittedPairs,
+        Self::UnrefusedHold,
+        Self::LostProbersCounted,
     ];
 
     /// `Config::identity` encodes the hostile profile with the plant code.
@@ -356,6 +366,8 @@ impl Plant {
             Self::ParkedCommand => 119,
             Self::ParkedWithdraws => 118,
             Self::UncommittedPairs => 97,
+            Self::UnrefusedHold => 98,
+            Self::LostProbersCounted => 99,
         }
     }
 }
@@ -572,6 +584,10 @@ impl Config {
 
     pub(crate) fn double_loss(root: u64) -> Self {
         Self::repair(root, Scenario::DoubleLoss)
+    }
+
+    pub(crate) fn quorum_loss(root: u64) -> Self {
+        Self::repair(root, Scenario::QuorumLoss)
     }
 
     /// The two-host loss of [`Config::partition_loss`] with the reconciler running.
@@ -855,7 +871,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v39-volumes";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v40-attach-host";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1572,6 +1588,7 @@ fn play_within(
     let _inline = Inline::set();
     let _share = IgnoredShare::set(config.planted(Plant::IgnoredShare));
     let _ack = AckOnUnknown::set(config.planted(Plant::AckOnUnknown));
+    let _probers = LostProbersCounted::set(config.planted(Plant::LostProbersCounted));
     let _agent = AgentPlant::set(config);
     Fleet::play(config, draws(), wait)
 }
@@ -1631,6 +1648,25 @@ impl Drop for AckOnUnknown {
     }
 }
 
+/// Sets `zone_loop::plan::LOST_PROBERS_COUNTED` on the calling thread for the life of the value when the run plants
+/// [`Plant::LostProbersCounted`], and clears it when dropped, an unwound run included.
+struct LostProbersCounted(bool);
+
+impl LostProbersCounted {
+    fn set(planted: bool) -> Self {
+        crate::failover::zone_loop::plan::LOST_PROBERS_COUNTED.with(|plant| plant.set(planted));
+        Self(planted)
+    }
+}
+
+impl Drop for LostProbersCounted {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::failover::zone_loop::plan::LOST_PROBERS_COUNTED.with(|plant| plant.set(false));
+        }
+    }
+}
+
 /// Arms storage's limiter bypass (every recovery charge fits) on the calling thread for the life of the value when
 /// `on`, and disarms it when dropped, an unwound run included.
 struct IgnoredShare(bool);
@@ -1658,6 +1694,13 @@ fn refuse_armed_controls() {
     assert!(plant.is_none(), "checkpoint::PLANT is armed: {plant:?}");
     let parked = crate::storage::PARK_RECOVERY.with(std::cell::Cell::get);
     assert!(!parked, "the recovery helpers' PARK is armed: {parked}");
+    let counted = crate::failover::zone_loop::plan::LOST_PROBERS_COUNTED.with(std::cell::Cell::get);
+    assert!(
+        !counted,
+        "the zone loop's LOST_PROBERS_COUNTED is armed: {counted}"
+    );
+    let kept = crate::host::fencer::KEEPS_COMMAND.with(std::cell::Cell::get);
+    assert!(!kept, "the fencer's KEEPS_COMMAND is armed: {kept}");
     let guarded = crate::storage::write_guard::armed();
     assert!(!guarded, "the write guard is armed: {guarded}");
     let planted = crate::host::agent::tests::armed();
@@ -1775,6 +1818,14 @@ struct Cell {
     device: volumes::Device,
     /// The members whose restart or takeover held at a device step of the cell's volume.
     device_holds: BTreeSet<usize>,
+    /// Whether the cell's volume keeps one command of the next recovery fencer whose table is built there
+    /// (`faults::Action::KeepCommand`); that recovery takes the flag.
+    keeps: std::cell::Cell<bool>,
+    /// The last status each production wait of the cell published to its period's status cell (`host::stand_by`),
+    /// one for each host whose process waits: its `Standby` phase, its target and the report entry
+    /// `host::recover::standing` built from that period's role read. A named standby's wait and an unnamed host's
+    /// wait of one cell each keep their own.
+    published: std::cell::RefCell<Vec<(Host, crate::host::link::Status)>>,
     /// Whether the cell runs a replacement volume, which retains nothing.
     cold: bool,
     fresh_refused: bool,
@@ -1924,6 +1975,8 @@ impl Cell {
             blocker: None,
             device: volumes::Device::Up,
             device_holds: BTreeSet::new(),
+            keeps: std::cell::Cell::new(false),
+            published: std::cell::RefCell::default(),
             cold: false,
             fresh_refused: false,
             fresh_unread: None,
@@ -4081,6 +4134,7 @@ impl<'c> Fleet<'c> {
             // mutant from the first agent decision its hook changed.
             planted: self.planted
                 || self.uncommitted.get()
+                || self.config.planted(Plant::LostProbersCounted)
                 || (self.config.planted(Plant::AckOnUnknown)
                     && (self.duty_unknowns.borrow().iter())
                         .any(|(key, _)| matches!(key, Key::Page(..))))

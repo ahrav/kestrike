@@ -66,15 +66,20 @@ fn scripted(config: &Config, script: Vec<Episode>) -> Report {
 
 /// [`scripted`], with a held process's due rerun ordered ahead of a queued takeover when `rerun_first`.
 pub(super) fn scripted_with(config: &Config, script: Vec<Episode>, rerun_first: bool) -> Report {
+    played(config, script, rerun_first).expect("a run inside the limits")
+}
+
+/// The run of `config`'s fleet under `script`, or the limit that stopped it.
+fn played(config: &Config, script: Vec<Episode>, rerun_first: bool) -> Result<Report, Stopped> {
     let mut draws = Draws::record(config.root);
     let seeded = Fleet::seeded(config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(script, fleet.topology.members.len());
-    fleet.rerun_first = rerun_first;
     fleet.alarms.scripted = true;
+    fleet.rerun_first = rerun_first;
     let _agent = super::AgentPlant::set(config);
     let _inline = Inline::set();
-    fleet.play_script(draws).expect("a run inside the limits")
+    fleet.play_script(draws)
 }
 
 /// Before any tenure serves, each host's headroom counts the volumes attached to its instance unbound and the
@@ -3418,6 +3423,175 @@ fn a_held_process_whose_rerun_finds_no_slot_keeps_its_hold_until_an_incarnation_
     assert_eq!(fleet.refused_due(), None);
 }
 
+/// Whether H3's last accepted report carries s3 in phase `Held`.
+fn s3_published_held(fleet: &Fleet<'_>) -> bool {
+    fleet.hosts[3].held.contains(&4)
+}
+
+/// H3's crash and return with s3's volume keeping one command of H3's restart fencer, and the held process's rerun
+/// once H3's report carries s3 in phase `Held`.
+fn h3_unrefused_hold() -> Vec<Episode> {
+    let mut script = h3_crash_and_return();
+    script.push(Episode {
+        scope: Vec::new(),
+        action: Action::KeepCommand(3),
+        heal: None,
+        ..script[0].clone()
+    });
+    script.push(Episode {
+        trigger: Trigger::When(s3_published_held),
+        scope: Vec::new(),
+        action: Action::Rerun(3),
+        heal: None,
+    });
+    script
+}
+
+/// The judgment of [`h3_unrefused_hold`]'s run: s3's blocker is the `Exit::Held` itself, since no sequence refused;
+/// H3's accepted reports carry s3 in phase `Held` and H3's recovery slot; and the held process's rerun completes
+/// H3's return as a restart of s3 at its own tenure.
+fn unrefused_hold_judged(report: &Report) -> Result<(), String> {
+    let s3 = &report.shards[3];
+    if !s3.blockers.iter().any(|check| check.starts_with("Held")) {
+        return Err(format!("no unrefused held exit: {:?}", s3.blockers));
+    }
+    let held: Vec<(u64, u32)> = (report.hosts.held.iter())
+        .map(|&(_, host, shard)| (host, shard))
+        .collect();
+    if held != [(H3, 4)] {
+        return Err(format!("held entries {held:?}"));
+    }
+    let slots = report.hosts.sealed(H3);
+    if !slots.iter().any(|gauges| gauges[2] == Gauge::known(1, 1)) {
+        return Err(format!("H3's recovery gauges {slots:?}"));
+    }
+    let last = s3.recoveries.last().ok_or("no recovery of s3")?;
+    let returned: Vec<_> = (report.zones.restarts.iter())
+        .map(|&(shard, host, tenure, _)| (shard, host, tenure))
+        .collect();
+    if (s3.recoveries.len(), last.host.get()) != (2, H3) || returned != [(4, H3, last.tenure)] {
+        return Err(format!("H3's return: {:?} {returned:?}", s3.recoveries));
+    }
+    Ok(())
+}
+
+/// DEVICE-FAILURE-HOLD with no refusal: a restart whose sequence succeeds while its fencer still holds a command ends
+/// `Exit::Held` with no refusal, and the fleet keeps it as a hold. H3 crashes and returns two rounds later, and s3's
+/// volume keeps one command of H3's restart fencer, so `host::recover` returns the outstanding table, which the
+/// proven stop drains. The hold's status keeps its attempt running, so it names no check and holds the recovery
+/// slot; H3 publishes s3 in phase `Held`; and `Fleet::rerun_held` runs the held process's next incarnation, which
+/// completes H3's return. Control: under `UnrefusedHold` (code 98) H3's restart of s3 over the kept command still
+/// ends held, and the fleet keeps no hold; the live planted run is the scheduled row's `held-unrefused-control`.
+#[test]
+fn a_restart_that_succeeds_with_a_kept_command_holds_with_no_check_and_its_rerun_completes_the_return()
+ {
+    let running = super::volumes::Held::of_restart(None).status();
+    let recovery = running.recovery(0);
+    assert_eq!(
+        (recovery.outcome, recovery.check, recovery.next),
+        (
+            Some(crate::failover::report::RecoveryOutcome::Running),
+            None,
+            None
+        )
+    );
+    assert!(running.holds_slot());
+    let report = scripted(&Config::host_loss(1), h3_unrefused_hold());
+    assert_eq!(unrefused_hold_judged(&report), Ok(()));
+    assert_eq!(report.verdicts.one_owner, Verdict::Pass);
+    assert_eq!(kept_command_holds(&Config::host_loss(1)), (true, false));
+    let planted = Config::host_loss(1).hostile(Plant::UnrefusedHold, 3);
+    assert_eq!(kept_command_holds(&planted), (false, true));
+}
+
+/// Whether H0's last accepted report carries s3 in phase `Held`.
+fn s3_published_held_by_h0(fleet: &Fleet<'_>) -> bool {
+    fleet.hosts[0].held.contains(&4)
+}
+
+/// DEVICE-FAILURE-HOLD with no refusal on a takeover: H3 crashes, and s3's volume keeps one command of the fencer of
+/// H0's takeover, so the takeover's sequence succeeds and `host::stand_by` ends `Exit::Held` with no refusal. The
+/// fleet keeps it as a hold of kind takeover: H0 publishes s3 in phase `Held`, and once it has, the held process's
+/// rerun restarts s3 on H0 at a later tenure.
+#[test]
+fn a_takeover_that_succeeds_with_a_kept_command_holds_and_its_rerun_serves_the_shard() {
+    let mut script = Scenario::HostLoss.episodes(false);
+    script[0].scope = vec![3];
+    script.push(Episode {
+        scope: Vec::new(),
+        action: Action::KeepCommand(3),
+        heal: None,
+        ..script[0].clone()
+    });
+    script.push(Episode {
+        trigger: Trigger::When(s3_published_held_by_h0),
+        scope: Vec::new(),
+        action: Action::Rerun(3),
+        heal: None,
+    });
+    let report = scripted(&Config::host_loss(1), script);
+    let refused: Vec<_> = (report.hosts.takeovers.iter())
+        .map(|attempt| (attempt.shard, attempt.host, attempt.refused.clone()))
+        .collect();
+    assert!(
+        matches!(&refused[..], [(4, H0, Some(held))] if held.starts_with("Held")),
+        "{refused:?}"
+    );
+    let held: Vec<(u64, u32)> = (report.hosts.held.iter())
+        .map(|&(_, host, shard)| (host, shard))
+        .collect();
+    assert_eq!(held, [(H0, 4)]);
+    let s3 = &report.shards[3];
+    let last = s3.recoveries.last().expect("a recovery of s3");
+    assert_eq!((last.host.get(), last.after_crash), (H0, true));
+    assert_eq!(report.verdicts.one_owner, Verdict::Pass);
+}
+
+/// H3's restart of s3 over a volume that keeps one command of its fencer, run alone on `config`'s fleet: whether
+/// the fleet keeps H3's hold of s3, and whether the run planted. The restart ends `Exit::Held` with no refusal.
+fn kept_command_holds(config: &Config) -> (bool, bool) {
+    let (mut fleet, _draws) = hosted(config);
+    let (at, member) = (3, 3);
+    fleet.hosts[member].up = hosts::Up::Running;
+    fleet.cells[at].keeps.set(true);
+    let grounds = [Grounds::over(storage_shared(1, fleet.share(at)))];
+    let pools = [Pools::new(&grounds[0])];
+    let mut slots = Slots {
+        grounds: &grounds,
+        pools: &pools,
+        members: vec![member],
+        used: vec![false],
+    };
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let restarted = fleet.restart_by(&mut live, &mut slots, (at, true, false), member);
+    let restarted = restarted.expect("a restart that stops on no wait");
+    assert!(matches!(restarted, super::volumes::Restarted::Held));
+    let blocker = fleet.cells[at]
+        .blockers
+        .last()
+        .expect("the held exit's blocker");
+    assert!(blocker.starts_with("Held"), "{blocker}");
+    assert!(
+        !fleet.cells[at].keeps.get(),
+        "the restart took the kept command"
+    );
+    let holds = fleet.cells[at].held.iter().any(|(of, _)| *of == member);
+    (holds, fleet.planted)
+}
+
+/// The live control of [`a_restart_that_succeeds_with_a_kept_command_holds_with_no_check_and_its_rerun_completes_the_return`]:
+/// under `UnrefusedHold` (code 98) the fleet keeps no hold for H3's held restart of s3, so H3 publishes no `Held`
+/// entry, no rerun runs, s3 is never served again, and the run stalls at the host scenario's settle.
+pub(super) fn an_unrefused_hold_the_fleet_drops_stalls_the_settle_on(root: u64) {
+    let config = Config::host_loss(root).hostile(Plant::UnrefusedHold, 3);
+    match played(&config, h3_unrefused_hold(), false) {
+        Err(Stopped::Stalled(stall)) => {
+            assert_eq!(stall.waited, "the host scenario's settle", "{stall:?}")
+        }
+        other => panic!("{:?}", other.map(|report| unrefused_hold_judged(&report))),
+    }
+}
+
 /// A returned host's restart that holds queues no next incarnation, so the return reads as still to run
 /// (`Fleet::returning`) only from the round the hold's rerun is queued. H3's restart of s3 after its return holds at
 /// a bump that times out; the rerun's tenure then rises, and the return is complete once its session is active.
@@ -3544,6 +3718,96 @@ fn a_view_period_whose_reads_pass_under_queued_arms_publishes_the_target_it_read
         the_standby_s_status_across_a_bump_read_under([Arm::Pass, Arm::Pass]);
     assert_eq!(armed, bumped);
     assert_eq!(unarmed, bumped);
+}
+
+/// The waiting standby's status comes from the production wait: once a view period of the waits ran, s0's standby
+/// turns over the status `host::stand_by` published to its period's status cell, phase `Standby` at the record's
+/// target with the report entry `host::recover::standing` built, role `Standby` and named, since its enrolled pair
+/// stands on the active volume. Before any period the process publishes only the target with no entry.
+#[test]
+fn a_waiting_standby_turns_over_the_status_and_entry_the_production_wait_published() {
+    use crate::failover::report::{Phase as OwnerPhase, RecordedRole};
+    let config = Config::host_loss(1);
+    let (mut fleet, _draws) = hosted(&config);
+    let at = 0;
+    let record = fleet.record_now(at);
+    let host = record.standby.expect("s0's standby");
+    let standby = fleet.member_of(host).expect("s0's standby member");
+    let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let now = fleet.detector_now();
+    let target = crate::failover::retire::Target::of(&record);
+    fleet.publish_wait(at, standby, target);
+    let shard = fleet.cells[at].placement.shard;
+    let early = fleet.statuses(&live, standby, now);
+    let early = (early.iter()).find(|status| status.shard == shard);
+    let early = early.expect("the incarnation's Standby status");
+    assert_eq!((early.phase, early.entry), (OwnerPhase::Standby, None));
+    fleet.standby_waits();
+    let published = fleet.cells[at].published.borrow().clone();
+    let [(of, published)] = published[..] else {
+        panic!("one published status: {published:?}");
+    };
+    assert_eq!(of, host);
+    let statuses = fleet.statuses(&live, standby, now);
+    let sent = (statuses.iter()).find(|status| status.shard == shard);
+    let sent = sent.expect("the standby's status");
+    assert_eq!(sent.phase, OwnerPhase::Standby);
+    assert_eq!(sent.target, Some(target));
+    assert_eq!(sent.entry, published.entry);
+    let entry = sent.entry.expect("the production wait's entry");
+    assert_eq!(
+        (entry.role, entry.named),
+        (Some(RecordedRole::Standby), Some(true))
+    );
+}
+
+/// Each waiting host's publication stands beside the others of its cell. s2's volume holds a third attach, of H1,
+/// and with H1's pair gone from the volume record H1's unnamed wait runs a view period of s2 after the named
+/// standby's. Both periods publish, and the named standby turns over the entry its own wait published.
+#[test]
+fn an_unnamed_host_s_period_keeps_the_named_standby_s_published_status() {
+    use crate::failover::report::{Phase as OwnerPhase, RecordedRole};
+    let config = Config::attach_survivor(1);
+    let (mut fleet, _draws) = hosted(&config);
+    let at = hosts::ATTACH_CELL;
+    let third = fleet.topology.members[1].host;
+    assert_eq!(third.get(), H1);
+    let mut volume = fleet.volume_now(at);
+    volume.pairs.retain(|recorded| recorded.host != third);
+    commit(&fleet, Key::Volume(volume.volume), volume.encode());
+    let record = fleet.record_now(at);
+    let host = record.standby.expect("s2's standby");
+    let standby = fleet.member_of(host).expect("s2's standby member");
+    let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let now = fleet.detector_now();
+    let target = crate::failover::retire::Target::of(&record);
+    fleet.publish_wait(at, standby, target);
+    fleet.standby_waits();
+    fleet.unnamed_waits();
+    let published: Vec<_> = (fleet.cells[at].published.borrow().iter())
+        .copied()
+        .collect();
+    let published =
+        |of: Host| (published.iter()).find_map(|&(host, status)| (host == of).then_some(status));
+    let unnamed = published(third).expect("the unnamed host's period published");
+    let entry = unnamed.entry.expect("the unnamed wait's entry");
+    assert_eq!(entry.role, Some(RecordedRole::Unrecorded));
+    let shard = fleet.cells[at].placement.shard;
+    let statuses = fleet.statuses(&live, standby, now);
+    let sent = (statuses.iter()).find(|status| status.shard == shard);
+    let sent = sent.expect("the standby's status");
+    assert_eq!(
+        (sent.phase, sent.target),
+        (OwnerPhase::Standby, Some(target))
+    );
+    let entry = sent
+        .entry
+        .expect("the entry the named standby's own wait published");
+    assert_eq!(
+        (entry.role, entry.named),
+        (Some(RecordedRole::Standby), Some(true))
+    );
+    assert_eq!(Some(sent.entry), published(host).map(|status| status.entry));
 }
 
 /// A wait classifies its role from the volume record and the shard record its view period read. A retired or deleted
@@ -5103,7 +5367,7 @@ fn a_hold_of_several_incarnations_publishes_its_age_and_its_attempt_count() {
     let h0 = (fleet.member_of(Host::new(H0).unwrap())).expect("H0's member");
     for round in [10, 25] {
         fleet.round = round;
-        fleet.held(S3, h3, super::volumes::Held::of_restart(refusal));
+        fleet.held(S3, h3, super::volumes::Held::of_restart(Some(refusal)));
     }
     fleet.round = 40;
     let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
@@ -5127,7 +5391,7 @@ fn a_hold_of_several_incarnations_publishes_its_age_and_its_attempt_count() {
         (published.attempts, published.age_us),
         (Some(2), Some(15 * ROUND_US))
     );
-    fleet.held(S3, h0, super::volumes::Held::of_restart(refusal));
+    fleet.held(S3, h0, super::volumes::Held::of_restart(Some(refusal)));
     let (_, other, _) = fleet.holds(&live, h0).next().expect("H0's hold");
     assert_eq!(other.status().recovery(now).attempts, Some(1));
 }

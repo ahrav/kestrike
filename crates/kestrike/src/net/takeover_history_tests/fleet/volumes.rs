@@ -143,11 +143,13 @@ pub(crate) struct CrashPoint {
 /// The recovery a held restart or takeover reports: its kind and refusal, as the production mapping of the
 /// refusal gives them, the start of the incarnation that last held, on the host agents' clock
 /// ([`Fleet::detector_now`]) at the round it held, and the member's recovery attempts on the cell's volume since its
-/// host booted ([`Cell::attempt`](super::Cell::attempt)).
+/// host booted ([`Cell::attempt`](super::Cell::attempt)). `refusal` is `None` for a sequence that succeeded while its
+/// fencer still held a command (DEVICE-FAILURE-HOLD in `host::recover`): that attempt stays running, so its status
+/// names no check and holds its recovery slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Held {
     pub(crate) kind: RecoveryKind,
-    pub(crate) refusal: RecoveryRefusal,
+    pub(crate) refusal: Option<RecoveryRefusal>,
     pub(crate) started_us: u64,
     pub(crate) attempts: u32,
 }
@@ -155,7 +157,7 @@ pub(crate) struct Held {
 impl Held {
     /// The hold of a production restart whose `Ended` carries `refusal`: one attempt, started at zero until
     /// [`Fleet::held`] records it.
-    pub(crate) fn of_restart(refusal: RecoveryRefusal) -> Self {
+    pub(crate) fn of_restart(refusal: Option<RecoveryRefusal>) -> Self {
         Self {
             kind: RecoveryKind::Restart,
             refusal,
@@ -164,14 +166,25 @@ impl Held {
         }
     }
 
+    /// The hold of a production takeover whose `Ended` carries `refusal`, as [`Held::of_restart`] builds a restart's.
+    pub(crate) fn of_takeover(refusal: Option<RecoveryRefusal>) -> Self {
+        Self {
+            kind: RecoveryKind::Takeover,
+            ..Self::of_restart(refusal)
+        }
+    }
+
     /// The hold's recovery status: `attempts` attempts, the last of kind `kind` started at `started_us` and refused
-    /// with `refusal`, so its age at a turn is that turn's time less the last incarnation's start.
+    /// with `refusal`, or still running with no refusal, so its age at a turn is that turn's time less the last
+    /// incarnation's start.
     pub(crate) fn status(self) -> crate::failover::report::RecoveryStatus {
         let mut status = crate::failover::report::RecoveryStatus::NO_ATTEMPT;
         for _ in 0..self.attempts {
             status.start(self.kind, self.started_us);
         }
-        status.refuse(self.refusal);
+        if let Some(refusal) = self.refusal {
+            status.refuse(refusal);
+        }
         status
     }
 }
@@ -349,7 +362,7 @@ impl Fleet<'_> {
             super::owners::Incarnation::Ended(exit, refusal) => {
                 let flip = matches!(exit, crate::host::Exit::Retire(_));
                 self.cells[at].refuse(super::owners::blocker(&exit, refusal), flip);
-                if let (crate::host::Exit::Held { .. }, Some(refusal)) = (&exit, refusal) {
+                if let crate::host::Exit::Held { .. } = exit {
                     self.held(at, member, Held::of_restart(refusal));
                 }
                 self.queue_rerun(at, member, &exit, true);
@@ -413,12 +426,17 @@ impl Fleet<'_> {
     }
 
     /// Keeps the hold of a restart or takeover of cell `at` by `member` whose incarnation ended `Exit::Held`, with its
-    /// refusal's class. `member`'s next report carries the held entry, from which the loop's status names the shard's
+    /// refusal's class, or with no refusal for a sequence that succeeded while its fencer kept a command. `member`'s next report carries the held entry, from which the loop's status names the shard's
     /// blocker; a hold other than `RecordedHolder` while the volume is stalled or lost also joins the cell's device
     /// holds, which the survey's device-hold guard reads.
     /// Records that `member`'s incarnation for cell `at` held with `recovery`, started at this round on the host
     /// agents' clock, as one more recovery attempt of the member on the cell.
+    /// Under `UnrefusedHold` the planted cell keeps no hold whose incarnation carries no refusal.
     pub(super) fn held(&mut self, at: usize, member: usize, recovery: Held) {
+        if recovery.refusal.is_none() && self.config.planted_at(super::Plant::UnrefusedHold, at) {
+            self.planted = true;
+            return;
+        }
         // The new hold replaces the process's earlier one, a returned host's included.
         self.held_returns.remove(&(at, member));
         let check = recovery.status().recovery(0).check;
@@ -660,7 +678,7 @@ impl Fleet<'_> {
                 self.cells[at].holder = member;
                 let flip = matches!(exit, crate::host::Exit::Retire(_));
                 self.cells[at].refuse(super::owners::blocker(&exit, refusal), flip);
-                if let (crate::host::Exit::Held { .. }, Some(refusal)) = (&exit, refusal) {
+                if let crate::host::Exit::Held { .. } = exit {
                     self.held(at, member, Held::of_restart(refusal));
                 }
                 return Ok(Restarted::Held);
