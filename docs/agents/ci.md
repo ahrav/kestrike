@@ -876,7 +876,7 @@ subsection below states each field's type, its writer and every refusal.
 | `injection/stopped.json` | `instance`, `state`, `time`, `request` {`instance`, `time`, `identity`} |
 | `injection/abort.json` | `cause`, `guardrail`, `time`, `detail` |
 | `injection/restoration.json` | `instance`, `state`, `time`, `reviewed_sha256` (the SHA-256 of the operator's record of GD-2's abort steps after an abort, else null) |
-| `injection/collected.json` | `time`, `files` {file: SHA-256} for `coverage.json` and each collected file present |
+| `injection/collected.json` | `time`, `files` {file: SHA-256} for `coverage.json`, each collected file present and each other mark under `injection/` that stood when it was written |
 | `records/<shard>.jsonl` | `time`, `owner`, `standby`, `generation`, `volume`, `attempts` |
 | `records/receipts.jsonl` | `time`, `shard`, `principal` |
 | `activations.jsonl` | `host`, `activations` [{`shard`, `generation`, `attempt`, `time`}] |
@@ -888,10 +888,13 @@ subsection below states each field's type, its writer and every refusal.
 
 `injection/roles.json` and `injection/collected.json` are required; the other
 four marks under `injection/` are optional. `collected.json` is the stop
-controller's seal of the collections, written by its `seal` once the run
-window has ended; the judge refuses a collected file or `coverage.json` whose
-bytes differ from the digest it names, so an evidence directory without it is
-refused (exit 2). `origin.jsonl`, `provider.jsonl` and `blockers.jsonl` hold
+controller's seal of the collections and the marks, written by its `seal`
+once the run window has ended; the judge refuses a collected file,
+`coverage.json` or a mark whose bytes differ from the digest it names, a file
+it names that is missing, and a mark it does not name, except a
+`restoration.json` that ends no observation (dated at or after the run
+window's end plus `clock_error_seconds`), which `restore` may write after the
+seal. An evidence directory without it is refused (exit 2). `origin.jsonl`, `provider.jsonl` and `blockers.jsonl` hold
 the observations `origin`, `provider` and `re-enrollment`; a `simulation`
 package names those its world lacks under `outside`, their files stand
 absent, and the rules that read them read `outside`. A package whose `hosts`,
@@ -992,12 +995,16 @@ stands in DIR, which the judge names by its last component and opens following n
                              mark and a stopped report of that instance read inside the run window, where they stand,
                              and the SHA-256 of the
                              operator's record that GD-2's abort steps were done before the start: 64 hex digits when
-                             `abort.json` stands, null when it does not. Its `time` inside the run window ends
-                             observation (the rules' common part below). Optional.
+                             `abort.json` stands, null when it does not. A `time` at or after the run window's start and
+                             less than `clock_error_seconds` after its end ends observation (the rules' common part
+                             below). Optional.
   injection/collected.json  {time, files}: the controller's seal of the collections, `time` at or after the run
-                             window's end and each `coverage.json` span's `to`, `files` {file: sha256} for exactly
-                             `coverage.json` and each file `coverage.json` names, the SHA-256 of its bytes. A file whose
-                             bytes differ from its digest is refused, collected files before `coverage.json`. Required.
+                             window's end and each `coverage.json` span's `to`, `files` {file: sha256} for
+                             `coverage.json`, each file `coverage.json` names and each other mark under `injection/`
+                             that stood when the seal was written, the SHA-256 of its bytes. A named file that is
+                             missing, a mark it does not name (a `restoration.json` that ends no observation
+                             excepted) and a file whose bytes differ from its digest are refused, collected files
+                             before the marks and `coverage.json`. Required.
   records/<shard>.jsonl     one per package shard: each committed version of the shard record over both windows, in
                              commit order (times never decrease): {time, owner, standby, generation, volume, attempts}.
   records/receipts.jsonl    each replacement receipt: {time, shard, principal}.
@@ -1050,9 +1057,11 @@ refuses a file, host, shard or key outside the package's lists, a package off th
 coverage count other than its file's. Four statements it takes as their writers' declarations and checks for shape
 alone: that `hosts` and `shards` are every host and shard of the zone, that each collected file held every row of the
 span `coverage.json` names when the controller sealed it, that the run ran `revision` on `date`, and that
-`reviewed_sha256` names the operator's record. The seal binds each collected file and `coverage.json` to the bytes the
+`reviewed_sha256` names the operator's record. The seal binds each collected file, `coverage.json` and each mark that stood to the bytes the
 controller read after the run window's end: a row removed from a collection after the seal, with its count lowered to
-match, or a span widened after it, changes a digest the seal names, and the judge refuses it. The seal itself is a file
+match, a span widened after it, or an abort or restoration mark removed, added or changed after it, changes what the
+seal names, and the judge refuses it. A restoration that ends no observation, dated at or after the run window's end
+plus `clock_error_seconds`, may stand unsealed. The seal itself is a file
 of DIR, checked for shape: a seal removed and written again over changed files, by the controller or another writer,
 reads as the first one does. The record carries the seal's SHA-256 and time, and `seal` prints that digest, so an
 approver who kept the printed digest can tell a second seal from the first. The run's producers write every file of DIR,
@@ -1060,8 +1069,9 @@ so a directory with a shard, a row or a date left out or changed reads as an hon
 that the evidence delivered meets GD-2's oracle. The record's `package_sha256` covers `package.json` alone (the lists,
 the revision and the date): `readiness.py judge` compares it with its inputs entry, which binds them when that entry's
 digest was taken from the package as filled before the injection, and compares `revision` with the release revision.
-`coverage.json` and the row files stand in the seal's digests, inside DIR, and the record's `seal` carries the seal's
-own digest; `reviewed_sha256` stands in no digest the record carries. While GD-2 is blocked, `readiness.py judge` grades
+`coverage.json`, the row files and the marks stand in the seal's digests, inside DIR, and the record's `seal` carries the seal's
+own digest; `reviewed_sha256` stands in the seal's digest of a sealed `restoration.json`, and in no digest of an
+unsealed one. While GD-2 is blocked, `readiness.py judge` grades
 a `HELD` staging record UNVERIFIED.
 
 GD-2's texts. The judge holds the five hypothesis clauses with their bound names, the eight guardrail texts, and the
@@ -1104,8 +1114,8 @@ at every place. The version
 a roles read names is the first in commit order that equals `roles.json` among the shard's last version stamped
 before the read by more than the clock error and its versions stamped within the clock error of the read, so a version
 committed after it is read even when its stamp precedes the read; a shard with no such version has every version read.
-The end of observation is the run window's end, or, when the time of `injection/restoration.json` lies inside the run
-window, that time less `clock_error_seconds`: the fault is over when the instance runs again, and a row stamped by
+The end of observation is the run window's end, or, when the time of `injection/restoration.json` lies at or after the
+run window's start and less than `clock_error_seconds` after its end, that time less `clock_error_seconds`: the fault is over when the instance runs again, and a row stamped by
 another writer within the clock error of the controller's restoration is undecided. No rule reads a line of `records/`,
 `activations.jsonl` (each activation by its own time), `witness.jsonl`, `origin.jsonl`, `provider.jsonl` or
 `blockers.jsonl` at or after the end of observation, a row's time and that end compared as the decimal values their
@@ -1118,7 +1128,8 @@ generation or volume still contradicts it). The other three are judged on the li
 where a drain that ends within the clock error of the end of observation, or after it, is open; witness-first-hit and
 no-origin-before-hit, where a requested key with no first hit before the end leaves them unobserved, and a takeover
 write or first hit that is not read counts as at the end of observation. Origin-load keeps the run window's intervals,
-the stop's cut interval joined to the next as planned. A restoration at or after the run window's end changes nothing.
+the stop's cut interval joined to the next as planned. A restoration at or after the run window's end plus
+`clock_error_seconds` changes nothing.
   takeover               clause 1: each owned shard's last version before the run window's end names its standby as
                          owner at the generation and volume of `roles.json`, and its takeover write and each later
                          version before that end name that generation and volume.
@@ -1142,7 +1153,7 @@ the stop's cut interval joined to the next as planned. A restoration at or after
                          before the reference, leaves the rule unobserved. An activation that no version read names
                          its host owner for contradicts the rule where its shard's versions are read to the run
                          window's end and the activation precedes the end of each collection the rule reads; under a
-                         restoration inside the run window, or where that shard's `records/` collection ends early,
+                         restoration that ends observation, or where that shard's `records/` collection ends early,
                          the owning version may stand unread and the rule reads unobserved. With nothing
                          contradicted, a package host with no activation line leaves it unobserved. The rule
                          compares the versions and activations of both windows, so a `records/` file or the
@@ -1226,10 +1237,11 @@ before the stop request, the abort mark or the matching stopped report; a baseli
 window starts; a run window that is not a whole number of origin intervals, from 1 to
 MAX_INTERVALS; an owned shard with no witness key, or, with the reach met, a witness key of a shard the target did not
 own; a coverage entry missing, extra, backwards, with another line count or spanning past the seal's time; a seal
-missing, dated before the run window's end, naming other files than `coverage.json` and the collected files present,
-or naming a digest other than its file's; a `hosts`, `shards` or `witness` list longer than its FLEET_BOUNDS bound, or
+missing, dated before the run window's end, leaving out `coverage.json`, a collected file or a mark that stands (a
+restoration that ends no observation excepted), naming a file that is missing or one outside them, or naming
+a digest other than its file's; a `hosts`, `shards` or `witness` list longer than its FLEET_BOUNDS bound, or
 a FLEET_BOUNDS file that cannot be read, is not UTF-8 or declares its constant other than once as `pub const NAME:
-usize = N;` (a CRLF read as LF); a `simulation`
+usize = N;` (a CRLF read as LF) or as a value past a 64-bit `usize`; a `simulation`
 package with a clock error other than 0; a `staging` package naming an observation as outside; a file of an outside
 observation present; a GD-2 text other
 than WRITTEN or a catalog budget other than null or a positive number; a record path at which an entry exists or whose
@@ -1290,9 +1302,10 @@ the record's `LaunchTime` less the clock difference the controller admits
 (`SKEW_SECONDS`), and at least the latest time among the stop request, the
 stopped report and the abort mark. That is the earliest time at which the
 target may have run again, so a target started inside the run window ends the
-judge's observation there whenever `restore` runs, and a start less than
-`2 * SKEW_SECONDS + 1` seconds after the run window's end may be dated inside
-it. A record that dates no return (unread, of another state, without a
+judge's observation there, and a start less than
+`2 * SKEW_SECONDS + 1` seconds plus `clock_error_seconds` after the run
+window's end may still end it before the run window's end; `run` prints that
+bound. A record that dates no return (unread, of another state, without a
 `LaunchTime` in UTC, or one that shows no start after the stopped report)
 ends `restore` with exit 1 and no mark; the judge reads the whole run window
 where no restoration stands, so that evidence is not to be judged as it
@@ -1303,14 +1316,24 @@ fake pins the field, and no test reads a real control plane.
 `DIR/injection`, so the operator keeps that directory under that name until
 `restore` ends. `seal --operator F --evidence DIR`, run once the run window
 has ended and every collection named in `DIR/coverage.json` is in DIR, writes
-`collected.json`: the SHA-256 of `coverage.json` and of each collected file,
-dated by the wall clock at its start, and prints the mark's own SHA-256,
+`collected.json`: the SHA-256 of `coverage.json`, of each collected file and
+of each mark under `injection/`, dated by the wall clock at its start, and prints the mark's own SHA-256,
 also for a mark it linked whose sync then failed (exit 1), since that mark
-stands or may stand again after a crash. It makes no AWS call. It reads each file relative to the descriptor of its
-directory, following no link, syncs each file and both directories, and runs
+stands or may stand again after a crash. It makes no AWS call. It lists DIR, `records/` and `injection/` as the judge
+does and refuses an entry outside the layout before it reads any file but
+`package.json`. It reads each file relative to the descriptor of its
+directory, following no link, syncs each file, then `records/`, `injection/` and DIR, and runs
 the judge's loader over the bytes it seals with the mark it would write, so
-it refuses evidence the judge would refuse. It lists DIR and `records/` as
-the judge does and refuses an entry outside the layout. It also refuses a
+it refuses evidence the loader would refuse; the judge's witness checks
+against `roles.json` run in the judge alone. The seal names a restoration
+that stands, so an operator who started the target before the seal runs
+`restore` first. A `restore` after the seal reads DIR as the judge does
+before any call, refuses a package other than the approval's and any evidence
+the judge's loader refuses of the directory as it stands (a seal that leaves
+out a collected file, `coverage.json` or a standing mark, a sealed file that
+is missing or holds other bytes, a file outside the layout), and writes
+the restoration with its true time; one that ends observation exits 1, and
+the judge refuses the evidence while that unsealed mark stands. `seal` also refuses a
 package other than the approval's, a package of kind other than `staging` (a
 simulation export seals its own files), a second seal, a held lock and a time
 before the run window's end, when a collection may still grow. A signal

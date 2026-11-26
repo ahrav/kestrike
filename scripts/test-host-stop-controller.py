@@ -23,6 +23,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import signal
 import stat
@@ -302,6 +303,11 @@ def repeated(text, key, value):
     return text.rstrip()[:-1] + f", {json.dumps(key)}: {json.dumps(value)}}}\n"
 
 
+def standing_marks(root):
+    """The relative paths of the marks under `root/injection` but the seal."""
+    return [f"injection/{p.name}" for p in (root / "injection").iterdir() if p.name != "collected.json"]
+
+
 @contextlib.contextmanager
 def patched(owner, name, value):
     """`owner.name` reads `value` inside the block and its own value again after it."""
@@ -516,7 +522,7 @@ class Run(Case):
     def test_a_clean_run_sends_the_five_calls_in_order_writes_three_marks_and_exits_0(self):
         self.assertEqual(self.run_controller(), 0, self.output)
         self.assertIn(f"A start before {gj.decode(PACKAGE.decode(), COPY)['run']['end'] + 2 * hsc.SKEW_SECONDS + 1} "
-                      "may be dated inside the run window", self.output)
+                      "may end the judge's observation", self.output)
         ops = self.plane.ops()
         first = [op for i, op in enumerate(ops) if op not in ops[:i]]
         self.assertEqual(first, ["sts get-caller-identity", STATUS, ALARMS, STOP, RECORD])
@@ -709,7 +715,7 @@ class Run(Case):
                  "a copy cut short": (lambda: copied.write_bytes(PACKAGE[:-1]), "holds other bytes than"),
                  "a link to the package": (linked, f"{COPY} cannot be read"),
                  "a named pipe": (piped, f"{COPY} is no regular file"),
-                 "a directory": (a_directory, f"{COPY} cannot be read: Is a directory")}
+                 "a directory": (a_directory, f"{COPY} is no regular file")}
         for name, (change, reason) in cases.items():
             with self.subTest(name):
                 self.setUp()
@@ -2045,6 +2051,28 @@ class Restore(Case):
         self.assertLess(marks["restoration"]["time"], self.plane.log[start]["start"], "before restore's start")
         self.assert_restore_refused(reason="restoration.json exists")
 
+    def test_a_start_at_the_bound_a_run_prints_ends_no_observation_under_a_clock_error(self):
+        # The plane's clock reads the skew behind the controller's, and its record names the launch's whole second.
+        self.repackage(lambda p: p.update(clock_error_seconds=2))
+        package = parse(self.package)
+        self.assertEqual(self.run_controller(), 0, self.output)
+        bounds = re.findall(r"A start before (\S+) may end the judge's observation", self.output)
+        self.assertEqual(len(bounds), 1, self.output)
+        late = float(bounds[0])
+        self.clock.advance(late - self.clock.t)
+        self.start_target(initializing=0)
+        self.plane.instances[TARGET]["launched"] = (self.clock.t - hsc.SKEW_SECONDS) // 1
+        self.assertEqual(self.restore(), 0, self.output)
+        restoration = self.marks()["restoration"]
+        self.assertEqual(restoration["time"], late - 2 * hsc.SKEW_SECONDS)
+        self.assertFalse(gj.ends_observation(package, restoration), restoration)
+        # The bound is the least the judge's rule admits: a restoration dated one second before the earliest time a
+        # start at the bound is dated ends observation.
+        self.assertEqual(late, package["run"]["end"] + 2 * hsc.SKEW_SECONDS + 1 + package["clock_error_seconds"])
+        earliest = late - 2 * hsc.SKEW_SECONDS - 1
+        self.assertFalse(gj.ends_observation(package, {"time": earliest}))
+        self.assertTrue(gj.ends_observation(package, {"time": earliest - 1}))
+
     def test_the_restoration_is_dated_by_the_targets_launch_between_the_marks_and_the_ready_read(self):
         skew, step = hsc.SKEW_SECONDS, 0.25
         # (the launch the record names from the stopped report's time and the first ready read's, the restoration's
@@ -2713,13 +2741,20 @@ class Judged(Case):
 
     def test_the_seal_names_each_collected_file_and_a_row_removed_after_it_is_refused(self):
         root = self.restored_copy()
-        calls = len(self.plane.log)
+        calls, seen = len(self.plane.log), len(self.output)
         self.assertEqual(self.seal(root), 0, self.output)
         self.assertEqual(len(self.plane.log), calls, "the seal makes no call")
         mark = parse(root / "injection" / "collected.json")
+        # The printed digest and the judge's record both name the SHA-256 of the mark's bytes on disk.
+        digest = hashlib.sha256((root / "injection" / "collected.json").read_bytes()).hexdigest()
+        self.assertIn(f"injection/collected.json sha256 {digest}\n", self.output[seen:])
+        sealed_record = self.tmp / "sealed-record.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(gj.run(str(root), str(sealed_record), CATALOG, FIS, self.readiness), 0)
+        self.assertEqual(parse(sealed_record)["seal"], {"sha256": digest, "time": mark["time"]})
         coverage = parse(root / "coverage.json")
         self.assertEqual(mark["time"], self.clock())
-        self.assertEqual(sorted(mark["files"]), sorted([*coverage, "coverage.json"]))
+        self.assertEqual(sorted(mark["files"]), sorted([*coverage, "coverage.json", *standing_marks(root)]))
         for rel, digest in mark["files"].items():
             self.assertEqual(digest, hashlib.sha256((root / rel).read_bytes()).hexdigest(), rel)
         self.assert_seal_refused(root, "injection/collected.json exists")
@@ -2749,18 +2784,27 @@ class Judged(Case):
             return lambda: path.write_bytes(original)
 
         for rel, change, reason in (
-                ("coverage.json", lambda c: c["provider.jsonl"].update(lines=2), "provider.jsonl holds 3 lines, but "
-                 "coverage.json counts 2"),
+                ("coverage.json", lambda c: c["provider.jsonl"].update(lines=2), "coverage.json spans provider.jsonl "
+                 "backwards or counts 2 lines, not its 3"),
                 ("coverage.json", lambda c: c["origin.jsonl"].update(to=end + 60), f"coverage.json spans origin.jsonl "
                  f"to {end + 60}, after the seal's time"),
                 ("coverage.json", lambda c: c.pop("witness.jsonl"), "not exactly the observeds"),
                 ("injection/roles.json", lambda r: r.update(package_sha256="0" * 64), "names another package")):
             with self.subTest(reason=reason):
                 undo = rewrite(rel, change)
-                self.assert_seal_refused(root, reason)
+                read, real = [], hsc.synced
+
+                def recorded(name, at, fd, read=read, real=real):
+                    read.append(at)
+                    return real(name, at, fd)
+                with patched(hsc, "synced", recorded):
+                    self.assert_seal_refused(root, reason)
+                if rel == "injection/roles.json":
+                    # A roles.json of another package is refused before any collection is read.
+                    self.assertEqual(read, ["package.json", "injection/roles.json"])
                 undo()
         (root / "blockers.jsonl").unlink()
-        self.assert_seal_refused(root, "blockers.jsonl cannot be read")
+        self.assert_seal_refused(root, "blockers.jsonl is missing")
         (root / "package.json").write_bytes(PACKAGE + b" ")
         self.assert_seal_refused(root, "package.json holds other bytes than the approval's package")
 
@@ -2772,10 +2816,21 @@ class Judged(Case):
         self.assertEqual(self.seal(root), 0, self.output)
         self.assertEqual(parse(root / "injection" / "collected.json")["time"], end)
         first = (root / "injection" / "collected.json").read_bytes()
-        # A seal that passes the existence check while another seal links its mark ends as the same refusal.
+        # A seal that passes the existence check while another seal links its mark is refused by its listing.
         real = hsc.stands
         self.patch(hsc, "stands", lambda path, what: False if path.name == "collected.json" else real(path, what))
         self.assert_seal_refused(root, "injection/collected.json exists: the seal is written once")
+        self.assertEqual((root / "injection" / "collected.json").read_bytes(), first)
+        # A seal whose mark another seal links after its listing ends as the same refusal, at the link.
+        (root / "injection" / "collected.json").unlink()
+        publish = hsc.publish
+
+        def raced(path, data):
+            path.write_bytes(first)
+            publish(path, data)
+        with patched(hsc, "publish", raced):
+            self.assertEqual(self.seal(root), 2, self.output)
+        self.assertIn("injection/collected.json exists: the seal is written once", self.output)
         self.assertEqual((root / "injection" / "collected.json").read_bytes(), first)
 
     def test_a_linked_root_records_or_injection_or_a_simulation_package_writes_no_seal(self):
@@ -2787,8 +2842,7 @@ class Judged(Case):
         self.assert_seal_refused(root, "records is no directory")
         linked = self.tmp / "linked"
         linked.symlink_to(twin)
-        self.assertEqual(self.seal(linked), 2, self.output)
-        self.assertIn("is no directory", self.output)
+        self.assert_seal_refused(linked, f"{linked} is no directory;")
         self.assertFalse((twin / "injection" / "collected.json").exists())
         shutil.rmtree(twin / "injection")
         (twin / "injection").symlink_to(root / "injection")
@@ -2892,7 +2946,7 @@ class Judged(Case):
                 os.kill(os.getpid(), signal.SIGTERM)
             say(text, err=err)
         self.patch(hsc, "say", signalled)
-        self.assert_seal_refused(root, f"blockers.jsonl cannot be read: {os.strerror(errno.ENOENT)}; nothing written")
+        self.assert_seal_refused(root, "blockers.jsonl is missing; nothing written")
 
     def test_a_failed_sync_of_a_collection_or_its_directory_writes_no_seal(self):
         root = self.restored_copy()
@@ -2948,10 +3002,178 @@ class Judged(Case):
         self.assertIn("collected.json stands, but it cannot be synced", self.output[seen:])
         self.assertIn(f"injection/collected.json sha256 {hashlib.sha256(mark.read_bytes()).hexdigest()}\n",
                       self.output[seen:])
-        self.assertEqual(sorted(parse(mark)["files"]), sorted([*parse(root / "coverage.json"), "coverage.json"]))
+        self.assertEqual(sorted(parse(mark)["files"]), sorted([*parse(root / "coverage.json"), "coverage.json",
+                                                              *standing_marks(root)]))
         self.assert_seal_refused(root, "injection/collected.json exists: the seal is written once")
         self.assertEqual(gj.read_evidence(str(root))["seal_sha256"], hashlib.sha256(mark.read_bytes()).hexdigest())
 
+    def test_an_entry_of_injection_outside_the_layout_is_refused_before_it_is_read(self):
+        root = self.restored_copy()
+        real, read = hsc.synced, []
+
+        def recorded(name, rel, dir_fd):
+            read.append(rel)
+            return real(name, rel, dir_fd)
+        self.patch(hsc, "synced", recorded)
+        for make, rel, reason in ((lambda p: p.write_bytes(b"{}"), "injection/notes.json", "is no file of the layout"),
+                                  (lambda p: p.write_bytes(b"{}"), "notes.json", "is no file of the layout"),
+                                  (lambda p: p.write_bytes(b""), "records/s9.jsonl", "is no file of the layout"),
+                                  (lambda p: p.unlink(), "blockers.jsonl", "is missing"),
+                                  (lambda p: p.mkdir(), "injection/spare", "is no directory of the layout"),
+                                  (lambda p: p.symlink_to(root / "injection" / "roles.json"), "injection/linked.json",
+                                   "is a link or a special file")):
+            with self.subTest(rel=rel):
+                read.clear()
+                make(root / rel)
+                self.assert_seal_refused(root, f"{rel} {reason}")
+                self.assertEqual(read, ["package.json"])
+                if rel == "blockers.jsonl":
+                    shutil.copy(HELD / rel, root / rel)
+                elif (root / rel).is_dir() and not (root / rel).is_symlink():
+                    (root / rel).rmdir()
+                else:
+                    (root / rel).unlink()
+        # When package.json is a directory, seal names package.json in the error and closes the directory descriptor.
+        package = (root / "package.json").read_bytes()
+        (root / "package.json").unlink()
+        (root / "package.json").mkdir()
+        opened = len(os.listdir("/proc/self/fd"))
+        self.assert_seal_refused(root, "package.json is no regular file")
+        self.assertEqual(len(os.listdir("/proc/self/fd")), opened)
+        (root / "package.json").rmdir()
+        (root / "package.json").write_bytes(package)
+        self.assertEqual(self.seal(root), 0, self.output)
+
+    def test_an_empty_evidence_path_seals_and_restores_nothing_in_the_working_directory(self):
+        self.addCleanup(os.chdir, os.getcwd())
+        root = self.restored_copy()
+        self.clock.advance(parse(self.package)["run"]["end"] + 30 - self.clock.t)
+        os.chdir(root)
+        calls, seen = len(self.plane.log), len(self.output)
+        self.assertEqual(self.main(["seal", "--operator", str(self.write_operator()), "--evidence", ""]), 2)
+        self.assertIn("no evidence directory is named", self.output[seen:])
+        self.assertFalse((root / "injection" / "collected.json").exists())
+        (root / "injection" / "restoration.json").unlink()
+        seen = len(self.output)
+        self.assertEqual(self.main(["restore", "--operator", str(self.write_operator()), "--evidence", ""]), 2)
+        self.assertIn("no evidence directory is named", self.output[seen:])
+        self.assertEqual((len(self.plane.log), (root / "injection" / "restoration.json").exists()), (calls, False))
+        # An explicit `.` names the working directory.
+        self.assertEqual(self.main(["restore", "--operator", str(self.write_operator()), "--evidence", "."]), 0,
+                         self.output)
+        self.assertEqual(self.main(["seal", "--operator", str(self.write_operator()), "--evidence", "."]), 0,
+                         self.output)
+
+    def test_the_seal_names_each_mark_and_the_judge_refuses_one_removed_after_it(self):
+        self.faulted(lambda: self.plane.flip("gd2-guardrail-1", "ALARM"))
+        self.assertEqual(self.run_controller(), 1, self.output)
+        self.start_target(initializing=0)
+        path = self.tmp / "reviewed.json"
+        path.write_text(json.dumps(self.review()), encoding="utf-8")
+        self.assertEqual(self.restore(path), 0, self.output)
+        root = self.copy()
+        self.clock.advance(parse(self.package)["run"]["end"] + 30 - self.clock.t)
+        self.assertEqual(self.seal(root), 0, self.output)
+        mark = parse(root / "injection" / "collected.json")
+        self.assertEqual(sorted(rel for rel in mark["files"] if rel.startswith("injection/")),
+                         [f"injection/{name}.json" for name in ("abort", "restoration", "roles", "stop", "stopped")])
+        # Without the abort, and with the restoration rewritten to name no review, the run would read COMPLETED.
+        (root / "injection" / "abort.json").unlink()
+        restoration = parse(root / "injection" / "restoration.json")
+        restoration["reviewed_sha256"] = None
+        (root / "injection" / "restoration.json").write_text(json.dumps(restoration, indent=1) + "\n")
+        with self.assertRaisesRegex(gj.Refusal, "injection/collected.json seals injection/abort.json, which is missing"):
+            gj.run(str(root), str(self.tmp / "record.json"), CATALOG, FIS, self.readiness)
+
+    def test_a_restore_after_the_seal_writes_its_restoration_and_exits_1_when_it_may_end_observation(self):
+        end = parse(self.package)["run"]["end"]
+        # (launch, exit): inside the run window; after the window's end and before the seal's time; after the seal.
+        for launched, code in ((end - 10, 1), (end + hsc.SKEW_SECONDS + 5, 0), (end + 40 + hsc.SKEW_SECONDS, 0)):
+            with self.subTest(launched=launched):
+                self.setUp()
+                self.assertEqual(self.run_controller(), 0, self.output)
+                root = self.copy()
+                self.clock.advance(end + 30 - self.clock.t)
+                self.assertEqual(self.seal(root), 0, self.output)
+                self.clock.advance(max(0.0, launched + hsc.SKEW_SECONDS + 1 - self.clock.t))
+                self.start_target(initializing=0)
+                self.plane.instances[TARGET]["launched"] = launched
+                seen = len(self.output)
+                self.plane.deadline = None
+                self.assertEqual(self.main(["restore", "--operator", str(self.write_operator()), "--evidence",
+                                            str(root)]), code, self.output)
+                restoration = parse(root / "injection" / "restoration.json")
+                self.assertEqual(restoration["time"], launched - hsc.SKEW_SECONDS)
+                record = self.tmp / "restored-record.json"
+                if code:
+                    self.assertIn("the judge refuses this evidence while the mark stands", self.output[seen:])
+                    with self.assertRaisesRegex(gj.Refusal, "injection/restoration.json stands unsealed"):
+                        gj.run(str(root), str(record), CATALOG, FIS, self.readiness)
+                    continue
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(gj.run(str(root), str(record), CATALOG, FIS, self.readiness), 0)
+                self.assertEqual((parse(record)["run_status"], parse(record)["verdict"]), ("COMPLETED", "HELD"))
+
+    def test_a_restore_after_the_seal_refuses_a_sealed_mark_missing_or_changed_before_any_call(self):
+        def changed_roles(root):
+            roles = parse(root / "injection" / "roles.json")
+            roles["time"] += 1
+            (root / "injection" / "roles.json").write_text(json.dumps(roles, indent=1) + "\n")
+
+        def unsealed(root):
+            seal = parse(root / "injection" / "collected.json")
+            seal.pop("files")
+            (root / "injection" / "collected.json").write_text(json.dumps(seal))
+
+        def unnamed(rel):
+            def change(root):
+                seal = parse(root / "injection" / "collected.json")
+                del seal["files"][rel]
+                (root / "injection" / "collected.json").write_text(json.dumps(seal))
+            return change
+        end = parse(self.package)["run"]["end"]
+        for name, change, reason in (
+                ("a seal that names no stop", unnamed("injection/stop.json"), "injection/stop.json stands unsealed"),
+                ("a seal that names no stopped report", unnamed("injection/stopped.json"),
+                 "injection/stopped.json stands unsealed"),
+                ("a seal that names no coverage", unnamed("coverage.json"),
+                 "injection/collected.json seals no coverage.json"),
+                ("a seal that names no witness collection", unnamed("witness.jsonl"),
+                 "injection/collected.json seals no witness.jsonl"),
+                ("restoration", lambda root: (root / "injection" / "restoration.json").unlink(),
+                 "injection/collected.json seals injection/restoration.json, which is missing"),
+                ("abort", lambda root: (root / "injection" / "abort.json").unlink(),
+                 "injection/collected.json seals injection/abort.json, which is missing"),
+                ("roles", changed_roles, "injection/roles.json differs from the bytes injection/collected.json seals"),
+                ("files", unsealed, "injection/collected.json holds the keys ['time'], not ['files', 'time']"),
+                ("coverage changed after the seal", lambda root: (root / "coverage.json").write_bytes(
+                    (root / "coverage.json").read_bytes() + b"\n"),
+                 "coverage.json differs from the bytes injection/collected.json seals"),
+                ("a collection removed after the seal", lambda root: (root / "witness.jsonl").unlink(),
+                 "witness.jsonl is missing"),
+                ("a file outside the layout", lambda root: (root / "notes.txt").write_text("a note"),
+                 "notes.txt is no file of the layout"),
+                ("package", lambda root: (root / "package.json").write_bytes(PACKAGE + b" "),
+                 "package.json holds other bytes than the approval's package")):
+            with self.subTest(name=name):
+                self.setUp()
+                if name == "abort":
+                    self.faulted(lambda: self.plane.flip("gd2-guardrail-1", "ALARM"))
+                self.assertEqual(self.run_controller(), 1 if name == "abort" else 0, self.output)
+                if name == "restoration":
+                    self.restore_after_the_run_window()
+                root = self.copy()
+                self.clock.advance(max(0.0, end + 30 - self.clock.t))
+                self.assertEqual(self.seal(root), 0, self.output)
+                change(root)
+                self.start_target(initializing=0)
+                calls, seen = len(self.plane.log), len(self.output)
+                before = sorted(p.name for p in (root / "injection").iterdir())
+                self.assertEqual(self.main(["restore", "--operator", str(self.write_operator()), "--evidence",
+                                            str(root)]), 2, self.output)
+                self.assertIn(reason, self.output[seen:])
+                self.assertEqual((len(self.plane.log), sorted(p.name for p in (root / "injection").iterdir())),
+                                 (calls, before))
 
 class Script(unittest.TestCase):
     """The script's source: its calls go through `Controller.aws` as the five calls alone, `Controller.aws` reaches

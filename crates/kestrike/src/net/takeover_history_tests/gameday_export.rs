@@ -15,9 +15,9 @@
 //! row of a successor's sweep stands at the loss round plus its recovery's `rounds`, the round the successor's
 //! client session opened. The report carries one round for each recovery: the sweep sends its first GET in that
 //! round and every later GET in that round or a later one, so the stamp is a lower bound of a row's send round.
-//! The run window ends one round after the latest of the loss and those stamps. The export seals its collected files
-//! and `coverage.json` at that end in `injection/collected.json`, the SHA-256 of each file's bytes, as the stop
-//! controller's `seal` does.
+//! The run window ends one round after the latest of the loss and those stamps. The export seals its collected files,
+//! `coverage.json` and its marks `roles.json`, `stop.json` and `stopped.json` at that end in
+//! `injection/collected.json`, the SHA-256 of each file's bytes, as the stop controller's `seal` does.
 //!
 //! The package is of kind `simulation`, so the judge's record reads mode `simulation`. Its revision is forty zeros
 //! and its date is [`DATE`]. A host scenario runs the fleet's hosts alone, so the package marks the origin,
@@ -424,18 +424,25 @@ fn export(report: &Report) -> Files {
         })
         .collect();
     files.insert("coverage.json".into(), json_file(&Value::Object(coverage)));
-    let sealed: Map<String, Value> = (files.iter())
-        .map(|(rel, bytes)| (rel.clone(), json!(hex(&Sha256::digest(bytes)))))
-        .collect();
-    files.insert(
-        "injection/collected.json".into(),
-        json_file(&json!({"time": end, "files": sealed})),
-    );
     files.insert("injection/roles.json".into(), json_file(&roles));
     files.insert("injection/stop.json".into(), json_file(&stop));
     files.insert("injection/stopped.json".into(), json_file(&stopped));
     files.insert("package.json".into(), package);
+    seal(&mut files, &json!(end));
     files
+}
+
+/// `seal` writes `injection/collected.json` at `time` over `files`: the SHA-256 of every file's bytes but
+/// `package.json` and the seal's own, as the stop controller's `seal` names the files it reads.
+fn seal(files: &mut Files, time: &Value) {
+    let sealed: Map<String, Value> = (files.iter())
+        .filter(|(rel, _)| *rel != "package.json" && *rel != "injection/collected.json")
+        .map(|(rel, bytes)| (rel.clone(), json!(hex(&Sha256::digest(bytes)))))
+        .collect();
+    files.insert(
+        "injection/collected.json".into(),
+        json_file(&json!({"time": time, "files": sealed})),
+    );
 }
 
 /// `Scratch` recursively removes its directory on drop. Cleanup failure triggers a panic unless the thread is
@@ -454,8 +461,9 @@ impl Drop for Scratch {
 }
 
 /// `judgment` writes `files` to a fresh evidence directory and runs the judge over it. It returns the judge's exit
-/// code, its standard error, and the bytes of the record it wrote, or `None` when no record stands.
-fn judgment(files: Files) -> (i32, String, Option<Vec<u8>>) {
+/// code, its standard error and the scratch directory that holds `record.json`, which the caller reads for the code
+/// it expects.
+fn judgment(files: Files) -> (i32, String, Scratch) {
     static CASES: AtomicUsize = AtomicUsize::new(0);
     let case = CASES.fetch_add(1, Ordering::Relaxed);
     let scratch = Scratch(fresh_directory(&format!("gameday-export-{case}")));
@@ -479,38 +487,31 @@ fn judgment(files: Files) -> (i32, String, Option<Vec<u8>>) {
     let Some(code) = output.status.code() else {
         panic!("the judge ended by {}: {stderr}", output.status);
     };
-    // After a refusal the record path is looked up without following a link, so any entry there counts as a record.
-    let record = if code == 2 {
-        match std::fs::symlink_metadata(&record_path) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Ok(_) => Some(Vec::new()),
-            Err(error) => panic!(
-                "the judge exited {code} and {} cannot be looked up: {error}: {stderr}",
-                record_path.display()
-            ),
-        }
-    } else {
-        Some(std::fs::read(&record_path).unwrap_or_else(|error| {
-            panic!(
-                "the judge exited {code} and {} reads {error}: {stderr}",
-                record_path.display()
-            )
-        }))
-    };
-    (code, stderr, record)
+    (code, stderr, scratch)
 }
 
 /// `judged` returns the judge's exit code and parsed run record for the evidence `files`. The judge must exit with
 /// code `0` or `1` and write a readable JSON record of the package in `files`.
 fn judged(files: Files) -> (i32, Value) {
     let package = hex(&Sha256::digest(&files["package.json"]));
-    let (code, stderr, record) = judgment(files);
+    let (code, stderr, scratch) = judgment(files);
     assert!(
         code == 0 || code == 1,
         "the judge wrote no record, exit {code}: {stderr}"
     );
-    let bytes =
-        record.unwrap_or_else(|| panic!("the judge exited {code} and wrote no record: {stderr}"));
+    let record_path = scratch.0.join("record.json");
+    let kind = std::fs::symlink_metadata(&record_path).map(|meta| meta.file_type());
+    assert!(
+        kind.as_ref().is_ok_and(std::fs::FileType::is_file),
+        "the judge exited {code} and {} is {kind:?}, not a regular file: {stderr}",
+        record_path.display()
+    );
+    let bytes = std::fs::read(&record_path).unwrap_or_else(|error| {
+        panic!(
+            "the judge exited {code} and {} reads {error}: {stderr}",
+            record_path.display()
+        )
+    });
     let record: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
         panic!("the judge exited {code} and its record is not JSON: {error}: {stderr}")
     });
@@ -525,9 +526,18 @@ fn judged(files: Files) -> (i32, Value) {
 /// `refused` returns the judge's standard error for the evidence `files`, which the judge must refuse with exit 2
 /// and no record.
 fn refused(files: Files) -> String {
-    let (code, stderr, record) = judgment(files);
+    let (code, stderr, scratch) = judgment(files);
     assert_eq!(code, 2, "the judge refuses the evidence: {stderr}");
-    assert!(record.is_none(), "a refusal leaves no record: {stderr}");
+    // The record path is looked up without following a link, so any entry there counts as a record.
+    let record_path = scratch.0.join("record.json");
+    match std::fs::symlink_metadata(&record_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(meta) => panic!("a refusal leaves no record, and {meta:?} stands: {stderr}"),
+        Err(error) => panic!(
+            "the judge exited {code} and {} cannot be looked up: {error}: {stderr}",
+            record_path.display()
+        ),
+    }
     stderr
 }
 
@@ -1095,6 +1105,22 @@ fn a_witness_row_removed_after_the_exports_seal_is_refused() {
     );
 }
 
+/// The export seals its marks with its collections. A `stopped.json` removed after the seal leaves a name the seal
+/// binds without its file, and the judge refuses it.
+#[test]
+fn a_stopped_mark_removed_after_the_exports_seal_is_refused() {
+    let mut files = export(&root_one());
+    assert!(
+        files.remove("injection/stopped.json").is_some(),
+        "the export writes stopped.json"
+    );
+    let stderr = refused(files);
+    assert!(
+        stderr.contains("injection/collected.json seals injection/stopped.json, which is missing"),
+        "{stderr}"
+    );
+}
+
 /// A package that lists every host the fleet directory admits, [`MAX_HOSTS`], is judged, and one more host is
 /// refused; a shard list one past [`MAX_SLOTS`] is refused too. The judge reads both bounds from their declarations,
 /// and the test compares them with the compiled constants.
@@ -1113,6 +1139,9 @@ fn a_package_host_list_past_the_fleet_directorys_bound_is_refused() {
         roles["package_sha256"] = json!(hex(&Sha256::digest(&bytes)));
         files.insert("injection/roles.json".into(), json_file(&roles));
         files.insert("package.json".into(), bytes);
+        let sealed: Value =
+            serde_json::from_slice(&files["injection/collected.json"]).expect("JSON");
+        seal(&mut files, &sealed["time"]);
         files
     };
     let (code, record) = judged(repackaged(&package));

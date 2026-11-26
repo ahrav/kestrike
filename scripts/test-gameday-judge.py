@@ -18,6 +18,7 @@ import io
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -171,7 +172,8 @@ class Evidence:
         if not self.keep_seal and SEAL in self.files:
             # `keep_seal` preserves the original digests so changes to sealed files produce a digest mismatch.
             self.files[SEAL]["files"] = {rel: hashlib.sha256(data).hexdigest() for rel, data in files.items()
-                                         if rel.startswith("records/") or rel in (*gj.COLLECTED, "coverage.json")}
+                                         if rel.startswith("records/") or rel in (*gj.COLLECTED, *gj.MARKS,
+                                                                                  "coverage.json")}
             files[SEAL] = serialized(SEAL, self.files[SEAL])
         return files
 
@@ -454,6 +456,9 @@ class Held(Judging):
         self.assertEqual(record["result"], "held on 11 rules")
         self.assertEqual(self.results(record, "held"), set(TEXT_AT))
         self.assertEqual(record["package_sha256"], hashlib.sha256((HELD / "package.json").read_bytes()).hexdigest())
+        seal = (HELD / SEAL).read_bytes()
+        self.assertEqual(record["seal"], {"sha256": hashlib.sha256(seal).hexdigest(),
+                                          "time": gj.decode(seal.decode(), SEAL)["time"]})
         set_values = self.catalog["budgets"]["origin-load"]["value"] is not None
         self.assertEqual(record["budgets"], {b: {"value": SET_BUDGETS[b], "source": "catalog"} if set_values else
                                              {"value": Evidence().package["working_budgets"][b], "source": "package"}
@@ -875,9 +880,14 @@ class Refusals(Judging):
                 edit(ev[SEAL])
             return plant
 
-        cases = [(sealed(lambda seal: seal["files"].pop("witness.jsonl")), "not exactly the sealeds"),
-                 (sealed(lambda seal: seal["files"].update({"records/s9.jsonl": "0" * 64})), "not exactly the sealeds"),
-                 (sealed(lambda seal: seal["files"].update({"package.json": "0" * 64})), "not exactly the sealeds"),
+        cases = [(sealed(lambda seal: seal["files"].pop("witness.jsonl")), "injection/collected.json seals no "
+                  "witness.jsonl"),
+                 (sealed(lambda seal: seal["files"].pop("coverage.json")), "injection/collected.json seals no "
+                  "coverage.json"),
+                 (sealed(lambda seal: seal["files"].update({"records/s9.jsonl": "0" * 64})), "not only the sealeds"),
+                 (sealed(lambda seal: seal["files"].update({"package.json": "0" * 64})), "not only the sealeds"),
+                 (sealed(lambda seal: seal["files"].update({"injection/collected.json": "0" * 64})),
+                  "not only the sealeds"),
                  (sealed(lambda seal: seal.update({"time": 399.5})), "before the run window's end 400"),
                  (lambda ev: ev["coverage.json"]["witness.jsonl"].update({"to": 431}),
                   "to 431, after the seal's time 430"),
@@ -890,11 +900,70 @@ class Refusals(Judging):
         self.assert_pair(planted(lambda ev: ev["coverage.json"]["witness.jsonl"].update({"to": 430})), "COMPLETED",
                          "HELD")
 
+    def test_the_seal_binds_every_mark_that_stood_when_it_was_written(self):
+        # Abort and restoration marks can affect the verdict even when the collections stay the same.
+        def resealed(*plants, after):
+            ev = planted(*plants)
+            ev.bytes()
+            ev.keep_seal = True
+            after(ev)
+            return ev
+
+        def unaborted(ev):
+            del ev["injection/abort.json"]
+            ev["injection/restoration.json"]["reviewed_sha256"] = None
+
+        self.assert_pair(planted(aborted("deadline")), "HALTED", "INCONCLUSIVE")
+        self.assert_pair(planted(restored(390)), "COMPLETED", "INCONCLUSIVE")
+        cases = [(resealed(aborted("deadline"), after=unaborted),
+                  "injection/collected.json seals injection/abort.json, which is missing"),
+                 (resealed(restored(390), after=lambda ev: ev.files.pop("injection/restoration.json")),
+                  "injection/collected.json seals injection/restoration.json, which is missing"),
+                 (resealed(after=aborted("deadline")), "injection/abort.json stands unsealed, and only a restoration may"),
+                 (resealed(after=lambda ev: ev["injection/roles.json"].update(time=99)),
+                  "injection/roles.json differs from the bytes injection/collected.json seals"),
+                 (resealed(after=lambda ev: ev["injection/stopped.json"].update(state="terminated")),
+                  "injection/stopped.json differs from the bytes injection/collected.json seals"),
+                 (resealed(aborted("deadline"), after=lambda ev: ev["injection/abort.json"].update(detail="changed")),
+                  "injection/abort.json differs from the bytes injection/collected.json seals"),
+                 (resealed(after=lambda ev: ev["injection/stop.json"].update(time=149)),
+                  "injection/stop.json differs from the bytes injection/collected.json seals"),
+                 (resealed(after=restored(421)),
+                  "injection/restoration.json differs from the bytes injection/collected.json seals")]
+        for ev, words in cases:
+            with self.subTest(words=words):
+                self.assert_refused(ev, words)
+
+        def restored_after_the_seal(time, *plants):
+            return resealed(lambda ev: ev.files.pop("injection/restoration.json"), *plants,
+                            after=lambda ev: ev.files.__setitem__("injection/restoration.json", {
+                                "instance": "i-h1", "state": "running", "time": time, "reviewed_sha256": None}))
+
+        # An unsealed restoration at or after the run window's end, less the clock error, ends no observation.
+        for time in (400, 429, 430):
+            with self.subTest(unsealed=time):
+                self.assert_pair(restored_after_the_seal(time), "COMPLETED", "HELD")
+        self.assert_refused(restored_after_the_seal(399), "injection/restoration.json stands unsealed and dates 399, "
+                            "less than the clock error after the run window's end 400, so it may end observation")
+        # With a clock error of 2, a restoration at 401 may precede rows other writers stamped before 400.
+        erred = planted(clock_error(2), restored(401))
+        self.assertEqual(self.record(erred)[1]["run_status"], "COMPLETED")
+        self.assertNotEqual(self.record(erred)[1]["verdict"], "HELD")
+        self.assert_pair(planted(clock_error(2), restored(402)), "COMPLETED", "HELD")
+        for time, refused in ((401, True), (402, False)):
+            with self.subTest(erred=time):
+                ev = restored_after_the_seal(time, clock_error(2))
+                if refused:
+                    self.assert_refused(ev, "injection/restoration.json stands unsealed and dates 401")
+                else:
+                    self.assert_pair(ev, "COMPLETED", "HELD")
+
     def test_lists_past_the_fleets_declared_bounds_are_refused_before_any_set_is_built(self):
         # The test reads MAX_HOSTS and MAX_SLOTS from their Rust declarations so its boundary cases track the fleet
         # limits.
         def declared(rel, name):
-            found = re.findall(rf"^pub const {name}: usize = ([0-9]+);$", (ROOT / rel).read_text(), re.MULTILINE)
+            text = gj.read_file(ROOT / rel, rel).replace(b"\r\n", b"\n").decode("utf-8")
+            found = re.findall(rf"^pub const {name}: usize = ([0-9]+);$", text, re.MULTILINE)
             self.assertEqual(len(found), 1, f"{rel} declares {name} once")
             return int(found[0])
 
@@ -916,12 +985,44 @@ class Refusals(Judging):
                 with self.assertRaisesRegex(gj.Refusal, f"holds {bound + 1} entries"):
                     gj.check_package(package)
 
+    def test_a_file_past_the_limit_is_refused_before_it_is_read_and_one_that_grows_before_it_is_synced(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch, "big.json")
+            path.write_bytes(b"12345")
+            opened = len(os.listdir("/proc/self/fd"))
+            # The size read by fstat refuses the file before any byte is read.
+            with mock.patch.object(gj, "FILE_LIMIT", 4), \
+                    mock.patch.object(gj.os, "fdopen", side_effect=AssertionError("the file was read")), \
+                    self.assertRaisesRegex(gj.Refusal, "big holds more than 4 bytes"):
+                gj.read_file(path, "big", sync=True)
+            self.assertEqual(len(os.listdir("/proc/self/fd")), opened)
+            # A file that grows past its fstat size while read is refused before it is synced.
+            real = os.fstat
+
+            def smaller(fd):
+                return os.stat_result((*real(fd)[:6], 4, *real(fd)[7:]))
+            with mock.patch.object(gj.os, "fstat", side_effect=smaller), \
+                    mock.patch.object(gj.os, "fsync", side_effect=AssertionError("the file was synced")), \
+                    self.assertRaisesRegex(gj.Refusal, "big grew while it was read"):
+                gj.read_file(path, "big", sync=True)
+            self.assertEqual(len(os.listdir("/proc/self/fd")), opened)
+            # A signal during fstat ends the read with the descriptor closed.
+            with mock.patch.object(gj.os, "fstat", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+                gj.read_file(path, "big")
+            self.assertEqual(len(os.listdir("/proc/self/fd")), opened)
+            self.assertEqual(gj.read_file(path, "big", sync=True), b"12345")
+            with self.assertRaises(TypeError):
+                gj.read_file(path, "big", None, True)
+
     def test_a_fleet_bound_is_read_from_its_own_declaration_or_refused(self):
         # Planted declarations with distinct values show which constant bounds each list; the cache is cleared around
         # each variant so neither the tree's values nor planted ones mask a read.
         gj.declared_bound.cache_clear()
         self.addCleanup(gj.declared_bound.cache_clear)
-        with tempfile.TemporaryDirectory() as scratch:
+        # The scratch directory's parent holds regex metacharacters, so a path matched as a pattern fails.
+        parent = Path(tempfile.mkdtemp(prefix="review[2]+("))
+        self.addCleanup(shutil.rmtree, parent)
+        with tempfile.TemporaryDirectory(dir=parent) as scratch:
             hosts, slots = Path(scratch, "hosts.rs"), Path(scratch, "slots.rs")
             bounds = {"hosts": (str(hosts), "MAX_HOSTS"), "shards": (str(slots), "MAX_SLOTS"),
                       "witness": (str(slots), "MAX_SLOTS")}
@@ -944,18 +1045,46 @@ class Refusals(Judging):
             for text, words in ((b"pub const MAX_HOSTS: usize = 1 << 12;\n", "declares MAX_HOSTS 0 times"),
                                 (b"pub const MAX_HOSTS: usize = 4;\npub const MAX_HOSTS: usize = 4;\n",
                                  "declares MAX_HOSTS 2 times"),
+                                (b"pub const MAX_HOSTS: usize = 18446744073709551616;\n",
+                                 "declares MAX_HOSTS as a value past a 64-bit usize"),
+                                (b"pub const MAX_HOSTS: usize = " + b"9" * 5000 + b";\n",
+                                 "declares MAX_HOSTS as a value past a 64-bit usize"),
+                                (b"pub const MAX_HOSTS: usize = 4;\npub const MAX_HOSTS: usize = " + b"9" * 30 + b";\n",
+                                 "declares MAX_HOSTS 2 times"),
                                 (b"pub const MAX_HOSTS: usize = 4;\n\xff\n", "is not UTF-8")):
                 with self.subTest(words=words):
                     hosts.write_bytes(text)
                     gj.declared_bound.cache_clear()
                     with mock.patch.dict(gj.FLEET_BOUNDS, bounds):
-                        with self.assertRaisesRegex(gj.Refusal, f"{hosts} {words}" if "declares" in words else words):
+                        with self.assertRaisesRegex(gj.Refusal, re.escape(f"{hosts} {words}")):
                             gj.check_package(Evidence().package)
-            hosts.unlink()
+            hosts.write_bytes(b"pub const MAX_HOSTS: usize = 18446744073709551615;\n")
             gj.declared_bound.cache_clear()
             with mock.patch.dict(gj.FLEET_BOUNDS, bounds):
-                with self.assertRaisesRegex(gj.Refusal, f"{hosts} cannot be read"):
-                    gj.check_package(Evidence().package)
+                self.assertEqual(gj.fleet_bound("hosts"), (1 << 64) - 1)
+            # A missing file, a link to a valid declaration and a named pipe with no writer are each refused, the
+            # pipe without blocking.
+            valid = Path(scratch, "valid.rs")
+            valid.write_bytes(b"pub const MAX_HOSTS: usize = 4;\n")
+            hosts.unlink()
+            for make, words in ((lambda: None, "cannot be read"),
+                                (lambda: hosts.symlink_to(valid), "cannot be read"),
+                                (lambda: os.mkfifo(hosts), "is no regular file")):
+                if os.path.lexists(hosts):
+                    hosts.unlink()
+                with self.subTest(words=words, kind=make):
+                    make()
+                    gj.declared_bound.cache_clear()
+                    # An alarm ends a read that blocks, so a reader that waits on the pipe fails the case.
+                    previous = signal.signal(signal.SIGALRM, lambda *_: self.fail(f"reading {hosts} blocked"))
+                    signal.alarm(10)
+                    try:
+                        with mock.patch.dict(gj.FLEET_BOUNDS, bounds):
+                            with self.assertRaisesRegex(gj.Refusal, re.escape(f"{hosts} {words}")):
+                                gj.check_package(Evidence().package)
+                    finally:
+                        signal.alarm(0)
+                        signal.signal(signal.SIGALRM, previous)
 
     def test_incomplete_or_inconsistent_evidence_is_refused(self):
         def missing(rel):

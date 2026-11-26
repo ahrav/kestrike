@@ -144,15 +144,40 @@ def shown(x):
 
 
 def read_bytes(path, what, dir_fd=None):
-    """The bytes of the regular file at `path` (relative to `dir_fd`), at most FILE_LIMIT, opened with no link."""
+    """The bytes of the regular file at `path` (relative to `dir_fd`), as `read_file` reads them. The judge reads its
+    evidence and the catalog through this name, which the self-test patches to observe each evidence read; a FLEET_BOUNDS
+    declaration is read through `read_file` itself."""
+    return read_file(path, what, dir_fd)
+
+
+def read_file(path, what, dir_fd=None, *, sync=False):
+    """The bytes of the regular file at `path` (relative to `dir_fd`), at most FILE_LIMIT, opened with no link and
+    without blocking; a file of another type, or one whose size passes FILE_LIMIT, is refused before its bytes are
+    read, and one that grows past it while read is refused before any sync. With `sync` the file is synced once read.
+    Every refusal names `what`, and the descriptor is closed on every path."""
     try:
-        with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd),
-                       "rb") as handle:
-            need(stat.S_ISREG(os.fstat(handle.fileno()).st_mode), f"{what} is no regular file")
-            data = handle.read(FILE_LIMIT + 1)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
     except OSError as error:
         raise Refusal(f"{what} cannot be read: {error.strerror}") from error
-    need(len(data) <= FILE_LIMIT, f"{what} holds more than {FILE_LIMIT} bytes")
+    try:
+        info = os.fstat(fd)
+        need(stat.S_ISREG(info.st_mode), f"{what} is no regular file")
+        need(info.st_size <= FILE_LIMIT, f"{what} holds more than {FILE_LIMIT} bytes")
+        handle = os.fdopen(fd, "rb")
+    except BaseException as error:
+        os.close(fd)
+        if isinstance(error, OSError):
+            raise Refusal(f"{what} cannot be read: {error.strerror}") from error
+        raise
+    with handle:
+        try:
+            # One byte past the size read by fstat tells a file that grew while it was read.
+            data = handle.read(info.st_size + 1)
+            need(len(data) <= info.st_size and len(data) <= FILE_LIMIT, f"{what} grew while it was read")
+            if sync:
+                os.fsync(handle.fileno())
+        except OSError as error:
+            raise Refusal(f"{what} cannot be read{' and synced' if sync else ''}: {error.strerror}") from error
     return data
 
 
@@ -272,7 +297,7 @@ LAYOUT = {
                               "detail": "name?"}, True),
     "injection/restoration.json": ({"instance": "name", "state": "name", "time": "time",
                                     "reviewed_sha256": "digest?"}, True),
-    "injection/collected.json": ({"time": "time", "files": Each("sealed", "digest", True)}, False),
+    "injection/collected.json": ({"time": "time", "files": Each("sealed", "digest", False)}, False),
     "records/receipts.jsonl": ({"time": "time", "shard": "shard", "principal": "name"}, False),
     "activations.jsonl": ({"host": "host", "activations": [{"shard": "shard", "generation": "generation",
                                                              "attempt": "epoch", "time": "time"}]}, False),
@@ -286,6 +311,8 @@ LAYOUT = {
 }
 # The files a collector writes, which `coverage.json` spans: each `records/` file and these.
 COLLECTED = ("activations.jsonl", "witness.jsonl", "origin.jsonl", "provider.jsonl", "blockers.jsonl")
+# The marks the seal names where they stand when it is written: each file of `injection/` but the seal itself.
+MARKS = tuple(rel for rel in LAYOUT if rel.startswith("injection/") and rel != "injection/collected.json")
 
 
 def fleet_bound(field):
@@ -297,17 +324,14 @@ def fleet_bound(field):
 def declared_bound(rel, name):
     """The value of the one `pub const NAME: usize = N;` line of the Rust file `rel` of this tree, read once per
     process with each CRLF read as LF as rustc reads it, or a Refusal. The file is read apart from the evidence."""
+    data = read_file(HERE.parent / rel, rel)
     try:
-        with open(HERE.parent / rel, "rb") as handle:
-            data = handle.read(FILE_LIMIT + 1)
         text = data.replace(b"\r\n", b"\n").decode("utf-8")
-    except OSError as error:
-        raise Refusal(f"{rel} cannot be read: {error.strerror}") from error
     except UnicodeDecodeError as error:
         raise Refusal(f"{rel} is not UTF-8: {error}") from error
-    need(len(data) <= FILE_LIMIT, f"{rel} holds more than {FILE_LIMIT} bytes")
     found = re.findall(rf"^pub const {name}: usize = ([0-9]+);$", text, re.MULTILINE)
     need(len(found) == 1, f"{rel} declares {name} {len(found)} times as `pub const {name}: usize = N;`, not once")
+    need(len(found[0]) <= 20 and int(found[0]) < 1 << 64, f"{rel} declares {name} as a value past a 64-bit usize")
     return int(found[0])
 
 
@@ -433,7 +457,7 @@ def load_evidence(files):
     ev = {"package": p, "package_sha256": hashlib.sha256(files["package.json"]).hexdigest(),
           "outside": set(p["outside"])}
     names["observed"] = collected(p)
-    names["sealed"] = names["observed"] | {"coverage.json"}
+    names["sealed"] = names["observed"] | {"coverage.json"} | set(MARKS)
     for rel, (schema, _) in layout_of(p).items():
         if rel not in files:
             ev[rel] = None
@@ -441,14 +465,34 @@ def load_evidence(files):
         ev[rel] = value = parsed(files[rel], rel)
         for n, row in enumerate(value, 1) if rel.endswith(".jsonl") else [(None, value)]:
             conform(row, schema, rel if n is None else f"{rel} line {n}", names)
-    # A row file is compared before coverage.json, so a shortened file is named itself.
-    for rel in [*sorted(names["observed"]), "coverage.json"]:
-        held, digest = hashlib.sha256(files[rel]).hexdigest(), ev["injection/collected.json"]["files"][rel]
-        need(held == digest, f"{rel} differs from the bytes injection/collected.json seals: it holds SHA-256 {held}, "
-             f"the seal {digest}")
+    check_seal(ev, files, names)
     ev["seal_sha256"] = hashlib.sha256(files["injection/collected.json"]).hexdigest()
     check_order(ev, p)
     return ev
+
+
+def check_seal(ev, files, names):
+    """Refuse a seal that leaves out a collected file, `coverage.json` or a mark that stands, names a file that stands
+    not, or names a digest other than its file's bytes. A restoration that ends no observation (`ends_observation`)
+    may stand unsealed, since `restore` may run after the seal."""
+    seal = ev["injection/collected.json"]
+    bound = set(seal["files"])
+    for rel in sorted(names["observed"] | {"coverage.json"}):
+        need(rel in bound, f"injection/collected.json seals no {rel}")
+    for rel in sorted(bound):
+        need(rel in files, f"injection/collected.json seals {rel}, which is missing")
+    for rel in MARKS:
+        if rel in files and rel not in bound:
+            need(rel == "injection/restoration.json", f"{rel} stands unsealed, and only a restoration may: the seal "
+                 "names each mark that stands when it is written")
+            need(not ends_observation(ev["package"], ev[rel]), f"{rel} stands unsealed and dates {ev[rel]['time']}, "
+                 f"less than the clock error after the run window's end {ev['package']['run']['end']}, so it may end "
+                 "observation")
+    # A row file is compared before the marks and coverage.json, so a shortened file is named itself.
+    for rel in [*sorted(names["observed"]), *(rel for rel in MARKS if rel in bound), "coverage.json"]:
+        held, digest = hashlib.sha256(files[rel]).hexdigest(), seal["files"][rel]
+        need(held == digest, f"{rel} differs from the bytes injection/collected.json seals: it holds SHA-256 {held}, "
+             f"the seal {digest}")
 
 
 def check_order(ev, p):
@@ -511,15 +555,24 @@ def in_run(ev, rows):
     return [r for r in rows if inside(r["time"], ev["package"]["run"])]
 
 
+def ends_observation(p, mark):
+    """Whether the restoration `mark` of package `p` ends observation before the run window's end: it dates at or
+    after the run window's start and less than the clock error after its end, so a row of another writer stamped
+    before the end may follow the return."""
+    error = exact(p["clock_error_seconds"])
+    return mark is not None and p["run"]["start"] <= mark["time"] and exact(mark["time"]) - error < exact(p["run"]["end"])
+
+
 def observed(ev):
     """`ev` with each row file cut at the end of observation, `end`: the run window's end, or the restoration's time
-    less the clock error when it lies inside the run window (`restored`), since a row within the error may follow it.
+    less the clock error when that ends observation earlier (`ends_observation`, `restored`), since a row within the
+    error may follow it.
     An unread takeover write or first hit lies at or after `end`; a drain ending within the error of `end` is open.
     A row's time compares with `end` as the decimal value its digits state. `short` holds the end of each
-    collection that ends before `end`. `cut` tells a restoration inside the run window; `restored` tells it too,
+    collection that ends before `end`. `cut` tells a restoration that ends observation; `restored` tells it too,
     until `graded` sets `restored` for a rule that reads a short collection."""
     p, mark, error = ev["package"], ev["injection/restoration.json"], exact(ev["package"]["clock_error_seconds"])
-    back = mark["time"] if mark is not None and inside(mark["time"], p["run"]) else None
+    back = mark["time"] if ends_observation(p, mark) else None
     end = p["run"]["end"] if back is None else exact(back) - error if error else back
     limit, near = exact(end), float(end)
     cut = {rel: [r for r in rows if r["time"] < near or r["time"] == near and exact(r["time"]) < limit]

@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2296",
+  "kind": "contract-change",
+  "pull_request": 2296,
+  "changed": "The game-day seal, injection/collected.json, names each mark under injection/ that stood when it was written (roles.json, stop.json, stopped.json, abort.json and restoration.json) beside coverage.json and each collected file. The judge, scripts/gameday-judge.py, refuses a seal that leaves out a standing mark, names a file that is missing, or names a digest other than its file's; a restoration.json dated at or after the run window's end plus clock_error_seconds may stand unsealed, since restore may run after the seal and such a restoration ends no observation, and an unsealed one dated earlier is refused. The end of observation is a restoration's time less the clock error whenever that time lies at or after the run window's start and less than the clock error after its end. The host stop controller's seal lists the evidence directory, records/ and injection/ against the judge's layout before it reads any file but package.json, and refuses an empty evidence path, as restore does; a restore after a seal reads the directory as the judge does and refuses, before any call, a package other than the approval's and any evidence the judge's loader refuses of the directory as it stands, and writes its restoration with its true time, exiting 1 when that restoration ends observation, so the judge refuses the evidence while the unsealed mark stands. An evidence directory sealed before this change names no mark and is refused with exit 2.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "gameday-judge-refuses-a-collection-changed-after-the-controllers-seal",
+    "reason": "Its invariant states the new contract of the seal: the export's seal names its marks with its collections, and the same export with stopped.json removed after the seal is refused with exit 2 and no record, the judge naming the sealed mark as missing, where before the judge read the marks unsealed."
+  }
+}
