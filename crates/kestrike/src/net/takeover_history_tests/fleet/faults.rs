@@ -73,6 +73,9 @@ pub(crate) enum Action {
     Impair(usize),
     /// The operator releases the held replacement receipt of the shard at this cell index.
     Release(usize),
+    /// The stalled volume of the shard at this cell index completes commands again, and each process of the shard
+    /// that ended `Exit::Held` runs its next incarnation at once, as its supervisor starts it.
+    Rerun(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,7 +151,9 @@ impl Kind {
             Action::Store(_) | Action::StoreWrite(_) => Self::StoreArm,
             Action::Outage => Self::StoreOutage,
             Action::Register(_) => Self::Hostile(Hostile::ForeignRegistrant),
-            Action::Stall(_) | Action::LoseVolume(_) | Action::Impair(_) => Self::Volume,
+            Action::Stall(_) | Action::LoseVolume(_) | Action::Impair(_) | Action::Rerun(_) => {
+                Self::Volume
+            }
             Action::Release(_) => Self::OperatorRelease,
         }
     }
@@ -282,6 +287,7 @@ pub(crate) enum Effect {
     /// The zone double lists the cell's volume impaired when `true` and `ok` when `false`.
     Impair(usize, bool),
     Release(usize),
+    Rerun(usize),
 }
 
 /// [`Faulted`] stores read `store`.
@@ -470,7 +476,10 @@ impl Faults {
             Action::LoseVolume(at) if on => vec![Effect::LoseVolume(*at)],
             Action::Impair(at) => vec![Effect::Impair(*at, on)],
             Action::Release(at) if on => vec![Effect::Release(*at)],
-            Action::Register(_) | Action::LoseVolume(_) | Action::Release(_) => Vec::new(),
+            Action::Rerun(at) if on => vec![Effect::Rerun(*at)],
+            Action::Register(_) | Action::LoseVolume(_) | Action::Release(_) | Action::Rerun(_) => {
+                Vec::new()
+            }
         }
     }
 }

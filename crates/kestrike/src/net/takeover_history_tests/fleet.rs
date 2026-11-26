@@ -209,10 +209,16 @@ pub(crate) enum Plant {
     /// Each view period while waiting, the indexed shard's standby supplements its role read with one read of
     /// either its own shard record or the record named by `Fleet::standby_extra`.
     StandbyExtraRead,
+    /// The standby process of the shard at the index publishes no `Standby` status from its wait, so its host's agent
+    /// addresses it no witness.
+    WaitUnpublished,
+    /// In a host scenario every tenure of the host at the index publishes flat device and completion counters with
+    /// one command pending, while the host stays healthy: the flat-progress gray owner.
+    FlatProgress,
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -235,6 +241,8 @@ impl Plant {
         Self::DutyRewrite,
         Self::AckOnUnknown,
         Self::StandbyExtraRead,
+        Self::WaitUnpublished,
+        Self::FlatProgress,
     ];
 
     /// `Config::identity` encodes the hostile profile with the plant code.
@@ -262,6 +270,8 @@ impl Plant {
             Self::DutyRewrite => 52,
             Self::AckOnUnknown => 53,
             Self::StandbyExtraRead => 54,
+            Self::WaitUnpublished => 55,
+            Self::FlatProgress => 56,
         }
     }
 }
@@ -272,9 +282,10 @@ pub(crate) enum Profile {
     Legal,
     /// The plant and the zero-based index of the cell it applies to; shard numbers start at one. For
     /// `NeighborRefusal` the index names the crashed shard whose episode sends the refused GET, and in a host
-    /// scenario the lost host by member index, as it does for `WholeShare` and `UnchargedRead`. `NoCrashEpisode`
-    /// and `WideCap` ignore the index, and any other plant with an index past the last cell plants nothing.
-    /// `Config::identity` encodes the index of every plant.
+    /// scenario the lost host by member index, as it does for `WholeShare` and `UnchargedRead`. For `FlatProgress`
+    /// the index names a host by member index, so an index past the last cell plants on a layout with that many
+    /// hosts. `NoCrashEpisode` and `WideCap` ignore the index, and any other plant with an index past the last cell
+    /// plants nothing. `Config::identity` encodes the index of every plant.
     Hostile(Plant, u32),
     /// A hostile profile whose episodes may break a premise of the fleet's rules; it plants nothing.
     Arm(Hostile),
@@ -726,7 +737,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v20-inbox";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v21-inbox";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1065,7 +1076,7 @@ impl Report {
         if self.config.scenario.hosted() {
             let log = &self.hosts;
             lines.push(format!(
-                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} refused-reruns {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} boot {:?} fired {:?} arrivals {:?}",
+                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} refused-reruns {} gray-readings {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} boot {:?} fired {:?} arrivals {:?}",
                 log.nominations,
                 log.addressed,
                 log.vetoes,
@@ -1078,6 +1089,7 @@ impl Report {
                 log.unslotted,
                 log.rerun_dropped,
                 log.refused_reruns,
+                log.gray_readings,
                 log.reports,
                 log.refused,
                 log.exempt,
@@ -1463,6 +1475,23 @@ struct Cell {
     waits: Vec<(u64, u64)>,
     /// The exit of each view period of the shard's standby wait that ended other than `Exit::Stopped`.
     wait_exits: Vec<String>,
+    /// The status the shard's standby process published: the member, and the target and active volume of the shard
+    /// record version its last role read returned while that read named it standby. Three role reads set it: the one of
+    /// a view period of its wait (`Fleet::standby_waits`), the one of a takeover's period with its witness that ends
+    /// `Exit::Stopped` (`Fleet::take_over`, through `Fleet::publish_read`), and the one of an incarnation that waits
+    /// (`Fleet::publish_role`). The host's agent reads it as a `Standby` status until the process holds the shard, its
+    /// host stops or pauses, an incarnation's role read returns another role, an incarnation or a witness-bearing
+    /// period ends the process at an exit or at a failed role read (`Fleet::end_wait`), or a view period of the waits
+    /// or a witness-bearing period that ends `Exit::Stopped` ends it: the stored shard record no longer names it
+    /// standby at a view period, the period's reads return records that assign it another role, or a view period ends
+    /// other than `Exit::Stopped`. Between a record write and the process's next role read the status stands, as a
+    /// process publishes it between two role reads; with no witness-bearing period and no incarnation between, that
+    /// read is the next view period's.
+    waiting: Option<(
+        usize,
+        crate::failover::retire::Target,
+        crate::failover::records::VolumeId,
+    )>,
     /// While a rerun's restart runs, the round its tenure ended, which the recovery's rounds count from.
     rerun_from: Option<u64>,
     /// The object of each GET offered to the shard during another shard's recovery.
@@ -1616,6 +1645,7 @@ impl Cell {
             waited: std::collections::BTreeMap::new(),
             waits: Vec::new(),
             wait_exits: Vec::new(),
+            waiting: None,
             rerun_from: None,
             requested: Vec::new(),
             third: third.map(|(member, record)| (member, record.pair(), Stored(Ok(record)))),
@@ -2019,6 +2049,11 @@ struct Fleet<'c> {
     /// The next incarnation runs as that restart again, so a tenure it serves, or a record that deposes it,
     /// completes the return in the zone log.
     returning: std::collections::BTreeSet<(usize, usize)>,
+    /// The processes that hold (`Exit::Held`) from a returned host's restart ([`Fleet::restart_returned`]), by cell
+    /// and member. When the hold's rerun is queued ([`Fleet::rerun_held`]) the entry moves to `returning`, so
+    /// `returning` holds an entry only while a next incarnation is queued. A new hold of the same process replaces
+    /// the entry ([`Fleet::held`]).
+    held_returns: std::collections::BTreeSet<(usize, usize)>,
     /// The entries of `refused` that a serving tenure's rerun queued (`Fleet::rerun`), by cell and member, with the
     /// round that tenure ended. The next incarnation's recovery counts its rounds from that round.
     rerun_starts: std::collections::BTreeMap<(usize, usize), u64>,
@@ -2037,6 +2072,9 @@ struct Fleet<'c> {
     /// no tenure, or only the tenure an open loss took from it, the host loop runs on, so the agent's next witness
     /// reaches the wait; the agent sends one a window while the records name its target.
     retakes: std::collections::BTreeMap<usize, usize>,
+    /// Whether the host loop runs a due rerun of [`Fleet::refused`] ahead of a queued takeover in the same pass: the
+    /// order of a held process's rerun and a standby's takeover that both became due in one round.
+    rerun_first: bool,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2170,10 +2208,12 @@ impl<'c> Fleet<'c> {
             torn: Vec::new(),
             reruns: std::collections::BTreeMap::new(),
             returning: std::collections::BTreeSet::new(),
+            held_returns: std::collections::BTreeSet::new(),
             rerun_starts: std::collections::BTreeMap::new(),
             recurred: std::collections::BTreeSet::new(),
             refused: std::collections::BTreeMap::new(),
             retakes: std::collections::BTreeMap::new(),
+            rerun_first: false,
             standby_extra: None,
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));
@@ -3180,7 +3220,7 @@ impl<'c> Fleet<'c> {
         member: usize,
         counts: &owners::WaitCounts,
     ) -> crate::storage::store::Client<
-        crate::storage::store::sim::Faulted<DutyCounted>,
+        owners::Returning<crate::storage::store::sim::Faulted<DutyCounted>>,
         crate::storage::store::sim::MemLog,
     > {
         let store = crate::storage::store::sim::Faulted {
@@ -3192,6 +3232,10 @@ impl<'c> Fleet<'c> {
             },
             actor: member as u32,
             faults: self.faults.store.clone(),
+        };
+        let store = owners::Returning {
+            inner: store,
+            returned: counts.returned.clone(),
         };
         let client = crate::storage::store::Client::open(store, self.hosts[member].log.clone());
         client.expect("a host's store client")

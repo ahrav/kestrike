@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2231",
+  "kind": "contract-change",
+  "pull_request": 2231,
+  "changed": "The obligation record fleet-held-and-standby-statuses-come-from-the-owner-processes-and-a-gray-owner-is-not-nominated is new, and the invariants of fleet-volume-faults-retain-an-impaired-volume-and-replace-a-lone-loss-once and fleet-volume-scenarios-pass-on-their-second-root-and-every-replacement-crash-cell change. The held entry of a held restart or takeover is the status the fleet's driver publishes for an incarnation that ended Exit::Held, with the recovery class host::recover::Ended::refusal carries, where it was an entry the harness built for the report. A standby's Standby status comes from its own host::stand_by view period, with the target of the shard record that period's read returned, where the fleet built it from the records the host's agent last synced. The scheduled volume case counts 11 checks and 32 lines, where it counted 10 and 31: it adds the rerun-first order of the held owner's rerun against its standby's takeover.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-held-and-standby-statuses-come-from-the-owner-processes-and-a-gray-owner-is-not-nominated",
+    "reason": "Its invariant states the new contract: the held owner's Held status makes its agent declare itself unhealthy, the standby's agent addresses the witness to the Standby status the standby's wait published, the takeover moves the shard once, a view period publishes the target of the record it read and keeps the earlier target when its shard read returns no value, the held process's rerun and the standby's takeover race to one winner in either order, and a flat-progress owner reads gray with no nomination. Its LIMITS state where the fleet's status differs from the production wait's: the fleet runs a wait only for the standby the stored shard record names."
+  }
+}

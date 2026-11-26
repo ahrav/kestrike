@@ -17,7 +17,7 @@ use crate::failover::evidence::Pair;
 use crate::failover::fresh::{LocalRecords, Refusals};
 use crate::failover::poll::Holder;
 use crate::failover::record::LocalRecord;
-use crate::failover::records::{Host, Record, ShardRecord};
+use crate::failover::records::{Host, Record, ShardRecord, VolumeRecord, VolumeState};
 use crate::failover::report::{RecoveryCheck, RecoveryRefusal};
 use crate::failover::restart::tests::Stored;
 use crate::failover::restart::{Local, LocalSource};
@@ -470,6 +470,52 @@ pub(super) fn tenure_at(target: Target) -> Tenure {
     }
 }
 
+/// Whether a role read that returned `volume` and `shard` names `host` standby, by the rule of `host::survey`: the
+/// volume is the shard's active volume, and the shard record names another owner and `host` standby. A volume in
+/// another state, or one that contradicts the shard record, makes the role retired or unnamed.
+fn reads_standby(host: Host, volume: &VolumeRecord, shard: &ShardRecord) -> bool {
+    let active = crate::failover::flip::volume_state(shard, volume) == Ok(VolumeState::Active);
+    active && shard.owner != host && shard.standby == Some(host)
+}
+
+/// The first value a read of each key returned, by key.
+pub(super) type Returned =
+    std::collections::BTreeMap<crate::storage::store::Key, crate::storage::store::Item>;
+
+/// A store that keeps the first value a read of each key returned. A standby wait's client reads through it above
+/// the fault layer, so it holds the replies that client received, and a period's role read is its first read of each
+/// record: a later read of the same key in the period, such as `enroll_standby`'s, leaves the kept value as it is.
+pub(crate) struct Returning<S> {
+    pub(crate) inner: S,
+    pub(crate) returned: Rc<RefCell<Returned>>,
+}
+
+impl<S: Store> Store for Returning<S> {
+    fn read(
+        &mut self,
+        key: &crate::storage::store::Key,
+    ) -> Result<Option<crate::storage::store::Item>, crate::storage::store::Unavailable> {
+        let read = self.inner.read(key);
+        if let Ok(Some(item)) = &read {
+            let mut returned = self.returned.borrow_mut();
+            returned.entry(*key).or_insert_with(|| item.clone());
+        }
+        read
+    }
+
+    fn write(
+        &mut self,
+        key: &crate::storage::store::Key,
+        write: &crate::storage::store::Write,
+    ) -> crate::storage::store::Outcome {
+        self.inner.write(key, write)
+    }
+
+    fn namespace(&self) -> crate::failover::records::Namespace {
+        self.inner.namespace()
+    }
+}
+
 /// The check `refusal`'s class names, as a held restart's status reads it.
 pub(super) fn check_of(refusal: RecoveryRefusal) -> Option<RecoveryCheck> {
     super::volumes::Held::of_restart(refusal)
@@ -491,6 +537,8 @@ pub(super) fn blocker(exit: &Exit, refusal: Option<RecoveryRefusal>) -> String {
 #[derive(Default)]
 pub(crate) struct WaitCounts {
     pub(crate) keys: super::DutyCounts,
+    /// The first value the period's client received from a read of each key ([`Returning`]).
+    pub(crate) returned: Rc<RefCell<Returned>>,
 }
 
 impl WaitCounts {
@@ -530,16 +578,25 @@ impl Fleet<'_> {
     pub(super) fn standby_waits(&mut self) {
         for at in 0..self.cells.len() {
             let record = self.record_now(at);
-            let Some(standby) = record.standby else {
-                continue;
-            };
-            let Some(member) = self.member_of(standby) else {
+            let waiter = (record.standby)
+                .and_then(|standby| self.member_of(standby))
+                .filter(|&member| {
+                    self.cells[at].holder != member
+                        && self.hosts[member].up == super::hosts::Up::Running
+                });
+            // The fleet runs a wait only for the standby the stored record names. A process that record stopped
+            // naming, that holds the shard, or whose host stopped runs no wait here, so its `Standby` status ends in
+            // this view period.
+            if self.cells[at]
+                .waiting
+                .is_some_and(|(of, ..)| Some(of) != waiter)
+            {
+                self.cells[at].waiting = None;
+            }
+            let Some(member) = waiter else {
                 continue;
             };
             let cell = &self.cells[at];
-            if cell.holder == member || self.hosts[member].up != super::hosts::Up::Running {
-                continue;
-            }
             // A process whose inbox holds a nomination for the shard's active volume runs its period with the
             // witness, in `Fleet::take_over`.
             let inbox = (member, record.active);
@@ -557,6 +614,7 @@ impl Fleet<'_> {
                 let own = crate::storage::store::Key::Shard(cell.placement.shard);
                 let key = self.standby_extra.unwrap_or(own);
                 let _ = client.read::<crate::failover::records::ShardRecord>(key);
+                counts.returned.borrow_mut().clear();
             }
             let refused = |_| Err(AdmissionError::AttemptConsumed);
             let stood = WAITS.with(|grounds| {
@@ -579,7 +637,36 @@ impl Fleet<'_> {
             cell.waits.push((reads, writes));
             if exit != Exit::Stopped {
                 cell.wait_exits.push(format!("{exit:?}"));
+                cell.waiting = None;
+            } else {
+                self.publish_read(at, member, &counts.returned);
             }
+        }
+    }
+
+    /// Publishes or ends `member`'s `Standby` status for cell `at` from the two records a period's role read
+    /// returned to its client, the volume record first and then the shard record: the member waits as the standby
+    /// they name, or reads another role and publishes no `Standby`. A period whose shard read returned no value
+    /// leaves the status as it is. Both a view period of the waits and a takeover's period with its witness publish
+    /// through it.
+    pub(super) fn publish_read(&mut self, at: usize, member: usize, returned: &RefCell<Returned>) {
+        let placement = self.cells[at].placement;
+        let read = {
+            let mut returned = returned.borrow_mut();
+            let volume = returned.remove(&crate::storage::store::Key::Volume(placement.volume));
+            let shard = returned.remove(&crate::storage::store::Key::Shard(placement.shard));
+            volume.zip(shard)
+        };
+        let Some((volume, shard)) = read else {
+            return;
+        };
+        let host = self.topology.members[member].host;
+        let volume = VolumeRecord::decode(&volume.value).expect("a stored volume record");
+        let shard = self.cells[at].decoded(&shard);
+        if reads_standby(host, &volume, &shard) {
+            self.cells[at].waiting = Some((member, Target::of(&shard), shard.active));
+        } else {
+            self.end_wait(at, member);
         }
     }
 }

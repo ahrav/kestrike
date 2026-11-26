@@ -681,6 +681,12 @@ pub(crate) struct HostLog {
     /// The next incarnations the host loop ran for a restart, takeover or held process whose incarnation ended with
     /// an exit naming a rerun (`host::Exit::Rerun`, or a failed role read), each a role read and `host::recover`.
     pub(crate) refused_reruns: u32,
+    /// The agent turns after which the observer's detector read a peer `Dead` with a failure that needs a second
+    /// observer class (`Failure::Gray`), the evidence the arbiter declines with `GrayNeedsSecondClass` when every
+    /// vote comes from one class.
+    pub(crate) gray_readings: u32,
+    /// Each observer host and the peer it read `Dead` with a gray failure, once a pair.
+    pub(crate) gray: std::collections::BTreeSet<(u64, u64)>,
     pub(crate) takeovers: Vec<Attempt>,
     pub(crate) reports: u32,
     /// The inputs a host's own agent or the report reader refused: a heartbeat or a probe message the agent refused,
@@ -1446,6 +1452,25 @@ impl<'c> Fleet<'c> {
         Client::open(faulted, self.hosts[member].log.clone()).expect("a host's store client")
     }
 
+    /// `member`'s store client for a takeover's period with its witness and for the incarnation after it:
+    /// [`Fleet::client`]'s store under `owners::Returning`, which keeps in `returned` the records the first role read
+    /// through the client returned.
+    fn takeover_client(
+        &self,
+        member: usize,
+        returned: &std::rc::Rc<std::cell::RefCell<super::owners::Returned>>,
+    ) -> Client<super::owners::Returning<Faulted<Shared>>, MemLog> {
+        let store = super::owners::Returning {
+            inner: Faulted {
+                inner: self.store.clone(),
+                actor: member as u32,
+                faults: self.faults.store.clone(),
+            },
+            returned: std::rc::Rc::clone(returned),
+        };
+        Client::open(store, self.hosts[member].log.clone()).expect("a host's store client")
+    }
+
     fn detector_now(&self) -> u64 {
         self.round * H
     }
@@ -1670,6 +1695,21 @@ impl<'c> Fleet<'c> {
         let out = agent.turn(t, inputs);
         let healthy = agent.healthy(t);
         let watch = agent.watch();
+        let own_host = self.topology.members[member].host.get();
+        let gray: Vec<u64> = (self.topology.members.iter())
+            .filter(|peer| {
+                matches!(
+                    watch.liveness(peer.host),
+                    Some(crate::failover::detect::Liveness::Dead(suspicion))
+                        if suspicion.failure.needs_second_class()
+                )
+            })
+            .map(|peer| peer.host.get())
+            .collect();
+        self.log.gray_readings += u32::from(!gray.is_empty());
+        self.log
+            .gray
+            .extend(gray.into_iter().map(|peer| (own_host, peer)));
         let nominated = watch.census().nominations.saturating_sub(published);
         // An authenticated heartbeat from a placed peer whose roles the receiver's records omit is refused `Sender`
         // at the detector's row lookup; every other `Sender` refusal counts against the run.
@@ -1950,12 +1990,17 @@ impl<'c> Fleet<'c> {
     /// - each tenure that runs on the host, a deposed one included, with its authority's phase, tenure and ages and
     ///   its report entry, as the serving duties publish it;
     /// - each restart or takeover of the host that holds ([`Fleet::holds`]), with `Held` and its held entry;
-    /// - a standby wait, `Standby` with the record's target, for each record the host last read that names it standby
-    ///   of a shard it does not hold on a volume no other process of the host publishes;
+    /// - a standby wait, `Standby` with the target its last role read returned, in a view period of the wait, in a
+    ///   takeover's period with its witness that ended `Exit::Stopped`, or in the incarnation that began the wait
+    ///   ([`Cell::waiting`](super::Cell), [`Fleet::publish_read`], [`Fleet::publish_role`]), for each shard the host
+    ///   waits on as standby and does not hold, on a volume no other process of the host publishes;
     /// - under the enroll-back plant, an entryless `Withdrawn` status for the hidden hold;
     /// - and an entryless `Withdrawn` status, once, for a process that published last turn and runs no more.
     fn statuses(&mut self, live: &Live<'_>, member: usize, t: u64) -> Vec<LinkStatus> {
         use crate::failover::serving::State;
+        // The flat-progress plant freezes the counters of each tenure status the host publishes, with one command
+        // pending, from its first turn.
+        let flat = self.config.planted_at(Plant::FlatProgress, member);
         let pid = |at: usize| (member * 100 + at) as u32;
         let count = self.round;
         let cells = self.cells.len();
@@ -1987,11 +2032,13 @@ impl<'c> Fleet<'c> {
                 tenure: Some(authority.tenure),
                 report_age_us: authority.report_age_us,
                 read_age_us: authority.freshness_age_us,
-                io: count,
-                completions: count,
+                io: if flat { 0 } else { count },
+                completions: if flat { 0 } else { count },
+                pending: u64::from(flat),
                 entry,
                 ..LinkStatus::idle(placement.shard, volume, pid(at), phase)
             });
+            self.planted |= flat;
         }
         let mut hidden = Vec::new();
         for (at, held, planted) in self.holds(live, member) {
@@ -2019,21 +2066,23 @@ impl<'c> Fleet<'c> {
             });
         }
         self.planted |= !hidden.is_empty();
-        let host = self.hosts[member].host;
-        for record in &self.hosts[member].records {
-            if record.standby != Some(host) || record.owner == host {
-                continue;
-            }
-            let Some(at) = self.cell_of(record.shard) else {
+        // Each standby process publishes `Standby` from its own wait, with the target its last role read returned.
+        for at in 0..cells {
+            let Some((of, target, volume)) = self.cells[at].waiting else {
                 continue;
             };
-            let published = statuses.iter().any(|status| status.volume == record.active);
-            if self.cells[at].holder == member || published {
+            let published = statuses.iter().any(|status| status.volume == volume);
+            if of != member || self.cells[at].holder == member || published {
                 continue;
             }
+            if self.config.planted_at(Plant::WaitUnpublished, at) {
+                self.planted = true;
+                continue;
+            }
+            let shard = self.cells[at].placement.shard;
             statuses.push(LinkStatus {
-                target: Some(crate::failover::retire::Target::of(record)),
-                ..LinkStatus::idle(record.shard, record.active, pid(at), OwnerPhase::Standby)
+                target: Some(target),
+                ..LinkStatus::idle(shard, volume, pid(at), OwnerPhase::Standby)
             });
         }
         for status in hidden {
@@ -2131,6 +2180,7 @@ impl<'c> Fleet<'c> {
                 Effect::Unstall(at) => self.unstall(at),
                 Effect::Impair(at, on) => self.impair(at, on),
                 Effect::Release(at) => self.release_hold(at),
+                Effect::Rerun(at) => self.rerun_held(at),
                 Effect::Crash(member) if self.hosts[member].up == Up::Down => {}
                 Effect::Crash(member) => {
                     crashed = true;
@@ -2214,6 +2264,12 @@ impl<'c> Fleet<'c> {
         if up == Up::Down {
             for cell in &mut self.cells {
                 cell.held.retain(|(of, _)| *of != member);
+            }
+        }
+        // A stopped or paused host's standby processes publish nothing until a later wait reads their role again.
+        for cell in &mut self.cells {
+            if cell.waiting.is_some_and(|(of, ..)| of == member) {
+                cell.waiting = None;
             }
         }
         let host = &mut self.hosts[member];
@@ -2346,6 +2402,12 @@ impl<'c> Fleet<'c> {
             self.episodes(live, slots)?;
             if let Some(refusal) = self.draw_refusal.take() {
                 return Err(Stopped::Choice(refusal));
+            }
+            if self.rerun_first
+                && let Some(due) = self.refused_due()
+            {
+                self.rerun_refused(live, slots, due)?;
+                continue;
             }
             if let Some((member, volume, witness, at)) = self.nominated.pop_front() {
                 self.take_over(live, slots, member, (volume, witness, at))?;
@@ -2494,6 +2556,60 @@ impl<'c> Fleet<'c> {
         }
     }
 
+    /// The device of cell `at`'s volume completes commands again, and each process that holds the shard
+    /// (`Exit::Held`) is due its next incarnation from this round, ahead of the queue's later work. The process and
+    /// device holds belong to the incarnation that returned `Exit::Held` and stand until the next one starts
+    /// ([`Fleet::rerun_refused`]).
+    pub(super) fn rerun_held(&mut self, at: usize) {
+        self.cells[at].device = super::volumes::Device::Up;
+        let ended = self.round.saturating_sub(1);
+        let held: Vec<usize> = (self.cells[at].held.iter())
+            .map(|(member, _)| *member)
+            .collect();
+        for member in held {
+            self.refused.insert((at, member), (ended, true));
+            // A returned host's held restart completes its return at this rerun.
+            if self.held_returns.remove(&(at, member)) {
+                self.returning.insert((at, member));
+            }
+        }
+    }
+
+    /// `member`'s incarnation for cell `at` read `role` and waits: a standby role publishes its `Standby` status
+    /// ([`Fleet::publish_wait`]), and any other role ends the `Standby` status the member's process published
+    /// before.
+    pub(super) fn publish_role(&mut self, at: usize, member: usize, role: crate::host::Role) {
+        match role {
+            crate::host::Role::Standby { target } => self.publish_wait(at, member, target),
+            _ => self.end_wait(at, member),
+        }
+    }
+
+    /// Ends the `Standby` status `member`'s process published for cell `at`: its takeover acquired the shard's tenure,
+    /// its incarnation read another role, or the process ended at an exit or at a failed role read, and its next
+    /// incarnation, if any, publishes what it reads.
+    pub(super) fn end_wait(&mut self, at: usize, member: usize) {
+        if (self.cells[at].waiting).is_some_and(|(of, ..)| of == member) {
+            self.cells[at].waiting = None;
+        }
+    }
+
+    /// The wait of `member`'s incarnation for cell `at` publishes `Standby` with the target its role read
+    /// returned and the active volume of the record version that read returned: the newest committed version with
+    /// that target, read from the store with no request.
+    pub(super) fn publish_wait(
+        &mut self,
+        at: usize,
+        member: usize,
+        target: crate::failover::retire::Target,
+    ) {
+        let versions = self.cells[at].history(&self.store);
+        let read = (versions.iter().rev())
+            .find(|record| crate::failover::retire::Target::of(record) == target)
+            .expect("a committed version with the target the role read returned");
+        self.cells[at].waiting = Some((member, target, read.active));
+    }
+
     /// Records that `member`'s process waits as the named standby of cell `at` after the next incarnation of a
     /// takeover or of a refused restart, while the record names another owner.
     pub(super) fn retake(&mut self, at: usize, member: usize) {
@@ -2552,7 +2668,7 @@ impl<'c> Fleet<'c> {
     /// The first cell of [`Fleet::refused`] whose next incarnation is due: its incarnation ended before this round and
     /// its host is not paused. The next incarnation of a serving tenure's rerun ([`Fleet::rerun_starts`]) waits, as
     /// that rerun did, until each open loss has sent its drawn GETs, so its load takes no round from them.
-    fn refused_due(&mut self) -> Option<(usize, usize, bool)> {
+    pub(super) fn refused_due(&mut self) -> Option<(usize, usize, bool)> {
         let round = self.round;
         let sent = self.losses.iter().all(|loss| loss.episode.due.is_empty());
         // A paused host's rerun stays queued until the host resumes.
@@ -2567,7 +2683,7 @@ impl<'c> Fleet<'c> {
         Some((key.0, key.1, after_loss))
     }
 
-    fn take_over<'w>(
+    pub(super) fn take_over<'w>(
         &mut self,
         live: &mut Live<'w>,
         slots: &mut Slots<'w>,
@@ -2601,7 +2717,9 @@ impl<'c> Fleet<'c> {
         let early = self.config.planted_at(Plant::EarlyDevice, at);
         self.planted |= early;
         let ground = slots.take(member);
-        let mut client = self.client(member);
+        // The period's client keeps the records its role read returned, as a view period's does.
+        let returned = std::rc::Rc::default();
+        let mut client = self.takeover_client(member, &returned);
         let persist = |_| Ok(local.0.clone().expect("the standby's local record"));
         let stood = super::owners::stand_by(
             (&self.cells[at], of, pair),
@@ -2621,6 +2739,8 @@ impl<'c> Fleet<'c> {
         let mut lineage = false;
         let (tenure, control, now) = match stood {
             super::owners::Stood::Tenure(tenure, control, now) => {
+                // The standby that acquired the tenure waits no more.
+                self.end_wait(at, member);
                 self.log.takeovers.push(attempt(None));
                 (tenure, control, now)
             }
@@ -2641,9 +2761,10 @@ impl<'c> Fleet<'c> {
                 // The next incarnation opens its own store client over the host's durable watermark log: a takeover
                 // read that withdrew the ending incarnation's client withdraws none of the next one's.
                 drop(client);
-                client = self.client(member);
+                client = self.takeover_client(member, &std::rc::Rc::default());
                 match super::owners::incarnate(cell, self.round, ground.0, &mut client, sources) {
                     super::owners::Incarnation::Tenure(tenure, control, now) => {
+                        self.end_wait(at, member);
                         let attempt = self.log.takeovers.last_mut().expect("the refused attempt");
                         attempt.refused = None;
                         lineage = tenure.lineage();
@@ -2652,6 +2773,7 @@ impl<'c> Fleet<'c> {
                     super::owners::Incarnation::Ended(exit, refusal) => {
                         slots.put_back(member, ground.0);
                         drop(client);
+                        self.end_wait(at, member);
                         let held = self.cells[at].device != super::volumes::Device::Up
                             && self.record_now(at).owner == of.host;
                         self.queue_rerun(at, member, &exit, true);
@@ -2670,8 +2792,9 @@ impl<'c> Fleet<'c> {
                     }
                     // The next incarnation read the predecessor's record and waits as standby: the agent's next
                     // witness for the shard starts its takeover.
-                    super::owners::Incarnation::Waits(_) => {
+                    super::owners::Incarnation::Waits(role) => {
                         slots.put_back(member, ground.0);
+                        self.publish_role(at, member, role);
                         self.retake(at, member);
                         return Ok(());
                     }
@@ -2679,6 +2802,7 @@ impl<'c> Fleet<'c> {
                     // incarnation with `Rerun::Records`.
                     super::owners::Incarnation::Unread(error) => {
                         slots.put_back(member, ground.0);
+                        self.end_wait(at, member);
                         self.cells[at].blockers.push(format!("{error:?}"));
                         let records = crate::host::Exit::Rerun(crate::host::Rerun::Records);
                         self.queue_rerun(at, member, &records, true);
@@ -2694,11 +2818,16 @@ impl<'c> Fleet<'c> {
                 // production supervisor then runs the standby process again. The fleet logs the attempt and queues
                 // that next incarnation below. A takeover that unwound fails the period in `owners::stand_by`.
                 if exit != crate::host::Exit::Stopped {
+                    self.end_wait(at, member);
                     self.log
                         .takeovers
                         .push(attempt(Some(super::owners::blocker(&exit, refusal))));
-                } else if self.record_now(at).owner != of.host {
-                    self.log.takeovers.push(attempt(Some("Stopped".to_owned())));
+                } else {
+                    // The wait goes on, and its status comes from the role read this period made.
+                    self.publish_read(at, member, &returned);
+                    if self.record_now(at).owner != of.host {
+                        self.log.takeovers.push(attempt(Some("Stopped".to_owned())));
+                    }
                 }
                 // The host loop runs the next incarnation of a period that ended with a rerun exit: its role read
                 // finds the wait again (`Fleet::retake`), or the restart role under a record that names its host

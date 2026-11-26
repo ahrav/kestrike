@@ -223,11 +223,11 @@ ROW_LINES = {
         *(f"fleet: scheduled volume {check}: pass"
           for check in ("no-fault root 2", "impaired root 2", "impaired-brief root 2", "stall root 2", "control enroll-back root 2",
                         "lost-alone root 2", "correlated root 2", "correlated-late root 2", "control loss-evidence root 2",
-                        "correlated-replay root 1")),
+                        "correlated-replay root 1", "held-race-rerun-first root 1")),
         *(f"fleet: scheduled volume replace-{boundary}-{ending} root 1: pass"
           for boundary in ("replacement", "createopen", "createissued", "createcreated", "recordattach", "addspare", "flip")
           for ending in ("acknowledged", "committed", "lost")),
-        "fleet: scheduled volume: 10 checks and 21 crash cells passed",
+        "fleet: scheduled volume: 11 checks and 21 crash cells passed",
         *(f"fleet: scheduled zone {check}: pass" for check in ("loss root 2", "loss-replay root 1", "settle root 2")),
         "fleet: scheduled zone: 3 checks passed",
         *(f"fleet: scheduled repair-and-host {check} root 2: pass"
@@ -1813,7 +1813,7 @@ class SelectTests(unittest.TestCase):
         rows = INVENTORY["qualified"]["search-nightly"]["rows"]
         others = [line for row in rows if row["id"] != "fleet-scheduled-roots" for line in ROW_LINES[row["id"]]]
         scheduled = ROW_LINES["fleet-scheduled-roots"]
-        self.assertEqual(len(scheduled), 92)
+        self.assertEqual(len(scheduled), 93)
         witnesses = next(row for row in rows if row["id"] == "fleet-scheduled-roots")["witnesses"]
         code, report, blocked = self.blocked("search-nightly", lines=others + scheduled)
         self.assertEqual((code, blocked), (0, {}), report)
@@ -1821,7 +1821,7 @@ class SelectTests(unittest.TestCase):
             ("a skipped check", [line for line in scheduled if " lost-alone root 2" not in line], "skipped members ['volume lost-alone root 2']"),
             ("a skipped cell", [line for line in scheduled if " replace-flip-committed " not in line],
              "skipped members ['volume replace-flip-committed root 1']"),
-            ("a repeated cell", scheduled + scheduled[10:11], "repeated members ['volume replace-replacement-acknowledged root 1']"),
+            ("a repeated cell", scheduled + scheduled[11:12], "repeated members ['volume replace-replacement-acknowledged root 1']"),
             ("another root", scheduled + [scheduled[0].replace("root 2", "root 3")], "unexpected members ['volume no-fault root 3']"),
             ("a short count", [line.replace("21 crash cells", "20 crash cells") for line in scheduled], f"missing witness {witnesses[0]!r}"),
             ("a skipped zone check", [line for line in scheduled if " zone loss-replay " not in line], "skipped members ['zone loss-replay root 1']"),

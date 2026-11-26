@@ -405,19 +405,20 @@ fn a_request_count_past_one_peers_allowance_is_refused_before_any_draw() {
 }
 
 #[test]
-fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_45_and_50_to_54() {
+fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_45_and_50_to_56() {
     let codes: Vec<u8> = Plant::ALL.iter().map(|plant| plant.code()).collect();
     assert_eq!(
         codes,
         [
-            13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53, 54
+            13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53, 54,
+            55, 56
         ]
     );
     let identities: BTreeSet<String> = (Plant::ALL.iter())
         .map(|plant| Config::six(1).hostile(*plant, 0).identity())
         .chain([Config::six(1).identity()])
         .collect();
-    assert_eq!(identities.len(), 23);
+    assert_eq!(identities.len(), 25);
 }
 
 #[test]

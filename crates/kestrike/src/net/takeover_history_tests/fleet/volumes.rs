@@ -350,6 +350,7 @@ impl Fleet<'_> {
             }
             super::owners::Incarnation::Waits(role) => {
                 self.cells[at].refuse(format!("{role:?}"), false);
+                self.publish_role(at, member, role);
             }
             super::owners::Incarnation::Tenure(..) => {
                 panic!(
@@ -400,18 +401,16 @@ impl Fleet<'_> {
         double.map_or(0, |double| double.provider.calls)
     }
 
-    /// Keeps the hold a refused restart or takeover of cell `at` by `member` holds at: a `RecordedHolder` refusal, or
-    /// any other refusal while the volume is stalled or lost. `member`'s next report carries the held entry, from
-    /// which the loop's status names the shard's blocker.
+    /// Keeps the hold of a restart or takeover of cell `at` by `member` whose incarnation ended `Exit::Held`, with its
+    /// refusal's class. `member`'s next report carries the held entry, from which the loop's status names the shard's
+    /// blocker; a hold other than `RecordedHolder` while the volume is stalled or lost also joins the cell's device
+    /// holds, which the survey's device-hold guard reads.
     pub(super) fn held(&mut self, at: usize, member: usize, recovery: Held) {
-        if !self.repairs() {
-            return;
-        }
+        // The new hold replaces the process's earlier one, a returned host's included.
+        self.held_returns.remove(&(at, member));
         let check = recovery.status(0).recovery(0).check;
-        if check != Some(crate::failover::report::RecoveryCheck::RecordedHolder) {
-            if self.cells[at].device == Device::Up {
-                return;
-            }
+        let recorded = check == Some(crate::failover::report::RecoveryCheck::RecordedHolder);
+        if self.repairs() && !recorded && self.cells[at].device != Device::Up {
             self.cells[at].device_holds.insert(member);
         }
         let cell = &mut self.cells[at];
@@ -434,6 +433,10 @@ impl Fleet<'_> {
         let Some(member) = self.member_of(record.owner) else {
             return Ok(());
         };
+        // An owner whose tenure already serves the shard runs no second restart over it.
+        if live[at].is_some() && self.cells[at].holder == member {
+            return Ok(());
+        }
         self.restart_by(live, slots, (at, true), member).map(|_| ())
     }
 
@@ -496,10 +499,25 @@ impl Fleet<'_> {
         }
         if !slots.free(member) {
             self.log.unslotted += 1;
+            // A held process's rerun stays due, with its return marker, until a slot is free and its incarnation
+            // starts.
+            if (self.cells[at].held.iter()).any(|(of, _)| *of == member) {
+                self.refused.insert((at, member), (self.round, after_loss));
+                if returning {
+                    self.returning.insert((at, member));
+                }
+                if let Some(ended) = ended {
+                    self.rerun_starts.insert((at, member), ended);
+                }
+            }
             return Ok(());
         }
         self.log.refused_reruns += 1;
-        self.cells[at].rerun_from = ended;
+        // A hold belongs to the incarnation that returned `Exit::Held` and ends as the next one starts.
+        let cell = &mut self.cells[at];
+        cell.held.retain(|(of, _)| *of != member);
+        cell.device_holds.remove(&member);
+        cell.rerun_from = ended;
         let restarted = if returning {
             self.restart_returned(live, slots, (at, member))
         } else {
@@ -566,12 +584,14 @@ impl Fleet<'_> {
             // host, and the cell stays as it was.
             super::owners::Incarnation::Waits(role) => {
                 slots.put_back(member, ground.0);
+                self.publish_role(at, member, role);
                 let check = Some(format!("{role:?}"));
                 let attempts = before.attempts;
                 return Ok(Restarted::Deposed { check, attempts });
             }
             super::owners::Incarnation::Ended(exit, refusal) => {
                 slots.put_back(member, ground.0);
+                self.end_wait(at, member);
                 // An exit that names a rerun ends the process under either record: its next incarnation reads its
                 // role again.
                 self.queue_rerun(at, member, &exit, after_loss);
@@ -595,6 +615,7 @@ impl Fleet<'_> {
             // process read no role, so its next incarnation runs.
             super::owners::Incarnation::Unread(error) => {
                 slots.put_back(member, ground.0);
+                self.end_wait(at, member);
                 let check = format!("{error:?}");
                 let records = crate::host::Exit::Rerun(crate::host::Rerun::Records);
                 self.queue_rerun(at, member, &records, after_loss);

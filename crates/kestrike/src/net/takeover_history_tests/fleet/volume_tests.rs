@@ -248,6 +248,8 @@ fn a_stall_the_control_plane_reports_healthy_moves_the_shard_once_holds_and_reco
 fn a_stall_the_control_plane_reports_healthy_moves_the_shard_once_holds_and_recovers_on(root: u64) {
     let report = passing(&Config::stall(root));
     provisions_nothing(&report);
+    // The declared hold: H3's Held status makes its agent declare itself unhealthy, so s3 alone is exempt.
+    assert_eq!(report.hosts.exempt, BTreeSet::from([S3]));
     assert_eq!(report.volumes.retained, 0);
     assert_eq!(moves(&report, S3), 1);
     let (first, held) = held_by_both(&report);
@@ -1051,14 +1053,15 @@ fn a_served_shard_carries_only_volume_impaired_and_a_later_hold_leaves_a_volume_
 }
 
 /// The scheduled roots of the volume scenarios: every check above that runs one root on the fast tier, on root 2,
-/// the correlated run's replay on root 1, and all 21 replacement crash cells with their three endings each. Each
-/// check and each cell that passes prints one line, and the last line counts them.
+/// the correlated run's replay on root 1, the rerun-first order of the held owner's rerun against its standby's
+/// takeover on root 1, and all 21 replacement crash cells with their three endings each. Each check and each cell
+/// that passes prints one line, and the last line counts them.
 #[test]
 #[ignore = "volume scenarios on their second root and the full replacement crash table; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
 fn the_volume_scenarios_pass_on_their_scheduled_roots_and_every_crash_cell() {
     let moved = "a shard on a stalled volume changed hands more than once";
     let provisioned = "a host loss changed a shard's generation or provisioned a volume";
-    let checks: [(&str, &dyn Fn()); 10] = [
+    let checks: [(&str, &dyn Fn()); 11] = [
         ("no-fault root 2", &|| {
             with_no_fault_the_reconciler_writes_no_receipt_and_calls_no_provider_on(2)
         }),
@@ -1094,6 +1097,9 @@ fn the_volume_scenarios_pass_on_their_scheduled_roots_and_every_crash_cell() {
         ("correlated-replay root 1", &|| {
             replays_and_refuses_a_short_tape(&Config::correlated(1))
         }),
+        ("held-race-rerun-first root 1", &|| {
+            a_held_owner_s_rerun_and_its_standby_s_takeover_race_on(true);
+        }),
     ];
     for (name, check) in checks {
         check();
@@ -1108,4 +1114,164 @@ fn the_volume_scenarios_pass_on_their_scheduled_roots_and_every_crash_cell() {
         checks.len(),
         cells.len()
     );
+}
+
+/// The control of the declared hold with the production statuses: on the stall scenario H3's restart ends `Exit::Held`,
+/// and H3 publishes the `Held` status built from that incarnation's `host::recover::Ended::refusal`, so its host agent
+/// declares itself unhealthy. H0, s3's named standby, publishes `Standby` from its own wait, with the target that
+/// wait's role read returned, and its agent addresses the witness to that status; the stall test checks that H0's
+/// takeover then moves s3 once and serves it warm after the stall. Under plant `WaitUnpublished` (code 55) H0's wait
+/// publishes no `Standby` status for s3, so no witness reaches H0, the shard never moves, and the credit reads its
+/// stalled-takeover witness missing.
+#[test]
+fn a_standby_whose_wait_publishes_no_status_takes_no_held_shard_over() {
+    let unpublished = run(&Config::stall(1).hostile(Plant::WaitUnpublished, FAULTED as u32));
+    let unpublished = unpublished.expect("a run inside the limits");
+    assert!(unpublished.planted);
+    let log = &unpublished.hosts;
+    assert!(log.nominations > 0, "{}", unpublished.summary());
+    assert_eq!((log.addressed, log.lapsed), (0, 0));
+    assert_eq!(moves(&unpublished, S3), 0);
+    assert!(unpublished.hosts.takeovers.is_empty());
+    assert_eq!(unpublished.hosts.exempt, BTreeSet::from([S3]));
+    let missing = "witness takeovers-of-stalled-shard missing";
+    assert_eq!(missing, hosts::STALLED_TAKEOVER);
+    assert_eq!(
+        unpublished.credit(),
+        Verdict::Unrun(missing),
+        "{}",
+        unpublished.summary()
+    );
+}
+
+/// Whether a witness for s3 waits in the fleet's queue for its standby process.
+fn s3_nominated(fleet: &Fleet<'_>) -> bool {
+    let shard = fleet.cells[FAULTED].placement.shard;
+    (fleet.nominated.iter()).any(|(_, _, witness, _)| witness.shard == shard)
+}
+
+/// The race of the held process's own rerun against the standby's takeover: s3's volume stalls with the control plane
+/// reporting it healthy, H3's restart ends `Exit::Held`, and H0 is nominated. In the round the witness reaches H0's
+/// queue the stall clears and H3's held process runs its next incarnation. The race ends with one winner in either
+/// order. Takeover first: H0's compare-and-swap commits at the record version the witness names, H0 serves s3, and H3's
+/// rerun finds the record naming another owner and runs no restart. Rerun first: H3's restart bumps `E` and serves s3,
+/// and H0's takeover finds the record past the witness's target and writes nothing. Each order commits exactly one
+/// owner change or bump over the version both read. The fast tier runs the takeover-first order; the scheduled case
+/// runs the rerun-first order.
+#[test]
+fn a_held_owner_s_rerun_and_its_standby_s_takeover_race_to_one_winner_in_either_order() {
+    let report = a_held_owner_s_rerun_and_its_standby_s_takeover_race_on(false);
+    // Control: the loser's write committed beside the winner's at the version both read, one more owner at the
+    // winner's attempt, fails the one-owner rule by name.
+    let twice = loser_beside_winner(&report, H3);
+    let two = "two hosts own one attempt of a shard";
+    assert_eq!(two, oracles::TWO_OWNERS);
+    assert_eq!(twice.rule(), Some(two));
+}
+
+/// The one-owner verdict over `report`'s histories with s3's last version repeated under `loser` as owner.
+fn loser_beside_winner(report: &Report, loser: u64) -> Verdict {
+    let mut histories = report.evidence.histories.clone();
+    let (_, versions) = (histories.iter_mut())
+        .find(|(shard, _)| shard.get() == S3)
+        .expect("s3's history");
+    let won = *versions.last().unwrap();
+    let loser = crate::failover::records::Host::new(loser).unwrap();
+    versions.push(ShardRecord {
+        owner: loser,
+        ..won
+    });
+    oracles::one_owner(&histories, &report.evidence.activations)
+}
+
+/// The checks of the test above with the held process's rerun ordered first (`rerun_first`) or second.
+pub(super) fn a_held_owner_s_rerun_and_its_standby_s_takeover_race_on(rerun_first: bool) -> Report {
+    let mut script = Scenario::Stall.episodes(false);
+    script.push(super::faults::Episode {
+        trigger: super::faults::Trigger::When(s3_nominated),
+        scope: Vec::new(),
+        action: super::faults::Action::Rerun(FAULTED),
+        heal: None,
+    });
+    {
+        let report = super::host_tests::scripted_with(&Config::stall(1), script, rerun_first);
+        let versions = history(&report, S3);
+        let last = versions.last().unwrap();
+        let (winner, loser) = match rerun_first {
+            false => (H0, H3),
+            true => (H3, H0),
+        };
+        assert_eq!(last.owner.get(), winner, "rerun first {rerun_first}");
+        let recoveries = &report.shards[FAULTED].recoveries;
+        let served = recoveries.last().unwrap();
+        assert_eq!(served.host.get(), winner, "rerun first {rerun_first}");
+        assert!(
+            served
+                .sweep
+                .is_some_and(|(of, swept)| of > 0 && of == swept),
+            "rerun first {rerun_first}: {:?}",
+            served.sweep
+        );
+        let after_hold = recoveries.iter().skip(1);
+        assert!(
+            after_hold
+                .into_iter()
+                .all(|recovery| recovery.host.get() != loser),
+            "rerun first {rerun_first}: {recoveries:?}"
+        );
+        assert_eq!(moves(&report, S3), usize::from(!rerun_first));
+        let attempts: Vec<_> = (report.hosts.takeovers.iter())
+            .map(|attempt| (attempt.shard, attempt.host, attempt.refused.as_deref()))
+            .collect();
+        let log = &report.hosts;
+        // Every incarnation of the race runs: H3's rerun reads its own role and `host::recover` either way.
+        assert_eq!(
+            (log.refused_reruns, log.rerun_dropped),
+            (1, 0),
+            "rerun first {rerun_first}"
+        );
+        match rerun_first {
+            // H3's rerun read the record naming H0 and waited.
+            false => assert_eq!(attempts, [(S3, H0, None)]),
+            true => {
+                assert_eq!(attempts, [(S3, H0, Some("Stopped"))]);
+                let commands = &report.hosts.takeovers[0].commands;
+                assert!(
+                    commands.is_empty(),
+                    "H0's reservation commands: {commands:?}"
+                );
+            }
+        }
+        // One write commits over the version both read, and none after it: the winner's swap or bump, and no second
+        // restart over the winner's serving tenure once the stall's own heal falls due.
+        let first = versions.first().expect("s3's seeded record");
+        let changes: Vec<(u64, u32)> = (versions.windows(2))
+            .filter(|pair| (pair[0].owner, pair[0].attempts) != (pair[1].owner, pair[1].attempts))
+            .map(|pair| (pair[1].owner.get(), pair[1].attempts))
+            .collect();
+        let held = first.attempts + 1;
+        assert_eq!(
+            changes,
+            [(H3, held), (winner, held + 1)],
+            "rerun first {rerun_first}: H3's held bump, then the winner's write"
+        );
+        assert_eq!(
+            recoveries.len(),
+            2,
+            "rerun first {rerun_first}: {recoveries:?}"
+        );
+        // Both rerun orders leave H3's recovery slot free.
+        let slot = report.hosts.sealed(H3).last().map(|gauges| gauges[2]);
+        assert_eq!(
+            slot,
+            Some(Gauge::known(0, 1)),
+            "rerun first {rerun_first}: host {H3}"
+        );
+        assert_eq!(
+            report.verdicts.one_owner,
+            Verdict::Pass,
+            "rerun first {rerun_first}"
+        );
+        report
+    }
 }

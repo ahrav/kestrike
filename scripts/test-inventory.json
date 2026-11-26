@@ -907,6 +907,7 @@
             "volume correlated-late root 2",
             "volume control loss-evidence root 2",
             "volume correlated-replay root 1",
+            "volume held-race-rerun-first root 1",
             "volume replace-replacement-acknowledged root 1",
             "volume replace-replacement-committed root 1",
             "volume replace-replacement-lost root 1",
@@ -988,7 +989,7 @@
             "repair-and-host fresh-designate-lost root 1"
           ],
           "witnesses": [
-            "^fleet: scheduled volume: 10 checks and 21 crash cells passed$",
+            "^fleet: scheduled volume: 11 checks and 21 crash cells passed$",
             "^fleet: scheduled zone: 3 checks passed$",
             "^fleet: scheduled repair-and-host: 30 checks and 25 crash cells passed$"
           ]

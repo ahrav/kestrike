@@ -242,10 +242,10 @@ impl Fleet<'_> {
 
     /// `member`'s restart of cell `at` after its return. A tenure that served then acknowledges one FILL of a new
     /// object and one INVALIDATE of its second checkpoint object. A restart whose incarnation queued its next one
-    /// ([`Fleet::queue_rerun`]) leaves the return open, and [`Fleet::rerun_refused`] runs that incarnation through
-    /// this restart again: after a held restart, and after a failed role read under a record that names another
-    /// owner, which the zone log lists with the read's error until the next incarnation's role read lists the role
-    /// it waits in.
+    /// ([`Fleet::queue_rerun`]) or holds (`Exit::Held`) leaves the return open, and [`Fleet::rerun_refused`] runs
+    /// the next incarnation through this restart again: after a held restart, and after a failed role read under a
+    /// record that names another owner, which the zone log lists with the read's error until the next incarnation's
+    /// role read lists the role it waits in.
     pub(super) fn restart_returned<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -267,6 +267,10 @@ impl Fleet<'_> {
             Restarted::Held => {
                 if self.refused.contains_key(&(at, member)) {
                     self.returning.insert((at, member));
+                } else if (self.cells[at].held.iter()).any(|(of, _)| *of == member) {
+                    // A held process's next incarnation is queued when its hold ends (`Fleet::rerun_held`), and the
+                    // return stays open from then.
+                    self.held_returns.insert((at, member));
                 }
                 return Ok(());
             }
