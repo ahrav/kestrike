@@ -20,6 +20,18 @@ block device.
   running it. Every other change, a merge that touches many files included,
   runs the selected modules' tests and leaves the full run to CI. For
   multi-file changes, run `cargo check --workspace` after each file edit.
+- Prefix the `cargo check`, `cargo clippy` and `cargo test` commands of the
+  rule above with
+  `CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_DEBUG=line-tables-only`,
+  the profile values `scripts/rust-lane.sh` gives the `workspace` lane; debug
+  assertions and overflow checks stay on. The library and simulation tests
+  then run several times faster, and a change of the values rebuilds the
+  affected artifacts. Put the values on those commands only and do not export
+  them for the shell: the hardware lane, `scripts/reproduce-test.py`,
+  `scripts/scan-barriers.py` and `campaign sim archive` read or record the
+  environment they are given. To reproduce a CI failure use the failing lane's
+  own recipe (`docs/agents/ci.md`), and use the plain dev profile when
+  debugging needs full symbols.
 - Before pushing changes to the test inventory, test registry, test-selection
   scripts, obligation catalog, its list of control-less records
   (`verification/control-less.json`), intake register (`verification/intake/`), or
