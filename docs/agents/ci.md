@@ -1761,14 +1761,16 @@ records with `"outcome": "timeout"`, without a class:
 
 ## Runner roles
 
-- GitHub-hosted `ubuntu-24.04`: comment policy, lane scripts, rustfmt, RC11
-  and the Rust gate on every event, and reviews, one fresh machine per job.
+- GitHub-hosted `ubuntu-24.04`: comment policy, lane scripts, rustfmt and the
+  Rust gate on every event, and reviews, one fresh machine per job.
 - `kestrike-vm-build`: pull-request and push preflight, workspace, campaigns,
   search, and fuzz-smoke on the two registrations of the first Linux VM. The
-  legacy label `kestrike-ci-build` stays on Linux while old jobs drain; new builds select only the Linux VM and queue while it is offline.
-- `kestrike-ci-heavy`: every schedule and manual job, including prerequisites
-  and the Rust gate, on the two registrations of the second Linux VM, plus the
-  pending x86-64 tag comparison once activated. Jobs queue while Linux is
+  legacy label `kestrike-ci-build` stays on Linux while old jobs drain; new
+  builds select only the Linux VM and queue while it is offline.
+- `kestrike-ci-heavy`: RC11 on every event, whose runner carries the pinned
+  `herd7`, and every other schedule and manual job, on the two registrations
+  of the second Linux VM, plus the pending x86-64 tag comparison once
+  activated. Jobs queue while Linux is
   offline.
 - `kestrike-hardware` and `kestrike-fis`: the hardware and FIS jobs, each on a
   host provisioned with its inputs. The hardware job runs one leg per

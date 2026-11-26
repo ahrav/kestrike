@@ -61,10 +61,10 @@ LANES = ("preflight", "workspace", "campaigns", "search", "fuzz-smoke", "long-ru
 AARCH64 = {"barriers": "[self-hosted, linux, arm64, kestrike-aarch64-native]",
            "isa-aarch64": "[self-hosted, linux, arm64, kestrike-isa-aarch64]",
            "tag-compare-aarch64": "[self-hosted, linux, arm64, kestrike-aarch64-native]"}
+# Jobs that run on a GitHub-hosted runner on every event.
+HOSTED = {"comment-policy", "lane-script", "rust-format", "rust-gate"}
 # Jobs that run on a dedicated host rather than the shared pool: the hardware and FIS hosts, and the native
 # x86-64 host whose CPU carries every feature the x86-64 architecture qualification lane declares.
-# Jobs that run on a GitHub-hosted runner on every event.
-HOSTED = {"comment-policy", "lane-script", "rust-format", "rc11", "rust-gate"}
 DEDICATED = {"hardware": '[self-hosted, linux, "${{ matrix.arch }}", kestrike-hardware]',
              "fis": "[self-hosted, linux, x64, kestrike-fis]",
              "isa-x86-64": "[self-hosted, linux, x64, kestrike-isa-x86-64]"}
