@@ -15,5 +15,6 @@ jobs:
   agent-checks-close-signal:
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - run: ":"

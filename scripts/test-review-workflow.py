@@ -277,13 +277,18 @@ class ReviewWorkflow(unittest.TestCase):
         step = self.step_named("Existing review comments")
         comments = f"repos/{REPO}/pulls/{NUMBER}/comments"
         self.assertIn(
-            'gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments"', step
+            'gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/comments" | jq "$trusted"', step
         )
         self.assertIn(
-            'gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments"', step
+            'gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" | jq "$trusted"', step
         )
         self.assertIn("PR_NUMBER: ${{ github.event.pull_request.number }}", step)
         self.assertNotIn("${{", step.split("run:")[1])
+        # Anyone can comment on a public pull request; the model reads the trusted authors' comments.
+        self.assertIn(
+            """trusted='[.[][] | select(.user.type == "Bot" or """
+            """(.author_association | IN("OWNER", "MEMBER", "COLLABORATOR")))]'""", step
+        )
         self.assertIn(f"{RUNNER_TEMP}/review/review-comments.json", self.prompt)
         self.assertIn(f"{RUNNER_TEMP}/review/issue-comments.json", self.prompt)
         self.assertNotIn(comments, self.prompt)
