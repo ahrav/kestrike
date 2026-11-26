@@ -794,7 +794,12 @@ pub(crate) fn builders() -> BTreeMap<&'static str, Build> {
         ("quorum_unreachable", |row, f| {
             let unreachable = quorum_unreachable().pick(f);
             let at = Blocker::QuorumUnreachable.position();
-            zones(span(row), |_, z| z.blockers[at] = unreachable)
+            // Both twins read every report and the instance listing, so each completeness flag the row guards on
+            // is true and a gap tick holds by its own flag alone.
+            zones(span(row), |_, z| {
+                (z.flags.reports, z.flags.instances) = (true, true);
+                z.blockers[at] = unreachable
+            })
         }),
         ("volume_lost", |row, f| {
             let lost = volume_lost().pick(f);

@@ -160,10 +160,11 @@ pub enum Blocker {
     Placement,
     /// Every candidate holds `standbys_per_host_max` census entries or `host_roles_max` roles.
     PerHostCap,
-    /// The owner reads lost, and the named standby's possible probers, counted from the zone's directory and this
-    /// tick's verdicts, span fewer than [`QUORUM_MIN`](crate::failover::arbiter::QUORUM_MIN) partitions, so no
-    /// detector quorum can nominate the standby's takeover (QUORUM-PREMISE in `plan`, which states what the count
-    /// leaves out).
+    /// The owner reads lost, and the named standby's possible probers, counted from the zone's directory, this
+    /// tick's verdicts and a retired host's instance and report evidence, span fewer than
+    /// [`QUORUM_MIN`](crate::failover::arbiter::QUORUM_MIN) partitions, so the standby can gather fresh replies from
+    /// too few partitions for any detector quorum to nominate its takeover (QUORUM-PREMISE in `plan`, which states
+    /// what the count leaves out, the votes the standby already holds among them).
     QuorumUnreachable,
     /// The owner's report holds the diagnostic entry of a restart held after a bump whose reply is unknown at the
     /// record's tenure or one attempt below it (HELD-RESTART-MATCH in `observe`), so the shard is unserved until the

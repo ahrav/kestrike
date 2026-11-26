@@ -3644,8 +3644,8 @@ fn record_fed() -> Vec<String> {
 }
 
 /// For the record-fed status rows tested here, the store guard preserves the firing state across a store-false tick
-/// that reports the clean value, as the instance guard does across an instances-false tick for a row that carries
-/// it: the row fires once, and twice without its completeness guards.
+/// that reports the clean value: the row fires once, and twice without its completeness guards.
+/// `each_completeness_guard_of_a_multi_guard_row_holds_a_gap_alone` tests each guard of a row with more than one.
 #[test]
 fn each_record_fed_status_row_holds_an_inconclusive_tick() {
     let families = record_fed();
@@ -3668,18 +3668,6 @@ fn each_record_fed_status_row_holds_an_inconclusive_tick() {
         parts[0].flags.store = false;
         let steps = [control.clone(), vec![gap], control.clone()].concat();
         assert_eq!(fired(row, &steps).len(), 1, "{signal}");
-        if filters(&row["guard"])
-            .iter()
-            .any(|f| f["field"] == "zones.flags.instances")
-        {
-            let mut gap = controls::history(row, row["clean"].as_str().unwrap()).remove(0);
-            let controls::Step::Status(parts) = &mut gap else {
-                panic!("a status row")
-            };
-            parts[0].flags.instances = false;
-            let unlisted = [control.clone(), vec![gap], control.clone()].concat();
-            assert_eq!(fired(row, &unlisted).len(), 1, "{signal} instances unread");
-        }
         let mut unguarded = row.clone();
         let store = |filter: &&Value| !COMPLETENESS.contains(&filter["field"].as_str().unwrap());
         let kept: Vec<Value> = filters(&row["guard"])
@@ -3700,6 +3688,103 @@ fn each_record_fed_status_row_holds_an_inconclusive_tick() {
             guards.clone().all(|f| f["field"] != "zones.flags.store"),
             "{signal}"
         );
+    }
+}
+
+/// Each completeness guard of a status row with more than one holds a gap tick by its own flag: a gap in which only
+/// that flag reads false, between two positive runs of complete records, leaves one firing, and the same row without
+/// that one guard fires twice. A complete clean tick in the same place ends the run, so the row fires twice. A
+/// positive run whose records all hold that one flag false still fires once. The guards come from a fixed table,
+/// which must list every catalog row with more than one completeness guard, so a guard removed from the catalog or a
+/// row that gains a second guard fails the test. An incomplete volume source reports no unnamed count, so a
+/// volume-unnamed gap carries none.
+#[test]
+fn each_completeness_guard_of_a_multi_guard_row_holds_a_gap_alone() {
+    type Gap = fn(&mut crate::failover::report::status::ZonePart);
+    let flag = |field: &str| -> Gap {
+        match field {
+            "zones.flags.store" => |part| part.flags.store = false,
+            "zones.flags.reports" => |part| part.flags.reports = false,
+            "zones.flags.instances" => |part| part.flags.instances = false,
+            "zones.flags.volumes" => |part| part.flags.volumes = false,
+            other => panic!("no gap for {other}"),
+        }
+    };
+    let table: [(&str, &[&str]); 2] = [
+        (
+            "quorum-unreachable",
+            &[
+                "zones.flags.store",
+                "zones.flags.reports",
+                "zones.flags.instances",
+            ],
+        ),
+        (
+            "volume-unnamed",
+            &["zones.flags.store", "zones.flags.volumes"],
+        ),
+    ];
+    let catalog = catalog();
+    let multi: BTreeSet<&str> = (catalog["rows"].as_array().unwrap().iter())
+        .filter(|row| {
+            (filters(&row["guard"]).iter())
+                .filter(|f| COMPLETENESS.contains(&f["field"].as_str().unwrap()))
+                .count()
+                > 1
+        })
+        .map(|row| row["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        multi,
+        table.iter().map(|(id, _)| *id).collect(),
+        "the multi-guard rows"
+    );
+    for (id, guards) in table {
+        let row = row(&catalog, id);
+        let listed: BTreeSet<&str> = (filters(&row["guard"]).iter())
+            .map(|f| f["field"].as_str().unwrap())
+            .filter(|field| field.starts_with("zones.flags."))
+            .collect();
+        assert_eq!(listed, guards.iter().copied().collect(), "{id}'s guards");
+        let control = controls::history(&row, row["control"].as_str().unwrap());
+        let clean = || controls::history(&row, row["clean"].as_str().unwrap()).remove(0);
+        let around = |gap: controls::Step| [control.clone(), vec![gap], control.clone()].concat();
+        assert_eq!(
+            fired(&row, &around(clean())).len(),
+            2,
+            "{id}: a complete zero rearms"
+        );
+        for &field in guards {
+            let mut gap = clean();
+            let controls::Step::Status(parts) = &mut gap else {
+                panic!("a status row")
+            };
+            flag(field)(&mut parts[0]);
+            if id == "volume-unnamed" {
+                parts[0].unnamed_volumes = None;
+            }
+            let steps = around(gap);
+            assert_eq!(fired(&row, &steps).len(), 1, "{id}: {field} holds its gap");
+            let mut unguarded = row.clone();
+            let kept: Vec<Value> = (filters(&row["guard"]).iter())
+                .filter(|f| f["field"] != field)
+                .cloned()
+                .collect();
+            unguarded["guard"] = Value::Array(kept);
+            assert_eq!(fired(&unguarded, &steps).len(), 2, "{id}: without {field}");
+            let mut incomplete = control.clone();
+            for step in &mut incomplete {
+                let controls::Step::Status(parts) = step else {
+                    panic!("a status row")
+                };
+                flag(field)(&mut parts[0]);
+            }
+            assert_eq!(
+                fired(&row, &incomplete).len(),
+                1,
+                "{id}: a positive count with {field} unread"
+            );
+        }
     }
 }
 

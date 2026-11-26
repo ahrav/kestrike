@@ -782,6 +782,7 @@ mod survey {
             verdict,
             answered: true,
             report: report.map(std::sync::Arc::new),
+            down: verdict == HostEvidence::Lost,
         }
     }
 

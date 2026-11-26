@@ -1790,3 +1790,136 @@ fn a_view_run_counts_numbered_ticks_of_one_active_volume() {
         run(Some(a), 7, 1, false, false)
     );
 }
+
+/// `instance_down` reads an ended instance as down at once, a stopping or stopped one from its dwell on, and an
+/// absence from `absent_ticks` listings on; a running instance, impaired or not, no evidence and a shorter absence or
+/// stop read not down.
+#[test]
+fn instance_down_reads_each_instance_evidence_at_its_threshold() {
+    let rule = HostRule::of(&bounds());
+    let config = bounds().config().clone();
+    let listed = |state, checks, stopped_us| InstanceEvidence::Listed {
+        state,
+        checks,
+        stopped_us,
+        impaired_us: config.impaired_dwell_us,
+    };
+    let dwell = config.stopped_dwell_us;
+    let cases = [
+        (InstanceEvidence::Unlisted, false),
+        (InstanceEvidence::Absent { ticks: 0 }, false),
+        (
+            InstanceEvidence::Absent {
+                ticks: config.absent_ticks - 1,
+            },
+            false,
+        ),
+        (
+            InstanceEvidence::Absent {
+                ticks: config.absent_ticks,
+            },
+            true,
+        ),
+        (listed(InstanceState::Running, StatusCheck::Ok, 0), false),
+        (
+            listed(InstanceState::Running, StatusCheck::Impaired, 0),
+            false,
+        ),
+        (
+            listed(InstanceState::Terminated, StatusCheck::NotApplicable, 0),
+            true,
+        ),
+        (
+            listed(InstanceState::ShuttingDown, StatusCheck::NotApplicable, 0),
+            true,
+        ),
+        (
+            listed(
+                InstanceState::Stopped,
+                StatusCheck::NotApplicable,
+                dwell - 1,
+            ),
+            false,
+        ),
+        (
+            listed(InstanceState::Stopped, StatusCheck::NotApplicable, dwell),
+            true,
+        ),
+        (
+            listed(
+                InstanceState::Stopping,
+                StatusCheck::NotApplicable,
+                dwell - 1,
+            ),
+            false,
+        ),
+        (
+            listed(InstanceState::Stopping, StatusCheck::NotApplicable, dwell),
+            true,
+        ),
+    ];
+    for (evidence, down) in cases {
+        assert_eq!(instance_down(&rule, evidence), down, "{evidence:?}");
+    }
+}
+
+/// `answers_no_probe` reads a down instance as answering no probe whatever its report, and a running instance from
+/// the tick its checks have been impaired for `impaired_dwell_us` while its report has been silent past `silent_us`
+/// with no unanswered read inside `silent_us`. Impaired checks under a publishing report, a silent report under
+/// passing checks, and each value one step short of its threshold leave the host able to answer.
+#[test]
+fn answers_no_probe_reads_a_down_instance_or_dwelt_impairment_under_a_silent_report() {
+    let rule = HostRule::of(&bounds());
+    let config = bounds().config().clone();
+    let (dwell, silent) = (config.impaired_dwell_us, bounds().silent_us());
+    let running = |checks, impaired_us| InstanceEvidence::Listed {
+        state: InstanceState::Running,
+        checks,
+        stopped_us: 0,
+        impaired_us,
+    };
+    let terminated = InstanceEvidence::Listed {
+        state: InstanceState::Terminated,
+        checks: StatusCheck::NotApplicable,
+        stopped_us: 0,
+        impaired_us: 0,
+    };
+    let quiet = |advanced, silent_us| Silence {
+        advanced,
+        silent_us,
+    };
+    let impaired = running(StatusCheck::Impaired, dwell);
+    let cases = [
+        (terminated, quiet(true, 0), 0, true),
+        (impaired, quiet(true, silent + 1), silent + 1, true),
+        (impaired, quiet(false, silent + 1), silent + 1, true),
+        (impaired, quiet(true, silent), silent + 1, false),
+        (impaired, quiet(true, silent + 1), silent, false),
+        (impaired, quiet(true, 0), 0, false),
+        (
+            running(StatusCheck::Impaired, dwell - 1),
+            quiet(true, silent + 1),
+            silent + 1,
+            false,
+        ),
+        (
+            running(StatusCheck::Ok, dwell),
+            quiet(true, silent + 1),
+            silent + 1,
+            false,
+        ),
+        (
+            InstanceEvidence::Unlisted,
+            quiet(true, silent + 1),
+            silent + 1,
+            false,
+        ),
+    ];
+    for (instance, silence, answered_us, expected) in cases {
+        assert_eq!(
+            answers_no_probe(&rule, silence, answered_us, instance),
+            expected,
+            "{instance:?} {silence:?} answered {answered_us}"
+        );
+    }
+}

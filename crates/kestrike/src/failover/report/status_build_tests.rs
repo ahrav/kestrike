@@ -78,6 +78,7 @@ fn host_view(number: u64, verdict: HostEvidence, report: Option<HostReport>) -> 
         verdict,
         answered: true,
         report: report.map(std::sync::Arc::new),
+        down: verdict == HostEvidence::Lost,
     }
 }
 

@@ -7,9 +7,11 @@
 //! - UNKNOWN-BLOCKS: `Zone::choose` considers only `Live` candidates whose host differs from `record.owner`. A
 //!   standby need whose owner reads other than live gives `OwnerNotReady`, and a named standby or slot incumbent that
 //!   reads unknown or in conflict gives `LossUnconfirmed`; neither plans a step.
-//! - QUORUM-PREMISE: a shard whose owner reads `Lost` while its named standby's possible probers span fewer than
-//!   [`QUORUM_MIN`] partitions carries `Blocker::QuorumUnreachable` (`Zone::quorum_unreachable`) in state
-//!   `Protected`. The blocker names the condition and plans no step.
+//! - QUORUM-PREMISE: a shard whose owner reads `Lost` while its named standby's possible probers (the hosts outside
+//!   the owner's partition, other than the owner and the standby, that do not read `Lost`, or are retired and not
+//!   shown down by their evidence apart from the retirement) span fewer than [`QUORUM_MIN`] partitions carries
+//!   `Blocker::QuorumUnreachable` (`Zone::quorum_unreachable`) in state `Protected`. The blocker names the condition
+//!   and plans no step.
 //! - HELD-RESTART: a shard whose owner's live report holds a held restart's diagnostic entry at the record's tenure or
 //!   one attempt below it (`ShardRecords::held`) carries `Blocker::RestartHeld` as its host-side blocker, ahead of the
 //!   owner entry's holds, with QUORUM-PREMISE's blockers first. The match is diagnostic evidence only: it inhibits no
@@ -304,6 +306,8 @@ pub(crate) use unverified_plant::AS_DEVICE as UNVERIFIED_AS_DEVICE;
 thread_local! {
     /// When true, QUORUM-PREMISE counts hosts that read `Lost` among the possible probers.
     pub(crate) static LOST_PROBERS_COUNTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When true, QUORUM-PREMISE reads a retired host read `Lost` as silent while [`HostView::down`] is false.
+    pub(crate) static RUNNING_RETIRED_SILENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// A held entry with a device in it. A held restart's diagnostic entry ([`VolumeEntry::held_restart`]) is none: its
@@ -618,12 +622,19 @@ impl<'a> Zone<'a> {
 
     /// QUORUM-PREMISE: true when the record's owner reads `Lost` and its named standby's possible probers span
     /// fewer than [`QUORUM_MIN`] partitions. A possible prober is a host of this zone's directory view outside the
-    /// owner's partition, other than the owner and the standby, whose verdict is other than `Lost`. That set holds
-    /// every host the standby's agent can draw probers from (`host::agent`) when the agent's synced placement is
-    /// the zone's directory and a host read `Lost` answers no probe; the loop reads neither the configured quorum
-    /// `k`, the agent's probe keys nor its accepted placement. Every valid quorum counts at least [`QUORUM_MIN`]
-    /// partitions, so a true result shows that no nomination of the standby can form; a false result shows no
-    /// quorum. An owner the view does not list gives false.
+    /// owner's partition, other than the owner and the standby, that is no silent host: a host read `Lost` is silent
+    /// unless it is retired and [`HostView::down`] is false: its instance is listed short of ended or stopped for
+    /// its dwell, or absent from fewer than `absent_ticks` listings, and its checks and report fall short of the
+    /// impairment and silence that read an active host `Lost`. A retirement is a directory state, and a retired
+    /// host's agent can still answer probes while its instance runs. A tick with no instance evidence reads the
+    /// standby unknown, so its shard is not `Protected` and does not reach this premise. That set holds every host
+    /// the standby's agent can draw probers from (`host::agent`) when the agent's
+    /// synced placement is the zone's directory and a silent host answers no new probe; the loop reads neither the
+    /// configured quorum `k`, the agent's probe keys, its accepted placement nor the votes it already holds. Every
+    /// valid quorum counts at least [`QUORUM_MIN`] partitions, so a true result shows that the standby can gather
+    /// fresh replies from fewer partitions than any quorum counts, and a nomination can form only from votes it
+    /// already holds within their lifetime; a false result shows no quorum. An owner the view does not list gives
+    /// false.
     fn quorum_unreachable(&self, record: &ShardRecord) -> bool {
         let (Some(standby), Some(owner)) = (record.standby, self.hosts.get(&record.owner)) else {
             return false;
@@ -632,19 +643,21 @@ impl<'a> Zone<'a> {
             return false;
         }
         #[cfg(test)]
-        let counted = LOST_PROBERS_COUNTED.get();
+        let (counted, retired_silent) = (LOST_PROBERS_COUNTED.get(), RUNNING_RETIRED_SILENT.get());
         #[cfg(not(test))]
-        let counted = false;
-        let excluded = owner.entry.placement.partition;
+        let (counted, retired_silent) = (false, false);
+        let owner_partition = owner.entry.placement.partition;
         let mut seen = [None; QUORUM_MIN];
         let mut distinct = 0;
         for view in &self.view.hosts {
             let host = view.entry.host;
             let partition = view.entry.placement.partition;
+            let retired_prober = view.entry.state == DirectoryState::Retired && !view.down;
+            let silent = view.verdict == HostEvidence::Lost && !(retired_prober && !retired_silent);
             let prober = host != record.owner
                 && host != standby
-                && (view.verdict != HostEvidence::Lost || counted)
-                && partition != excluded;
+                && (!silent || counted)
+                && partition != owner_partition;
             if prober && !seen[..distinct].contains(&Some(partition)) {
                 seen[distinct] = Some(partition);
                 distinct += 1;

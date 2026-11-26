@@ -240,6 +240,27 @@ pub fn host_evidence(
     HostEvidence::Unknown
 }
 
+/// `instance_down` is true when `instance` shows the host's instance down under `rule`: ended, stopping or stopped
+/// for `stopped_dwell_us`, or absent from `absent_ticks` listings in a row. A host whose instance is down answers no
+/// new probe; a retired host whose instance runs may still answer one.
+pub fn instance_down(rule: &HostRule, instance: InstanceEvidence) -> bool {
+    Shown::of(rule, instance).is_some_and(|shown| shown.down)
+}
+
+/// `answers_no_probe` is true when the evidence apart from the host's directory state shows that the host answers no
+/// new probe: its instance is down ([`instance_down`]), or an active host with this evidence reads `Lost`
+/// ([`tick_evidence`]), which adds checks impaired for `impaired_dwell_us` under a report silent past `silent_us`
+/// with no unanswered read inside it. A retired host for which this is false may still answer a probe.
+pub fn answers_no_probe(
+    rule: &HostRule,
+    silence: Silence,
+    answered_us: u64,
+    instance: InstanceEvidence,
+) -> bool {
+    let active = tick_evidence(rule, DirectoryState::Active, silence, answered_us, instance);
+    instance_down(rule, instance) || active == HostEvidence::Lost
+}
+
 pub fn tick_evidence(
     rule: &HostRule,
     state: DirectoryState,

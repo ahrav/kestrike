@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2297",
+  "kind": "contract-change",
+  "pull_request": 2297,
+  "changed": "The zone loop's QUORUM-PREMISE, Zone::quorum_unreachable in crates/kestrike/src/failover/zone_loop/plan.rs, counts a retired host read Lost among the named standby's possible probers while this tick's evidence apart from the retirement shows it able to answer a probe (its instance not ended, stopped past the stop dwell, or absent past the absent listings, and its checks not impaired past their dwell under a report silent past the silence window with no unanswered report read inside that window), since a retirement is a directory state and the host's agent can still answer probes. Every other host read Lost stays out of the count, as before. A lost owner whose standby can still draw probers from two partitions through such a retired host carries no QuorumUnreachable blocker and pages no quorum-unreachable alarm. HostView gains the field down.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "zone-loop-names-quorum-unreachable-for-a-lost-owner",
+    "reason": "Its invariant states the narrowed rule: a retired prober whose instance runs leaves the shard with no blocker, while a retired prober whose instance ended and a prober, retired or active, with a silent report and checks impaired past their dwell leave it quorum-unreachable, with a control that reads a running retired prober as silent and reads quorum-unreachable there."
+  }
+}

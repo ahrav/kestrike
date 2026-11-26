@@ -60,8 +60,8 @@ use crate::failover::zone_loop::directory::{
     Directory, HostEntry, ReconcilerProjection, SuccessionRefusal,
 };
 use crate::failover::zone_loop::evidence::{
-    HostEvidence, HostRule, LISTING_GAP_TICKS, ViewRun, VolumeCondition, VolumeJudgement, loss_run,
-    tick_evidence,
+    HostEvidence, HostRule, LISTING_GAP_TICKS, ViewRun, VolumeCondition, VolumeJudgement,
+    answers_no_probe, loss_run, tick_evidence,
 };
 use crate::failover::zone_loop::sources::{
     InstanceSource, ListedVolume, ReportSource, Unreachable, VolumeSource,
@@ -106,6 +106,11 @@ pub struct HostView {
     pub answered: bool,
     /// The last report this loop holds for the host under the instance the directory names for it.
     pub report: Option<Arc<HostReport>>,
+    /// This tick's evidence apart from the directory state shows that the host answers no new probe
+    /// (`evidence::answers_no_probe`): its instance is down, or its checks are impaired past their dwell under a
+    /// report silent past the silence window with no unanswered report read inside that window. QUORUM-PREMISE in
+    /// `plan` reads it for a retired host.
+    pub down: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -609,6 +614,7 @@ impl<S: Store, L: WatermarkLog> ZoneLoop<S, L> {
                 verdict: tick_evidence(&rule, entry.state, silence, answered_us, instance),
                 answered: !unanswered.contains(&host),
                 report: self.reports.latest(host).cloned(),
+                down: answers_no_probe(&rule, silence, answered_us, instance),
             }
         };
         directory.zone_hosts().map(view).collect()

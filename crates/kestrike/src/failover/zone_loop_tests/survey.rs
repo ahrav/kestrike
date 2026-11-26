@@ -188,6 +188,8 @@ impl Scene {
                 verdict: self.verdicts[&entry.host.get()],
                 answered: true,
                 report: self.reports.get(&entry.host.get()).cloned().map(Arc::new),
+                // A scene's lost host stands for one whose instance ended.
+                down: self.verdicts[&entry.host.get()] == HostEvidence::Lost,
             })
             .collect();
         let shards = (self.shards.iter())
