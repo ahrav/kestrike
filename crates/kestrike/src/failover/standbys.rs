@@ -22,8 +22,9 @@
 //!   counted while that attach is live.
 //! - HEADROOM: a new reservation names a candidate whose host report shows a recovery slot below its limit and,
 //!   unless the volume record shows its live attach of the active volume ([`Attach::Live`]), an attachment slot
-//!   below its limit after the census entries of other shards that name it and whose shard its report does not list
-//!   in the standby role, each of which can still take an attach of that host. An unavailable gauge admits no candidate. The caller
+//!   below its limit after counting uncredited census entries from other shards that name the candidate's host. An
+//!   entry earns credit when the report lists its shard as a standby on a caller-known active volume for that shard.
+//!   Candidate admission requires an available gauge. The caller
 //!   bounds the report's age; [`Population::admit`] reads only its gauges and entries.
 //! - FEASIBLE-SLOT: [`Population::admit`] refuses the owner, a candidate of a record at `E = 0`, and a candidate
 //!   whose attach of the active volume reads [`Attach::Closed`], and `Reconciler::reserve` refuses
@@ -56,7 +57,7 @@
 use crate::failover::bounds::Bounds;
 use crate::failover::records::{
     ATTEMPTS_MAX, CodecError, EventKind, Host, MAX_ATTACHED, MAX_EVENTS, Reader, Record,
-    ShardRecord, SuccessorRule, VolumeRecord, attachment_key, head,
+    ShardRecord, SuccessorRule, VolumeId, VolumeRecord, attachment_key, head,
 };
 use crate::failover::report::{Gauge, HostReport, RecordedRole, VolumeEntry};
 use crate::failover::retire::Target;
@@ -82,6 +83,21 @@ pub const CENSUS_MAX: usize = CENSUS_FIXED + MAX_SLOTS * CENSUS_ENTRY;
 pub struct Entry {
     pub target: Target,
     pub host: Host,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveVolume {
+    pub generation: ShardGeneration,
+    pub volume: VolumeId,
+}
+
+impl ActiveVolume {
+    pub fn of(record: &ShardRecord) -> Self {
+        Self {
+            generation: record.generation,
+            volume: record.active,
+        }
+    }
 }
 
 /// One encoded census entry: the shard, then the generation, owner, `E` and host of its slot, big-endian.
@@ -265,10 +281,22 @@ impl Census {
     }
 
     /// HEADROOM: a reservation of another shard than `shard` for `candidate`'s writer counts against its attachment
-    /// headroom until its report lists that shard in the standby role.
-    pub(crate) fn pending(&self, shard: Shard, candidate: &HostReport) -> u64 {
+    /// headroom unless `known` gives that shard's active volume at the entry's generation or a later one and
+    /// `candidate`'s report lists that shard in the standby role on that volume.
+    pub(crate) fn pending(
+        &self,
+        shard: Shard,
+        candidate: &HostReport,
+        known: impl Fn(Shard) -> Option<ActiveVolume>,
+    ) -> u64 {
         let named = candidate.writer.host.get().to_be_bytes();
-        let standby = |held: u32| lists_standby(candidate, held);
+        let credited = |held: u32, generation: u32| {
+            let active = Shard::new(held).and_then(&known);
+            active.is_some_and(|active| {
+                u64::from(generation) <= active.generation.get()
+                    && lists_standby(candidate, held, active.volume)
+            })
+        };
         let mut pending = 0;
         for chunk in self.rows().chunks(64) {
             let named_bit = |mask: u64, (bit, row): (usize, &Row)| {
@@ -276,8 +304,8 @@ impl Census {
             };
             let mut named_rows = chunk.iter().enumerate().fold(0, named_bit);
             while named_rows != 0 {
-                let held = fields(&chunk[named_rows.trailing_zeros() as usize]).0;
-                pending += u64::from(held != shard.get() && !standby(held));
+                let (held, generation, ..) = fields(&chunk[named_rows.trailing_zeros() as usize]);
+                pending += u64::from(held != shard.get() && !credited(held, generation));
                 named_rows &= named_rows - 1;
             }
         }
@@ -364,9 +392,12 @@ pub(crate) fn room(gauge: Gauge, owed: u64) -> bool {
     matches!(gauge, Gauge::Known { used, limit } if used.saturating_add(owed) < limit.get())
 }
 
-pub(crate) fn lists_standby(candidate: &HostReport, shard: u32) -> bool {
-    let listed =
-        |seen: &VolumeEntry| seen.shard.get() == shard && seen.role == Some(RecordedRole::Standby);
+pub(crate) fn lists_standby(candidate: &HostReport, shard: u32, volume: VolumeId) -> bool {
+    let listed = |seen: &VolumeEntry| {
+        seen.shard.get() == shard
+            && seen.volume == volume
+            && seen.role == Some(RecordedRole::Standby)
+    };
     candidate.entries.iter().any(listed)
 }
 
@@ -577,7 +608,8 @@ impl Population {
     /// The census that reserves the slot of `record`'s shard at `record`'s `(g, owner, E)` for `candidate`'s writer,
     /// `candidate` a report the report reader accepted and `attach` its attach of the active volume, or `None` when
     /// `census` already lists that slot for that host. A shard the census lists keeps its place and takes the
-    /// record's target and the candidate (HEADROOM, FEASIBLE-SLOT). `lost` is the caller's evidence that a host can
+    /// record's target and the candidate (HEADROOM, FEASIBLE-SLOT). `known` gives the generation and active volume
+    /// of each other shard's record the caller read. `lost` is the caller's evidence that a host can
     /// no longer serve as the shard's standby: a host that is gone, and a reserved host whose attach failed for good.
     /// The caller reads `record` after the census it writes over (CENSUS-COVERS).
     ///
@@ -592,6 +624,7 @@ impl Population {
         record: &ShardRecord,
         candidate: &HostReport,
         attach: Attach,
+        known: impl Fn(Shard) -> Option<ActiveVolume>,
         lost: impl Fn(Host) -> bool,
     ) -> Result<Option<Census>, Refusal> {
         let host = candidate.writer.host;
@@ -612,7 +645,7 @@ impl Population {
             Attach::Live => true,
             Attach::Open => room(
                 headroom.attachments,
-                census.pending(record.shard, candidate),
+                census.pending(record.shard, candidate, known),
             ),
             Attach::Closed => return Err(Refusal::Closed),
         };

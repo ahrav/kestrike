@@ -126,7 +126,8 @@ use crate::failover::records::{
 use crate::failover::report::HostReport;
 use crate::failover::retire::{Retirement, Role, Target};
 use crate::failover::standbys::{
-    Attach, Census, Entry, Population, Refusal as PopulationRefusal, Slot, Zone, standby_ended,
+    ActiveVolume, Attach, Census, Entry, Population, Refusal as PopulationRefusal, Slot, Zone,
+    standby_ended,
 };
 use crate::net::ownership::{ActivatedEpoch, Shard};
 use crate::storage::store::{
@@ -955,6 +956,7 @@ impl<S: Store, L: WatermarkLog> Reconciler<S, L> {
         zone: Zone,
         shard: Shard,
         candidate: &HostReport,
+        known: impl Fn(Shard) -> Option<ActiveVolume>,
         lost: impl Fn(Host) -> bool,
     ) -> Result<Slot, ReconcileError> {
         let key = Key::Standbys(zone);
@@ -974,7 +976,7 @@ impl<S: Store, L: WatermarkLog> Reconciler<S, L> {
         let empty = Census::empty(zone);
         let census = held.as_ref().map_or(&empty, |r| r.value());
         let lost = |host| lost(host) || standby_ended(record.value(), held_volume, host);
-        let admitted = population.admit(census, record.value(), candidate, attach, lost);
+        let admitted = population.admit(census, record.value(), candidate, attach, known, lost);
         let listed = match (admitted, held) {
             (Err(refusal), held) => {
                 self.census = held.map(Read::into_value).or(self.census.take());

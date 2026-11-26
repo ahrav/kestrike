@@ -247,6 +247,7 @@ fn moved_inside_the_designation(cell: &mut Cell) -> (Host, Host) {
                 ZONE,
                 shard(1),
                 &report,
+                |_| None,
                 lost,
             );
             assert_eq!(slot.unwrap().host(), next);

@@ -111,6 +111,7 @@ fn admit_second(census: &Census) -> Result<Option<Census>, Refusal> {
         &second,
         &roomy(host(RESERVED)),
         Attach::Open,
+        |_| None,
         |_| false,
     )
 }

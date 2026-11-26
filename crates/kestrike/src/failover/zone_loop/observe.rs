@@ -46,7 +46,7 @@ use crate::failover::attachments::{InstanceId, Unlisted};
 use crate::failover::loss::{Health, Phase, Receipt};
 use crate::failover::records::{Host, ShardRecord, VolumeId, VolumeRecord, VolumeState};
 use crate::failover::report::{HostReport, ReportError, TAG_LEN, VolumeEntry};
-use crate::failover::standbys::Census;
+use crate::failover::standbys::{ActiveVolume, Census};
 use crate::failover::zone_loop::ZoneLoop;
 use crate::failover::zone_loop::directory::{
     Directory, HostEntry, ReconcilerProjection, SuccessionRefusal,
@@ -157,6 +157,14 @@ pub struct ZoneView {
 }
 
 impl ZoneView {
+    /// `active` returns `ActiveVolume::of(&records.record)` when the view holds a successfully read record for
+    /// `shard`; otherwise it returns `None`.
+    pub(crate) fn active(&self, shard: Shard) -> Option<ActiveVolume> {
+        let at = (self.shards.binary_search_by_key(&shard, |held| held.shard)).ok()?;
+        let records = self.shards[at].records.as_ref().ok()?.as_ref()?;
+        Some(ActiveVolume::of(&records.record))
+    }
+
     /// `listing` returns the attachments of `volume` when at least one row matches, every matching row lists the same
     /// attachments, and each identifier parses as an instance identifier.
     pub(crate) fn listing(&self, volume: VolumeId) -> Option<&[String]> {

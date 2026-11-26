@@ -680,6 +680,7 @@ fn designated_as(world: &World, host: Host) -> Result<(), String> {
             Zone(1),
             shard(),
             &roomy(host),
+            |_| None,
             |other| other != host,
         )
         .map_err(|refusal| format!("reserve: {refusal:?}"))?;

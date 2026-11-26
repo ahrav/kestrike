@@ -2733,6 +2733,7 @@ pub(crate) fn try_designate_fresh_host(
             Zone(1),
             shard(),
             &roomy(d_host()),
+            |_| None,
             |h| h != d_host(),
         )
         .unwrap();
@@ -3819,6 +3820,7 @@ fn negative_control_a_volume_first_step_1_strands_the_shard() {
                 Zone(1),
                 shard(),
                 &roomy(d_host()),
+                |_| None,
                 |h| h != d_host(),
             )
             .unwrap();

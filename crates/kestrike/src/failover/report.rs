@@ -309,19 +309,22 @@ macro_rules! labels {
 }
 
 labels! {
-    /// The role the last accepted shard record and the last own-volume read give the host for the volume. Owner
-    /// and replacement rank first and need only the shard record; the others need an own-volume read.
+    /// The role the last accepted shard record and the last own-volume read give the host for the volume. In an
+    /// owner process's entry, owner and replacement rank first and need only the shard record, and the others need
+    /// an own-volume read. A waiting process's entry reads `Standby` or `Unrecorded` alone, by the rule each states.
     RecordedRole, ROLES, [
         /// The shard record names the volume active and the host its owner.
         Owner,
         /// The shard record names the volume active under another owner, and the volume record lists a registrant
         /// pair of the host. A deposed owner's pair on the same volume reads as standby until a fence drops it. The
         /// role reports enrollment: the shard record's named standby, which alone holds takeover authority, and any
-        /// other enrolled host both read as standby.
+        /// other enrolled host both read as standby. A waiting process's entry reads standby only for an enrolled pair
+        /// whose live attach binds the waiting host's instance or none.
         Standby,
         /// The shard record names the volume and host as its spare.
         Replacement,
-        /// The records give the host none of the roles above.
+        /// The records give the host none of the roles above. A waiting process's entry reads unrecorded wherever it
+        /// does not read standby, a spare's host included.
         Unrecorded,
     ]
 }
@@ -1266,6 +1269,64 @@ fn layout(bytes: &[u8], trailer: usize) -> Result<usize, ReportError> {
 }
 
 impl VolumeEntry {
+    /// The entry of `volume` and `shard` with every other field absent or unavailable (NO-INVENTED-VALUES), for a
+    /// producer that fills the fields it has a source for.
+    #[inline(always)]
+    pub fn unobserved(volume: VolumeId, shard: Shard) -> Self {
+        Self {
+            volume,
+            shard,
+            role: None,
+            tenure: None,
+            volume_state: None,
+            serving: None,
+            withheld: false,
+            quarantine: false,
+            flip: false,
+            withdrawal: None,
+            refusal: None,
+            enumeration: Enumeration::Unavailable,
+            watermark: Watermark::Unavailable,
+            report_age_us: None,
+            own_records: None,
+            checkpoint: None,
+            checkpoint_age_us: None,
+            captures: Captures {
+                refused: None,
+                abandoned: None,
+            },
+            exit: None,
+            pressure: Pressure {
+                frontier: Gauge::Unavailable,
+                ancestry: Gauge::Unavailable,
+                quarantine: Gauge::Unavailable,
+                full: Gauge::Unavailable,
+            },
+            registrants: None,
+            hold: None,
+            readiness: None,
+            metadata: None,
+            load_refusal: None,
+            recovery: Recovery::UNAVAILABLE,
+            phase: None,
+            ended: None,
+            named: None,
+            roll_due: None,
+            roll_active: None,
+            publication_due: None,
+            times: RecoveryTimes::UNAVAILABLE,
+            retention: None,
+            suffix: Backlog::UNAVAILABLE,
+            recovery_io: RecoveryIo::UNAVAILABLE,
+            attaches: Gauge::Unavailable,
+            store: StoreOutcomes::UNAVAILABLE,
+            coverage: Coverage::UNAVAILABLE,
+            invalidations: Gauge::Unavailable,
+            read_defects: None,
+            served: None,
+        }
+    }
+
     /// The entry's fixed encoding in a schema-[`SCHEMA`] report, returned only when [`VolumeEntry::decode`] accepts
     /// it. The bytes carry no schema, so a sender that carries an entry outside a report names `SCHEMA` beside it.
     ///
@@ -1749,58 +1810,7 @@ fn take_identity(e: &[u8; ENTRY_LEN]) -> Result<VolumeEntry, ReportError> {
         .expect("an entry begins with its volume field");
     let volume = VolumeId::from_field(field).ok_or(ReportError::Field)?;
     let shard = Shard::new(u32_at(e, VOLUME)).ok_or(ReportError::Field)?;
-    Ok(VolumeEntry {
-        volume,
-        shard,
-        role: None,
-        tenure: None,
-        volume_state: None,
-        serving: None,
-        withheld: false,
-        quarantine: false,
-        flip: false,
-        withdrawal: None,
-        refusal: None,
-        enumeration: Enumeration::Unavailable,
-        watermark: Watermark::Unavailable,
-        report_age_us: None,
-        own_records: None,
-        checkpoint: None,
-        checkpoint_age_us: None,
-        captures: Captures {
-            refused: None,
-            abandoned: None,
-        },
-        exit: None,
-        pressure: Pressure {
-            frontier: Gauge::Unavailable,
-            ancestry: Gauge::Unavailable,
-            quarantine: Gauge::Unavailable,
-            full: Gauge::Unavailable,
-        },
-        registrants: None,
-        hold: None,
-        readiness: None,
-        metadata: None,
-        load_refusal: None,
-        recovery: Recovery::UNAVAILABLE,
-        phase: None,
-        ended: None,
-        named: None,
-        roll_due: None,
-        roll_active: None,
-        publication_due: None,
-        times: RecoveryTimes::UNAVAILABLE,
-        retention: None,
-        suffix: Backlog::UNAVAILABLE,
-        recovery_io: RecoveryIo::UNAVAILABLE,
-        attaches: Gauge::Unavailable,
-        store: StoreOutcomes::UNAVAILABLE,
-        coverage: Coverage::UNAVAILABLE,
-        invalidations: Gauge::Unavailable,
-        read_defects: None,
-        served: None,
-    })
+    Ok(VolumeEntry::unobserved(volume, shard))
 }
 
 /// Decodes the fields of the entry `e` after its volume and shard into `out`, checking them in wire order. Each

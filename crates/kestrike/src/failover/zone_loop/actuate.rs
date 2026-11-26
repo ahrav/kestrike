@@ -777,10 +777,19 @@ impl<S: Store, L: WatermarkLog> ZoneLoop<S, L> {
                 let cap = self.bounds.config().population_cap;
                 let population = Population { cap };
                 let bounds = self.bounds.bounds();
+                let known = |held| view.active(held);
                 let lost = |host| tick.lost(shard, host);
                 budget.writes -= 1;
-                let reserved =
-                    (self.reconciler).reserve(gate, &population, bounds, zone, shard, report, lost);
+                let reserved = (self.reconciler).reserve(
+                    gate,
+                    &population,
+                    bounds,
+                    zone,
+                    shard,
+                    report,
+                    known,
+                    lost,
+                );
                 let verdict = match reserved {
                     Ok(_) => Verdict::Advance,
                     Err(ReconcileError::Population(refusal)) => {

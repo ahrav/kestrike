@@ -77,7 +77,7 @@ use crate::failover::retire::Target;
 use crate::failover::sim::{host, instance_of_host, layout};
 use crate::failover::standbys::tests::report_of;
 use crate::failover::standbys::{
-    Attach, Census, Entry, Population, Refusal as PopulationRefusal, Slot, Zone,
+    ActiveVolume, Attach, Census, Entry, Population, Refusal as PopulationRefusal, Slot, Zone,
 };
 use crate::net::ownership::{Shard, ShardGeneration};
 use crate::storage::store::sim::{Arm, AsReconciler, MemLog, Shared};
@@ -750,7 +750,14 @@ impl Replay<'_> {
                     Gauge::known(0, 1),
                 );
                 census = Population { cap: 64 }
-                    .admit(&census, &tenure, &candidate, Attach::Live, |_| true)
+                    .admit(
+                        &census,
+                        &tenure,
+                        &candidate,
+                        Attach::Live,
+                        |_| None,
+                        |_| true,
+                    )
                     .map_err(|refusal| format!("init census {refusal:?}"))?
                     .ok_or("init census")?;
             }
@@ -845,7 +852,7 @@ impl Replay<'_> {
             if enrolled.contains(&h) && owner != h {
                 report.entries.push(VolumeEntry {
                     shard: shard_of(s),
-                    ..bare("vol-0a", RecordedRole::Standby)
+                    ..bare(self.active(s)?.as_str(), RecordedRole::Standby)
                 });
             }
         }
@@ -871,6 +878,15 @@ impl Replay<'_> {
         let op = match name {
             "reserve" => {
                 let (cap, report) = (self.cap, self.report(r as u64, h)?);
+                let mut records = Vec::new();
+                for &held in &self.shards {
+                    let record = self.shard_record(held)?;
+                    records.push((record.shard, ActiveVolume::of(&record)));
+                }
+                let known = move |held: Shard| {
+                    let found = records.iter().find(|(listed, _)| *listed == held);
+                    found.map(|&(_, active)| active)
+                };
                 let out = Arc::new(Mutex::new(None));
                 self.procs[r].reserved = Some(out.clone());
                 Op::start(move |proxy| {
@@ -881,6 +897,7 @@ impl Replay<'_> {
                         Zone(ZONES[0]),
                         shard,
                         &report,
+                        known,
                         lost,
                     );
                     if let Ok(slot) = &reserved {
@@ -1017,7 +1034,14 @@ impl Replay<'_> {
                 };
                 let candidate = report_of(host(7), Gauge::known(0, 64), Gauge::known(0, 1));
                 Population { cap: 64 }
-                    .admit(&census, &tenure, &candidate, Attach::Live, |_| true)
+                    .admit(
+                        &census,
+                        &tenure,
+                        &candidate,
+                        Attach::Live,
+                        |_| None,
+                        |_| true,
+                    )
                     .map_err(|refusal| format!("planted entry {refusal:?}"))?
                     .ok_or("planted entry")?
                     .encode()

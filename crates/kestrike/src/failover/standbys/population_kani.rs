@@ -16,8 +16,9 @@
 //! - ONE-HOST-PER-SLOT, FEASIBLE-SLOT, HEADROOM: the admission refuses in the order `Ineligible`, `Closed`,
 //!   `Headroom`, `Taken`, `Full`, each on exactly its condition, and returns `None` for a slot the census already
 //!   lists for the candidate at the record's tenure.
-//! - HEADROOM's pending count: an entry of a shard other than the record's counts against the candidate exactly when
-//!   its host is the candidate's and the candidate's report lists that shard in no standby role.
+//! - HEADROOM's pending count starts with entries on the candidate's host for shards other than the record's shard,
+//!   then subtracts the entries whose shards the report lists as standbys on a caller-known active volume for that
+//!   shard.
 //! - CENSUS-COVERS: a release drops an entry only when the record names no standby, holds another `(g, owner, E)`
 //!   than the entry's, and the entry's host is the owner or shows no live attach.
 //!
@@ -41,9 +42,14 @@
 //!
 //! The record is any value of every other field (`failover::symbolic_kani`); the candidate's attachment and recovery
 //! gauges are each unavailable or any `used` and `limit`, its other gauges unavailable, and in the admission proofs
-//! its report lists no volume; the pending-count proof lists two volume entries, each under any shard in any recorded
-//! role, and checks the standby-role exemption of HEADROOM's pending count. Its control inverts the standby predicate
-//! for each reported entry and covers counts above and below the reference. With at most three entries the pending
+//! its report lists no volume, so an admission asks its caller for no shard's record; the pending-count proof lists
+//! two volume entries, each under any shard in any recorded role on any of three volumes, gives the caller a record
+//! of each census shard, of any generation and any of those volumes, or none, and checks the standby-role credit of
+//! HEADROOM's pending count. Its two controls invert the standby predicate for each reported entry and credit a
+//! standby entry on the volume it names itself, the role-only rule; the first covers counts above and below the
+//! reference and the second a count below it. The last-free-slot proof runs an admission over a census of one entry
+//! that names the candidate under a listed shard, with one attachment slot free and one standby entry of that
+//! shard. With at most three entries the pending
 //! count reads one 64-row chunk and `cap`, any `usize`, always binds below `MAX_SLOTS`. The caller's loss and live-attach evidence is true at each of two symbolic
 //! hosts and false elsewhere; an admission and a release consult it at most once, and `need` at the standby and the
 //! owner. The census proofs unwind 30 iterations, which covers the 28-byte entry copy of the census splice and every
@@ -54,18 +60,21 @@
 #[cfg(kani)]
 mod verification {
     use super::super::{
-        Attach, CENSUS_ENTRY, CENSUS_FIXED, Census, Entry, MAX_SLOTS, Need, Population, Refusal,
-        Zone, fields, need, row,
+        ActiveVolume, Attach, CENSUS_ENTRY, CENSUS_FIXED, Census, Entry, MAX_SLOTS, Need,
+        Population, Refusal, Zone, fields, need, room, row,
     };
-    use crate::failover::records::{ATTEMPTS_MAX, Host, ShardRecord};
+    use crate::failover::records::{ATTEMPTS_MAX, Host, ShardRecord, VolumeId};
     use crate::failover::report::{
         Backlog, BuildIdentity, Captures, Coverage, Detector, Enumeration, Gauge, Headroom,
         HostReport, HostState, Members, Pressure, RecordedRole, Recovery, RecoveryIo,
         RecoveryTimes, StoreOutcomes, VolumeEntry, Watermark, WriterId,
     };
     use crate::failover::retire::Target;
-    use crate::failover::symbolic_kani::values::{host, shard, shard_record, target, volume};
-    use crate::net::ownership::Shard;
+    use crate::failover::symbolic_kani::values::{
+        generation, host, shard, shard_record, target, volume,
+    };
+    use crate::net::ownership::{Shard, ShardGeneration};
+    use core::num::NonZeroU64;
 
     /// The most entries a census of these proofs holds.
     const ENTRIES: usize = 3;
@@ -291,11 +300,14 @@ mod verification {
                 ..self.record
             };
             let lost = self.lost;
-            let admitted =
-                self.population
-                    .admit(census, &record, &self.candidate, self.attach, |h| {
-                        lost.holds(h)
-                    });
+            let admitted = self.population.admit(
+                census,
+                &record,
+                &self.candidate,
+                self.attach,
+                |_| None,
+                |h| lost.holds(h),
+            );
 
             let host = self.candidate.writer.host;
             let entry = Entry {
@@ -755,12 +767,16 @@ mod verification {
         }
     }
 
-    /// The inputs the pending-count proof and its control share: a census of three entries, a candidate whose report
-    /// lists two volume entries, each under any shard in any recorded role or none, and a record under any shard.
+    /// The inputs the pending-count proof and its controls share: a census of three entries, a candidate whose report
+    /// lists two volume entries, each under any shard in any recorded role or none on any of three volumes, the
+    /// caller's record of each census shard, and a record under any shard.
     struct Pending {
         entries: [Entry; ENTRIES],
         census: Census,
         candidate: HostReport,
+        /// The caller's record of the census shard at each place: any generation and any of the three volumes, or
+        /// `None` for a shard the caller holds no record of.
+        known: [Option<ActiveVolume>; ENTRIES],
         /// The record's shard.
         shard: Shard,
     }
@@ -771,13 +787,37 @@ mod verification {
             let census = census::<ENTRIES>(Zone(kani::any()), &fixed_shards(), &entries);
             let mut candidate = candidate();
             candidate.entries = vec![reported(shard(), role()), reported(shard(), role())];
+            let known = core::array::from_fn(|_| {
+                kani::any::<bool>().then(|| ActiveVolume {
+                    generation: generation(),
+                    volume: volume(),
+                })
+            });
             let shard = shard();
             Self {
                 entries,
                 census,
                 candidate,
+                known,
                 shard,
             }
+        }
+
+        /// The caller's evidence `Census::pending` is given: the record of the census shard `held` equals, and `None`
+        /// for any other shard.
+        fn lookup(&self, held: Shard) -> Option<ActiveVolume> {
+            let mut found = None;
+            for at in 0..ENTRIES {
+                if shard_at(at) == held {
+                    found = self.known[at];
+                }
+            }
+            found
+        }
+
+        /// The count `Census::pending` returns for `candidate` under the case's census, record shard and evidence.
+        fn count(&self, candidate: &HostReport) -> u64 {
+            (self.census).pending(self.shard, candidate, |held| self.lookup(held))
         }
 
         /// Whether the report lists `held` in the standby role, for `standby`, or in another role or none.
@@ -787,19 +827,39 @@ mod verification {
             })
         }
 
+        /// Whether the report lists `held` in the standby role on `volume`.
+        fn listed_on(&self, held: Shard, volume: VolumeId) -> bool {
+            self.candidate.entries.iter().any(|seen| {
+                seen.shard == held
+                    && seen.volume == volume
+                    && seen.role == Some(RecordedRole::Standby)
+            })
+        }
+
+        /// The generation the census row at `at` encodes.
+        fn row_generation(&self, at: usize) -> u64 {
+            row_at(&self.census, at).map_or(0, |(_, generation, ..)| u64::from(generation))
+        }
+
         /// Whether the entry at `at` is on the candidate's host under a shard other than the record's.
         fn named(&self, at: usize) -> bool {
             self.entries[at].host == self.candidate.writer.host && shard_at(at) != self.shard
         }
 
-        /// Whether the standby role exempts the entry at `at` from the count.
+        /// Whether a standby entry credits the entry at `at`: the caller holds a record of its shard at the row's
+        /// generation or a later one, and the report lists the shard in the standby role on that record's active
+        /// volume.
         fn exempt(&self, at: usize) -> bool {
-            self.named(at) && self.listed(shard_at(at), true)
+            self.named(at)
+                && self.known[at].is_some_and(|active| {
+                    self.row_generation(at) <= active.generation.get()
+                        && self.listed_on(shard_at(at), active.volume)
+                })
         }
 
-        /// The reference count: the entries on the candidate's host under a shard other than the record's that the
-        /// report lists in no standby role. The proof asserts `Census::pending` equal to it, and the control's covers
-        /// compare the planted count with it.
+        /// The reference count: the entries on the candidate's host under a shard other than the record's that no
+        /// standby entry credits. The proof asserts `Census::pending` equal to it, and the controls' covers compare
+        /// the planted counts with it.
         fn reference(&self) -> u64 {
             (0..ENTRIES)
                 .filter(|&at| self.named(at) && !self.exempt(at))
@@ -808,23 +868,52 @@ mod verification {
     }
 
     /// Over the pending count of a census of three entries, for a candidate whose report lists two volume entries,
-    /// each under any shard in any recorded role or none, and a record under any shard: the count is the number of
-    /// entries whose host is the candidate's, whose shard differs from the record's, and whose shard the report lists
-    /// in no standby role. Covers witness an entry the standby role exempts, an entry counted beside a report entry
-    /// of its shard in another role, and a count of three. Bounds: the census and its entries are those of the other
-    /// census proofs; the report lists two entries.
+    /// each under any shard in any recorded role or none on any of three volumes, the caller's record of each census
+    /// shard at any generation with any of those volumes active or absent, and a record under any shard: the count
+    /// is the number of entries whose host is the candidate's, whose shard differs from the record's, and which no
+    /// standby entry credits, and a caller that holds no record counts every such entry, so a record only removes
+    /// the charge of an entry whose shard the report lists in the standby role on that record's active volume.
+    /// Covers witness a credited entry, an entry charged beside a standby entry on another volume than the active
+    /// one, one charged with no record, one charged at a later generation than the record's beside a standby entry
+    /// on the active volume, one charged beside an entry of its shard in another role, and a count of three.
+    /// Bounds: the census and its entries are those of the other census proofs; the report lists two entries.
     #[kani::proof]
     #[kani::unwind(30)]
-    fn the_pending_count_exempts_each_shard_the_report_lists_in_the_standby_role() {
+    fn the_pending_count_credits_a_standby_listing_only_on_the_known_active_volume() {
         let case = Pending::any();
         let expected = case.reference();
-        assert_eq!(case.census.pending(case.shard, &case.candidate), expected);
-        kani::cover!((0..ENTRIES).any(|at| case.exempt(at)));
-        kani::cover!(
-            (0..ENTRIES).any(|at| {
-                case.named(at) && !case.exempt(at) && case.listed(shard_at(at), false)
-            })
-        );
+        assert_eq!(case.count(&case.candidate), expected);
+        let mut named = 0;
+        for at in 0..ENTRIES {
+            if case.named(at) {
+                named += 1;
+            }
+        }
+        let unknown = (case.census).pending(case.shard, &case.candidate, |_| None);
+        assert_eq!(unknown, named);
+        let mut matching = false;
+        let mut wrong = false;
+        let mut absent = false;
+        let mut newer = false;
+        let mut other_role = false;
+        for at in 0..ENTRIES {
+            let held = shard_at(at);
+            let standby = case.named(at) && case.listed(held, true);
+            matching |= case.exempt(at);
+            if let Some(active) = case.known[at] {
+                wrong |= standby && !case.listed_on(held, active.volume);
+                newer |= case.named(at)
+                    && case.listed_on(held, active.volume)
+                    && case.row_generation(at) > active.generation.get();
+            }
+            absent |= standby && case.known[at].is_none();
+            other_role |= case.named(at) && !case.exempt(at) && case.listed(held, false);
+        }
+        kani::cover!(matching);
+        kani::cover!(wrong);
+        kani::cover!(absent);
+        kani::cover!(newer);
+        kani::cover!(other_role);
         kani::cover!(expected == 3);
     }
 
@@ -846,9 +935,90 @@ mod verification {
                 _ => Some(RecordedRole::Standby),
             };
         }
-        let planted = case.census.pending(case.shard, &negated);
+        let planted = case.count(&negated);
         kani::cover!(planted > reference);
         kani::cover!(planted < reference);
+    }
+
+    /// The role-only control credits a standby entry on the volume it names itself.
+    ///
+    /// The planted evidence answers, for each shard, the volume of the report's first standby entry of that shard at
+    /// the largest generation, so `Census::pending` credits every entry whose shard the report lists in the standby
+    /// role, whatever the caller's record names active. The control reads the inputs and the reference count of the
+    /// proof through [`Pending`]. Its cover witnesses the plant crediting an entry the reference charges.
+    #[kani::proof]
+    #[kani::unwind(30)]
+    fn the_pending_count_of_a_role_only_standby_credit_differs_from_the_reference() {
+        let case = Pending::any();
+        let reference = case.reference();
+        let forged = |held: Shard| {
+            let mut found = None;
+            for seen in &case.candidate.entries {
+                if found.is_none() && seen.shard == held && seen.role == Some(RecordedRole::Standby)
+                {
+                    found = Some(ActiveVolume {
+                        generation: ShardGeneration::new(u64::from(u32::MAX)).unwrap(),
+                        volume: seen.volume,
+                    });
+                }
+            }
+            found
+        };
+        let planted = (case.census).pending(case.shard, &case.candidate, forged);
+        kani::cover!(planted < reference);
+    }
+
+    /// Over one admission by `Population::admit` of a record under shard 3 into a census of one entry, which lists
+    /// shard 2 for the candidate's host, for a candidate that is eligible, has room in its recovery gauge and one
+    /// attachment slot free, and whose report lists shard 2 in the standby role on any of three volumes, with the
+    /// caller's record of shard 2 at any generation with any of those volumes active or absent, an attach that is
+    /// live or open, any cap and no lost host: the admission refuses `Headroom` exactly for an open attach whose
+    /// census entry no standby entry credits, and a live attach never refuses it. Covers witness an open attach
+    /// admitted on a credit, one refused on another volume than the active one, one refused with no record, and a
+    /// live attach admitted with no record. Bounds: a census of one entry and a report of one entry.
+    #[kani::proof]
+    #[kani::unwind(30)]
+    fn an_admission_at_the_last_free_slot_credits_only_the_known_active_volume() {
+        let entries = entries();
+        let census = census::<1>(Zone(kani::any()), &fixed_shards(), &entries);
+        let record = ShardRecord {
+            shard: Shard::new(3).unwrap(),
+            ..shard_record()
+        };
+        let mut candidate = candidate();
+        let host = candidate.writer.host;
+        kani::assume(host == entries[0].host && host != record.owner && record.attempts > 0);
+        let used: u64 = kani::any();
+        let limit = NonZeroU64::new(used.wrapping_add(1));
+        kani::assume(limit.is_some());
+        candidate.host.headroom.attachments = Gauge::Known {
+            used,
+            limit: limit.unwrap(),
+        };
+        kani::assume(room(candidate.host.headroom.recovery, 0));
+        let listed = reported(shard_at(0), Some(RecordedRole::Standby));
+        candidate.entries = vec![listed.clone()];
+        let known = kani::any::<bool>().then(|| ActiveVolume {
+            generation: generation(),
+            volume: volume(),
+        });
+        let attach = match kani::any() {
+            true => Attach::Live,
+            false => Attach::Open,
+        };
+        let lookup = |held: Shard| known.filter(|_| held == shard_at(0));
+        let population = Population { cap: kani::any() };
+        let admitted = population.admit(&census, &record, &candidate, attach, lookup, |_| false);
+        let row = entries[0].target.generation.get();
+        let credited = known
+            .is_some_and(|active| row <= active.generation.get() && active.volume == listed.volume);
+        let refused = admitted == Err(Refusal::Headroom);
+        assert_eq!(refused, attach == Attach::Open && !credited);
+        let open = attach == Attach::Open;
+        kani::cover!(open && credited && admitted.is_ok());
+        kani::cover!(open && known.is_some_and(|active| active.volume != listed.volume) && refused);
+        kani::cover!(open && known.is_none() && refused);
+        kani::cover!(!open && known.is_none() && admitted.is_ok());
     }
 
     /// The inputs one release proof shares across its shards.

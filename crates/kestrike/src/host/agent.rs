@@ -60,8 +60,12 @@
 //!   entries of the last sync's roles come first and a report holds [`MAX_ENTRIES`], so the entry of a role the
 //!   sync no longer lists takes a place only when every listed role's entry has one.
 //!   Parking ends the tenure. The agent seals a parked status's entry when the entry names the status's volume and
-//!   shard. The producer-missing gauge counts the owned roles of the last accepted sync with no sealed entry, and
-//!   reads unavailable before the first accepted sync. A seal the writer refuses reports its [`SealError`] in
+//!   shard. A waiting process's `Standby` status carries no tenure, and the agent seals its entry when the status
+//!   and the entry hold no tenure and the entry names the status's volume and shard with no serving state and the
+//!   role `Standby` or `Unrecorded`; such an entry counts toward no owned role in the producer-missing gauge, and a
+//!   `Standby` status gives no heartbeat entry. The producer-missing gauge counts the owned roles of the last
+//!   accepted sync with no sealed entry of a phase other than `Standby`, and reads unavailable before the first
+//!   accepted sync. A seal the writer refuses reports its [`SealError`] in
 //!   [`Outputs::seal_refused`], and the next turn tries again. [`Outputs::deliver`] hands the sealed bytes to a [`ReportSink`]
 //!   unchanged.
 //! - REPORTS-CONFER-NO-AUTHORITY: the agent holds no store client and no device handle. A report, a probe reading
@@ -83,7 +87,7 @@ use crate::failover::detect::probe::{self, Keyed, Message, ProbeError, ProbeKey}
 use crate::failover::records::{self, Host, ShardRecord, VolumeId};
 use crate::failover::report::{
     BuildIdentity, Detector, Ended, Gauge, Headroom, Health, HostState, MAX_ENTRIES, Members,
-    Phase, SealError, VolumeEntry, Writer, producer_missing,
+    Phase, RecordedRole, SealError, VolumeEntry, Writer, producer_missing,
 };
 use crate::failover::retire::Target;
 use crate::failover::zone_loop::directory::{HostProjection, Projection};
@@ -613,9 +617,13 @@ impl Agent {
             })
             .take(MAX_ENTRIES)
             .collect();
+        // A waiting process's entry produces no owned role's entry.
         let produced = (self.owned.as_ref()).map(|owned| {
             producer_missing(owned.iter().map(|&(shard, volume)| {
-                (entries.iter()).any(|entry| (entry.shard, entry.volume) == (shard, volume))
+                (entries.iter()).any(|entry| {
+                    (entry.shard, entry.volume) == (shard, volume)
+                        && entry.phase != Some(Phase::Standby)
+                })
             }))
         });
         let host = HostState {
@@ -637,14 +645,24 @@ impl Agent {
     }
 
     /// A parked `status` with `tenure == None` can accept an entry with `Some` tenure when volume and shard match.
-    /// All other statuses require matching tenure as well.
+    /// All other statuses require matching tenure as well. A `Standby` status and its entry also hold no tenure, and
+    /// the entry no serving state and the role `Standby` or `Unrecorded`, so a waiting process's entry never reads as
+    /// an owner's.
     fn own_entry(status: &Status) -> Option<VolumeEntry> {
         let entry = status.entry?;
         let tenure = match status.tenure {
             Some(tenure) => entry.tenure == Some(tenure),
             None => status.phase == Phase::Parked || entry.tenure.is_none(),
         };
-        let own = tenure && (entry.volume, entry.shard) == (status.volume, status.shard);
+        let waiting = status.phase != Phase::Standby
+            || (status.tenure.is_none()
+                && entry.tenure.is_none()
+                && entry.serving.is_none()
+                && matches!(
+                    entry.role,
+                    Some(RecordedRole::Standby | RecordedRole::Unrecorded)
+                ));
+        let own = tenure && waiting && (entry.volume, entry.shard) == (status.volume, status.shard);
         own.then_some(entry)
     }
 
@@ -669,19 +687,25 @@ impl Agent {
             if earlier || fell {
                 continue;
             }
+            // A status without a tenure counts no tenure's progress, so it leaves the baseline and the totals to the
+            // last tenure's status: a replay of that status then reads as the same sample.
+            let tenured = status.tenure.is_some();
             let (io, completions) = same.map_or((0, 0), |last| (last.io, last.completions));
-            self.progress.0 = (self.progress.0).saturating_add(status.io - io);
-            self.progress.1 = (self.progress.1).saturating_add(status.completions - completions);
-            let next = Baseline {
-                volume: status.volume,
-                pid: status.pid,
-                tenure: status.tenure,
-                io: status.io,
-                completions: status.completions,
-            };
-            match baseline {
-                Some(baseline) => *baseline = next,
-                None => self.baselines.push(next),
+            if tenured {
+                self.progress.0 = (self.progress.0).saturating_add(status.io - io);
+                self.progress.1 =
+                    (self.progress.1).saturating_add(status.completions - completions);
+                let next = Baseline {
+                    volume: status.volume,
+                    pid: status.pid,
+                    tenure: status.tenure,
+                    io: status.io,
+                    completions: status.completions,
+                };
+                match baseline {
+                    Some(baseline) => *baseline = next,
+                    None => self.baselines.push(next),
+                }
             }
             match (self.statuses.iter_mut()).find(|kept| kept.status.volume == status.volume) {
                 Some(kept) => *kept = received,
@@ -890,6 +914,9 @@ impl Agent {
     fn entry(&self, received: &Received, now: u64) -> Option<Entry> {
         let status = &received.status;
         let waited = now.saturating_sub(received.published_after);
+        if status.phase == Phase::Standby {
+            return None;
+        }
         let (generation, epoch) = status.tenure.filter(|(_, a)| a.is_activated())?;
         // A tenure is retired when its own entry reads its volume from Retired on, or when the last sync names
         // another volume active for a shard this host still holds a role on.

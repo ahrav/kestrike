@@ -298,10 +298,14 @@ fn census_of(slots: &[(ShardRecord, u64)]) -> Census {
     let population = Population { cap: 64 };
     let mut census = Census::empty(ZONE);
     for (record, named) in slots {
-        let admitted =
-            population.admit(&census, record, &roomy(host(*named)), Attach::Live, |_| {
-                false
-            });
+        let admitted = population.admit(
+            &census,
+            record,
+            &roomy(host(*named)),
+            Attach::Live,
+            |_| None,
+            |_| false,
+        );
         census = admitted.unwrap().unwrap();
     }
     census
@@ -1159,7 +1163,7 @@ fn survey_changes_no_store_key_and_calls_no_attachment_over_ticks_with_unmet_nee
     assert!(!reserves(&survey.plan).is_empty());
 }
 
-fn designate_attached(fixture: &Fixture, number: u32, standby: Host) {
+pub(super) fn designate_attached(fixture: &Fixture, number: u32, standby: Host) {
     let mut owner = Client::open(fixture.store.clone(), MemLog::default()).unwrap();
     let read = owner
         .read::<ShardRecord>(Key::Shard(shard(number)))
@@ -1923,6 +1927,7 @@ fn a_reservation_owes_the_attachment_a_later_reservation_of_the_host_needs() {
         &scene.shards[0].record,
         &report,
         Attach::Live,
+        |_| None,
         |_| false,
     ))
     .unwrap()
@@ -1932,18 +1937,46 @@ fn a_reservation_owes_the_attachment_a_later_reservation_of_the_host_needs() {
         &scene.shards[1].record,
         &report,
         Attach::Open,
+        |_| None,
         |_| false,
     );
     assert_eq!(second, Err(crate::failover::standbys::Refusal::Headroom));
-    // A host whose report lists shard 1 in the standby role holds that attachment already, so the free slot serves
-    // shard 2.
+    // A host whose report lists shard 1 in the standby role on shard 1's active volume holds that attachment
+    // already, so the free slot serves shard 2.
     let mut listed = report;
-    let mut standby = super::observe::entry("vol-0a", 1, record().generation.get(), 1);
+    let mut standby = super::observe::entry(volume(1).as_str(), 1, record().generation.get(), 1);
     standby.role = Some(crate::failover::report::RecordedRole::Standby);
     listed.entries.push(standby);
     scene.reports.insert(12, listed);
     let plan = scene.plan_under(&bounds_with(|config| config.enroll_inflight_max = 64));
     assert_eq!(reserves(&plan), [(1, 12), (2, 12)]);
+}
+
+/// The old-volume twin of [`a_reservation_owes_the_attachment_a_later_reservation_of_the_host_needs`]: a standby
+/// entry for shard 1 on a volume other than its active one holds no attachment of that volume, so the reservation of
+/// shard 1 still owes host 12's one free slot and shard 2 reads `Headroom`.
+#[test]
+fn a_standby_entry_on_an_old_volume_leaves_the_reservation_owing_the_attachment() {
+    let mut scene = Scene::new(vec![
+        records(1, OWNER, None, lineage(&[(host(12), c_pair())])),
+        records(2, OWNER, None, volume_record()),
+    ]);
+    scene
+        .listing
+        .hosts
+        .retain(|entry| [OWNER, 12].contains(&entry.host.get()));
+    let mut report = report_of(host(12), Gauge::known(1, 2), Gauge::known(0, 2));
+    let mut standby = super::observe::entry("vol-0a", 1, record().generation.get(), 1);
+    standby.role = Some(crate::failover::report::RecordedRole::Standby);
+    assert_ne!(standby.volume, scene.shards[0].record.active);
+    report.entries.push(standby);
+    scene.reports.insert(12, report);
+    let plan = scene.plan_under(&bounds_with(|config| config.enroll_inflight_max = 64));
+    assert_eq!(reserves(&plan), [(1, 12)]);
+    assert_eq!(
+        state_of(&plan, 2),
+        (ShardState::NoCandidate, Some(Blocker::Headroom))
+    );
 }
 
 #[test]
@@ -3582,6 +3615,7 @@ fn a_cap_below_the_shard_count_is_reported_and_a_slotless_shard_reads_census_ful
             ZONE,
             shard(1),
             &roomy(host(1)),
+            |_| None,
             |_| false,
         )
         .unwrap();

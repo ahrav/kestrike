@@ -2424,6 +2424,7 @@ fn a_standby_attach_conflicts_before_any_write_once_no_sequence_number_is_left()
             ZONE,
             sid(),
             &roomy(host(SPARE)),
+            |_| None,
             |_| false
         ),
         Err(ReconcileError::Population(PopulationRefusal::Closed))
@@ -2504,6 +2505,7 @@ fn a_derived_key_a_recorded_pair_holds_opens_no_attach() {
             ZONE,
             sid(),
             &roomy(host(SPARE)),
+            |_| None,
             |_| false
         ),
         Err(ReconcileError::Population(PopulationRefusal::Closed))
@@ -3715,6 +3717,7 @@ fn slot_for(store: &Shared, candidate: u64) -> Slot {
             ZONE,
             sid(),
             &roomy(host(candidate)),
+            |_| None,
             |h| h != host(candidate),
         )
         .unwrap()
@@ -3754,14 +3757,30 @@ fn report_claims_change_no_reservation() {
         );
         (stored(store), stored_volume(store, active), counts)
     };
+    let known = |held: crate::net::ownership::Shard| {
+        let volume = crate::failover::records::VolumeId::new("vol-0c").unwrap();
+        let generation = record().generation;
+        let active = crate::failover::standbys::ActiveVolume { generation, volume };
+        (held.get() == sid().get() + 1).then_some(active)
+    };
     let reserving = |store: &Shared, census: &Census, cap, attach, entry| {
         let mut report = roomy(host(candidate));
         report.entries = vec![entry];
         let population = Population { cap };
         let before = records(store);
-        let admitted = population.admit(census, &shard_held(store), &report, attach, |_| false);
-        let slot =
-            reconciler(store).reserve(&gate, &population, &wide(), ZONE, sid(), &report, |_| false);
+        let admitted = population.admit(census, &shard_held(store), &report, attach, known, |_| {
+            false
+        });
+        let slot = reconciler(store).reserve(
+            &gate,
+            &population,
+            &wide(),
+            ZONE,
+            sid(),
+            &report,
+            known,
+            |_| false,
+        );
         assert_eq!(records(store), before, "no shard or volume write");
         (admitted, slot, census_held(store))
     };
@@ -3808,6 +3827,16 @@ fn report_claims_change_no_reservation() {
         matches!(free.0, Ok(Some(_))) && free.1.is_ok(),
         "control: a standby listing of the other shard frees the slot: {free:?}"
     );
+    let moved = unattached(VolumeEntry {
+        shard: other,
+        ..bare("vol-0d", RecordedRole::Standby)
+    });
+    assert_eq!(
+        (&moved.0, &moved.1),
+        (&Err(headroom), &Err(ReconcileError::Population(headroom))),
+        "a standby listing on another volume than the other shard's active one frees no slot"
+    );
+    assert_eq!(moved.2, charged.2, "no census write");
 }
 
 /// The slot of the shard for `candidate` at its stored `(g, owner, E)`, from a census written to list it alone, as
@@ -3909,6 +3938,7 @@ fn a_designation_names_an_enrolled_standby_and_replaces_it() {
                 ZONE,
                 sid(),
                 &roomy(host(candidate)),
+                |_| None,
                 |h| h != host(candidate)
             ),
             Err(ReconcileError::Population(refusal)),
@@ -3976,6 +4006,7 @@ fn a_designation_names_an_enrolled_standby_and_replaces_it() {
             ZONE,
             sid(),
             &roomy(host(first)),
+            |_| None,
             |_| false
         ),
         Err(ReconcileError::Population(PopulationRefusal::Ineligible))
@@ -4066,6 +4097,7 @@ fn a_stale_reconciler_cannot_replace_a_newer_designation() {
             ZONE,
             sid(),
             &roomy(host(candidate)),
+            |_| None,
             |h| Some(h.get()) == lost,
         )
     };
@@ -4110,6 +4142,7 @@ fn a_reserved_host_whose_attach_failed_releases_its_slot_on_the_callers_evidence
             ZONE,
             sid(),
             &roomy(host(candidate)),
+            |_| None,
             |h| Some(h.get()) == failed,
         )
     };
@@ -4710,9 +4743,16 @@ fn a_failed_replacement_attach_leaves_no_attach_for_a_new_host() {
         .designate(&gate, &slot_for(&store, y), active)
         .unwrap();
     reconciler(&store)
-        .reserve(&gate, &cap, &wide(), ZONE, sid(), &roomy(host(x)), |h| {
-            h == host(y)
-        })
+        .reserve(
+            &gate,
+            &cap,
+            &wide(),
+            ZONE,
+            sid(),
+            &roomy(host(x)),
+            |_| None,
+            |h| h == host(y),
+        )
         .unwrap();
     reconciler(&store)
         .record_standby(
@@ -4728,7 +4768,16 @@ fn a_failed_replacement_attach_leaves_no_attach_for_a_new_host() {
     let before = (stored(&store), census_held(&store));
     let gone = |h: Host| h == host(x) || h == host(y);
     assert_eq!(
-        reconciler(&store).reserve(&gate, &cap, &wide(), ZONE, sid(), &roomy(host(z)), gone),
+        reconciler(&store).reserve(
+            &gate,
+            &cap,
+            &wide(),
+            ZONE,
+            sid(),
+            &roomy(host(z)),
+            |_| None,
+            gone
+        ),
         Err(ReconcileError::Population(PopulationRefusal::Closed))
     );
     assert_eq!(
@@ -4837,7 +4886,7 @@ fn concurrent_reservations_share_one_census_under_the_cap() {
         "an AZ with no census lists no shard"
     );
     assert_eq!(
-        reconciler(&store).reserve(&gate, &one, &wide(), ZONE, sid(), &starved, live),
+        reconciler(&store).reserve(&gate, &one, &wide(), ZONE, sid(), &starved, |_| None, live),
         Err(ReconcileError::Population(PopulationRefusal::Headroom))
     );
     assert_eq!(commits(&store, Key::Standbys(ZONE)), 0);
@@ -4852,12 +4901,30 @@ fn concurrent_reservations_share_one_census_under_the_cap() {
     )));
     let candidate = roomy(host(SPARE + 2));
     assert_eq!(
-        loser.reserve(&gate, &one, &wide(), ZONE, other, &candidate, live),
+        loser.reserve(
+            &gate,
+            &one,
+            &wide(),
+            ZONE,
+            other,
+            &candidate,
+            |_| None,
+            live
+        ),
         condition
     );
     let full = Err(ReconcileError::Population(PopulationRefusal::Full));
     assert_eq!(
-        loser.reserve(&gate, &one, &wide(), ZONE, other, &candidate, live),
+        loser.reserve(
+            &gate,
+            &one,
+            &wide(),
+            ZONE,
+            other,
+            &candidate,
+            |_| None,
+            live
+        ),
         full
     );
     let listed = census_held(&store);
@@ -4875,17 +4942,36 @@ fn concurrent_reservations_share_one_census_under_the_cap() {
                 ZONE,
                 third,
                 &roomy(host(SPARE + 3)),
+                |_| None,
                 |_| false,
             )
             .unwrap();
     });
     let mut loser = Reconciler::new(Client::open(AsReconciler(hook), MemLog::default()).unwrap());
     assert_eq!(
-        loser.reserve(&gate, &two, &wide(), ZONE, other, &candidate, live),
+        loser.reserve(
+            &gate,
+            &two,
+            &wide(),
+            ZONE,
+            other,
+            &candidate,
+            |_| None,
+            live
+        ),
         condition
     );
     assert_eq!(
-        loser.reserve(&gate, &two, &wide(), ZONE, other, &candidate, live),
+        loser.reserve(
+            &gate,
+            &two,
+            &wide(),
+            ZONE,
+            other,
+            &candidate,
+            |_| None,
+            live
+        ),
         full
     );
     assert_eq!(census_held(&store).len(), 2);
@@ -4939,7 +5025,16 @@ fn concurrent_reservations_share_one_census_under_the_cap() {
         Ok(false)
     );
     let slot = loser
-        .reserve(&gate, &two, &wide(), ZONE, other, &candidate, live)
+        .reserve(
+            &gate,
+            &two,
+            &wide(),
+            ZONE,
+            other,
+            &candidate,
+            |_| None,
+            live,
+        )
         .unwrap();
     assert_eq!((slot.shard(), slot.host()), (other, host(SPARE + 2)));
     let listed = census_held(&store);
@@ -4965,6 +5060,7 @@ fn a_restarted_reconciler_converges_on_one_reservation() {
                 ZONE,
                 sid(),
                 &roomy(host(SPARE + 1)),
+                |_| None,
                 |_| false,
             )
         };
@@ -7541,6 +7637,7 @@ fn a_designation_racing_the_end_is_reported_and_retires_nothing() {
             ZONE,
             sid(),
             &roomy(host(fresh)),
+            |_| None,
             |_| false,
         )
     };

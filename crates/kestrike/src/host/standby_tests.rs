@@ -37,6 +37,32 @@ use crate::storage::store::{Client, Key};
 use crate::storage::store_tests::{client, shard};
 use crate::storage::{Dropped, ServingClock};
 
+/// A planted fault of the wait's publications, which a control runs a witness under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Plant {
+    /// The wait publishes no status.
+    Silent,
+    /// The wait publishes each role read's status once and never again within a view period.
+    Unrepeated,
+}
+
+thread_local! {
+    static PLANT: Cell<Option<Plant>> = const { Cell::new(None) };
+}
+
+/// The plant set on this thread.
+pub(super) fn plant() -> Option<Plant> {
+    PLANT.with(Cell::get)
+}
+
+/// Runs `body` with `plant` set on this thread.
+fn planted<R>(plant: Plant, body: impl FnOnce() -> R) -> R {
+    PLANT.with(|cell| cell.set(Some(plant)));
+    let result = body();
+    PLANT.with(|cell| cell.set(None));
+    result
+}
+
 /// D's local record, the record of a fresh host the reconciler attached: its key is the key of the attach entry
 /// [`record_d`] appends to [`with_c`] (KEY-PER-ATTACH).
 fn d_record() -> LocalRecord {
@@ -105,6 +131,15 @@ struct Standby<'t> {
     clock: Option<&'t dyn ServingClock>,
     /// The fencer's state when the arm takes the fencer.
     fencer: Held,
+    /// The link whose status cell the wait publishes to; a link of the run's own when `None`.
+    link: Option<&'t super::Link>,
+    /// The calls of the period signal that return before each view period passed, each after it advances `now` by
+    /// the bound it was given.
+    slices: u32,
+    /// Runs at each call of the period signal with the bound it was given.
+    on_wait: Option<&'t dyn Fn(u64)>,
+    /// The detector window the wait is told; two status periods unless a case sets it.
+    window_us: u64,
 }
 
 /// What a fencer holds before the arm's first view period.
@@ -134,6 +169,10 @@ fn standby<'t>(
         log_fails: Rc::default(),
         clock: None,
         fencer: Held::Nothing,
+        link: None,
+        slices: 0,
+        on_wait: None,
+        window_us: 2 * super::duties::STATUS_US,
     }
 }
 
@@ -177,6 +216,9 @@ fn stood(
     let persists = RefCell::new(Vec::new());
     let marks = RefCell::new(Vec::new());
     let holder = holder_on(run.volume, run.host, instance_of(run.host));
+    let own_link = super::Link::default();
+    let link = run.link.unwrap_or(&own_link);
+    let slice = Cell::new(0);
     let inputs = Inputs::new(shard(), holder, bounds_of(limits()), limits(), 4).unwrap();
     let recovery = stand_by(
         (&HostGate::qualified(), &StandbyGate::qualified()),
@@ -193,18 +235,33 @@ fn stood(
         Box::new(ZeroClock),
         Signals {
             stop: &stop,
-            period: || {
-                periods.set(periods.get() + 1);
-                assert!(periods.get() < 100, "the wait never ended");
-                marks.borrow_mut().push(issued());
-                // The slot keeps an unread witness; a send replaces it.
-                if let Some(witness) = script(periods.get(), &stop) {
-                    pending.set(Some(witness));
+            period: |bound| {
+                if let Some(on_wait) = run.on_wait {
+                    on_wait(bound);
                 }
-                log_fails.set(run.log_fails.get());
+                let sliced = slice.get();
+                if sliced == 0 {
+                    periods.set(periods.get() + 1);
+                    assert!(periods.get() < 100, "the wait never ended");
+                    marks.borrow_mut().push(issued());
+                    // The slot keeps an unread witness; a send replaces it.
+                    if let Some(witness) = script(periods.get(), &stop) {
+                        pending.set(Some(witness));
+                    }
+                    log_fails.set(run.log_fails.get());
+                }
+                let passed = sliced == run.slices;
+                slice.set(if passed { 0 } else { sliced + 1 });
+                if !passed {
+                    run.now.set(run.now.get() + bound);
+                }
+                passed
             },
             nominations: || pending.take(),
             now: || run.now.get(),
+            status: &link.status,
+            pid: 7,
+            window_us: run.window_us,
         },
     );
     let (exit, tenure, device, class) = match recovery {
@@ -724,15 +781,20 @@ fn an_owner_role_read_ends_the_arm_in_its_first_period() {
     let store = store(shard_record(), with_c());
     let registry = own_holds();
     let now = Cell::new(0);
+    let link = super::Link::default();
     let stood = stood(
         &store,
-        &standby(owner_host(), local_record(), &registry, &now),
+        &Standby {
+            link: Some(&link),
+            ..standby(owner_host(), local_record(), &registry, &now)
+        },
         &mut |_, _| Some(witness_of(&store)),
         &no_persist,
     );
     assert_eq!(stood.exit, Some(Exit::Rerun(Rerun::RoleChanged)));
     assert_eq!(stood.calls, two_reads());
     assert!(stood.device == "unconnected" && commands(&registry).is_empty());
+    assert_eq!(link.status.take(), None, "an owner read publishes nothing");
 }
 
 /// Records D's attach as the reconciler does, with no enrolled pair.
@@ -960,10 +1022,17 @@ fn an_enrolled_unnamed_host_writes_nothing() {
         ..witness_of(&store)
     };
     let now = Cell::new(0);
+    let link = super::Link::default();
+    let mut named = Vec::new();
     let stood = stood(
         &store,
-        &standby(b_host(), stored_b().0.unwrap(), &registry, &now),
+        &Standby {
+            link: Some(&link),
+            ..standby(b_host(), stored_b().0.unwrap(), &registry, &now)
+        },
         &mut |period, stop| {
+            let entry = link.status.take().and_then(|status| status.entry);
+            named.extend(entry.map(|entry| (entry.role, entry.named)));
             match period {
                 3 => designate(&designated, Some(b_host())),
                 4 => return Some(stale),
@@ -985,6 +1054,17 @@ fn an_enrolled_unnamed_host_writes_nothing() {
     );
     assert!(writes(&stood.calls).is_empty());
     assert!(stood.device == "unconnected" && commands(&registry).is_empty());
+    use crate::failover::report::RecordedRole::Standby as Enrolled;
+    assert_eq!(
+        named,
+        [
+            (Some(Enrolled), Some(false)),
+            (Some(Enrolled), Some(false)),
+            (Some(Enrolled), Some(true)),
+            (Some(Enrolled), Some(true)),
+        ],
+        "B's entry reads standby while enrolled and named once designated"
+    );
 }
 
 /// The named standby D enrolls its pair in period 1 and retains that period's witness until the role read of
@@ -1079,10 +1159,20 @@ fn c_agent(store: &Shared) -> super::Agent {
 /// One agent window at `now`: C's standby status, DEAD votes from 21 and 22 for every open probe round, and each
 /// message the agent addresses to C's process delivered to `link`. Returns the nominations delivered.
 fn c_window(agent: &mut super::Agent, link: &super::Link, now: u64) -> usize {
-    use super::agent::tests::{answer, slices};
-    use crate::failover::detect::tests::{SILENT, clock};
     use crate::failover::report::Phase;
     let statuses = [super::Status::idle(shard(), volume_id(), 7, Phase::Standby)];
+    c_window_over(agent, link, now, &statuses)
+}
+
+/// [`c_window`] over `statuses` in place of C's fixed standby status.
+fn c_window_over(
+    agent: &mut super::Agent,
+    link: &super::Link,
+    now: u64,
+    statuses: &[super::Status],
+) -> usize {
+    use super::agent::tests::{answer, slices};
+    use crate::failover::detect::tests::{SILENT, clock};
     let mut delivered = 0;
     for probing in [false, true] {
         let requests: Vec<_> = agent.watch().probes().collect();
@@ -1093,7 +1183,7 @@ fn c_window(agent: &mut super::Agent, link: &super::Link, now: u64) -> usize {
         let out = agent.turn(
             now,
             super::agent::Inputs {
-                statuses: &statuses,
+                statuses,
                 probes: &slices(&votes),
                 clock: clock(now),
                 ..super::agent::Inputs::NONE
@@ -1201,6 +1291,597 @@ fn the_control_that_sends_only_the_published_values_fails_the_retried_takeover()
     assert!(commands(&registry).is_empty(), "no device command");
 }
 
+/// The reports C's agent seals over what C's own wait publishes: C, the enrolled named standby, waits three view
+/// periods with no nomination, and each period's script hands C's agent the status `link`'s cell holds, one report
+/// period apart, before the run stops in the fourth. Returns the last report, read under C's report key.
+fn reported_while_waiting(
+    store: &Shared,
+    link: &super::Link,
+) -> crate::failover::report::HostReport {
+    use super::agent::tests::{REPORT_US, reader_key};
+    use crate::failover::detect::tests::clock;
+    let registry = own_holds();
+    let mut agent = c_agent(store);
+    let now = Cell::new(0);
+    let mut sealed = None;
+    let stood = stood(
+        store,
+        &Standby {
+            link: Some(link),
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            let t = u64::from(period) * REPORT_US;
+            now.set(t);
+            let statuses: Vec<_> = link.status.take().into_iter().collect();
+            let out = agent.turn(
+                t,
+                super::agent::Inputs {
+                    statuses: &statuses,
+                    clock: clock(t),
+                    ..super::agent::Inputs::NONE
+                },
+            );
+            assert_eq!(out.seal_refused, None);
+            sealed = out.report.or(sealed.take());
+            if period == 4 {
+                stop.store(true, Ordering::Release);
+            }
+            None
+        },
+        &no_persist,
+    );
+    assert_eq!(stood.exit, Some(Exit::Stopped));
+    assert!(stood.device == "unconnected" && commands(&registry).is_empty());
+    let sealed = sealed.expect("C's agent sealed a report");
+    crate::failover::report::Reader::default()
+        .accept(&sealed, reader_key)
+        .unwrap()
+}
+
+/// HEADROOM over a production wait: the census lists C's slot for its shard, and C's report, sealed from the
+/// statuses C's wait published, lists that shard in the standby role, so a reservation of another shard counts C's
+/// slot as filled and charges C no pending attachment.
+#[test]
+fn the_census_counts_a_waiting_standby_from_the_report_its_wait_feeds() {
+    use crate::failover::standbys::tests::listing;
+    use crate::failover::standbys::{ActiveVolume, Entry, Zone, lists_standby};
+    let store = store(shard_record(), with_c());
+    let link = super::Link::default();
+    let report = reported_while_waiting(&store, &link);
+    let record = shard_now(&store);
+    assert!(
+        lists_standby(&report, shard().get(), record.active),
+        "the report lists the standby: {:?}",
+        report.entries
+    );
+    let census = listing(
+        Zone(1),
+        shard(),
+        Entry {
+            target: Target::of(&record),
+            host: c_host(),
+        },
+    );
+    let other = crate::net::ownership::Shard::new(shard().get() + 1).unwrap();
+    let known = |held| (held == shard()).then(|| ActiveVolume::of(&record));
+    assert_eq!(
+        census.pending(other, &report, known),
+        0,
+        "C's slot is filled"
+    );
+    assert_eq!(
+        census.pending(other, &report, |_| None),
+        1,
+        "a caller with no record of the shard keeps the charge"
+    );
+}
+
+/// HEADROOM after a flip: C's report still holds the standby entry its wait published for the volume the shard
+/// record named active before the flip, and the census lists C's slot at the record's new tenure. That entry fills
+/// no slot of the new active volume, so a reservation of another shard counts C's slot as a pending attachment,
+/// whether its caller holds the record of after the flip or still the one of before it.
+#[test]
+fn a_standby_entry_for_a_volume_the_record_no_longer_names_active_fills_no_slot() {
+    use crate::failover::standbys::tests::listing;
+    use crate::failover::standbys::{ActiveVolume, Entry, Zone};
+    let store = store_with_spare(shard_record(), with_c());
+    let link = super::Link::default();
+    let report = reported_while_waiting(&store, &link);
+    flip(&store);
+    let record = shard_now(&store);
+    assert_ne!(
+        record.active,
+        volume_id(),
+        "the flip named the spare active"
+    );
+    let target = Target {
+        attempts: 1,
+        ..Target::of(&record)
+    };
+    let census = listing(
+        Zone(1),
+        shard(),
+        Entry {
+            target,
+            host: c_host(),
+        },
+    );
+    let other = crate::net::ownership::Shard::new(shard().get() + 1).unwrap();
+    let known = |held| (held == shard()).then(|| ActiveVolume::of(&record));
+    assert_eq!(
+        census.pending(other, &report, known),
+        1,
+        "C owes the attach of the new active volume: {:?}",
+        report.entries
+    );
+    // A caller that still holds the record of before the flip reads the entry's volume as the active one, and
+    // the census entry's later generation keeps the charge.
+    let earlier = shard_record();
+    assert_eq!(earlier.active, volume_id());
+    assert!(earlier.generation < target.generation);
+    let before = |held| (held == shard()).then(|| ActiveVolume::of(&earlier));
+    assert_eq!(
+        census.pending(other, &report, before),
+        1,
+        "the census entry is of a later generation than the caller's record"
+    );
+    let at_the_entry = ActiveVolume {
+        generation: target.generation,
+        ..ActiveVolume::of(&earlier)
+    };
+    let credited = |held| (held == shard()).then_some(at_the_entry);
+    assert_eq!(
+        census.pending(other, &report, credited),
+        0,
+        "control: the entry fills the slot on the volume it names at the census entry's generation"
+    );
+}
+
+/// The record names C standby, the active volume record shows C's enrolled pair, and C's report, sealed from the
+/// statuses C's wait published, holds an entry for the record's shard and active volume in the standby role.
+#[test]
+fn a_waiting_standbys_report_holds_a_standby_entry_for_its_shard_and_active_volume() {
+    use crate::failover::report::RecordedRole;
+    let store = store(shard_record(), with_c());
+    let link = super::Link::default();
+    let report = reported_while_waiting(&store, &link);
+    let record = shard_now(&store);
+    assert_eq!(record.standby, Some(c_host()));
+    assert!(volume_now(&store).enrolled(c_host()).is_some());
+    let listed = (report.entries.iter()).any(|entry| {
+        entry.shard == record.shard
+            && entry.volume == record.active
+            && entry.role == Some(RecordedRole::Standby)
+    });
+    assert!(listed, "a standby entry: {:?}", report.entries);
+}
+
+/// NAMED-STANDBY over a production wait: C's agent turns over the statuses C's own wait published, nominates the
+/// silent owner A, and the takeover that nomination starts commits.
+#[test]
+fn a_silent_owners_standby_is_nominated_through_the_status_its_wait_publishes() {
+    let store = store(shard_record(), with_c());
+    let registry = own_holds();
+    let mut agent = c_agent(&store);
+    let link = super::Link::default();
+    let now = Cell::new(0);
+    let mut delivered = 0;
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            let t = u64::from(period) * 10;
+            now.set(t);
+            let statuses: Vec<_> = link.status.take().into_iter().collect();
+            delivered += c_window_over(&mut agent, &link, t, &statuses);
+            if period == 12 {
+                stop.store(true, Ordering::Release);
+            }
+            link.inbox.nomination()
+        },
+        &no_persist,
+    );
+    assert!(delivered >= 1, "C's agent nominated C's process");
+    assert_eq!(stood.exit, None, "the takeover returned a tenure");
+    assert_eq!(stood.tenure.map(|t| t.owner), Some(c_host()));
+    assert_eq!(shard_now(&store), taken(&shard_record(), c_host()));
+}
+
+/// The status C, the enrolled named standby of `store`'s shard, publishes for a role read of `store`'s records:
+/// phase `Standby` at the shard record's target with no tenure, and an entry in the standby role, named, with the
+/// volume's state and every other field absent or unavailable.
+fn c_standing(store: &Shared) -> super::Status {
+    use crate::failover::report::tests::bare;
+    use crate::failover::report::{Phase, RecordedRole, VolumeEntry};
+    let entry = VolumeEntry {
+        volume: volume_id(),
+        shard: shard(),
+        volume_state: Some(crate::failover::records::VolumeState::Active),
+        named: Some(true),
+        ..bare(volume_id().as_str(), RecordedRole::Standby)
+    };
+    super::Status {
+        target: Some(Target::of(&shard_now(store))),
+        entry: Some(entry),
+        ..super::Status::idle(shard(), volume_id(), 7, Phase::Standby)
+    }
+}
+
+/// Whether each call of C's period signal found a status in C's link cell, over four view periods of three status
+/// periods each: the period signal returns three times, one `STATUS_US` apart, before each period passes, and
+/// period 2's role read fails. Every status found is C's, and every call is bounded by `STATUS_US`.
+fn found_over_long_periods() -> Vec<bool> {
+    use super::duties::STATUS_US;
+    let store = store(shard_record(), with_c());
+    let registry = own_holds();
+    let link = super::Link::default();
+    let now = Cell::new(0);
+    let seen = RefCell::new(Vec::new());
+    let on_wait = |bound: u64| {
+        seen.borrow_mut()
+            .push((bound, now.get(), link.status.take()));
+    };
+    let armed = store.clone();
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            slices: 3,
+            on_wait: Some(&on_wait),
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            if period == 2 {
+                armed.schedule(Arm::Unavailable);
+            }
+            stop.store(period == 4, Ordering::Release);
+            None
+        },
+        &no_persist,
+    );
+    assert_eq!(stood.exit, Some(Exit::Stopped));
+    assert_eq!(stood.period(1), two_reads());
+    assert_eq!(stood.period(2), &two_reads()[..1], "the failed role read");
+    assert_eq!(stood.period(3), two_reads());
+    assert!(stood.device == "unconnected" && commands(&registry).is_empty());
+    let standing = c_standing(&store);
+    let seen = seen.into_inner();
+    assert!(seen.iter().all(|(bound, ..)| *bound == STATUS_US));
+    (seen.iter())
+        .map(|(_, at, status)| {
+            if let Some(status) = status {
+                assert_eq!(*status, standing, "at {at}");
+            }
+            status.is_some()
+        })
+        .collect()
+}
+
+/// STANDBY-PUBLISHES over a view period of three status periods: period 1's read publishes C's status; period 2's
+/// calls find it and its republications one and two status periods later, and none once the read is `STALE_US`
+/// old. Period 2's role read fails, so period 3 finds nothing to republish; period 3's read publishes again, and
+/// period 4's first call finds it. The stop flag set at that call ends the wait there. Each period issues only its
+/// role read.
+#[test]
+fn a_long_view_period_republishes_each_status_period_until_its_read_is_stale() {
+    let (none, some) = (false, true);
+    assert_eq!(
+        found_over_long_periods(),
+        [
+            &[none; 4][..],
+            &[some, some, some, none],
+            &[none; 4],
+            &[some],
+        ]
+        .concat(),
+        "the stop set at period 4's first call ends the period there"
+    );
+}
+
+/// The control whose wait publishes each read once and never again within a view period fails the long-period case:
+/// each read's status is found once, at the first call after it, and the later calls find the cell empty.
+#[test]
+fn the_control_that_publishes_once_a_period_fails_the_long_period_case() {
+    let found = planted(Plant::Unrepeated, found_over_long_periods);
+    let found = found.iter().filter(|some| **some).count();
+    assert_eq!(
+        found, 2,
+        "each read's status is found once and then the cell is empty"
+    );
+}
+
+/// The control whose wait publishes nothing fails the census case: C's report lists no standby.
+#[test]
+fn the_control_whose_wait_publishes_nothing_fails_the_census_case() {
+    let store = store(shard_record(), with_c());
+    let link = super::Link::default();
+    let report = planted(Plant::Silent, || reported_while_waiting(&store, &link));
+    let active = shard_now(&store).active;
+    let listed = crate::failover::standbys::lists_standby(&report, shard().get(), active);
+    assert!(!listed, "the control's report lists no standby");
+}
+
+/// The status a named standby with no enrolled pair publishes reads `Unrecorded`, and the next period's, after its
+/// enrollment committed, reads `Standby`; each names the record's target and carries no tenure and no serving state.
+#[test]
+fn a_standby_entry_reads_standby_only_while_the_volume_read_lists_the_enrolled_pair() {
+    use crate::failover::report::RecordedRole;
+    let store = store(shard_record(), with_c());
+    fence_page_zero(&store);
+    record_d(&store);
+    designate(&store, Some(d_host()));
+    let registry = own_holds();
+    let link = super::Link::default();
+    let now = Cell::new(0);
+    let mut published = Vec::new();
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            ..standby(d_host(), d_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            published.extend(link.status.take());
+            stop.store(period == 3, Ordering::Release);
+            None
+        },
+        &persist_d,
+    );
+    assert_eq!(stood.exit, Some(Exit::Stopped));
+    let roles: Vec<_> = (published.iter())
+        .map(|status| status.entry.and_then(|entry| entry.role))
+        .collect();
+    assert_eq!(
+        roles,
+        [Some(RecordedRole::Unrecorded), Some(RecordedRole::Standby)]
+    );
+    for status in &published {
+        let entry = status.entry.unwrap();
+        assert_eq!(status.target, Some(Target::of(&shard_now(&store))));
+        assert_eq!(
+            (status.tenure, entry.tenure, entry.serving),
+            (None, None, None)
+        );
+        assert_eq!(entry.named, Some(true));
+    }
+}
+
+/// A publication the held cell refuses is retried at the next call of the period signal, and a republication waits
+/// one status period after the last accepted one and stops once the read is `STALE_US` old.
+#[test]
+fn a_refused_publication_is_retried_and_a_stale_read_is_published_no_more() {
+    use super::agent::STALE_US;
+    use super::duties::STATUS_US;
+    use super::recover::Publisher;
+    let store = store(shard_record(), with_c());
+    let link = super::Link::default();
+    let publisher = Publisher {
+        cell: &link.status,
+        last: Cell::new(None),
+    };
+    let standing = c_standing(&store);
+    let held = link.status.hold();
+    publisher.publish(standing, 100);
+    drop(held);
+    assert_eq!(link.status.take(), None, "the held cell refused");
+    publisher.again(150);
+    assert_eq!(link.status.take(), Some(standing), "the retry");
+    publisher.again(150 + STATUS_US - 1);
+    assert_eq!(link.status.take(), None, "within a status period");
+    publisher.again(150 + STATUS_US);
+    assert_eq!(link.status.take(), Some(standing));
+    publisher.again(100 + STALE_US);
+    assert_eq!(link.status.take(), None, "the read is STALE_US old");
+}
+
+/// A witness that arrives within a long view period ends the period: the role read and the takeover follow at the
+/// next call of the period signal, while the witness is live, where the period's end would find it expired.
+#[test]
+fn a_witness_within_a_long_view_period_starts_its_takeover_while_it_is_live() {
+    use super::duties::STATUS_US;
+    let store = store(shard_record(), with_c());
+    let registry = own_holds();
+    let now = Cell::new(0);
+    let link = super::Link::default();
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            slices: 3,
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, _| {
+            (period == 2).then(|| Revalidated {
+                until_us: now.get() + STATUS_US + STATUS_US / 2,
+                ..witness_of(&store)
+            })
+        },
+        &no_persist,
+    );
+    assert_eq!(stood.exit, None, "the takeover returned a tenure");
+    assert_eq!(stood.tenure.map(|t| t.owner), Some(c_host()));
+    assert_eq!(shard_now(&store), taken(&shard_record(), c_host()));
+}
+
+/// A witness of a detector window shorter than the status period, delivered as a bounded call of a long view
+/// period begins, starts its takeover while it is live: the call that holds it returns within the window.
+#[test]
+fn a_witness_of_a_window_shorter_than_the_status_period_starts_its_takeover_while_it_is_live() {
+    const WINDOW_US: u64 = 1_000;
+    let store = store(shard_record(), with_c());
+    let registry = own_holds();
+    let now = Cell::new(0);
+    let link = super::Link::default();
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            slices: 3,
+            window_us: WINDOW_US,
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            stop.store(period == 4, Ordering::Release);
+            (period == 2).then(|| Revalidated {
+                until_us: now.get() + WINDOW_US,
+                ..witness_of(&store)
+            })
+        },
+        &no_persist,
+    );
+    assert_eq!(stood.exit, None, "the takeover returned a tenure");
+    assert_eq!(stood.tenure.map(|t| t.owner), Some(c_host()));
+    assert_eq!(shard_now(&store), taken(&shard_record(), c_host()));
+}
+
+/// A detector window below two status periods bounds each call of the period signal by half the window, and the
+/// publications keep the status period's pacing: over a view period of two and a half status periods, period 2's
+/// calls find period 1's status and its republications one status period apart, and period 3's first call finds
+/// period 2's. Each period issues only its role read.
+#[test]
+fn a_short_detector_window_bounds_each_call_and_keeps_the_publication_pacing() {
+    use super::duties::STATUS_US;
+    const WINDOW_US: u64 = 1_000;
+    let view_us = 5 * STATUS_US / 2;
+    let store = store(shard_record(), with_c());
+    let registry = own_holds();
+    let link = super::Link::default();
+    let now = Cell::new(0);
+    let seen = RefCell::new(Vec::new());
+    let on_wait = |bound: u64| {
+        let found = link.status.take().is_some();
+        seen.borrow_mut().push((bound, now.get(), found));
+    };
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            slices: (view_us / (WINDOW_US / 2)) as u32,
+            on_wait: Some(&on_wait),
+            window_us: WINDOW_US,
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            stop.store(period == 3, Ordering::Release);
+            None
+        },
+        &no_persist,
+    );
+    assert_eq!(stood.exit, Some(Exit::Stopped));
+    assert_eq!(stood.period(1), two_reads());
+    assert_eq!(stood.period(2), two_reads());
+    let seen = seen.into_inner();
+    assert!(seen.iter().all(|(bound, ..)| *bound == WINDOW_US / 2));
+    let found: Vec<u64> = (seen.iter())
+        .filter_map(|(_, at, found)| found.then_some(*at))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            view_us,
+            view_us + STATUS_US,
+            view_us + 2 * STATUS_US,
+            2 * view_us
+        ],
+        "one publication a status period"
+    );
+}
+
+/// A detector window of zero or one microsecond gives calls of one microsecond, and a window of two status periods
+/// or more gives calls of one status period.
+#[test]
+fn the_bound_of_a_call_is_half_the_window_within_one_microsecond_and_one_status_period() {
+    use super::duties::STATUS_US;
+    let bound_of = |window_us: u64| {
+        let store = store(shard_record(), with_c());
+        let registry = own_holds();
+        let now = Cell::new(0);
+        let seen = Cell::new(None);
+        let on_wait = |bound: u64| seen.set(Some(bound));
+        let stood = stood(
+            &store,
+            &Standby {
+                slices: 1,
+                on_wait: Some(&on_wait),
+                window_us,
+                ..standby(c_host(), c_record(), &registry, &now)
+            },
+            &mut |_, stop| {
+                stop.store(true, Ordering::Release);
+                None
+            },
+            &no_persist,
+        );
+        assert_eq!(stood.exit, Some(Exit::Stopped));
+        seen.get()
+    };
+    assert_eq!(bound_of(0), Some(1));
+    assert_eq!(bound_of(1), Some(1));
+    assert_eq!(bound_of(2 * STATUS_US - 2), Some(STATUS_US - 1));
+    assert_eq!(bound_of(2 * STATUS_US), Some(STATUS_US));
+    assert_eq!(bound_of(u64::MAX), Some(STATUS_US));
+}
+
+/// A role read that fails publishes the last successful read's status again once its publication is `STATUS_US` old,
+/// while that read is less than `STALE_US` old.
+#[test]
+fn a_failed_role_read_republishes_the_last_read_when_due() {
+    use super::duties::STATUS_US;
+    let store = store(shard_record(), with_c());
+    let registry = own_holds();
+    let link = super::Link::default();
+    let now = Cell::new(0);
+    let armed = store.clone();
+    let mut found = Vec::new();
+    let stood = stood(
+        &store,
+        &Standby {
+            link: Some(&link),
+            ..standby(c_host(), c_record(), &registry, &now)
+        },
+        &mut |period, stop| {
+            found.push(link.status.take().is_some());
+            if period == 2 {
+                now.set(STATUS_US);
+                armed.schedule(Arm::Unavailable);
+            }
+            stop.store(period == 3, Ordering::Release);
+            None
+        },
+        &no_persist,
+    );
+    assert_eq!(stood.exit, Some(Exit::Stopped));
+    assert_eq!(stood.period(2), &two_reads()[..1], "the failed role read");
+    assert_eq!(
+        found,
+        [false, true, true],
+        "period 2's failed read republished"
+    );
+}
+
+/// INSTANCE-BOUND: a live attach entry bound to another instance than the holder's gives the waiting entry the role
+/// `Unrecorded` though the pair is enrolled, and the holder's own instance gives `Standby`.
+#[test]
+fn a_standby_entry_reads_unrecorded_for_an_attach_bound_to_another_instance() {
+    use crate::failover::report::RecordedRole;
+    let (record, mut volume) = (shard_record(), with_c());
+    assert!(volume.enrolled(c_host()).is_some());
+    let live = volume.live(c_host()).unwrap();
+    let attach = (volume.events.iter_mut()).find(|event| event.seq == live);
+    attach.unwrap().instance = Some(instance_of(c_host()));
+    let role = |instance| {
+        let holder = holder_on(volume_id(), c_host(), instance);
+        let status = super::recover::standing((&holder, shard(), 7), &volume, &record);
+        status.entry.and_then(|entry| entry.role)
+    };
+    assert_eq!(role(instance_of(c_host())), Some(RecordedRole::Standby));
+    assert_eq!(role(instance_of(d_host())), Some(RecordedRole::Unrecorded));
+}
+
 /// The flip of the stored shard record, as the reconciler's client writes it: the spare becomes the active volume
 /// under its host at the next generation and `E = 0`.
 fn flip(store: &Shared) {
@@ -1225,13 +1906,17 @@ fn the_spares_host_issues_role_reads_only_until_a_flip_makes_it_fresh() {
     let registry = own_holds();
     let now = Cell::new(0);
     let local = bound_record(instance_of(spare_host), spare, (6 << 32) | 4, 0x5e);
+    let link = super::Link::default();
+    let mut published = Vec::new();
     let stood = stood(
         &store,
         &Standby {
             volume: spare,
+            link: Some(&link),
             ..standby(spare_host, local, &registry, &now)
         },
         &mut |period, _| {
+            published.push(link.status.take());
             if period == 3 {
                 flip(&store);
             }
@@ -1243,4 +1928,18 @@ fn the_spares_host_issues_role_reads_only_until_a_flip_makes_it_fresh() {
     assert_eq!(stood.periods, 3);
     assert_eq!(stood.calls, reads_of(spare).repeat(3));
     assert!(stood.device == "unconnected" && commands(&registry).is_empty());
+    use crate::failover::report::{Phase, RecordedRole};
+    let first = published[1].expect("period 1's read published");
+    let entry = first.entry.unwrap();
+    assert_eq!((first.phase, first.tenure), (Phase::Standby, None));
+    assert_eq!(
+        (entry.role, entry.named, entry.volume_state),
+        (
+            Some(RecordedRole::Unrecorded),
+            Some(false),
+            Some(unenrolled.state)
+        ),
+        "the spare's host"
+    );
+    assert_eq!(link.status.take(), None, "the Fresh read publishes nothing");
 }

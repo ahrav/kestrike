@@ -185,7 +185,14 @@ fn census_of(cap: usize, records: &[ShardRecord]) -> Census {
     let mut census = Census::empty(Zone(1));
     for record in records {
         census = Population { cap }
-            .admit(&census, record, &plenty(host(30)), Attach::Open, |_| false)
+            .admit(
+                &census,
+                record,
+                &plenty(host(30)),
+                Attach::Open,
+                |_| None,
+                |_| false,
+            )
             .unwrap()
             .unwrap();
     }
@@ -220,16 +227,16 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
     let full = Population { cap: 2 };
     let (live, open) = (|_: Host| false, Attach::Open);
     assert_eq!(
-        full.admit(&census, &third, &candidate, open, live),
+        full.admit(&census, &third, &candidate, open, |_| None, live),
         Err(Refusal::Full)
     );
     assert_eq!(
-        full.admit(&census, &first, &candidate, open, live),
+        full.admit(&census, &first, &candidate, open, |_| None, live),
         Ok(None)
     );
     let attached = report_of(host(30), Gauge::known(3, 3), Gauge::known(0, 1));
     assert_eq!(
-        full.admit(&census, &first, &attached, Attach::Live, live),
+        full.admit(&census, &first, &attached, Attach::Live, |_| None, live),
         Ok(None)
     );
     let bumped = ShardRecord {
@@ -238,7 +245,7 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
     };
     for (report, attach) in [(&candidate, open), (&attached, Attach::Live)] {
         let moved = full
-            .admit(&census, &bumped, report, attach, live)
+            .admit(&census, &bumped, report, attach, |_| None, live)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -247,18 +254,25 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
         );
     }
     assert_eq!(
-        full.admit(&census, &bumped, &attached, open, live),
+        full.admit(&census, &bumped, &attached, open, |_| None, live),
         Err(Refusal::Headroom)
     );
     let wide = Population { cap: 3 };
     let grown = wide
-        .admit(&census, &third, &candidate, open, live)
+        .admit(&census, &third, &candidate, open, |_| None, live)
         .unwrap()
         .unwrap();
     assert_eq!((grown.len(), grown.slot(shard(3))), (3, entry(&third, 30)));
     assert_eq!(grown, Census::decode(&grown.encode()).unwrap());
     assert_eq!(
-        Population { cap: 0 }.admit(&Census::empty(Zone(1)), &third, &candidate, open, live),
+        Population { cap: 0 }.admit(
+            &Census::empty(Zone(1)),
+            &third,
+            &candidate,
+            open,
+            |_| None,
+            live
+        ),
         Err(Refusal::Full)
     );
     for (attachments, recovery) in [
@@ -274,6 +288,7 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
                 &third,
                 &report_of(host(30), attachments, recovery),
                 open,
+                |_| None,
                 live
             ),
             Err(Refusal::Headroom),
@@ -281,26 +296,64 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
         );
     }
     let two_free = report_of(host(30), Gauge::known(0, 3), Gauge::known(0, 1));
-    assert!(wide.admit(&census, &third, &two_free, open, live).is_ok());
+    assert!(
+        wide.admit(&census, &third, &two_free, open, |_| None, live)
+            .is_ok()
+    );
     let listing = |role| {
         let mut report = report_of(host(30), Gauge::known(1, 3), Gauge::known(0, 1));
         report.entries = vec![crate::failover::report::VolumeEntry {
             shard: shard(2),
-            ..crate::failover::report::tests::bare("vol-0b", role)
+            ..crate::failover::report::tests::bare(second.active.as_str(), role)
         }];
         report
     };
+    let known = |held| (held == shard(2)).then(|| ActiveVolume::of(&second));
     let admitted = wide
-        .admit(&census, &third, &listing(RecordedRole::Standby), open, live)
+        .admit(
+            &census,
+            &third,
+            &listing(RecordedRole::Standby),
+            open,
+            known,
+            live,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(admitted.slot(shard(3)), entry(&third, 30));
+    let moved = ShardRecord {
+        active: crate::failover::records::VolumeId::new("vol-0f").unwrap(),
+        ..second
+    };
+    let replaced = |held| (held == shard(2)).then(|| ActiveVolume::of(&moved));
+    let earlier = ShardRecord {
+        generation: ShardGeneration::new(second.generation.get() - 1).unwrap(),
+        ..second
+    };
+    let behind = |held| (held == shard(2)).then(|| ActiveVolume::of(&earlier));
+    let standby = listing(RecordedRole::Standby);
+    assert_eq!(
+        wide.admit(&census, &third, &standby, open, |_| None, live),
+        Err(Refusal::Headroom),
+        "a standby listing of a shard whose record the caller lacks leaves the entry charged"
+    );
+    assert_eq!(
+        wide.admit(&census, &third, &standby, open, replaced, live),
+        Err(Refusal::Headroom),
+        "a standby listing of the shard's old volume leaves the entry charged"
+    );
+    assert_eq!(
+        wide.admit(&census, &third, &standby, open, behind, live),
+        Err(Refusal::Headroom),
+        "a record below the entry's generation leaves the entry charged"
+    );
     assert_eq!(
         wide.admit(
             &census,
             &third,
             &listing(RecordedRole::Replacement),
             open,
+            known,
             live
         ),
         Err(Refusal::Headroom),
@@ -314,6 +367,7 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
                 &third,
                 &unlisted_attached,
                 Attach::Live,
+                |_| None,
                 live
             )
             .is_ok(),
@@ -329,7 +383,7 @@ fn the_population_cap_admits_listed_shards_and_refuses_a_new_one_at_the_cap() {
         (&third, &candidate, Attach::Closed, Refusal::Closed),
     ] {
         assert_eq!(
-            wide.admit(&census, record, report, attach, live),
+            wide.admit(&census, record, report, attach, |_| None, live),
             Err(refusal),
             "{record:?} {attach:?}"
         );
@@ -356,14 +410,26 @@ fn a_reservation_in_the_second_census_chunk_counts_against_the_candidate() {
     assert_eq!(charged.len(), 65);
     assert_eq!(charged, Census::decode(&charged.encode()).unwrap());
     assert_eq!(
-        population.admit(&charged, &new, &candidate, Attach::Open, |_| false),
+        population.admit(
+            &charged,
+            &new,
+            &candidate,
+            Attach::Open,
+            |_| None,
+            |_| false
+        ),
         Err(Refusal::Headroom),
         "one free attachment slot, taken by the row-65 reservation"
     );
     let admitted = population
-        .admit(&census_naming(32), &new, &candidate, Attach::Open, |_| {
-            false
-        })
+        .admit(
+            &census_naming(32),
+            &new,
+            &candidate,
+            Attach::Open,
+            |_| None,
+            |_| false,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -400,7 +466,14 @@ fn an_admission_leaves_every_other_entry_as_it_was() {
             ..shard_record(changed, 20, None)
         };
         let admitted = population
-            .admit(&census, &record, &plenty(host(40)), Attach::Open, |_| true)
+            .admit(
+                &census,
+                &record,
+                &plenty(host(40)),
+                Attach::Open,
+                |_| None,
+                |_| true,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(admitted, Census::decode(&admitted.encode()).unwrap());
@@ -433,18 +506,25 @@ fn a_slot_moves_to_another_host_only_when_its_incumbent_is_lost() {
     let cap = Population { cap: 1 };
     let open = Attach::Open;
     assert_eq!(
-        cap.admit(&census, &first, &other, open, |_| false),
+        cap.admit(&census, &first, &other, open, |_| None, |_| false),
         Err(Refusal::Taken)
     );
     let moved = cap
-        .admit(&census, &first, &other, open, |h| h == host(30))
+        .admit(&census, &first, &other, open, |_| None, |h| h == host(30))
         .unwrap()
         .unwrap();
     assert_eq!((moved.len(), moved.slot(shard(1))), (1, entry(&first, 31)));
     let starved = report_of(host(31), Gauge::known(3, 3), Gauge::known(0, 1));
     for gone in [false, true] {
         assert_eq!(
-            cap.admit(&census, &first, &starved, open, |h| gone && h == host(30)),
+            cap.admit(
+                &census,
+                &first,
+                &starved,
+                open,
+                |_| None,
+                |h| gone && h == host(30)
+            ),
             Err(Refusal::Headroom),
             "incumbent lost: {gone}"
         );
@@ -455,11 +535,11 @@ fn a_slot_moves_to_another_host_only_when_its_incumbent_is_lost() {
     };
     let empty = Census::empty(Zone(1));
     assert_eq!(
-        cap.admit(&empty, &named, &other, open, |_| false),
+        cap.admit(&empty, &named, &other, open, |_| None, |_| false),
         Err(Refusal::Taken)
     );
     assert!(
-        cap.admit(&empty, &named, &other, open, |h| h == host(30))
+        cap.admit(&empty, &named, &other, open, |_| None, |h| h == host(30))
             .is_ok()
     );
     let bumped = ShardRecord {
@@ -467,12 +547,19 @@ fn a_slot_moves_to_another_host_only_when_its_incumbent_is_lost() {
         ..first
     };
     assert_eq!(
-        cap.admit(&census, &bumped, &other, open, |_| false),
+        cap.admit(&census, &bumped, &other, open, |_| None, |_| false),
         Err(Refusal::Taken)
     );
     let attached = report_of(host(30), Gauge::known(3, 3), Gauge::known(0, 1));
     let retaken = cap
-        .admit(&census, &bumped, &attached, Attach::Live, |_| false)
+        .admit(
+            &census,
+            &bumped,
+            &attached,
+            Attach::Live,
+            |_| None,
+            |_| false,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(retaken.slot(shard(1)), entry(&bumped, 30));
@@ -483,11 +570,18 @@ fn a_slot_moves_to_another_host_only_when_its_incumbent_is_lost() {
         ..first
     };
     assert_eq!(
-        cap.admit(&census, &flipped, &attached, open, |_| false),
+        cap.admit(&census, &flipped, &attached, open, |_| None, |_| false),
         Err(Refusal::Headroom)
     );
     let reattached = cap
-        .admit(&census, &flipped, &roomy(host(30)), open, |_| false)
+        .admit(
+            &census,
+            &flipped,
+            &roomy(host(30)),
+            open,
+            |_| None,
+            |_| false,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(reattached.slot(shard(1)), entry(&flipped, 30));
@@ -497,7 +591,7 @@ fn a_slot_moves_to_another_host_only_when_its_incumbent_is_lost() {
         ..first
     };
     let rebound = cap
-        .admit(&census, &taken_over, &other, open, |_| false)
+        .admit(&census, &taken_over, &other, open, |_| None, |_| false)
         .unwrap()
         .unwrap();
     assert_eq!(rebound.slot(shard(1)), entry(&taken_over, 31));
@@ -615,6 +709,7 @@ fn the_census_codec_accepts_exactly_its_encodings() {
             &next,
             &plenty(host(31)),
             Attach::Open,
+            |_| None,
             |_| false
         ),
         Err(Refusal::Full),
@@ -674,7 +769,14 @@ fn a_census_passes_the_write_check_exactly_when_its_encoding_decodes() {
             "{name}"
         );
         let repaired = Population { cap: 1 }
-            .admit(&listed, &first, &plenty(host(31)), Attach::Open, |_| true)
+            .admit(
+                &listed,
+                &first,
+                &plenty(host(31)),
+                Attach::Open,
+                |_| None,
+                |_| true,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(write_check(&repaired), Ok(()), "{name}");
@@ -689,7 +791,14 @@ fn a_census_passes_the_write_check_exactly_when_its_encoding_decodes() {
         ..shard_record(3, 13, None)
     };
     let grown = Population { cap: 3 }
-        .admit(&census, &over, &plenty(host(30)), Attach::Open, |_| false)
+        .admit(
+            &census,
+            &over,
+            &plenty(host(30)),
+            Attach::Open,
+            |_| None,
+            |_| false,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(write_check(&grown), Err(CodecError::Field));

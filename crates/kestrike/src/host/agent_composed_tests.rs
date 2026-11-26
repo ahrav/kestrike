@@ -1,6 +1,6 @@
 //! Two hosts through the production driver, duties and agent: A owns the warm volume's shard and C is its named
-//! standby. A's agent turns every round over its owner's status. C's agent turns over a fixed standby status, the
-//! heartbeats A's agent sent until the loss or isolation, and, once a suspect has an open probe round, the DEAD
+//! standby. A's agent turns every round over its owner's status. C's agent turns over a fixed standby status until
+//! C's standby wait starts and then over the statuses the wait publishes to C's link, the heartbeats A's agent sent until the loss or isolation, and, once a suspect has an open probe round, the DEAD
 //! votes of two probers in partitions 2 and 3, which stand in for the indirect probes of other hosts' agents. In the
 //! held case A's agent goes on turning over a held status after A's process stops, so its heartbeats report A
 //! unhealthy, and the probers read the declared hold.
@@ -150,6 +150,9 @@ struct Standby {
     reading: Reading,
     /// The failure kinds C's detector read of A after each turn, in order.
     read: RefCell<Vec<Failure>>,
+    /// Whether C's standby wait runs. Before it does, C's agent turns over a fixed standby status in its place; while
+    /// it runs, over the statuses the wait publishes to C's link.
+    waiting: Cell<bool>,
 }
 
 impl Standby {
@@ -162,12 +165,16 @@ impl Standby {
             nominations: Cell::new(0),
             reading: SILENT,
             read: RefCell::new(Vec::new()),
+            waiting: Cell::new(false),
         }
     }
 
     fn turn(&mut self, now: u64) {
         self.now.set(now);
-        let statuses = [Status::idle(shard(), volume_id(), 3, Phase::Standby)];
+        let statuses: Vec<Status> = match self.waiting.get() {
+            true => self.link.status.take().into_iter().collect(),
+            false => vec![Status::idle(shard(), volume_id(), 3, Phase::Standby)],
+        };
         let beats = self.inbound.take();
         let beats: Vec<&[u8]> = beats.iter().map(Vec::as_slice).collect();
         let votes = dead_votes(&self.agent, c_host(), self.reading);
@@ -272,6 +279,8 @@ fn succeed_beside(
 ) -> Succeeded {
     let stop = AtomicBool::new(false);
     let periods = Cell::new(0);
+    let link = standby.link;
+    standby.waiting.set(true);
     let standby = RefCell::new(standby);
     staged_by(
         (registry.clone(), c_pair(), false),
@@ -289,16 +298,20 @@ fn succeed_beside(
                 serving,
                 Signals {
                     stop: &stop,
-                    period: || {
+                    period: |_| {
                         periods.set(periods.get() + 1);
                         assert!(periods.get() < 50, "no takeover");
                         let mut standby = standby.borrow_mut();
                         let now = standby.now.get() + H;
                         beside(now, &standby);
                         standby.turn(now);
+                        true
                     },
                     nominations: || standby.borrow().link.inbox.nomination(),
                     now: || standby.borrow().now.get(),
+                    status: &link.status,
+                    pid: 3,
+                    window_us: H,
                 },
             );
             match recovery {

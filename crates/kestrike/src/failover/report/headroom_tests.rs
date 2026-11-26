@@ -22,6 +22,7 @@ fn admitted_with(attachments: Gauge, recovery: Gauge) -> Result<(), Refusal> {
             &shard_record(1, 11, None),
             &candidate,
             Attach::Open,
+            |_| None,
             |_| false,
         )
         .map(drop)

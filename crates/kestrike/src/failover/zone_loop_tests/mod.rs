@@ -1,4 +1,5 @@
 mod actuate;
+mod charge;
 pub(crate) mod config;
 mod detach_guard;
 pub(crate) mod directory;

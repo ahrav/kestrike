@@ -2937,6 +2937,7 @@ fn designate_through_the_reconciler(
             Zone(1),
             shard,
             &roomy(host),
+            |_| None,
             |h| h != host,
         )
         .expect("the census reserves the slot");

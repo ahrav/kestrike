@@ -251,7 +251,9 @@ pub(super) enum Stood<'w> {
 }
 
 /// One view period of the wait of the owner process of `of`, issuing as `pair`, for `cell` at fleet round `round`:
-/// `host::stand_by` over `client` and `local`, whose `period` returns once and sets the stop flag on its next call.
+/// `host::stand_by` over `client` and `local`, whose `period` passes at each call and sets the stop flag on its
+/// second. The wait publishes its status to a cell of this period that no agent takes: `Fleet::statuses` builds the
+/// status the host's agent turns over.
 /// The period reads `witness` at the time it carries, and the takeover it starts runs through a fencer over the host's device double on the arena and clock of
 /// `grounds`. Its connect records whether the shard record already names `of`'s host owner with no standby, read
 /// from `store` with no request, and once `host::stand_by` returns the period asserts that every device call
@@ -315,19 +317,25 @@ where
     }
     let stop = std::sync::atomic::AtomicBool::new(false);
     let periods = Slot::new(0_u32);
-    let period = || {
+    let period = |_| {
         periods.set(periods.get() + 1);
         if periods.get() > 1 {
             stop.store(true, std::sync::atomic::Ordering::Release);
         }
+        true
     };
     let read_at = witness.as_ref().map_or(round * ROUND_US, |(_, at)| *at);
+    let status = host::link::StatusCell::default();
     let mut witness = witness.map(|(witness, _)| witness);
     let signals = host::Signals {
         stop: &stop,
         period,
         nominations: || witness.take(),
         now: || read_at,
+        status: &status,
+        pid: 0,
+        // The fleet's detector window is one round.
+        window_us: ROUND_US,
     };
     let standby = crate::failover::reconcile::StandbyGate::qualified();
     let stood = host::stand_by(

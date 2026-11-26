@@ -3599,3 +3599,49 @@ fn a_full_census_under_the_default_cap_is_not_near_its_cap() {
     assert_eq!(fired(&near, &[status(false), status(false)]), []);
     assert_eq!(fired(&near, &[status(true), status(true)]).len(), 1);
 }
+
+/// A healthy waiting standby fires no report row: a run of reports of a host whose one entry is the waiting
+/// standby's, as `host::recover::standing` builds it with the phase `Standby` the host agent seals, and whose host
+/// part is the zone loop fixture's, keeps every report row silent. The run is one report longer than the longest
+/// report-count window of any report row, so each run row could reach its window. The same run with the entry's
+/// watermark read `regression` fires `store-regression`, so the rows read the entry.
+#[test]
+fn a_healthy_waiting_standby_fires_no_report_row() {
+    use crate::failover::report::{RecordedRole, Watermark};
+    use crate::failover::takeover::tests::{c_host, holder_of, shard_record, with_c};
+    let catalog = catalog();
+    let record = shard_record();
+    let status =
+        crate::host::recover::standing((&holder_of(c_host()), record.shard, 7), &with_c(), &record);
+    let entry = VolumeEntry {
+        phase: Some(status.phase),
+        ended: status.ended,
+        ..status.entry.unwrap()
+    };
+    assert_eq!(
+        (entry.role, entry.named),
+        (Some(RecordedRole::Standby), Some(true))
+    );
+    let rows = catalog["rows"].as_array().unwrap();
+    let report_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row["source"] == "report")
+        .collect();
+    assert!(!report_rows.is_empty());
+    let longest = (report_rows.iter())
+        .filter_map(|row| row["window"]["reports"].as_u64())
+        .max()
+        .unwrap();
+    let reports = |entry: VolumeEntry| -> Vec<controls::Step> {
+        (0..=longest).map(|_| report(entry)).collect()
+    };
+    for row in report_rows {
+        assert_eq!(fired(row, &reports(entry)), [], "{}", row["id"]);
+    }
+    let regressed = VolumeEntry {
+        watermark: Watermark::Regression,
+        ..entry
+    };
+    let store = row(&catalog, "store-regression");
+    assert!(!fired(&store, &reports(regressed)).is_empty());
+}

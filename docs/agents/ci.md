@@ -70,11 +70,12 @@ when the step's test selection or the nightly pin changes.
   `CARGO_BUILD_JOBS` where that is lower, with two malloc arenas
   (`MALLOC_ARENA_MAX=2`); `KANI_JOBS` sets another count within the bound.
   Every figure here is from an aarch64 host, a whole Graviton4 socket unless
-  another is named, on 2026-11-23 and 2026-11-24; none is from the x86-64 runner, which took 0.82
+  another is named, on 2026-11-23 and 2026-11-24, and on 2026-11-26 for the
+  45-harness `pr` runs; none is from the x86-64 runner, which took 0.82
   of that host's seconds over the 193 harnesses of its nightly run of
   2026-11-20. The heavy runner's limits are a four-CPU quota on eight
   processors, the 11 GiB memory-high threshold and the 12 GiB maximum. The
-  `pr` profile holds 43 harnesses. With no memory bound the lane's run of
+  `pr` profile holds 45 harnesses. With no memory bound the lane's run of
   42 of them, build included, took 527 seconds and its verification 779
   CPU-seconds. The
   longest harness is the ownership round-trip proof,
@@ -88,7 +89,7 @@ when the step's test selection or the nightly pin changes.
   peaked at 10.1 to 10.7 GiB, and at four workers they reached the threshold
   in three of four runs with two arenas and were killed for memory in both
   runs with the allocator's default arenas. The `scheduled` profile holds
-  223 harnesses. At three workers under the four-CPU quota with a 40 GiB
+  225 harnesses. At three workers under the four-CPU quota with a 40 GiB
   memory maximum the command over 222 of them, build included, took 184
   minutes, its
   verification 32,267 CPU-seconds, and it peaked at 14.6 GiB; at four
@@ -111,19 +112,21 @@ when the step's test selection or the nightly pin changes.
   peak of 11.8 GiB with 635,894 memory-high events, and 110 minutes at 2.8
   GiB for the last 111. The profile fits the runner's memory when the lane
   runs it in batches or the runner's memory maximum holds the 14.6 GiB.
-  In the 35 batches of the declared cut, at three workers under the
-  runner's limits, the lane's run of the 222 was credited five times with
-  no memory-high event. Four runs that shared a 16-vCPU Graviton4 host
+  In the 35 batches the declaration cut on 2026-11-24, at three workers
+  under the runner's limits, the lane's run of the 222 was credited five
+  times with no memory-high event. Four runs that shared a 16-vCPU Graviton4 host
   peaked at 10.39 GiB in 263 to 288 minutes. One run alone on that host
   peaked at 10.51 GiB in 280 minutes, build included, with 32,736
   CPU-seconds of verification. The 210-minute deadline is shorter than that
   run, and than the 230 minutes the runner's 0.82 gives for it: a
   `scheduled` run that reaches the deadline is judged a timeout and credits
-  no record.
+  no record. The declared cut is 40 batches now, since the four harnesses
+  over the standby credit of the pending count each run alone; no
+  `scheduled` run has measured it.
   A revision is fit for
   the runner when each profile at its default worker count peaks at or below
   10.5 GiB under the runner's limits with no memory-high event. The
-  declared cut is 6 MiB over that line in the run alone, so it is not fit
+  35-batch cut is 6 MiB over that line in the run alone, so it is not fit
   by this rule there, and under the line in the four other runs. It stays
   as declared at that figure because its peak is one proof,
   `failover::standbys::population_kani::verification::an_admission_into_one_entry_keeps_the_cap_and_the_other_entry`,
@@ -132,18 +135,25 @@ when the step's test selection or the nightly pin changes.
   needs a heavier weight or a smaller budget first. Where the peak is a
   harness that already runs alone, that proof's CBMC result must shrink
   first. `pr` is cut the same way by its own budget of 41, which puts the
-  ownership round-trip proof in its second batch, away from the two other
-  `pr` harnesses that weigh 14. As one batch `pr` peaked at 10.37, 9.16 and
+  ownership round-trip proof in its last batch, away from the other
+  `pr` harnesses that weigh 14. As one batch, its 42 harnesses of
+  2026-11-24 peaked at 10.37, 9.16 and
   9.18 GiB in three more runs of 509 to 526 seconds: `kani-driver` held
   2.3 to 3.5 GiB of finished results while the ownership proof's CBMC ran
-  beside another, 5.6 to 5.7 GiB together. In the two batches, three runs
+  beside another, 5.6 to 5.7 GiB together. In the two batches of that day's cut, three runs
   beside one single-threaded test script peaked at 9.37, 8.23 and 7.84 GiB
   in 539 to 553 seconds with no memory-high event. With the pending-count
-  control the profile holds 43 harnesses in two batches of summed weight 41
+  control the profile held 43 harnesses in two batches of summed weight 41
   each. Under the runner's limits, alone on a 16-vCPU Graviton4 share, three
   runs peaked at 9.91, 7.20 and 7.21 GiB in 610, 530 and 530 seconds with no
   memory-high event; the first built the crate inside its memory scope and
-  the other two ran with the build cached. A `pr` run above the
+  the other two ran with the build cached. With the four harnesses over the
+  standby credit of the pending count, each at weight 14, the profile holds
+  45 harnesses in four batches of 15, 4, 14 and 12. Under the runner's
+  limits, alone on a 32-vCPU Graviton4 share, three runs peaked at 8.63,
+  7.15 and 7.14 GiB in 931, 833 and 829 seconds with no memory-high event;
+  the first built the crate inside its memory scope and the other two ran
+  with the build cached. A `pr` run above the
   line needs a smaller `pr` budget first, measured in three runs. The lane runs each
   profile in the batches that
   `verification/kani/expected.json` declares through its `batch_budget`

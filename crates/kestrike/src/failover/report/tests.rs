@@ -2823,8 +2823,9 @@ fn write_paths(sources: &[(String, String)]) -> Vec<(String, &'static str)> {
 
 /// The non-test sources that name `HostReport` or `VolumeEntry`: the report module, the readers that take a candidate
 /// host, its headroom or its entries from an accepted report, the owner that builds an entry, the population proofs
-/// that build a candidate's report, and the host agent and link that build and carry a host's entries.
-const READERS: [&str; 12] = [
+/// that build a candidate's report, the host agent and link that build and carry a host's entries, and the standby's
+/// wait that builds its own entry.
+const READERS: [&str; 13] = [
     "failover/report.rs",
     "failover/report/status/build.rs",
     "failover/standbys.rs",
@@ -2837,6 +2838,7 @@ const READERS: [&str; 12] = [
     "failover/zone_loop/actuate.rs",
     "host/link.rs",
     "host/agent.rs",
+    "host/recover.rs",
 ];
 
 /// Whether the tokens of `text` include `HostReport` or `VolumeEntry`. A token is a slice of its source, so a source

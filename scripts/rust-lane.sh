@@ -971,19 +971,25 @@ kani() {
   # CPU-seconds and 527 seconds with the build with no memory bound; 488 to
   # 501 seconds and a peak of 8.7 to 9.9 GiB over four runs under the heavy
   # runner's four-CPU quota, 11 GiB memory-high threshold and 12 GiB maximum.
-  # In the two batches of the declared cut under those limits: 539 to 553
-  # seconds and a peak of 7.8 to 9.4 GiB over three runs.
+  # In the two batches the declaration cut then, under those limits: 539 to
+  # 553 seconds and a peak of 7.8 to 9.4 GiB over three runs.
   # With the pending-count control's 43 harnesses in two batches under those
   # limits, three runs alone: 530 seconds and a peak of 7.2 GiB in each of two
   # with the build cached, 610 seconds and 9.9 GiB in one that built the crate.
+  # With the four standby-credit harnesses at weight 14, the profile's 45
+  # harnesses in four batches under those limits, three runs alone on a
+  # 32-vCPU Graviton4 share: 829 and 833 seconds and a peak of 7.1 GiB in
+  # two with the build cached, 931 seconds and 8.6 GiB in one that built
+  # the crate.
   # The scheduled profile's 222 harnesses at three workers under the quota
   # with a 40 GiB maximum: 32,267 CPU-seconds, 184 minutes with the build and
-  # a peak of 14.6 GiB. In the declared weighted batches at three workers
-  # under the runner's limits, alone on a 16-vCPU Graviton4 share on
-  # 2026-11-24, the scheduled profile took 280 minutes with the build and
-  # 32,736 CPU-seconds and peaked at 10.51 GiB with no memory-high event.
-  # The 210 minutes below are shorter than that run, so a scheduled run
-  # that reaches them is judged a timeout and credits no record.
+  # a peak of 14.6 GiB. In the 35 weighted batches the declaration cut on
+  # 2026-11-24, at three workers under the runner's limits, alone on a
+  # 16-vCPU Graviton4 share, the scheduled profile took 280 minutes with the
+  # build and 32,736 CPU-seconds and peaked at 10.51 GiB with no memory-high
+  # event. The 210 minutes below are shorter than that run, so a scheduled
+  # run that reaches them is judged a timeout and credits no record. The
+  # declaration cuts 40 batches now, which no scheduled run has measured.
   if [ "$profile" = pr ]; then
     export KANI_TOTAL="${KANI_TOTAL:-30m}"
   else

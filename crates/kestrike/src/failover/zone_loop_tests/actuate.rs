@@ -558,6 +558,7 @@ impl Cell {
             ZONE,
             shard(1),
             &report,
+            |_| None,
             lost,
         );
         assert_eq!(slot.unwrap().host(), next);
@@ -1220,6 +1221,7 @@ fn a_slot_moved_inside_a_designation_leaves_a_named_standby_the_slots_host_repla
                 ZONE,
                 shard(1),
                 &report,
+                |_| None,
                 |h| h == first,
             );
             assert_eq!(slot.unwrap().host(), next);
@@ -2243,6 +2245,7 @@ fn a_release_drops_the_owners_stale_slot_and_waits_on_a_retargeted_one() {
                 ZONE,
                 shard(1),
                 &report,
+                |_| None,
                 |_| false,
             );
             kept = Some(slot.unwrap().host());
@@ -2441,9 +2444,16 @@ fn a_reservation_refused_by_a_full_or_taken_census_writes_nothing() {
         let report = crate::failover::standbys::tests::roomy(rival);
         let population = Population { cap: 1 };
         let zone = bounds();
-        let held = other.reserve(&gate, &population, zone.bounds(), ZONE, at, &report, |_| {
-            false
-        });
+        let held = other.reserve(
+            &gate,
+            &population,
+            zone.bounds(),
+            ZONE,
+            at,
+            &report,
+            |_| None,
+            |_| false,
+        );
         held.unwrap();
         let before = cell.store().0.borrow().commit_count(&Key::Standbys(ZONE));
         let outcomes = cell.actuate(&survey);
@@ -2539,6 +2549,7 @@ fn a_step_planned_before_its_slot_took_a_later_target_waits_for_the_next_survey(
             ZONE,
             shard(1),
             &report,
+            |_| None,
             |_| false,
         );
         let slot = slot.unwrap();
@@ -2674,9 +2685,16 @@ fn assert_a_release_keeps_a_slot_reserved_after_the_survey(recorded: bool) {
     let report = crate::failover::standbys::tests::roomy(host(kept));
     let population = Population { cap: 8 };
     let bounds = *cell.bounds.bounds();
-    let slot = other.reserve(&gate, &population, &bounds, ZONE, shard(1), &report, |_| {
-        false
-    });
+    let slot = other.reserve(
+        &gate,
+        &population,
+        &bounds,
+        ZONE,
+        shard(1),
+        &report,
+        |_| None,
+        |_| false,
+    );
     let reserved = slot.unwrap().target();
     if recorded {
         let binding = RecordBinding {

@@ -836,7 +836,8 @@ impl Fleet<'_> {
                     Gauge::known(0, 64),
                     Gauge::known(0, 2),
                 );
-                let admitted = population.admit(&census, &record, &report, Attach::Live, |_| false);
+                let admitted =
+                    population.admit(&census, &record, &report, Attach::Live, |_| None, |_| false);
                 if let Ok(Some(admitted)) = admitted {
                     census = admitted;
                 }

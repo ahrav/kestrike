@@ -20,8 +20,9 @@ pub(super) mod values {
     }
 
     /// One of three distinct volume names. The decisions these harnesses check use a volume name only through equality
-    /// with another, and one harness compares at most three volumes, so three names realize every pattern of equal and
-    /// distinct volumes the decisions can see.
+    /// with another, and no harness's decisions tell more than three classes of equal volumes apart, so three names
+    /// realize every pattern of equal and distinct volumes the decisions can see. The pending-count proof draws five
+    /// volumes and compares each census shard's active volume with the two reported entries' volumes alone.
     pub(crate) fn volume() -> VolumeId {
         let name = match kani::any::<u8>() % 3 {
             0 => "vol-1",

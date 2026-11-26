@@ -100,8 +100,8 @@ use crate::failover::records::{
     EventKind, Host, MAX_ATTACHED, MIN_ERA, RecordedPair, ShardRecord, VolumeId, VolumeRecord,
 };
 use crate::failover::report::{
-    Gauge, Health as HostHealth, Phase as OwnerPhase, RecoveryCheck, RecoveryKind, VolumeEntry,
-    Withdrawal,
+    Gauge, Health as HostHealth, HostReport, Phase as OwnerPhase, RecoveryCheck, RecoveryKind,
+    VolumeEntry, Withdrawal,
 };
 use crate::failover::retire::Target;
 use crate::failover::serving::State as ServingState;
@@ -472,8 +472,12 @@ impl<'a> Zone<'a> {
             return false;
         };
         let headroom = report.host.headroom;
-        let owed =
-            || (self.census.pending(shard, report)).saturating_add(tally.owed(view.entry.host));
+        let owed = || {
+            (self
+                .census
+                .pending(shard, report, |held| self.view.active(held)))
+            .saturating_add(tally.owed(view.entry.host))
+        };
         let attaches = || room(headroom.attachments, 0) && room(headroom.attachments, owed());
         room(headroom.recovery, 0) && (attach == Attach::Live || attaches())
     }
@@ -1237,7 +1241,10 @@ impl<'a> Zone<'a> {
             return false;
         };
         let headroom = report.host.headroom;
-        let owed = (self.census.pending(shard, report)).saturating_add(extra as u64);
+        let owed = (self
+            .census
+            .pending(shard, report, |held| self.view.active(held)))
+        .saturating_add(extra as u64);
         room(headroom.recovery, 0)
             && room(headroom.attachments, 0)
             && room(headroom.attachments, owed)
@@ -1305,7 +1312,7 @@ impl<'a> Zone<'a> {
                     refused += 1;
                     if refused <= places {
                         opened += usize::from(opens && !known);
-                        self.charge(&mut tally, host, shard);
+                        self.charge(&mut tally, host, record);
                         reserved += 1;
                     }
                 }
@@ -1356,7 +1363,7 @@ impl<'a> Zone<'a> {
                 admitted.push(key);
             }
             if slot.is_none_or(|slot| slot.host != host) {
-                self.charge(&mut tally, host, shard);
+                self.charge(&mut tally, host, record);
             }
             tally.added += usize::from(slot.is_none());
             reserved += usize::from(!exchange);
@@ -1369,12 +1376,13 @@ impl<'a> Zone<'a> {
         (admitted, refused)
     }
 
-    /// Counts a new census role on `host` for `shard`, and an attachment owed when its report does not list `shard`
-    /// in the standby role.
-    fn charge(&self, tally: &mut Tally, host: Host, shard: Shard) {
+    /// The tally counts a new census role on `host` for `record`'s shard. If `host`'s report lists that shard in the
+    /// standby role on `record`'s active volume, the tally counts zero attachments owed; otherwise, it counts one.
+    fn charge(&self, tally: &mut Tally, host: Host, record: &ShardRecord) {
         *tally.named.entry(host).or_default() += 1;
         let report = (self.hosts.get(&host)).and_then(|view| view.report.as_ref());
-        if !report.is_some_and(|report| lists_standby(report, shard.get())) {
+        let listed = |report: &HostReport| lists_standby(report, record.shard.get(), record.active);
+        if !report.is_some_and(|report| listed(report)) {
             *tally.owed.entry(host).or_default() += 1;
         }
     }

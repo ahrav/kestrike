@@ -270,9 +270,16 @@ fn a_full_census_reads_full_and_one_free_slot_reserves() {
         let population = Population { cap };
         let bounds = *fixture.zone.bounds.bounds();
         reconciler
-            .reserve(&gate, &population, &bounds, ZONE, shard, &candidate, |_| {
-                false
-            })
+            .reserve(
+                &gate,
+                &population,
+                &bounds,
+                ZONE,
+                shard,
+                &candidate,
+                |_| None,
+                |_| false,
+            )
             .unwrap();
         warm(&mut fixture, 12);
         let tick = tick(&mut fixture, START + 200 * S);

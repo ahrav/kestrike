@@ -4,8 +4,8 @@
 //! [`recover`] then runs the sequence of a restart or fresh role once, through a [`Fencer`], and returns the
 //! [`Tenure`] the sequence acquired, or one [`Exit`] with the fencer's driver or table: the exit a refusal maps to,
 //! or a hold when the sequence succeeded and the fencer still held a command.
-//! [`stand_by`] holds a standby or unnamed host through its wait, enrolls an attached host's pair and runs the
-//! takeover a nomination starts.
+//! [`stand_by`] holds a standby or unnamed host through its wait, publishes the wait's status to the host agent,
+//! enrolls an attached host's pair and runs the takeover a nomination starts.
 //!
 //! Invariants:
 //!
@@ -23,11 +23,15 @@
 //!   device only by its takeover, at the takeover's own step, when the first Report lists none.
 //!   A named standby makes its local record durable before writing the pair enrollment for its live attach.
 
+use super::agent::STALE_US;
+use super::duties::STATUS_US;
 use super::exit::{Exit, Refusal, Rerun};
 use super::fencer::{Fencer, Release};
 use super::gate::HostGate;
 use super::inputs::{self, Inputs};
-use std::sync::atomic::AtomicBool;
+use super::link::{Status, StatusCell};
+use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::serve::{Surveyed, wait_with};
 use crate::failover::admission::AdmissionError;
@@ -41,7 +45,7 @@ use crate::failover::reconcile::{StandbyGate, enroll_standby, records_admit_stan
 use crate::failover::record::LocalRecord;
 use crate::failover::records::Host;
 use crate::failover::records::{ShardRecord, VolumeId, VolumeRecord, VolumeState};
-use crate::failover::report::RecoveryRefusal;
+use crate::failover::report::{Phase, RecordedRole, RecoveryRefusal, VolumeEntry};
 use crate::failover::restart::{self, Check, Local, LocalSource};
 use crate::failover::retire::Target;
 use crate::failover::takeover::Next;
@@ -375,18 +379,35 @@ where
 }
 
 /// What a waiting host is told: the stop flag, the view period, the nominations its host agent sends and the time
-/// they expire on.
+/// they expire on, and the status cell it publishes to.
 pub struct Signals<'w, W, N, T> {
     pub stop: &'w AtomicBool,
-    /// Returns once one view period passed.
+    /// Waits until the view period passed or `bound_us` microseconds of it passed, whichever comes first, on the
+    /// clock `now` reads, and returns whether the view period passed. The arm calls it with a bound of at most
+    /// [`STATUS_US`] and at most half of `window_us`, and of one microsecond at least, so it publishes and reads
+    /// `nominations` between the calls of a longer period. A view period of at most [`STALE_US`] keeps a healthy wait's status fresh at the agent between
+    /// role reads; a longer one leaves the agent without a fresh status once the last read is [`STALE_US`] old.
     pub period: W,
     /// Takes the pending witness of a nomination of this standby's shard. The source holds at most one witness: a
     /// witness the host's detector sends replaces an unread one, and a call takes it, so an expired witness never
     /// waits ahead of a live one. `None` when the detector sent none since the last call.
     pub nominations: N,
     /// The observer's `CLOCK_BOOTTIME` in microseconds, which a witness's `until_us` is read against. The witness
-    /// was minted on the same host in the same boot.
+    /// was minted on the same host in the same boot. It also paces the wait's status publications.
     pub now: T,
+    /// The link status cell the owner's phases publish to, which the host agent takes the waiting status from.
+    pub status: &'w StatusCell,
+    /// The process id the waiting status names.
+    pub pid: u32,
+    /// The detector window in microseconds, which is the lifetime of a witness at its mint: the validated
+    /// `WatchBounds::detect.h` of the host's agent. The arm bounds each call of `period` by half of it, and by one
+    /// microsecond at least, so a witness delivered during a call waits at most that bound for the arm to take it,
+    /// and the role read and the takeover's acceptance have the rest of its lifetime. A witness starts its takeover
+    /// only while that rest covers its delivery, the role read's two store requests and the acceptance: a window
+    /// whose half is shorter than those starts a takeover only for a witness delivered late in a call, and a
+    /// window shorter than the role read, as one of a few microseconds is, starts none under any wait. A window
+    /// below twice [`STATUS_US`] wakes the wait twice a window.
+    pub window_us: u64,
 }
 
 /// The standby arm and the unnamed arm of the recovery: holds a host the records name standby, or name in no role,
@@ -427,6 +448,24 @@ pub struct Signals<'w, W, N, T> {
 /// an enrollment or takeover read before it: a withdrawn client issues no further request, so the arm ends
 /// [`Rerun::Records`] and the next incarnation opens a client from the durable watermark.
 ///
+/// STANDBY-PUBLISHES: each view period whose role read returns a waiting role (`Standby`, `Unnamed` or `Retired`)
+/// publishes that read's status to `signals.status` before the period acts on it: phase `Standby`, the process id
+/// `signals.pid`, the shard record's `(g, owner, E)` as its target, no tenure, and an entry with no tenure and no
+/// serving state whose role is `Standby` while the volume read lists this host's enrolled pair for a live attach that
+/// binds this host's instance or none, on an active volume the shard record names active, and `Unrecorded`
+/// otherwise, with `named` and `volume_state` from the same records and every other field absent or unavailable.
+/// The arm waits out a view period in calls of `signals.period` bounded by the smaller of [`STATUS_US`] and half of
+/// `signals.window_us`, and by one microsecond at least. After each call that returns before the period passed, and
+/// after a failed role read, it publishes the last successful read's status again once its last accepted
+/// publication is [`STATUS_US`] old or the cell refused it, while that read is less than [`STALE_US`] old, so the
+/// gap between accepted publications is [`STATUS_US`] plus the time of the calls, the role read and the act between
+/// them. The agent dates a status at its arrival, so it can hold a republished read for up to [`STALE_US`] past
+/// that read's last republication. A witness that `signals.nominations` returns between the calls ends the period,
+/// so the arm takes a witness within half a detector window of its delivery, and the role read and the takeover
+/// follow in the other half while the witness is live, where that half covers them (`Signals::window_us`); at most
+/// one role read is added per witness the agent sends. A set stop flag ends the period at the next call.
+/// Publishing adds no store request, no store write and no device command.
+///
 /// `local` reads the record `persist` makes durable, replacements during this call included; one owner lock
 /// behind both gives that.
 ///
@@ -457,68 +496,183 @@ where
     S: Store,
     L: WatermarkLog,
     R: LocalSource,
-    W: FnMut(),
+    W: FnMut(u64) -> bool,
     N: FnMut() -> Option<Revalidated>,
     T: FnMut() -> u64,
 {
     let mut fencer = deviceless(fencer)?;
     let Signals {
         stop,
-        period,
-        mut nominations,
-        mut now,
+        mut period,
+        nominations,
+        now,
+        status,
+        pid,
+        window_us,
     } = signals;
     let holder = *inputs.holder();
+    let now = RefCell::new(now);
+    let now = || (now.borrow_mut())();
+    let publisher = Publisher {
+        cell: status,
+        last: Cell::new(None),
+    };
     let unenrolled = |volume: &VolumeRecord, shard: &ShardRecord| {
         volume.live(holder.host).is_some()
             && volume.enrolled(holder.host).is_none()
             && records_admit_standby(shard, volume, holder.host)
     };
-    // A takeover's refusal that ends the incarnation leaves the wait as its exit with the refusal's class.
-    let act = |read: Surveyed, client: &mut Client<S, L>| match read {
-        Err(_) => None,
-        Ok((Role::Restart | Role::Fresh, ..)) => Some(Err(Exit::Rerun(Rerun::RoleChanged))),
-        Ok((Role::Retired, ..)) => None,
-        Ok((Role::Unnamed | Role::Standby { .. }, volume, shard))
-            if unenrolled(&volume, &shard) =>
-        {
-            // A refusal keeps the wait. The call may have committed its enrollment or withdrawn the client, so
-            // the next view period's role read decides whether the arm calls again, waits or ends.
-            let _ = enroll_standby(
-                standby,
-                inputs.shard(),
-                &holder,
-                &inputs.bounds(),
-                client,
-                &mut persist,
-            );
-            None
-        }
-        Ok((Role::Unnamed, ..)) => None,
-        Ok((Role::Standby { .. }, volume, _)) => {
-            let witness = nominations()?;
-            let peers = inputs::peers(&holder, &volume, instance)?;
-            let takeover = inputs::takeover(inputs, &peers, &witness, now())?;
-            // An unwound takeover resumes nothing; the fencer's release keeps every command it still owns.
-            match contain(|| takeover.run(client, local, &mut fencer)) {
-                Ok(Ok(restarted)) => Some(Ok(Ok(restarted))),
-                Ok(Err(refused)) => match takeover.next(&refused) {
-                    Next::Stop => None,
-                    Next::Restart(_) => Some(Ok(Err((
-                        Exit::Rerun(Rerun::Takeover),
-                        Some(RecoveryRefusal::from(&refused)),
-                    )))),
-                },
-                Err(_) => Some(Err(Exit::Rerun(Rerun::Unwound))),
+    // A witness that arrives within a view period ends the period, so the role read and the takeover follow while
+    // it is live; the latest witness the source sends replaces one the arm took and has yet to use.
+    let nominations = RefCell::new(nominations);
+    let pending = Cell::new(None);
+    let witness = || match (nominations.borrow_mut())() {
+        Some(latest) => Some(latest),
+        None => pending.take(),
+    };
+    // A delivered witness waits unread for at most half its lifetime, and the role read has the other half.
+    let bound = STATUS_US.min(window_us / 2).max(1);
+    let mut wait = || {
+        while !period(bound) && !stop.load(Ordering::Acquire) {
+            publisher.again(now());
+            if let Some(arrived) = (nominations.borrow_mut())() {
+                pending.set(Some(arrived));
+                break;
             }
         }
     };
-    let acquired = match wait_with(host, (inputs.shard(), &holder), client, stop, period, act) {
+    // A takeover's refusal that ends the incarnation leaves the wait as its exit with the refusal's class.
+    let act = |read: Surveyed, client: &mut Client<S, L>| {
+        if let Ok((Role::Unnamed | Role::Standby { .. } | Role::Retired, volume, shard)) = &read {
+            let standing = standing((&holder, inputs.shard(), pid), volume, shard);
+            publisher.publish(standing, now());
+        }
+        match read {
+            Err(_) => {
+                publisher.again(now());
+                None
+            }
+            Ok((Role::Restart | Role::Fresh, ..)) => Some(Err(Exit::Rerun(Rerun::RoleChanged))),
+            Ok((Role::Retired, ..)) => None,
+            Ok((Role::Unnamed | Role::Standby { .. }, volume, shard))
+                if unenrolled(&volume, &shard) =>
+            {
+                // A refusal keeps the wait. The call may have committed its enrollment or withdrawn the client, so
+                // the next view period's role read decides whether the arm calls again, waits or ends.
+                let _ = enroll_standby(
+                    standby,
+                    inputs.shard(),
+                    &holder,
+                    &inputs.bounds(),
+                    client,
+                    &mut persist,
+                );
+                None
+            }
+            Ok((Role::Unnamed, ..)) => None,
+            Ok((Role::Standby { .. }, volume, _)) => {
+                let witness = witness()?;
+                let peers = inputs::peers(&holder, &volume, instance)?;
+                let takeover = inputs::takeover(inputs, &peers, &witness, now())?;
+                // An unwound takeover resumes nothing; the fencer's release keeps every command it still owns.
+                match contain(|| takeover.run(client, local, &mut fencer)) {
+                    Ok(Ok(restarted)) => Some(Ok(Ok(restarted))),
+                    Ok(Err(refused)) => match takeover.next(&refused) {
+                        Next::Stop => None,
+                        Next::Restart(_) => Some(Ok(Err((
+                            Exit::Rerun(Rerun::Takeover),
+                            Some(RecoveryRefusal::from(&refused)),
+                        )))),
+                    },
+                    Err(_) => Some(Err(Exit::Rerun(Rerun::Unwound))),
+                }
+            }
+        }
+    };
+    let acquired = match wait_with(
+        host,
+        (inputs.shard(), &holder),
+        client,
+        stop,
+        &mut wait,
+        act,
+    ) {
         Ok(Ok(restarted)) => Ok(serving(inputs, clock, restarted)),
         Ok(Err(refused)) => Err(refused),
         Err(exit) => Err((exit, None)),
     };
     finish(acquired, fencer)
+}
+
+/// The status a waiting host publishes for one view period's role read: phase `Standby` at the shard record's
+/// `(g, owner, E)` with no tenure, and an entry with no tenure and no serving state whose role is `Standby` while the
+/// volume read lists this host's enrolled pair for a live attach that binds this host's instance or none
+/// (INSTANCE-BOUND, `restart::enrolled`), on an active volume the shard record names active, and `Unrecorded`
+/// otherwise. The entry's `named` and `volume_state` come from the same two records, and every other field is
+/// absent or unavailable.
+pub(crate) fn standing(
+    (holder, shard, pid): (&Holder, Shard, u32),
+    volume: &VolumeRecord,
+    record: &ShardRecord,
+) -> Status {
+    let active = record.active == holder.volume;
+    let current = matches!(volume_state(record, volume), Ok(VolumeState::Active));
+    let enrolled = (volume.enrolled(holder.host))
+        .is_some_and(|pair| restart::enrolled(holder, volume, pair).is_ok());
+    let role = match active && current && enrolled {
+        true => RecordedRole::Standby,
+        false => RecordedRole::Unrecorded,
+    };
+    let entry = VolumeEntry {
+        role: Some(role),
+        volume_state: Some(volume.state),
+        named: Some(active && record.standby == Some(holder.host)),
+        ..VolumeEntry::unobserved(holder.volume, shard)
+    };
+    Status {
+        target: Some(Target::of(record)),
+        entry: Some(entry),
+        ..Status::idle(shard, holder.volume, pid, Phase::Standby)
+    }
+}
+
+/// The waiting host's publications to its status cell: the status of the last role read that succeeded, the time of
+/// that read, and the time of that status's last accepted publication, `None` until the cell accepted it once. A
+/// refusal keeps the time of the last accepted publication, which is then [`STATUS_US`] old or more, so the next call
+/// retries.
+pub(super) struct Publisher<'w> {
+    pub(super) cell: &'w StatusCell,
+    pub(super) last: Cell<Option<(Status, u64, Option<u64>)>>,
+}
+
+impl Publisher<'_> {
+    /// Publishes the status of a role read made at `now`.
+    pub(super) fn publish(&self, status: Status, now: u64) {
+        #[cfg(test)]
+        if super::standby_tests::plant() == Some(super::standby_tests::Plant::Silent) {
+            return;
+        }
+        let published = self.cell.publish(status).then_some(now);
+        self.last.set(Some((status, now, published)));
+    }
+
+    /// Publishes the last read's status again at `now` when the cell has yet to accept it or its last accepted
+    /// publication is [`STATUS_US`] old, while that read is less than [`STALE_US`] old. A read that old is published
+    /// no more, and the agent's staleness bound retires its last copy until the next role read succeeds.
+    pub(super) fn again(&self, now: u64) {
+        #[cfg(test)]
+        if super::standby_tests::plant() == Some(super::standby_tests::Plant::Unrepeated) {
+            return;
+        }
+        let Some((status, read_at, published)) = self.last.get() else {
+            return;
+        };
+        let due = published.is_none_or(|at| now.saturating_sub(at) >= STATUS_US);
+        if due && now.saturating_sub(read_at) < STALE_US {
+            let published = self.cell.publish(status).then_some(now).or(published);
+            self.last.set(Some((status, read_at, published)));
+        }
+    }
 }
 
 /// The serving authority and coverage fencing a restart or a takeover reached, and whether it reached them through

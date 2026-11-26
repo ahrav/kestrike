@@ -1376,7 +1376,7 @@ fn a_full_report_seals_every_listed_role_before_an_unlisted_one() {
     );
 }
 
-fn reader_key(h: Host) -> Option<ReportKey> {
+pub(crate) fn reader_key(h: Host) -> Option<ReportKey> {
     Some(ReportKey::derive(&host_key(h)))
 }
 
@@ -3047,4 +3047,216 @@ fn a_status_received_on_the_first_turn_is_dated_from_the_clock_origin() {
         .map(|e| (e.read_age_us, e.report_age_us))
         .collect();
     assert_eq!(ages, [(Some(5 + t), 7 + t)]);
+}
+
+/// The status a waiting standby publishes for shard `shard` as the wait builds it: phase `Standby` at a target with
+/// no tenure, and an entry in the standby role with no tenure and no serving state.
+fn waiting_status(shard: u32) -> Status {
+    let shard_id = Shard::new(shard).unwrap();
+    let entry = VolumeEntry {
+        role: Some(RecordedRole::Standby),
+        volume_state: Some(Recorded::Active),
+        named: Some(true),
+        ..VolumeEntry::unobserved(volume(shard), shard_id)
+    };
+    Status {
+        target: Some(Target::of(&record(shard, 12, Some(OWN)))),
+        entry: Some(entry),
+        ..Status::idle(shard_id, volume(shard), shard, Phase::Standby)
+    }
+}
+
+/// The host owns shard 1 and waits as shard 2's standby. Its report holds the owner's entry and the waiting
+/// standby's entry in the standby role, phase `Standby`; the producer gauge counts the owned role produced. A
+/// `Standby` status whose entry claims the owner role, or a serving state, is left out.
+#[test]
+fn a_waiting_standbys_entry_is_sealed_and_an_owner_claim_under_its_status_is_left_out() {
+    let records = [record(1, OWN, Some(11)), record(2, 12, Some(OWN))];
+    let waiting = waiting_status(2);
+    let mut agent = synced(&records, &[reporting_status(1), waiting]);
+    let out = at(&mut agent, REPORT_US, &[]);
+    let report = Reader::default()
+        .accept(out.report.as_ref().unwrap(), reader_key)
+        .unwrap();
+    let sealed: Vec<_> = (report.entries.iter())
+        .map(|e| (e.shard.get(), e.role, e.phase))
+        .collect();
+    assert_eq!(
+        sealed,
+        [
+            (1, Some(RecordedRole::Owner), Some(Phase::Serving)),
+            (2, Some(RecordedRole::Standby), Some(Phase::Standby)),
+        ]
+    );
+    assert_eq!(report.entries[1].tenure, None);
+    assert_eq!(
+        report.host.producer_missing,
+        Members::Known { used: 0, limit: 1 }
+    );
+    let entry = waiting.entry.unwrap();
+    let claims = [
+        VolumeEntry {
+            role: Some(RecordedRole::Owner),
+            ..entry
+        },
+        VolumeEntry {
+            role: None,
+            ..entry
+        },
+        VolumeEntry {
+            serving: Some(State::Serving),
+            ..entry
+        },
+        VolumeEntry {
+            role: Some(RecordedRole::Replacement),
+            ..entry
+        },
+    ];
+    let tenure = (
+        ShardGeneration::new(3).unwrap(),
+        ActivatedEpoch::new(4).unwrap(),
+    );
+    let tenured = Status {
+        tenure: Some(tenure),
+        entry: Some(VolumeEntry {
+            tenure: Some(tenure),
+            ..entry
+        }),
+        ..waiting
+    };
+    let claimed = (claims.into_iter())
+        .map(|claim| Status {
+            entry: Some(claim),
+            ..waiting
+        })
+        .chain([tenured]);
+    for claimed in claimed {
+        let mut agent = synced(&records, &[reporting_status(1), claimed]);
+        let out = at(&mut agent, REPORT_US, &[]);
+        let report = Reader::default()
+            .accept(out.report.as_ref().unwrap(), reader_key)
+            .unwrap();
+        let shards: Vec<_> = report.entries.iter().map(|e| e.shard.get()).collect();
+        assert_eq!(shards, [1], "{claimed:?}");
+        let (_, beats) = beat_to(&out, 11);
+        let beaten: Vec<_> = beats.iter().map(|e| e.shard.get()).collect();
+        assert_eq!(beaten, [1], "{claimed:?}");
+    }
+    let unrecorded = Status {
+        entry: Some(VolumeEntry {
+            role: Some(RecordedRole::Unrecorded),
+            named: Some(false),
+            ..entry
+        }),
+        ..waiting
+    };
+    let mut agent = synced(&records, &[reporting_status(1), unrecorded]);
+    let out = at(&mut agent, REPORT_US, &[]);
+    let report = Reader::default()
+        .accept(out.report.as_ref().unwrap(), reader_key)
+        .unwrap();
+    let sealed: Vec<_> = (report.entries.iter())
+        .map(|e| (e.shard.get(), e.role, e.phase))
+        .collect();
+    assert_eq!(
+        sealed[1],
+        (2, Some(RecordedRole::Unrecorded), Some(Phase::Standby)),
+        "an unrecorded waiting entry is sealed"
+    );
+}
+
+/// A waiting status leaves the volume's progress baseline to the last tenure's status: an owner status at a tenure,
+/// then a `Standby` status of the same volume, then a replay of the owner status add the owner's counts once.
+#[test]
+fn a_waiting_status_leaves_the_owner_baseline_so_a_replay_adds_nothing() {
+    let records = [record(1, OWN, Some(11))];
+    let owner = status(1, Phase::Serving);
+    let mut agent = synced(&records, &[owner]);
+    let waiting = Status {
+        pid: owner.pid + 1,
+        ..waiting_status(1)
+    };
+    for (now, statuses) in [(1, vec![waiting]), (2, vec![owner])] {
+        agent.turn(
+            now,
+            Inputs {
+                statuses: &statuses,
+                clock: clock(now),
+                ..Inputs::NONE
+            },
+        );
+    }
+    let out = at(&mut agent, H, &[]);
+    let (header, _) = beat_to(&out, 11);
+    assert_eq!(
+        (header.io, header.completions),
+        (owner.io, owner.completions),
+        "the owner's counts, once"
+    );
+}
+
+/// A waiting status's entry for a role this host owns produces no owner entry: the producer gauge counts the owned
+/// role missing.
+#[test]
+fn a_waiting_entry_for_an_owned_role_counts_the_role_missing() {
+    let records = [record(1, OWN, Some(11))];
+    let mut agent = synced(&records, &[waiting_status(1)]);
+    let out = at(&mut agent, REPORT_US, &[]);
+    let report = Reader::default()
+        .accept(out.report.as_ref().unwrap(), reader_key)
+        .unwrap();
+    assert_eq!(report.entries.len(), 1, "the waiting entry is sealed");
+    assert_eq!(
+        report.host.producer_missing,
+        Members::Known { used: 1, limit: 1 }
+    );
+}
+
+/// No reader of the agent takes a waiting standby for an owner: on a host that owns shard 1 and waits as shard 2's
+/// standby, the heartbeat carries the owner's tenure alone, the peer read time goes to the serving process alone,
+/// the host reads healthy, and a nomination of shard 2 goes to the waiting process.
+#[test]
+fn a_waiting_standby_beside_an_owned_shard_reads_as_no_owner() {
+    let records = [record(1, OWN, Some(11)), record(2, 12, Some(OWN))];
+    let serving = status(1, Phase::Serving);
+    let mut agent = synced(&records, &[serving, waiting_status(2)]);
+    let entry = beat::Entry {
+        shard: Shard::new(9).unwrap(),
+        generation: ShardGeneration::new(3).unwrap(),
+        epoch: ActivatedEpoch::new(2).unwrap(),
+        volume: VolumeState::Active,
+        report_age_us: 0,
+        read_age_us: Some(0),
+    };
+    let acking = sealed(
+        &Header {
+            ack: 1,
+            ack_boot: BOOT,
+            ..header(11, 1, 1)
+        },
+        &[entry],
+        OWN,
+    );
+    let out = agent.turn(
+        5,
+        Inputs {
+            heartbeats: &[&acking],
+            clock: clock(5),
+            ..Inputs::NONE
+        },
+    );
+    assert!(out.refused.is_empty(), "{:?}", out.refused);
+    let read = Inbound::Peer { read_at: Some(0) };
+    assert_eq!(peers(&out), [(serving.volume, read)]);
+    let out = at(&mut agent, H, &[]);
+    let (_, beats) = beat_to(&out, 11);
+    let shards: Vec<_> = beats.iter().map(|e| e.shard.get()).collect();
+    assert_eq!(shards, [1], "the owner's tenure alone");
+    assert!(agent.healthy(H));
+    let (_, out) = nominated(&records, &[serving, waiting_status(2)]);
+    let sent: Vec<_> = nominations(&out).iter().map(|(to, ..)| *to).collect();
+    assert!(
+        !sent.is_empty() && sent.iter().all(|to| *to == volume(2)),
+        "a nomination reaches the waiting process alone: {sent:?}"
+    );
 }

@@ -718,6 +718,27 @@ fn a_report_entry_counts_for_a_shard_only_at_the_shard_records_tenure() {
     assert_eq!(records(&observation, 0).entries, [(host(2), bumped)]);
 }
 
+/// A waiting standby's entry, which carries no tenure, joins no shard's entries: the host that owns shard 1 and waits
+/// as shard 2's standby gives shard 1 its owner entry and shard 2 none, so the planner's owner entry and the status
+/// builder's class, which read those entries, take no standby for an owner.
+#[test]
+fn a_waiting_standbys_entry_is_no_shards_entry_at_its_tenure() {
+    let mut fixture = Fixture::new(2, 2);
+    let generation = record().generation.get();
+    let current = entry(volume(1).as_str(), 1, generation, 1);
+    let waiting = VolumeEntry {
+        role: Some(RecordedRole::Standby),
+        volume_state: Some(crate::failover::records::VolumeState::Active),
+        named: Some(true),
+        ..VolumeEntry::unobserved(volume(2), id(2))
+    };
+    fixture.publish(2, &[current, waiting]);
+    let observation = fixture.observe(START);
+    assert_eq!(observation.dropped, 0);
+    assert_eq!(records(&observation, 0).entries, [(host(2), current)]);
+    assert!(records(&observation, 1).entries.is_empty());
+}
+
 #[test]
 fn observe_changes_no_store_key_over_ticks_with_unmet_needs() {
     let mut fixture = Fixture::new(3, 3);

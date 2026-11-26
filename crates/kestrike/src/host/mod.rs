@@ -8,8 +8,8 @@
 //! and the takeover before the volume attaches. [`recover::recover`] runs a restart or fresh role's sequence through
 //! it, and [`serve::bring_up`] takes the tenure that sequence acquired to a `Live` owner endpoint. [`serve::serve`]
 //! polls that owner until one exit ends the tenure and tears it down, and [`serve::wait`] holds a parked process,
-//! which leaves when its role changed. [`recover::stand_by`] is the wait of a standby or unnamed host: it enrolls
-//! an attached host's pair and runs the takeover a nomination starts.
+//! which leaves when its role changed. [`recover::stand_by`] is the wait of a standby or unnamed host: it publishes
+//! the wait's status to the host agent, enrolls an attached host's pair and runs the takeover a nomination starts.
 //! [`lane`] runs a serving tenure's store requests on a thread apart from the owner's, and [`duties`] submits them
 //! from each serving turn.
 //! [`link`] is the owner-agent codec, the status cell an owner publishes to and the inbox that queues inbound
