@@ -37,6 +37,12 @@ pub(crate) fn writer_at(boot: [u8; 16]) -> StatusWriter {
     fixed(host(IDENTITY), boot, status_key(), PERIOD)
 }
 
+/// A writer of the reconciler `identity` under [`status_key`], with the boot nonce `boot` and the seal period
+/// `period_us`.
+pub(crate) fn writer_of(identity: Host, boot: [u8; 16], period_us: NonZeroU64) -> StatusWriter {
+    fixed(identity, boot, status_key(), period_us)
+}
+
 fn shard(number: u32) -> Shard {
     Shard::new(number).unwrap()
 }
@@ -216,7 +222,8 @@ fn named(tables: &Value, table: &str, counts: &[u32]) -> Value {
 
 /// The contract view of one part.
 pub(crate) fn part_view(p: &ZonePart) -> Value {
-    let t = tables();
+    static TABLES: std::sync::LazyLock<Value> = std::sync::LazyLock::new(tables);
+    let t = &*TABLES;
     let f = p.flags;
     let flags = [
         f.reports,
@@ -235,12 +242,12 @@ pub(crate) fn part_view(p: &ZonePart) -> Value {
         "zone": p.zone.0,
         "tick": p.tick,
         "flags": Value::Object(flag_names.zip(flags.map(Value::Bool)).collect()),
-        "classes": named(&t, "class", &p.classes),
+        "classes": named(t, "class", &p.classes),
         "stale_serving": p.stale_serving,
         "stale_oldest_us": p.stale_oldest_us,
-        "standby": named(&t, "standby.counts", &p.standby),
-        "needs": named(&t, "needs", &p.needs),
-        "blockers": named(&t, "blockers", &p.blockers),
+        "standby": named(t, "standby.counts", &p.standby),
+        "needs": named(t, "needs", &p.needs),
+        "blockers": named(t, "blockers", &p.blockers),
         "census": members(p.census),
         "attaches": {
             "live": p.attaches.live,
@@ -248,13 +255,13 @@ pub(crate) fn part_view(p: &ZonePart) -> Value {
             "ended_unpaired": p.attaches.ended_unpaired,
             "gone": p.attaches.gone,
             "pairs": members(p.attaches.pairs),
-            "closed": named(&t, "closed", &p.attaches.closed),
+            "closed": named(t, "closed", &p.attaches.closed),
         },
-        "receipts": named(&t, "receipts", &p.receipts),
-        "volumes": named(&t, "volumes", &p.volumes),
+        "receipts": named(t, "receipts", &p.receipts),
+        "volumes": named(t, "volumes", &p.volumes),
         "unnamed_volumes": p.unnamed_volumes,
         "hosts": {
-            "verdicts": named(&t, "verdicts", &p.hosts.verdicts),
+            "verdicts": named(t, "verdicts", &p.hosts.verdicts),
             "silent": members(p.hosts.silent),
             "self_suspect": p.hosts.self_suspect,
         },
@@ -264,17 +271,17 @@ pub(crate) fn part_view(p: &ZonePart) -> Value {
         },
         "store": {
             "alarm": kebab(p.store.alarm),
-            "outcomes": named(&t, "store.outcomes", &p.store.outcomes),
+            "outcomes": named(t, "store.outcomes", &p.store.outcomes),
         },
         "events": {
-            "refused": named(&t, "events.refused", &e.refused),
-            "reservations": named(&t, "events.reservations", &e.reservations),
-            "enrollments": named(&t, "events.enrollments", &e.enrollments),
-            "decisions": named(&t, "events.decisions", &e.decisions),
-            "errors": named(&t, "events.errors", &e.errors),
-            "creates": named(&t, "events.creates", &e.creates),
-            "attaches": named(&t, "events.attaches", &e.attaches),
-            "reclaims": named(&t, "events.reclaims", &e.reclaims),
+            "refused": named(t, "events.refused", &e.refused),
+            "reservations": named(t, "events.reservations", &e.reservations),
+            "enrollments": named(t, "events.enrollments", &e.enrollments),
+            "decisions": named(t, "events.decisions", &e.decisions),
+            "errors": named(t, "events.errors", &e.errors),
+            "creates": named(t, "events.creates", &e.creates),
+            "attaches": named(t, "events.attaches", &e.attaches),
+            "reclaims": named(t, "events.reclaims", &e.reclaims),
         },
         "omitted": p.omitted,
         "rows": p.rows.iter().map(|row| json!({

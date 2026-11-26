@@ -2387,6 +2387,7 @@ class LaneCancellation(unittest.TestCase):
                                 "serve-search-exhausts-its-prefinal-ack-bound",
                                 "serve-search-exhausts-its-completed-held-bound",
                                 "serve-search-due-get-stages-within-k-under-reply-pressure",
+                                "fleet-alarm-sets-match-on-root-1-of-every-scenario",
                                 "fleet-volume-scenarios-pass-on-their-second-root-and-every-replacement-crash-cell",
                                 "fleet-zone-repair-and-host-scenarios-pass-on-their-second-root"]),
         }

@@ -986,6 +986,7 @@ pub(crate) const FIXPOINT_TICKS: &str = "witness ticks-after-settle missing";
 pub(crate) const SILENT_MOVED: &str =
     "a census slot or a shard record of a silent host whose instance runs changed";
 pub(crate) const SILENT_WINDOW: &str = "witness silent-past-the-window missing";
+pub(crate) const SEALED_RECORDS: &str = "witness sealed-reports-and-statuses missing";
 
 /// The first exit a tenure's serving duties named that its scenario does not script, as a failed verdict. A
 /// deposition's exit (`Deposed`, or `Rerun(RecordedHolder)` from the successor's reservation) of a tenure a later
@@ -1919,6 +1920,7 @@ impl<'c> Fleet<'c> {
             self.log.vetoes += count_u32(alive);
         }
         self.log.refused += u32::from(out.seal_refused.is_some());
+        self.alarms.unsealable += u32::from(out.seal_refused.is_some());
         self.log.repair_demands += u32::from(out.repair.is_some());
         if nominated > 0 {
             let nominated = u32::try_from(nominated).unwrap_or(u32::MAX);
@@ -1942,6 +1944,8 @@ impl<'c> Fleet<'c> {
             self.deliver(member, volume, witness, t);
         }
         if let Some(bytes) = report {
+            let at_us = self.round * ROUND_US;
+            (self.alarms).receive(super::alarms::Source::Report, at_us, &bytes);
             let key = |host: Host| Some(report::ReportKey::derive(&host_key(host)));
             match self.reader.accept(&bytes, key) {
                 Ok(accepted) => {

@@ -684,6 +684,7 @@ fn a_crash_cells_cleanup_leaves_the_write_arms_an_episode_queued_for_the_enrolli
         let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(script, fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         let _inline = Inline::set();
         let mut queued = 0;
         let ran = fleet.play_script_with(draws, |fleet, live, slots| {

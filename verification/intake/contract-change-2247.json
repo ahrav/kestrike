@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2247",
+  "kind": "contract-change",
+  "pull_request": 2247,
+  "changed": "Three new obligation records, takeover-history-alarm-sets-match-five-single-shard-histories, fleet-alarm-oracle-judges-every-scenario-on-its-sealed-reports-and-statuses and fleet-alarm-sets-match-on-root-1-of-every-scenario, and the invariant of alarm-catalog-controls-and-reference-evaluator, whose count of the catalog's rows includes registrant-ended.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-alarm-oracle-judges-every-scenario-on-its-sealed-reports-and-statuses",
+    "reason": "Its invariant states the new contract: a fleet scenario that states an alarm set fires exactly that set over the host reports and zone statuses the production writers seal and the production readers accept, and a run that differs fails by the rule text the fired alarm rows differ from the scenario's expected set; the record holds it on root 1 of the three scenarios the workspace job runs. fleet-alarm-sets-match-on-root-1-of-every-scenario holds it on root 1 of the 64 scenarios that state a set, takeover-history-alarm-sets-match-five-single-shard-histories holds the exact firing lists of five single-shard histories, and alarm-catalog-controls-and-reference-evaluator adds the row registrant-ended with its control and clean twin."
+  }
+}

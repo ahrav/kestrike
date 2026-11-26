@@ -97,6 +97,7 @@ use super::owner::{Bundle, Keys, Owner};
 use super::owner_tests::{Mux, OWNER, PRINCIPALS, collect, entries};
 use super::requests::RequestId;
 
+mod alarm_histories;
 pub(crate) mod cycles;
 #[warn(clippy::disallowed_methods, clippy::disallowed_types)]
 pub(crate) mod fleet;

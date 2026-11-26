@@ -1205,16 +1205,20 @@ impl Fleet<'_> {
         if self.reconcilers[r].zone_loop.is_none() {
             let opened = self.open_loop(r);
             self.reconcilers[r].zone_loop = Some(opened);
+            self.sealers.open(r, loop_now(TICK_ROUNDS));
         }
         let now = loop_now(self.round);
         let zone = self.reconcilers[r].zone;
         let directory = self.directory(zone);
         let at = self.double_at(zone);
-        let mut survey = {
+        let tick = {
             let (actors, zones) = (&mut self.reconcilers, &mut self.zones);
             let zone_loop = actors[r].zone_loop.as_mut().expect("an open loop");
-            zone_loop.tick(Ok(directory), &mut zones[at], now).survey
+            zone_loop.tick(Ok(directory), &mut zones[at], now)
         };
+        // The actor seals the tick's status part as the service shell does, before the plant and the actuation.
+        (self.sealers).seal(r, &tick.part, now, &mut self.alarms);
+        let mut survey = tick.survey;
         self.plant_survey(&mut survey);
         survey
     }

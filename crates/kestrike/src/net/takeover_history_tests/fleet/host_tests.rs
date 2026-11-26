@@ -66,6 +66,7 @@ pub(super) fn scripted_with(config: &Config, script: Vec<Episode>, rerun_first: 
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(script, fleet.topology.members.len());
     fleet.rerun_first = rerun_first;
+    fleet.alarms.scripted = true;
     let _agent = super::AgentPlant::set(config);
     let _inline = Inline::set();
     fleet.play_script(draws).expect("a run inside the limits")
@@ -1213,6 +1214,7 @@ fn an_after_trigger_fires_at_its_occurrence_of_committed_takeovers_and_of_nomina
         delay(Pattern::Nominated, 4, 5),
     ];
     fleet.faults = Faults::new(script, fleet.hosts.len());
+    fleet.alarms.scripted = true;
     let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
     let mut slots = super::Slots {
         grounds: &[],
@@ -1681,6 +1683,7 @@ fn an_exit_named_while_a_get_is_in_flight_is_torn_down_and_rerun_before_the_run_
     let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let at = hosts::DUTY_CELL;
     let mut ended = None;
@@ -1713,6 +1716,7 @@ fn a_rerun_queued_for_a_paused_host_waits_for_its_resume() {
     let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let at = hosts::DUTY_CELL;
     let mut ended = None;
@@ -2310,6 +2314,7 @@ fn an_agent_that_sends_a_nomination_once_strands_a_retaken_shard_and_stalls_the_
         let seeded = Fleet::seeded(config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(script.clone(), fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         fleet.horizon = 600;
         let _agent = super::AgentPlant::set(config);
         let _inline = Inline::set();
@@ -2966,6 +2971,7 @@ fn a_serving_tenures_rerun_refused_under_an_outage_counts_its_rounds_from_the_ro
         let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(script, fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         let _inline = Inline::set();
         let ran = fleet.play_script_with(draws, |fleet, live, slots| {
             for _ in 0..hosts::TAIL_ROUNDS {
@@ -3016,6 +3022,7 @@ fn a_restart_refused_after_the_tail_rounds_runs_its_next_incarnation_once_before
         heal: None,
     };
     fleet.faults = Faults::new(vec![outage], fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let mut ended = 0;
     let ran = fleet.play_script_with(draws, |fleet, live, slots| {
@@ -3442,6 +3449,7 @@ fn a_standby_period_that_ends_at_a_changed_role_runs_its_next_incarnation() {
         let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(script, fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         let _inline = Inline::set();
         let ran = fleet.play_script_with(draws, |fleet, live, slots| {
             for _ in 0..hosts::TAIL_ROUNDS {
@@ -3520,6 +3528,7 @@ fn a_standby_period_with_a_witness_that_ends_the_process_ends_the_standby_status
     let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let ran = fleet.play_script_with(draws, |fleet, live, slots| {
         for _ in 0..hosts::TAIL_ROUNDS {
@@ -3563,6 +3572,7 @@ fn a_standby_period_with_a_stale_witness_publishes_the_target_its_role_read_retu
     let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let ran = fleet.play_script_with(draws, |fleet, live, slots| {
         for _ in 0..hosts::TAIL_ROUNDS {
@@ -3604,6 +3614,7 @@ fn a_standby_whose_takeover_acquires_a_tenure_ends_its_standby_status() {
     let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let ran = fleet.play_script_with(draws, |fleet, live, slots| {
         for _ in 0..hosts::TAIL_ROUNDS {
@@ -3649,6 +3660,7 @@ fn a_fresh_activation_refused_in_a_settled_round_runs_its_retry_once_before_the_
         let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(script, fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         let _inline = Inline::set();
         let mut rounds = 0;
         let ran = fleet.play_script_with(draws, |fleet, live, slots| {
@@ -3723,6 +3735,7 @@ fn a_refused_rerun_of_a_serving_tenure_waits_for_an_open_losss_drawn_gets() {
         })),
     ];
     fleet.faults = Faults::new(script, fleet.topology.members.len());
+    fleet.alarms.scripted = true;
     let _inline = Inline::set();
     let ran = fleet.play_script_with(draws, |fleet, live, slots| {
         for _ in 0..hosts::TAIL_ROUNDS {
@@ -3845,6 +3858,7 @@ fn a_tape_recorded_with_another_set_of_runnable_actors_is_refused_before_its_rou
         let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(script, fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         fleet.record_actors = actors;
         let _inline = Inline::set();
         fleet.play_script(draws)
@@ -3962,6 +3976,7 @@ fn a_replay_whose_round_lacks_one_tenure_or_one_reconciler_is_refused_with_every
         let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
         let mut fleet = seeded.expect("a recorded topology");
         fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+        fleet.alarms.scripted = true;
         let _inline = Inline::set();
         let mut seen = None;
         let ran = fleet.play_script_with(draws, |fleet, live, _| {

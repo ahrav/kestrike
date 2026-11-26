@@ -213,6 +213,15 @@ pub(crate) fn registrant_deferred() -> (Option<Registrants>, Option<Withdrawal>)
     (Some(Registrants::ForeignRegistrant), None)
 }
 
+/// An ended registrant on every report of the window, and one whose reports read the own pair sole from the
+/// window's last report on, as a Report with the ended key removed reads.
+pub(crate) fn registrant_ended() -> Twin<Option<Registrants>> {
+    Twin {
+        fault: Some(Registrants::EndedRegistrant),
+        clean: Some(Registrants::Sole),
+    }
+}
+
 /// A warm load with one slot unit whose content check failed, and the same load intact.
 pub(crate) fn retention_damage() -> Twin<Option<Retention>> {
     let intact = Retention {
@@ -603,7 +612,7 @@ type Build = fn(&Value, bool) -> Vec<Step>;
 /// The history builder of each row's control, keyed by the name the row's `control` field holds; its clean twin is
 /// the same builder under the name the row's `clean` field holds.
 pub(crate) fn builders() -> BTreeMap<&'static str, Build> {
-    let rows: [(&'static str, Build); 55] = [
+    let rows: [(&'static str, Build); 56] = [
         ("store_regression", |row, f| {
             entries(span(row), |_, e| e.watermark = store_regression().pick(f))
         }),
@@ -905,6 +914,16 @@ pub(crate) fn builders() -> BTreeMap<&'static str, Build> {
             let rise = u32::try_from(number(row, "at_least")).unwrap() - u32::from(!f);
             zones(span(row), |at, z| {
                 z.store.outcomes[0] = if at == 0 { 0 } else { rise }
+            })
+        }),
+        ("registrant_ended", |row, f| {
+            // The clean twin clears one report short of the row's window, whatever the padded length.
+            let clears = row["window"]["reports"].as_u64().unwrap() - 1;
+            entries(span(row), |at, e| {
+                e.registrants = match at >= clears {
+                    true => registrant_ended().pick(f),
+                    false => registrant_ended().fault,
+                }
             })
         }),
     ];

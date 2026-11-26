@@ -1320,7 +1320,7 @@ fn fired(row: &Value, steps: &[controls::Step]) -> Vec<Fired> {
 fn the_shipped_catalog_validates() {
     let catalog = catalog();
     assert_eq!(validate(&catalog, &controls::names()), []);
-    assert_eq!(catalog["rows"].as_array().unwrap().len(), 55);
+    assert_eq!(catalog["rows"].as_array().unwrap().len(), 56);
     let routes = catalog["routes"].as_array().unwrap();
     assert_eq!(routes.len(), 9, "nine route classes");
 }
@@ -1401,6 +1401,11 @@ const QUIET_LABELS: &[(&str, &str, &[&str])] = &[
     ("report", "entries.watermark", &["unavailable", "clear"]),
     (
         "report",
+        "entries.serving",
+        &["pre-boundary", "recovering", "withdrawn", "closed"],
+    ),
+    (
+        "report",
         "entries.enumeration",
         &["unavailable", "matches", "missing"],
     ),
@@ -1415,7 +1420,6 @@ const QUIET_LABELS: &[(&str, &str, &[&str])] = &[
             "reservation-type",
             "duplicate-own-record",
             "not-holder",
-            "ended-registrant",
         ],
     ),
     (
@@ -1557,6 +1561,7 @@ fn filter_twins() -> Vec<(&'static str, &'static str, Value)> {
         ("hold-device", "entries.recovery.next", "stop".into()),
         ("hold-store", "entries.recovery.next", "stop".into()),
         ("handoff-due", "entries.role", "standby".into()),
+        ("registrant-ended", "entries.serving", "withdrawn".into()),
         (
             "recovery-stuck",
             "entries.recovery.outcome",
@@ -3598,6 +3603,39 @@ fn a_full_census_under_the_default_cap_is_not_near_its_cap() {
     };
     assert_eq!(fired(&near, &[status(false), status(false)]), []);
     assert_eq!(fired(&near, &[status(true), status(true)]).len(), 1);
+}
+
+/// `registrant-ended` under a window of one, two and six reports: the control fires once and the clean twin, which
+/// clears one report short of the window, raises nothing; six serving reports of an ended registrant whose sixth
+/// entry reads withdrawn raise nothing, and since a record outside the serving filter ends the run, five more
+/// serving reports after it stay silent and the sixth fires.
+#[test]
+fn an_ended_registrant_fires_at_its_window_and_a_withdrawn_entry_ends_the_run() {
+    let shipped = row(&catalog(), "registrant-ended");
+    assert_eq!(shipped["window"]["reports"], 6);
+    for window in [1, 2, 6] {
+        let mut row = shipped.clone();
+        row["window"]["reports"] = window.into();
+        let control = controls::history(&row, "registrant_ended");
+        assert_eq!(fired(&row, &control).len(), 1, "window {window}");
+        let clean = controls::history(&row, "registrant_ended.clean");
+        assert_eq!(fired(&row, &clean), [], "window {window}");
+    }
+    let mut withdrawn = controls::history(&shipped, "registrant_ended");
+    let Some(controls::Step::Report { entries, .. }) = withdrawn.last_mut() else {
+        panic!("the control ends with a report");
+    };
+    entries[0].serving = Some(crate::failover::serving::State::Withdrawn);
+    assert_eq!(fired(&shipped, &withdrawn), []);
+    // Five serving reports, a withdrawn one, then serving reports again: a run the withdrawn entry only paused
+    // would reach six at the first of them, and a run it ended reaches six at the sixth.
+    let serving = controls::history(&shipped, "registrant_ended");
+    let resumed = |after: usize| {
+        let mut steps = withdrawn.clone();
+        steps.extend(serving.iter().take(after).cloned());
+        fired(&shipped, &steps).len()
+    };
+    assert_eq!((resumed(1), resumed(5), resumed(6)), (0, 0, 1));
 }
 
 /// A healthy waiting standby fires no report row: a run of reports of a host whose one entry is the waiting

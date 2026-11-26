@@ -680,3 +680,10 @@ pub(crate) fn fenced_before_admission(fences: &[PageFences], admissions: &[Admis
     }
     Verdict::Pass
 }
+
+pub(crate) const ALARM_SET: &str = "the fired alarm rows differ from the scenario's expected set";
+pub(crate) const ALARM_UNREAD: &str = "the alarm oracle's reader refused a sealed report or status";
+pub(crate) const ALARM_UNSEALED: &str = "a report or status writer refused a due record, or a status writer an early one its scenario does not script";
+pub(crate) const ALARM_NOT_JUDGED: &str = "the scenario states no expected alarm set";
+pub(crate) const ALARM_PLANTED: &str = "a planted run's alarm set is not judged";
+pub(crate) const ALARM_INCOMPLETE: &str = "a scenario's alarm set was not judged";

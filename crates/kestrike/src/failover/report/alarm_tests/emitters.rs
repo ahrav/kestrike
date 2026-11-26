@@ -410,6 +410,15 @@ fn the_listing_check_and_the_registrant_judgment_give_the_foreign_rows() {
     assert_eq!(twin(holder, sole), controls::registrant_foreign());
 }
 
+/// `registrant-ended`: the judgment of a Report that lists a registrant recorded for an ended attach gives the ended
+/// label, and the judgment of the own pair alone the clean one.
+#[test]
+fn the_registrant_judgment_gives_the_ended_row() {
+    let ended = Some(Registrants::from(RegistrantJudgment::Ended));
+    let sole = Some(Registrants::from(RegistrantJudgment::Sole));
+    assert_eq!(twin(ended, sole), controls::registrant_ended());
+}
+
 /// `retention-damage` and `first-hit-slow`: a warm load with one slot unit whose content check failed, and a first
 /// safe hit one microsecond past the row's threshold from the attach's first tick, give the account and the time
 /// the entry reads; the intact load and the hit at the threshold give the clean twins.

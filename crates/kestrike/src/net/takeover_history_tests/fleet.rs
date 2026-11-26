@@ -98,6 +98,7 @@ use super::{
 };
 
 pub(crate) mod actors;
+pub(crate) mod alarms;
 pub(crate) mod bounds;
 pub(crate) mod draws;
 pub(crate) mod faults;
@@ -110,6 +111,8 @@ pub(crate) mod topology;
 pub(crate) mod volumes;
 pub(crate) mod zones;
 
+#[cfg(test)]
+mod alarm_tests;
 #[cfg(test)]
 mod driven;
 #[cfg(test)]
@@ -826,7 +829,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v24";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v31";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -965,6 +968,8 @@ pub(crate) struct Report {
     pub(crate) volumes: volumes::VolumeLog,
     pub(crate) zones: zones::ZoneLog,
     pub(crate) duties: DutyLog,
+    /// Every sealed report and status the run received, which the alarm oracle reads.
+    pub(crate) alarm_log: alarms::AlarmLog,
 }
 
 /// What the tenures' serving duties did: the closed tenures whose duties' open ended `Opened` (a tenure whose record
@@ -1050,6 +1055,12 @@ pub(crate) struct Evidence {
 }
 
 impl Report {
+    /// The alarm oracle's verdict over the run's sealed reports and statuses (`alarms::verdict`), evaluated at the
+    /// call. The credit leaves it out: the alarm tests judge it for each scenario.
+    pub(crate) fn alarms(&self) -> Verdict {
+        alarms::verdict(&self.alarm_log, &self.config)
+    }
+
     /// In order: the first serving-duty exit the scenario does not script ([`hosts::unscripted_exit`]), in a host
     /// run and in a restart run; the first verdict that fails; for a legal run, `Fail(INCOMPLETE, ..)` when a shard
     /// reported a blocker or lacks one of its two swept recoveries, then `Fail(TOOK_OVER, ..)` when a record changed
@@ -2234,6 +2245,8 @@ struct Fleet<'c> {
     unparked: Vec<usize>,
     /// The restart grace the ended-target handoff set on every agent, which an agent built later takes too.
     grace_us: Option<u64>,
+    alarms: alarms::AlarmLog,
+    sealers: alarms::Sealers,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2395,6 +2408,8 @@ impl<'c> Fleet<'c> {
             unparked: Vec::new(),
             grace_us: None,
             standby_extra: None,
+            alarms: Default::default(),
+            sealers: Default::default(),
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));
         Ok(fleet)
@@ -3830,6 +3845,7 @@ impl<'c> Fleet<'c> {
                     },
                 }
             },
+            alarm_log: self.alarms.clone(),
         }
     }
 
