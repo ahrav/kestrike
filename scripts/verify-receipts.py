@@ -170,10 +170,23 @@ lane receipt also names one for the evidence its counts come from (`run.txt`,
 `report.json` and `pins.txt` for a cargo lane, and `controls.txt` as well
 for the Miri lane, `kani-run.json` and each declared batch's command, output and exit code for a Kani
 profile, as `scripts/judge-kani.py` names them, `fuzz.json` and `pins.txt` for the fuzz lanes, a qualified test lane a cargo
-lane judged under the `qualified` cfg for its own lane); a missing digest is
-`unbound-input`, and a receipt from another job or module, or a `completed`
-cargo lane receipt whose selection report was judged under another cfg or
-lane, is `unbound-lane`.
+lane judged under the `qualified` cfg for its own lane, and `list.txt`, `ignored.txt` and `exit.txt` as well for every
+lane whose report `select-tests.py` writes); a missing digest is
+`unbound-input`, and a receipt from another job or module is `unbound-lane`.
+A completed lane whose `report.json` `select-tests.py run` writes (the
+workspace, Loom, Miri, sweep, ASan and QEMU lanes and the qualified test
+lanes) has a receipt that takes its selection verdict, its
+per-target counts and its execution count from `select-tests.py run`'s
+judgment, run in this process under the lane's cfg arguments
+(`selection_args`) on the lane's `list.txt`, `ignored.txt`, `run.txt` and
+`exit.txt` against the committed inventory, registry and catalog; no test
+runs again. The receipt also records the saved `report.json`'s verdict and the
+fields of `VERDICT_FIELDS` (`code`, `credited`, `cfg`, `module`, `rows`,
+`targets`) in which it differs from that judgment. Credit refuses a missing raw
+file or an exit code that is no integer as `unbound-input`, a saved report
+that refused as `selection-refused` whatever the judgment, and a saved
+positive report that differs as `raw-selection-mismatch`, a report judged
+under another cfg or lane included.
 A `violation` receipt credits a record with controls and no positive test only
 when its text equals each control's. A fuzz lane completes only when each of
 its `qualified` rows ran at least its `executions` inputs past its seeds and
@@ -251,7 +264,8 @@ credits the two-reader domain. The advisory ASan lane is judged the same
 way on those events, and the summary reports its reason, but an
 incomplete ASan lane leaves the gate credited.
 A lane is incomplete without its receipt (an unavailable runner, a skipped
-prerequisite or a missing artifact), with a refused credit, a completion
+prerequisite, a missing artifact, or a saved receipt that parses and has
+another shape than `receipt_shaped` reads), with a refused credit, a completion
 other than `completed`, zero executions, executed names other than its
 domain (a count-matched wrong domain included) or a repeated receipt. The
 expected identity is the `--revision`, `--run` and `--run-attempt` the
@@ -260,6 +274,15 @@ receipt, the barrier report included, must record a nonempty revision, run
 and attempt equal to them, or the lane is incomplete with a reason naming
 the component, an advisory lane's gap staying advisory. The barrier report's
 embedded build identity must also equal the lane's `identity.json`.
+The credit of a lane whose `report.json` `select-tests.py run` writes is
+judged again in this process from its evidence, with no catalog admission: the
+receipt derived from the evidence, under the run identity the saved receipt
+records, must equal the saved one, or it is `unbound-input`; evidence that
+cannot be read or judged is that lane's `unbound-input`, and its saved
+`credit.json` is left unread. The barrier lane's refusals come from its scan
+report and `identity.json`, and every other lane's from its `credit.json`,
+whose `refusals` must be a list of records that each name a `code`; a saved
+credit of another shape is that lane's `missing-result`.
 Evidence from another run attempt is reported and left unread, so a rerun
 never replaces an earlier attempt's first failure; a rerun of only the
 failed jobs therefore leaves the gate incomplete, and a full rerun credits
@@ -301,7 +324,7 @@ COMPLETED, VIOLATION, TIMEOUT, EXHAUSTED, UNSUPPORTED, SKIPPED, TOOL_FAILURE, DR
 REFUSALS = {
     "baseline-mismatch", "malformed-record", "duplicate-record", "nonexistent-test", "ignored-required-test",
     "missing-job", "missing-violation", "missing-reference", "gate-structure",
-    "unbound-revision", "unbound-input", "unbound-lane", "selection-refused", "zero-executions", "raw-failed", "identity",
+    "unbound-revision", "unbound-input", "unbound-lane", "selection-refused", "raw-selection-mismatch", "zero-executions", "raw-failed", "identity",
     "missing-result", "wrong-violation", "missing-provenance", "uncovered-lane", "incomplete", "unsupported-event", "lane-result", "unqualified", TIMEOUT, EXHAUSTED, UNSUPPORTED, SKIPPED, "tool-failure", "correspondence-drift", "census", "intake", "control-ratchet",
 }
 ADMITTED, REFUSED, CRASHED = 0, 1, 2
@@ -315,13 +338,15 @@ QUALIFIED = tuple(lane for lane, declared in LANES.items() if "target" in declar
 FUZZ = tuple(lane for lane, declared in LANES.items() if "target" not in declared)
 # The tag comparison inspection lanes, one per architecture, share one declaration and one inspection script.
 TAG_COMPARE = ("tag-compare-x86-64", "tag-compare-aarch64")
+# The raw files a selection judge reads: the two listings, the run and its exit code.
+SELECTED = ("list.txt", "ignored.txt", "run.txt", "exit.txt")
 LANE_EVIDENCE = {
-    "workspace": ("run.txt", "report.json", "pins.txt"), "loom": ("run.txt", "report.json", "pins.txt"),
-    **{lane: ("run.txt", "report.json", "pins.txt") for lane in QUALIFIED},
+    "workspace": ("report.json", "pins.txt", *SELECTED), "loom": ("report.json", "pins.txt", *SELECTED),
+    **{lane: ("report.json", "pins.txt", *SELECTED) for lane in QUALIFIED},
     **{lane: ("fuzz.json", "pins.txt") for lane in FUZZ},
-    "asan": ("run.txt", "report.json", "pins.txt", "qualified.json"),
-    "qemu": ("run.txt", "report.json", "pins.txt", "qualified.json", "guest.json"),
-    "miri": ("run.txt", "report.json", "pins.txt", "controls.txt"), "sweep": ("run.txt", "report.json", "pins.txt"),
+    "asan": ("report.json", "pins.txt", "qualified.json", *SELECTED),
+    "qemu": ("report.json", "pins.txt", "qualified.json", "guest.json", *SELECTED),
+    "miri": ("report.json", "pins.txt", "controls.txt", *SELECTED), "sweep": ("report.json", "pins.txt", *SELECTED),
     "rc11": ("report.json", "identity.json", "pins.txt"),
     "verus": ("report.json", "identity.json", "pins.txt", "verus.txt", "verus.d", "cargo.d", "tree.txt"),
     "genmc": ("report.json", "identity.json", "pins.txt"), "kani": ("report.json", "identity.json", "pins.txt", "kani-list.json", "Cargo.lock"),
@@ -2179,28 +2204,72 @@ def control_gaps(receipt, inventory):
     return gaps
 
 
+VERDICT_FIELDS = ("code", "credited", "cfg", "module", "rows", "targets")
+EXIT_CODE = re.compile(r"-?[0-9]{1,9}")
+
+
+def selection_args(job, module):
+    """Return the `select-tests.py` cfg arguments the lane script passes for `job` and `module`, or None for a lane
+    whose `report.json` no selection judge writes."""
+    cfg = LANE_CFG.get(job)
+    if cfg in ("qualified", "loom"):
+        return [f"--cfg={cfg}", f"--module={job if cfg == 'qualified' else module}"]
+    return None if cfg is None else [f"--cfg={cfg}"]
+
+
+def judged_selection(select, cfg_args, evidence, exit_text):
+    """Return the report `select-tests.py run` writes under `cfg_args` for the lane's `SELECTED` files, judged in this process
+    against the committed inventory, registry and catalog; the run's parsed summaries, or None when the judgment
+    stopped before it parsed the run; and the reasons no judgment ran: a missing file or an exit code that is no
+    integer."""
+    unbound = [f"the lane holds no {name} to judge its selection from" for name in SELECTED if not (evidence / name).is_file()]
+    if exit_text is not None and not EXIT_CODE.fullmatch(exit_text):
+        unbound.append(f"exit.txt holds {exit_text[:40]!r}, which is no exit code")
+    if unbound:
+        return None, None, unbound
+    try:
+        judged, args = select.verdict(["run", *cfg_args, "--list", str(evidence / "list.txt"),
+                                   "--ignored", str(evidence / "ignored.txt"), "--output", str(evidence / "run.txt"),
+                                   "--exit", exit_text])
+    except SystemExit as error:
+        return None, None, [f"the selection judge refused its arguments {cfg_args}: exit {error.code}"]
+    return judged, getattr(args, "summaries", None), []
+
+
 def build_receipt(select, job, module, evidence, revision):
+    """Return the receipt of the lane's evidence. A completed lane whose report a selection judge writes takes its
+    selection verdict, per-target counts and execution count from `judged_selection`, and records beside them the
+    saved `report.json`'s verdict and the `VERDICT_FIELDS` in which it differs."""
     evidence = Path(evidence)
     report = read_json(evidence / "report.json") if (evidence / "report.json").exists() else None
-    exit_code = int((evidence / "exit.txt").read_text().strip()) if (evidence / "exit.txt").exists() else None
+    if report is not None and not isinstance(report, dict):
+        raise Crash(f"{evidence / 'report.json'} holds no JSON object")
+    exit_text = (evidence / "exit.txt").read_text().strip() if (evidence / "exit.txt").exists() else None
+    cfg_args = selection_args(job, module)
+    raw = cfg_args is not None
+    exit_code = None if exit_text is None or (raw and not EXIT_CODE.fullmatch(exit_text)) else int(exit_text)
     completion, detail = completion_of(evidence, job, report, exit_code)
+    derived = raw and completion == COMPLETED
+    judged, summaries, unbound = judged_selection(select, cfg_args, evidence, exit_text) if derived else (None, None, [])
+    basis = (judged if derived else report) or {}
     executed, failed, executions = [], [], 0
     if job in FUZZ:
         fuzz = read_json(evidence / "fuzz.json") if (evidence / "fuzz.json").exists() else {}
         executions = int(fuzz.get("runs", 0))
     elif (evidence / "run.txt").exists():
-        try:
-            summaries = select.parse_summaries(select.read(str(evidence / "run.txt")))
-        except select.Refusal as refusal:
-            summaries = {}
-            if CANCELLED in str(refusal):
-                completion, detail = TIMEOUT, str(refusal)
-            elif completion == COMPLETED:
-                completion, detail = TOOL_FAILURE, str(refusal)
+        if summaries is None:
+            try:
+                summaries = select.parse_summaries(select.read(str(evidence / "run.txt")))
+            except select.Refusal as refusal:
+                summaries = {}
+                if CANCELLED in str(refusal):
+                    completion, detail = TIMEOUT, str(refusal)
+                elif completion == COMPLETED:
+                    completion, detail = TOOL_FAILURE, str(refusal)
         for summary in summaries.values():
             executed += summary["ok"]
             failed += summary["FAILED"]
-        executions = sum(counts.get("executed", 0) for counts in (report or {}).get("targets", {}).values())
+        executions = sum(dict_of(counts).get("executed", 0) for counts in dict_of(basis.get("targets")).values())
     pins = (evidence / "pins.txt").read_text().strip().splitlines() if (evidence / "pins.txt").exists() else []
     lane = f"loom {module}" if job == "loom" else job
     assumptions = ASSUMPTIONS.get(job, [])
@@ -2208,6 +2277,13 @@ def build_receipt(select, job, module, evidence, revision):
     inputs.update(committed_inputs())
     qualified = qualified_record(evidence, "qualified.json") if job in ENVELOPED else None
     field, record = DOMAIN_RECORDS.get(job, (None, None))
+    selection = {"credited": bool(basis.get("credited")), "reason": basis.get("reason"), "cfg": basis.get("cfg"),
+                 "module": basis.get("module")}
+    if derived:
+        saved = report or {}
+        differs = [] if judged is None else [name for name in VERDICT_FIELDS if judged.get(name) != saved.get(name)]
+        selection.update(unbound=unbound, report={"credited": bool(saved.get("credited")), "reason": saved.get("reason"),
+                                                  "differs": differs})
     return {
         **({"qualified": qualified} if job in ENVELOPED else {}),
         **({field: qualified_record(evidence, record)} if field else {}),
@@ -2216,10 +2292,9 @@ def build_receipt(select, job, module, evidence, revision):
         "inputs": inputs,
         "tool": {"name": "cargo fuzz" if job in FUZZ else {"miri": "cargo miri test", "sweep": "cargo miri test", "asan": "cargo test -Zbuild-std -Zsanitizer=address", "qemu": "scripts/guest-binder.py"}.get(job, "cargo test"), "provenance": pins},
         "assumptions": assumptions,
-        "bounds": {"targets": (report or {}).get("targets", {}), "exit": exit_code},
+        "bounds": {"targets": basis.get("targets", {}), "exit": exit_code},
         "completion": completion, "violation": detail if completion == VIOLATION else None, "detail": detail,
-        "selection": {"credited": bool(report and report.get("credited")), "reason": (report or {}).get("reason"), "cfg": (report or {}).get("cfg"),
-                      "module": (report or {}).get("module")},
+        "selection": selection,
         "executions": executions, "executed": sorted(executed), "failed": sorted(failed),
         "replay": f"bash scripts/rust-lane.sh {lane}",
         "ci": {key: os.environ.get(key) for key in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB")},
@@ -2288,6 +2363,9 @@ def credit(catalog, receipt, job, module, revision, evidence, inventory):
     if completion not in (COMPLETED, VIOLATION):
         code = completion.replace(" ", "-") if completion in (TIMEOUT, EXHAUSTED, UNSUPPORTED, SKIPPED, TOOL_FAILURE, DRIFT) else "tool-failure"
         refuse(code, None, receipt.get("detail") or f"completion {completion!r}")
+    elif completion == COMPLETED and selection_args(job, module) is not None and (gaps := raw_gaps(receipt)):
+        for code, reason in gaps:
+            refuse(code, None, reason)
     elif job not in FUZZ and not receipt.get("selection", {}).get("credited"):
         refuse("selection-refused", None, receipt["selection"].get("reason") or "the selection report is not credited")
     elif completion == COMPLETED and job in LANE_CFG and receipt["selection"].get("cfg") != LANE_CFG[job]:
@@ -2340,6 +2418,23 @@ def credit(catalog, receipt, job, module, revision, evidence, inventory):
         if completion == VIOLATION and (record["tests"] or not record["controls"]):
             refuse("wrong-violation", record["id"], f"a positive obligation met the violation {receipt.get('violation')!r}")
     return records, refusals
+
+
+def raw_gaps(receipt):
+    """Return the (code, reason) refusals a completed receipt earns from the selection judged again from its raw
+    evidence: `unbound-input` for each raw file that is missing or malformed, `selection-refused` for a saved
+    `report.json` that refused, and `raw-selection-mismatch` for a saved positive whose verdict fields differ from
+    the judgment. A saved refusal stays refused whatever the judgment."""
+    selection = dict_of(receipt.get("selection"))
+    saved = dict_of(selection.get("report"))
+    if selection.get("unbound"):
+        return [("unbound-input", reason) for reason in selection["unbound"]]
+    if not saved.get("credited"):
+        return [("selection-refused", saved.get("reason") or "the saved report.json is not credited")]
+    if saved.get("differs"):
+        return [("raw-selection-mismatch", f"report.json differs from the selection judged again from the raw evidence in "
+                                           f"{saved['differs']}: {selection.get('reason') or 'the judgment credits the run'}")]
+    return []
 
 
 def qualification_gaps(job, receipt, inventory):
@@ -2478,7 +2573,11 @@ def lineage_gaps(envelope):
     if native.get("lineage") is None:
         return []
     installs = ROOT / "crates/spdk-sys/src/generated/installs"
-    record = (ROOT / str(envelope.get("install"))).resolve()
+    named = Path(str(envelope.get("install")))
+    # A lane that records the absolute path of its own checkout names the record by its place under `installs`,
+    # which is read in the judging checkout.
+    within = named.is_absolute() and named.parts[-6:-1] == installs.relative_to(ROOT).parts
+    record = installs / named.name if within else (ROOT / named).resolve()
     if record.parent != installs or not record.is_file():
         return [f"the envelope names install {envelope.get('install')!r}, no committed record under {installs.relative_to(ROOT)}"]
     text = record.read_text(encoding="utf-8")
@@ -2522,9 +2621,9 @@ def envelope_gaps(job, receipt, envelope, inventory):
             gaps.append(f"the envelope names {field} {envelope[field]!r}, expected {admissible!r}")
     gaps += basis_gaps(job, envelope, missing)
     gaps += lineage_gaps(envelope)
-    targets = (receipt.get("bounds") or {}).get("targets") or {}
+    targets = dict_of(dict_of(receipt.get("bounds")).get("targets"))
     for target, witnesses in inventory[job].get("required", {}).items():
-        executed = ((targets.get(target) or {}).get("witnesses") or {}).get("executed_modules") or {}
+        executed = dict_of(dict_of(dict_of(targets.get(target)).get("witnesses")).get("executed_modules"))
         unattributed = sorted(module for module in witnesses["modules"] if not executed.get(module))
         if unattributed:
             gaps.append(f"{target} attributes no executed test to the required modules {unattributed}")
@@ -2649,6 +2748,43 @@ def identity_gap(receipt, expected):
     return None
 
 
+def recredit(select, catalog, inventory, receipt, evidence, revision):
+    """Return the refusals credit gives a lane whose report a selection judge writes, judged in this process from the
+    lane's evidence at `revision` against the committed catalog, inventory and registry, with no admission. The
+    receipt derived from the evidence carries the saved receipt's `ci`, the run identity the lane recorded, and must
+    equal the saved receipt, or it is `unbound-input`. Evidence that cannot be read or judged is the lane's own
+    `unbound-input`, so the other lanes are still judged. The saved `credit.json` is left unread."""
+    job, module = receipt.get("job"), receipt.get("module")
+    try:
+        derived = {**build_receipt(select, job, module, evidence, revision), "ci": receipt.get("ci")}
+        judged = credit(catalog, derived, job, module, revision, evidence, inventory)[1]
+    except (Crash, OSError, ValueError, KeyError, TypeError, select.Refusal) as error:
+        return [{"code": "unbound-input", "record": None, "reason": f"the lane's evidence cannot be judged again: {error}"}]
+    refusals = [] if receipt == derived else [
+        {"code": "unbound-input", "record": None, "reason": "the receipt differs from the receipt derived from the evidence"}]
+    return refusals + judged
+
+
+def receipt_shaped(receipt):
+    """Whether a saved receipt has the shape aggregation reads: a JSON object whose `ci` is an object or empty, whose
+    `job` and `module` are text or null and whose `executed` is a list of text."""
+    if not isinstance(receipt, dict) or not isinstance(receipt.get("ci") or {}, dict):
+        return False
+    executed = receipt.get("executed", [])
+    return (all(isinstance(receipt.get(name), (str, type(None))) for name in ("job", "module"))
+            and isinstance(executed, list) and all(isinstance(name, str) for name in executed))
+
+
+def saved_refusals(path):
+    """The refusals of the lane's saved `credit.json` at `path`: its `refusals`, a list of records that each name
+    their `code` as text. A missing file or a document of another shape is one `missing-result` refusal."""
+    refusals = dict_of(read_json(path)).get("refusals") if path.is_file() else None
+    if isinstance(refusals, list) and all(isinstance(dict_of(refusal).get("code"), str) for refusal in refusals):
+        return refusals
+    reason = "credit.json holds no list of refusals" if path.is_file() else "no credit.json"
+    return [{"code": "missing-result", "reason": reason}]
+
+
 def aggregate(lanes, event, expected, inventory):
     """The aggregate verdict over the lane evidence under `lanes`: per lane, its executed domain or why it is incomplete.
 
@@ -2658,12 +2794,14 @@ def aggregate(lanes, event, expected, inventory):
         raise ValueError(f"the aggregate needs a nonempty expected revision, run and attempt: {expected}")
     attempt = expected["attempt"]
     domains = lane_domains(event, inventory)
+    select, catalog = load_select_tests(), read_catalog()
     found, other, unread = {}, [], []
     for evidence in sorted(path for path in lanes.iterdir() if path.is_dir()) if lanes.is_dir() else []:
         if (evidence / "receipt.json").is_file():
-            receipt = read_json(evidence / "receipt.json")
-            credit = read_json(evidence / "credit.json") if (evidence / "credit.json").is_file() else None
-            refusals = credit["refusals"] if credit else [{"code": "missing-result", "reason": "no credit.json"}]
+            receipt, refusals = read_json(evidence / "receipt.json"), None
+            if not receipt_shaped(receipt):
+                unread.append(evidence.name)
+                continue
         elif evidence.name.startswith("evidence-barriers-") and (evidence / "report.json").is_file():
             receipt, refusals = barrier_receipt(evidence)
         else:
@@ -2673,8 +2811,10 @@ def aggregate(lanes, event, expected, inventory):
         if ran is not None and str(ran) != str(attempt):
             other.append({"lane": evidence.name, "attempt": ran})
             continue
+        if refusals is None and selection_args(receipt.get("job"), receipt.get("module")) is None:
+            refusals = saved_refusals(evidence / "credit.json")
         key = (receipt.get("job"), receipt.get("module"))
-        found.setdefault(key, []).append((evidence.name, receipt, refusals))
+        found.setdefault(key, []).append((evidence, receipt, refusals))
     lanes_out, complete = [], True
     for key in sorted(set(domains) | set(found), key=lambda key: (key[0] or "", key[1] or "")):
         job, module = key
@@ -2690,15 +2830,16 @@ def aggregate(lanes, event, expected, inventory):
             reason = (f"the lane ran, and its artifact {held[0]} holds no receipt" if held else
                       "no receipt: the lane did not run (an unavailable runner, a skipped prerequisite or a missing artifact)")
         elif len(entries) > 1:
-            reason = f"{len(entries)} receipts: {[entry[0] for entry in entries]}"
+            reason = f"{len(entries)} receipts: {[entry[0].name for entry in entries]}"
         else:
-            _, receipt, refusals = entries[0]
+            evidence, receipt, refusals = entries[0]
             executed = set(receipt.get("executed", []))
             if (gap := identity_gap(receipt, expected)) is not None:
                 reason = gap
             elif receipt.get("completion") != COMPLETED:
                 reason = f"completion {receipt.get('completion')}"
-            elif refusals:
+            elif (refusals := recredit(select, catalog, inventory, receipt, evidence, expected["revision"])
+                  if refusals is None else refusals):
                 reason = f"credit refused: {sorted({refusal['code'] for refusal in refusals})}"
             elif not receipt.get("executions"):
                 reason = "zero executions"
@@ -2712,7 +2853,7 @@ def aggregate(lanes, event, expected, inventory):
         if len(entries) == 1:
             receipt = entries[0][1]
             entry.update(executions=receipt.get("executions"), executed=len(receipt.get("executed", [])),
-                         artifact=entries[0][0])
+                         artifact=entries[0][0].name)
         advisory = job in ADVISORY_JOBS and key in domains
         if advisory:
             entry["advisory"] = True

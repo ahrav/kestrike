@@ -1798,7 +1798,7 @@ class LaneCancellation(unittest.TestCase):
         )
         self.assertEqual(step.returncode, 0, step.stderr)
         summary = (self.dir / "summary.md").read_text()
-        self.assertIn("### Workspace suite: credited", summary)
+        self.assertIn("### Workspace suite: selection credited", summary)
         self.assertIn(
             "- 1696 executed; ignored per crate: 0 campaign-monitor, 0 campaign-supervisor, "
             "0 sim-host, 15 kestrike, 0 kestrike-aws, 0 kestrike-reconciler, 0 source-anchors, 0 spdk-sys",
@@ -1824,7 +1824,7 @@ class LaneCancellation(unittest.TestCase):
         )
         self.assertEqual(step.returncode, 0, step.stderr)
         summary = (self.dir / "summary.md").read_text()
-        self.assertIn("### Workspace suite: execution mismatch", summary)
+        self.assertIn("### Workspace suite: selection execution mismatch", summary)
         self.assertIn(f"- revision {revision}; census baseline 0123456789abcdef0123456789abcdef01234567", summary)
         self.assertIn("- reason: kestrike executed 2 of 3 runnable tests", summary)
         self.assertNotIn("rust-lane.sh failed at line", summary)
@@ -1854,7 +1854,7 @@ class LaneCancellation(unittest.TestCase):
         summary = (self.dir / "summary.md").read_text()
         select = load("select_tests", ROOT / "scripts/select-tests.py")
         fences = select.load_inventory(select.INVENTORY)["loom"]["credit_model"]["ignored"]
-        self.assertIn("### Loom credit_model: credited", summary)
+        self.assertIn("### Loom credit_model: selection credited", summary)
         self.assertIn("- 8 listed, 8 executed, 0 ignored", summary)
         self.assertIn(f"- excluded fence controls: {', '.join(fences) if fences else 'none'}", summary)
 
@@ -1879,7 +1879,7 @@ class LaneCancellation(unittest.TestCase):
                               cwd=fixture, env=self.env, capture_output=True, text=True)
         self.assertEqual(step.returncode, 0, step.stderr)
         summary = (self.dir / "summary.md").read_text()
-        self.assertIn("### Loom authority_model: credited", summary)
+        self.assertIn("### Loom authority_model: selection credited", summary)
         self.assertIn("preemption bounds: unbounded (loom::model) at 1 sites", summary)
         self.assertIn("- 2 listed, 2 executed, 0 ignored", summary)
         self.assertFalse((evidence / "failure.txt").exists())
@@ -1914,7 +1914,7 @@ class LaneCancellation(unittest.TestCase):
         self.assertEqual(step.returncode, 0, step.stderr)
         summary = (self.dir / "summary.md").read_text()
         for line in (
-            "### Miri ownership corpus: credited",
+            "### Miri ownership corpus: selection credited",
             f"- {selected} of {selected} selected IDs executed at seed 0 on one test thread; 46 interpreter ignores reconciled",
             f"- control `{control}`: exit 1, diagnostic found",
             "with isolation enabled; no detector is disabled",
@@ -2378,6 +2378,7 @@ class LaneCancellation(unittest.TestCase):
                           "handoff-cycles-hold-every-acknowledged-mutation-across-both-hosts"]),
             "campaigns": ("--test sim_worker -- --nocapture --exact", "Worker campaigns",
                           ["worker-campaigns-replay-bundles-and-trees-in-fresh-processes",
+                           "lane-credit-derives-the-selection-verdict-from-the-raw-run",
                            "fleet-pinned-runs-report-one-digest-in-fresh-processes"]),
             "search": ("--lib -- --nocapture --exact", "ServeCore search, pull-request bound",
                        ["serve-search-exhausts-its-pull-request-bound"]),
@@ -2415,7 +2416,7 @@ class LaneCancellation(unittest.TestCase):
                                          capture_output=True, text=True)
                 self.assertEqual(summary.returncode, 0, summary.stderr)
                 text = (self.dir / "summary.md").read_text()
-                self.assertIn(f"### {title}: credited", text)
+                self.assertIn(f"### {title}: selection credited", text)
                 side = "among the ignored cases of" if lane in ("long-run", "search-nightly") else "in"
                 self.assertIn(f"- {len(selection)} of {len(selection)} selected cases executed by exact ID {side} ", text)
                 for row in json.loads((evidence / "report.json").read_text())["rows"]:
@@ -2583,7 +2584,7 @@ class LaneCancellation(unittest.TestCase):
         step = subprocess.run(["bash", "scripts/rust-lane.sh", "summary", "asan"], cwd=ROOT, env=self.env, capture_output=True, text=True)
         self.assertEqual(step.returncode, 0, step.stderr)
         summary = (self.dir / "summary.md").read_text()
-        for line in ("### Address-sanitized library tests: credited",
+        for line in ("### Address-sanitized library tests: selection credited",
                      f"- kestrike: {3 + required_count} executed, {receipt['bounds']['targets']['kestrike']['observed_ignored']} ignored",
                      f"attributed per module: bind 1, index 1, native {1 + required_count}",
                      "- spdk_sys: 3 executed, 0 ignored; controls `shim_tests::a_one_byte_header_read_is_reported_at_the_shim_frame`",
@@ -2838,7 +2839,7 @@ class LaneCancellation(unittest.TestCase):
         self.assertEqual(step.returncode, 0, step.stderr)
         summary = (self.dir / "summary.md").read_text()
         qemu = json.loads((ROOT / "scripts/test-inventory.json").read_text())["qemu"]
-        for line in ("### Guest binder in a disposable QEMU guest: credited",
+        for line in ("### Guest binder in a disposable QEMU guest: selection credited",
                      f"- 1 of 1 guest cases executed by exact ID among the ignored cases of kestrike, 2470 filtered out; `{guest[0]}`",
                      "- guest outcome qualified pass; reports ['default refused', 'controller 0000:00:04.0",
                      "- identity: volume vol-0123456789abcdef0, instance i-0123456789abcdef0, model QEMU NVMe Ctrl, pci 1b36:0010; QEMU emulator version 9.2.0 (fake)",

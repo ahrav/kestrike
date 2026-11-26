@@ -595,6 +595,17 @@
       "reference": "the worker's own fresh-process reruns of each bundle, regression and tree"
     },
     {
+      "id": "lane-credit-derives-the-selection-verdict-from-the-raw-run",
+      "property": "#343 raw-selection-credit",
+      "transition": "scripts/verify-receipts.py credit, credit --receipt and aggregate on a completed lane whose report.json select-tests.py run writes: the workspace, Loom, Miri, sweep, ASan and QEMU lanes and the qualified test lanes, this record's campaigns lane among them, whose fleet-replay row's two cases this record cites",
+      "invariant": "the receipt's selection verdict, per-target counts and execution count come from select-tests.py's judgment, run in process under the lane's cfg arguments, of the lane's bound list.txt, ignored.txt, run.txt and exit.txt against the committed inventory, registry and catalog; a saved report.json that refused keeps the lane refused, a saved positive report that differs from the judgment on code, credited, cfg, module, rows or targets is refused as raw-selection-mismatch, and a missing raw file or an exit code that is no integer is unbound-input; aggregation derives each such lane's receipt and credit again from its evidence and refuses a saved receipt that differs from the derived one; so a stale credited report beside a run short of a row's member or witness line, such as the fleet-replay row's, credits no record. LIMITS: credit of this record shows that the campaigns run's saved report agrees with the judgment derived from its raw files on those six fields, and nothing more: no lane case feeds the tool a stale report, so no lane observes a refusal, and the self-tests the no_control member names check the refusals; the checker, fuzz and barrier lanes keep their own evidence rules: aggregation reads the checker and fuzz lanes' saved credit.json and the barrier lane's scan report; the policy gaps of a report depend on the day of the judgment and are not compared",
+      "job": "campaigns",
+      "tests": ["fleet::pinned_runs_report_their_digests", "fleet::two_fresh_processes_report_one_digest_for_every_pinned_run"],
+      "controls": [],
+      "no_control": "The rule is the credit tool's own, so its positive and negative cases are self-tests of the tool, not lane tests: QualifiedRejudge in scripts/test-verify-receipts.py, which the comment-policy job's Script self-checks step runs through scripts/run-receipt-selftests.py, refuses a stale credited report beside a run that lacks one fleet-scheduled-roots member line or one witness line on each of the three paths, and a stale credited report beside a failing exit code for each of the workspace, Loom, Miri, sweep, ASan and QEMU lanes; admit takes a campaigns test only from the campaigns rows of scripts/test-inventory.json, which name no self-test.",
+      "reference": "select-tests.py run, the lane's own selection judge, rerun on the bound raw files; issue #343"
+    },
+    {
       "id": "serve-search-exhausts-its-pull-request-bound",
       "property": "#11 S3-D-18",
       "transition": "the finite ServeCore search at its pull-request bound: depth 5, one fault and one advance",

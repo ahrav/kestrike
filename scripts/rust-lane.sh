@@ -2082,9 +2082,11 @@ if report is None:
     print(f"### {title}: red\n- revision {revision}\n- listing {verdict}; run not judged; reason: {reason}")
     sys.exit()
 # A refused judgment exits through the ERR trap, so failure.txt accompanies every refused report and the
-# heading keeps that verdict; a failure after a credited report, a Miri control's, makes the lane red.
+# heading keeps that verdict; a failure after a credited report, a Miri control's, makes the lane red. The verdict
+# is the selection report's; the credit step's line states the obligations' credit.
 failed_after_credit = failure is not None and report["verdict"] == "credited"
-print(f"### {title}: {'red' if failed_after_credit else report['verdict']}")
+heading = "red" if failed_after_credit else f"selection {report['verdict']}"
+print(f"### {title}: {heading}")
 print(f"- revision {revision}; census baseline {report['baseline']}")
 if failed_after_credit:
     print(f"- reason: {failure}")

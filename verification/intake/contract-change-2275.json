@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2275",
+  "kind": "contract-change",
+  "pull_request": 2275,
+  "changed": "The credit rule of every lane whose report.json select-tests.py run writes: the workspace, Loom, Miri, sweep, ASan and QEMU lanes and the qualified test lanes. Credit took the selection verdict and the execution count from the saved report.json; it now derives them from select-tests.py's judgment of the lane's bound list.txt, ignored.txt, run.txt and exit.txt, refuses a saved positive report that differs as raw-selection-mismatch, and aggregation derives each such lane's receipt and credit again from its evidence. The new obligation record lane-credit-derives-the-selection-verdict-from-the-raw-run states the rule.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "lane-credit-derives-the-selection-verdict-from-the-raw-run",
+    "reason": "Its invariant states the new contract: a stale credited report beside a run short of a row's member or witness line, or beside a failing exit code, credits no record on the direct credit path, on import or at aggregation, and a saved refusal stays refused."
+  }
+}

@@ -2,7 +2,9 @@
 """Exercise verify-receipts.py on the committed catalog and on seeded lane evidence."""
 
 import contextlib
+import atexit
 import copy
+import functools
 import types
 import dataclasses
 import importlib.util
@@ -85,8 +87,8 @@ def summary(passed, failed, ignored, filtered=0):
     )
 
 
-def module_witnesses(target="kestrike"):
-    required = INVENTORY["ordinary"]["kestrike"]["required"][target]
+def module_witnesses(target="kestrike", crate="kestrike"):
+    required = INVENTORY["ordinary"][crate]["required"][target]
     names = list(required["tests"])
     for module in required["modules"]:
         if not any(name.startswith(module + "::") for name in names):
@@ -235,13 +237,21 @@ class VerifyReceipts(unittest.TestCase):
         return evidence
 
     def workspace_evidence(self, name="workspace", **kwargs):
-        """The workspace lane's evidence: each required target that holds a test a workspace record names, with its required witnesses and declared ignores."""
+        """The workspace lane's evidence as `--cfg ordinary` judges its whole-workspace listing: every declared target
+        of every crate, a required target with its witnesses and every other with one test, each with its declared
+        ignores, `kestrike` first."""
         headers = {"kestrike": HEADER, "sim_worker": WORKER_HEADER, "soak_cli": SOAK_HEADER}
-        self.assertEqual(set(WORKSPACE_TARGETS), set(headers), "the fixture's sections differ from the required targets a workspace record names")
-        declared = INVENTORY["ordinary"]["kestrike"]["ignored"]
-        cfg_args = ("--cfg", "ordinary", "--crate", "kestrike", *(arg for target in headers for arg in ("--target", target)))
-        more = tuple((headers[target], module_witnesses(target), declared.get(target, [])) for target in headers if target != "kestrike")
-        return self.evidence(name, module_witnesses(), declared["kestrike"], cfg_args=cfg_args, more_targets=more, **kwargs)
+        self.assertLessEqual(set(WORKSPACE_TARGETS), set(headers), "a workspace record names a test of a target the fixture lists as generic")
+        sections = []
+        for crate, declared in INVENTORY["ordinary"].items():
+            for target in declared["targets"]:
+                header = headers.get(target) or (f"   Doc-tests {target.removeprefix('doc:')}" if target.startswith("doc:") else
+                                                 f"     Running unittests src/lib.rs (target/debug/deps/{target}-0123456789abcdef)")
+                runnable = module_witnesses(target, crate) if target in declared.get("required", {}) else ["tests::a_listed_test"]
+                sections.append((target, (header, runnable, declared["ignored"].get(target, []))))
+        sections.sort(key=lambda section: section[0] != "kestrike")
+        (header, runnable, ignored), *more = (section for _, section in sections)
+        return self.evidence(name, runnable, ignored, header=header, cfg_args=("--cfg", "ordinary"), more_targets=tuple(more), **kwargs)
 
     def loom_evidence(self, module, name=None, **kwargs):
         declared = INVENTORY["loom"][module]
@@ -832,7 +842,8 @@ class VerifyReceipts(unittest.TestCase):
         receipt = self.receipt_of(evidence)
         self.assertEqual(receipt["revision"], REVISION)
         self.assertEqual(receipt["completion"], "completed")
-        self.assertEqual(receipt["executions"], sum(len(module_witnesses(target)) for target in WORKSPACE_TARGETS))
+        self.assertEqual(receipt["executions"], len(receipt["executed"]))
+        self.assertLessEqual({name for target in WORKSPACE_TARGETS for name in module_witnesses(target)}, set(receipt["executed"]))
         self.assertLessEqual({"list.txt", "run.txt", "report.json", "scripts/test-inventory.json", "verification/obligations.json"}, set(receipt["inputs"]))
         self.assertEqual(receipt["tool"], {"name": "cargo test", "provenance": ["- rustc 1.99.0 (b940084d7 2026-09-28)"]})
         self.assertEqual(receipt["replay"], "bash scripts/rust-lane.sh workspace")
@@ -987,6 +998,9 @@ class VerifyReceipts(unittest.TestCase):
             "native not a record": ({"native": "GCC"}, "the envelope's native lacks ['compilers', 'configure', 'archives', 'lineage']"),
             "stale lineage": ({"native": {**self.ENVELOPE["native"], "lineage": "e" * 64}}, f"the envelope's lineage {'e' * 64} is "
                               f"not unrecorded, the identity of the committed {self.ENVELOPE['install']}; the record is stale"),
+            "install of another checkout's directory outside installs": ({"install": "/srv/checkout/crates/spdk-sys/src/generated/x86_64-unknown-linux-gnu-native-asan"},
+                "the envelope names install '/srv/checkout/crates/spdk-sys/src/generated/x86_64-unknown-linux-gnu-native-asan', no committed record "
+                "under crates/spdk-sys/src/generated/installs"),
             "foreign install": ({"install": "/etc/passwd"}, "the envelope names install '/etc/passwd', no committed record "
                                 "under crates/spdk-sys/src/generated/installs"),
         }
@@ -1011,6 +1025,8 @@ class VerifyReceipts(unittest.TestCase):
         install.write_bytes(original)
         with mock.patch.object(verify, "ROOT", self.dir):
             self.assertEqual(verify.lineage_gaps(self.ENVELOPE), [])
+            another_checkout = {**self.ENVELOPE, "install": f"/srv/another-checkout/{self.ENVELOPE['install']}"}
+            self.assertEqual(verify.lineage_gaps(another_checkout), [], "a producer's absolute install path is read in the judging checkout")
             install.write_bytes(original + f"Source: SPDK a DPDK b\nArchive: {'a' * 64}  librte_eal.a\n".encode())
             digest = hashlib.sha256(install.read_bytes()).hexdigest()
             recorded = {**self.ENVELOPE, "native": {**self.ENVELOPE["native"], "lineage": digest}}
@@ -1347,9 +1363,10 @@ class VerifyReceipts(unittest.TestCase):
         refusals = self.admit(lambda c: next(r for r in c["records"] if r["job"] == "miri")["tests"].append(INVENTORY["miri"]["ignored"][0]))
         self.assertEqual([r["code"] for r in refusals], ["ignored-required-test"])
 
-    def test_a_completed_sweep_receipt_credits_every_kernel_over_every_seed(self):
+    def sweep_evidence(self, name="sweep"):
+        """The sweep lane's evidence: every kernel run `ok` in one block per seed."""
         declared, sweep = INVENTORY["miri"], INVENTORY["miri_sweep"]
-        evidence = self.dir / "sweep"
+        evidence = self.dir / name
         evidence.mkdir()
         header = "     Running unittests src/lib.rs (/tmp/miri-target/miri/x86_64-unknown-linux-gnu/debug/deps/kestrike-2d37337a438c04e5)"
         names = sweep["tests"] + declared["ignored"]
@@ -1367,6 +1384,11 @@ class VerifyReceipts(unittest.TestCase):
         with (evidence / "report.json").open("w") as out:
             subprocess.run([sys.executable, str(SELECT), "run", *common, "--output", str(evidence / "run.txt"), "--exit", "0"],
                            stdout=out, stderr=subprocess.DEVNULL, check=False)
+        return evidence
+
+    def test_a_completed_sweep_receipt_credits_every_kernel_over_every_seed(self):
+        sweep = INVENTORY["miri_sweep"]
+        evidence = self.sweep_evidence()
         code, report = self.run_script("credit", "--job", "sweep", "--evidence", str(evidence), "--revision", REVISION)
         self.assertEqual((code, report["refusals"]), (0, []), report)
         self.assertEqual(report["executions"], len(sweep["tests"]) * sweep["seeds"])
@@ -1470,10 +1492,11 @@ class VerifyReceipts(unittest.TestCase):
         self.assertTrue(json.loads((native / "report.json").read_text())["credited"])
         code, report = self.run_script("credit", "--job", "miri", "--evidence", str(native), "--revision", REVISION)
         self.assertEqual(code, 1, report)
-        self.assertIn("unbound-lane", self.codes(report))
-        self.assertTrue(any("judged under cfg 'ordinary'" in r["reason"] for r in report["refusals"]), report)
+        self.assertIn("raw-selection-mismatch", self.codes(report))
+        self.assertTrue(any(r["code"] == "raw-selection-mismatch" and "'cfg'" in r["reason"] for r in report["refusals"]), report)
         code, report = self.run_script("credit", "--job", "workspace", "--evidence", str(native), "--revision", REVISION)
-        self.assertNotIn("unbound-lane", self.codes(report), report)
+        self.assertEqual(code, 1, report)
+        self.assertFalse(any("'cfg'" in r["reason"] for r in report["refusals"] if r["code"] == "raw-selection-mismatch"), report)
 
     def genmc_evidence(self, outputs=None, profile="pr"):
         """Write synthetic GenMC evidence for every case of `profile` and judge it as the lane does."""
@@ -2168,7 +2191,7 @@ class VerifyReceipts(unittest.TestCase):
         self.assertEqual([r["code"] for r in refusals], ["tool-failure", "missing-result"])
         receipt.update(completion="completed", executions=0)
         _, refusals = verify.credit(catalog, receipt, "loom", "grace_model", REVISION, self.dir, INVENTORY)
-        self.assertEqual({r["code"] for r in refusals}, {"zero-executions", "missing-result", "unbound-input"})
+        self.assertEqual({r["code"] for r in refusals}, {"zero-executions", "missing-result", "unbound-input", "selection-refused"})
         receipt.update(completion="violation", executions=1, violation="protection violated")
         catalog["records"][0]["tests"] = ["storage::grace_model::pinned_readers_never_observe_a_released_anchor_or_a_reused_slot"]
         _, refusals = verify.credit(catalog, receipt, "loom", "grace_model", REVISION, self.dir, INVENTORY)
@@ -2381,6 +2404,301 @@ def expected(attempt="1"):
     return {"revision": REVISION, "run": RUN, "attempt": attempt}
 
 
+select_fixture = load("test_select_tests", ROOT / "scripts/test-select-tests.py")
+REJUDGED_LANE = "search-nightly"
+MEMBER_LINE = "fleet: scheduled zone loss root 2: pass"
+WITNESS_LINE = "fleet: scheduled zone: 3 checks passed"
+
+
+def qualified_evidence(evidence, lane, ran=None, drop=None):
+    """Write qualified test lane `lane`'s evidence into the new directory `evidence`: its listings, a run that
+    executes `ran` (the lane's selection by default) with every row's lines, its exit code, its pins and the report
+    `select-tests.py run` writes for them. `drop` then removes that line from `run.txt`, so the report is stale
+    against the run beside it. Return the report."""
+    evidence.mkdir()
+    header = select_fixture.QUALIFIED_HEADERS[lane]
+    selection = select.selection_of(INVENTORY["qualified"][lane])
+    ran = selection if ran is None else list(ran)
+    lines = [line for row in INVENTORY["qualified"][lane]["rows"] for line in select_fixture.ROW_LINES[row["id"]]]
+    filtered = len(select_fixture.QUALIFIED_LISTED[lane]) - len(ran)
+    run = (f"{header}\n\nrunning {len(ran)} tests\n" + "".join(f"{line}\n" for line in lines)
+           + f"{select_fixture.outcomes(ran)}\n{summary(len(ran), 0, 0, filtered)}\n")
+    (evidence / "list.txt").write_text(select_fixture.listing(select_fixture.QUALIFIED_LISTED[lane], header))
+    (evidence / "ignored.txt").write_text(select_fixture.listing(select_fixture.QUALIFIED_IGNORED[lane], header))
+    (evidence / "run.txt").write_text(run)
+    (evidence / "exit.txt").write_text("0\n")
+    (evidence / "pins.txt").write_text("- rustc 1.99.0 (b940084d7 2026-09-28)\n")
+    common = ["--cfg", "qualified", "--module", lane, "--list", str(evidence / "list.txt"), "--ignored", str(evidence / "ignored.txt")]
+    report, _ = select.verdict(["run", *common, "--output", str(evidence / "run.txt"), "--exit", "0"])
+    (evidence / "report.json").write_text(json.dumps(report, sort_keys=True) + "\n")
+    if drop is not None:
+        if f"{drop}\n" not in run:
+            raise AssertionError(f"the {lane} run prints no line {drop!r}")
+        (evidence / "run.txt").write_text(run.replace(f"{drop}\n", ""))
+    return report
+
+
+COMPLETE = Path(tempfile.mkdtemp(prefix="kestrike-complete-"))
+atexit.register(shutil.rmtree, COMPLETE, ignore_errors=True)
+
+
+def complete_evidence(job, module=None):
+    """Return a directory of evidence that credits lane `job` (and Loom `module`), written once a process by the
+    `VerifyReceipts` builders, which run `select-tests.py` on it as the lane does."""
+    return built_evidence(job, module)
+
+
+@functools.cache
+def built_evidence(job, module):
+    builder = VerifyReceipts("test_the_committed_catalog_is_admitted_and_covers_every_lane")
+    builder.dir = COMPLETE
+    name = f"{job}-{module}" if module else job
+    build = {"workspace": lambda: builder.workspace_evidence(name), "loom": lambda: builder.loom_evidence(module, name=name),
+             "miri": lambda: builder.miri_evidence(name), "sweep": lambda: builder.sweep_evidence(name),
+             "asan": lambda: builder.asan_evidence(name), "qemu": lambda: builder.qemu_evidence(name)}[job]
+    return build()
+
+
+def lane_receipt(job, module, evidence):
+    """The receipt `verify-receipts.py receipt` writes for `evidence` under run 7, attempt 1."""
+    with mock.patch.dict(os.environ, {"GITHUB_RUN_ID": RUN, "GITHUB_RUN_ATTEMPT": "1"}):
+        return verify.build_receipt(select, job, module, evidence, REVISION)
+
+
+class QualifiedRejudge(unittest.TestCase):
+    """Credit of a qualified test lane judges its bound listings, run and exit code again and refuses a saved positive
+    report or receipt that disagrees, on the direct path, the import path and aggregation."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="kestrike-rejudge-")
+        self.addCleanup(self.temp.cleanup)
+
+    def evidence(self, drop=None, lane=REJUDGED_LANE):
+        """Write a passing run of `lane` with its report into a lanes directory of its own, then remove the line
+        `drop` from `run.txt`, so the report that says credited is stale against the run beside it."""
+        evidence = Path(tempfile.mkdtemp(dir=self.temp.name)) / f"evidence-{lane}-{RUN}-1"
+        report = qualified_evidence(evidence, lane, drop=drop)
+        self.assertTrue(report["credited"], report)
+        return evidence
+
+    def main(self, *argv):
+        """Run the script in-process under run 7, attempt 1, with the catalog admission and the census, which this
+        evidence does not reach, left out; return (code, report)."""
+        ci = {"GITHUB_RUN_ID": RUN, "GITHUB_RUN_ATTEMPT": "1"}
+        with mock.patch.dict(os.environ, ci), mock.patch.object(verify, "admit", return_value=[]), \
+                mock.patch.object(verify, "census_judgment", return_value=([], [])), \
+                contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(io.StringIO()):
+            code = verify.main([*argv, "--job", REJUDGED_LANE, "--revision", REVISION])
+        try:
+            return code, json.loads(stdout.getvalue())
+        except ValueError:
+            self.fail(f"no JSON report: {stdout.getvalue()!r}")
+
+    def credit(self, evidence, *extra):
+        return self.main("credit", "--evidence", str(evidence), *extra)
+
+    def imported(self, evidence):
+        """Write the lane's receipt, then credit it as an imported receipt, read-only."""
+        code, report = self.main("receipt", "--evidence", str(evidence))
+        self.assertEqual(code, 0, report)
+        return self.credit(evidence, "--receipt", str(evidence / "receipt.json"), "--read-only")
+
+    def aggregated(self, evidence):
+        _, entries, _ = verify.aggregate(evidence.parent, "schedule", expected(), INVENTORY)
+        return {entry["lane"]: entry for entry in entries}[REJUDGED_LANE]
+
+    def codes(self, report):
+        return sorted({refusal["code"] for refusal in report["refusals"]})
+
+    STALE = (("a missing member", MEMBER_LINE, "skipped members ['zone loss root 2']"),
+             ("a missing witness", WITNESS_LINE, "missing witness '^fleet: scheduled zone: 3 checks passed$'"))
+
+    def test_the_honest_run_credits_on_each_path(self):
+        evidence = self.evidence()
+        code, report = self.credit(evidence)
+        self.assertEqual((code, report["refusals"]), (0, []), report)
+        code, report = self.imported(evidence)
+        self.assertEqual((code, report["refusals"]), (0, []), report)
+        self.assertTrue(self.aggregated(evidence)["complete"], self.aggregated(evidence))
+
+    def test_a_saved_refusal_stays_refused_and_saved_credit_refusals_are_left_unread(self):
+        """A `report.json` that refused keeps the lane refused though its run judged again credits it, and
+        aggregation judges the lane from its evidence, so a saved `credit.json` neither refuses nor credits it."""
+        evidence = self.evidence()
+        saved = json.loads((evidence / "report.json").read_text())
+        (evidence / "report.json").write_text(json.dumps({**saved, "code": 4, "credited": False, "reason": "stale refusal"}))
+        code, report = self.credit(evidence)
+        self.assertEqual((code, self.codes(report)), (1, ["selection-refused"]), report)
+        self.assertEqual(report["refusals"][0]["reason"], "stale refusal")
+        self.assertFalse(self.aggregated(evidence)["complete"])
+        (evidence / "report.json").write_text(json.dumps(saved))
+        self.assertEqual(self.credit(evidence)[0], 0)
+        (evidence / "credit.json").write_text(json.dumps({"refusals": [{"code": "selection-refused", "reason": "x"}]}))
+        self.assertTrue(self.aggregated(evidence)["complete"], self.aggregated(evidence))
+
+    def test_aggregation_leaves_an_unreadable_credit_file_unread_and_keeps_a_lane_read_failure_local(self):
+        """A selection lane's `credit.json` is left unread, so an unreadable one changes nothing; a lane whose raw
+        evidence cannot be read is that lane's `unbound-input`, and the aggregate judges the other lanes."""
+        evidence = self.evidence()
+        self.assertEqual(self.credit(evidence)[0], 0)
+        (evidence / "credit.json").write_text("{")
+        self.assertTrue(self.aggregated(evidence)["complete"], self.aggregated(evidence))
+        (evidence / "report.json").write_text("{")
+        entry = self.aggregated(evidence)
+        self.assertEqual((entry["complete"], entry["reason"]), (False, "credit refused: ['unbound-input']"), entry)
+
+    def test_a_saved_report_whose_targets_are_malformed_is_the_lanes_own_refusal(self):
+        """A saved report of a tool failure is the receipt's basis as written. A `targets` field that is no object
+        of objects reads as holding no count, so the receipt step and direct credit end in their JSON report, and
+        aggregation refuses that lane and judges the others."""
+        for targets in ([], "kestrike", {"kestrike": []}):
+            with self.subTest(targets=targets):
+                evidence = self.evidence()
+                self.assertEqual(self.credit(evidence)[0], 0)
+                (evidence / "report.json").write_text(json.dumps({"code": 2, "targets": targets}))
+                entry = self.aggregated(evidence)
+                self.assertFalse(entry["complete"], entry)
+                self.assertIn("unbound-input", entry["reason"])
+                code, report = self.credit(evidence)
+                self.assertEqual((code, report["executions"]), (1, 0), report)
+                self.assertIn("tool-failure", self.codes(report))
+
+    def test_a_saved_report_whose_targets_are_malformed_is_the_asan_lanes_own_refusal(self):
+        """The ASan envelope reads each required target's witnesses from the receipt's bounds, which a saved report
+        of a tool failure supplies as written. A target, its witnesses or its executed modules in another shape
+        than an object attributes no executed test, so aggregation refuses the ASan lane, direct credit and import
+        end in their JSON report, and the other lanes are judged."""
+        shapes = ("kestrike", {"spdk_sys": "x"}, {"kestrike": {"witnesses": "x"}},
+                  {"kestrike": {"witnesses": {"executed_modules": "x"}}})
+        for targets in shapes:
+            with self.subTest(targets=targets):
+                lanes = Path(tempfile.mkdtemp(dir=self.temp.name))
+                evidence = lanes / f"evidence-asan-{RUN}-1"
+                shutil.copytree(complete_evidence("asan"), evidence)
+                (evidence / "receipt.json").write_text(json.dumps(lane_receipt("asan", None, evidence)))
+                (evidence / "report.json").write_text(json.dumps({"code": 2, "targets": targets}))
+                _, entries, _ = verify.aggregate(lanes, "schedule", expected(), INVENTORY)
+                entry = next(entry for entry in entries if entry.get("artifact") == evidence.name)
+                self.assertFalse(entry["complete"], entry)
+                self.assertIn("unbound-input", entry["reason"])
+                argv = ["credit", "--job", "asan", "--evidence", str(evidence), "--revision", REVISION]
+                ci = {"GITHUB_RUN_ID": RUN, "GITHUB_RUN_ATTEMPT": "1"}
+                with mock.patch.dict(os.environ, ci), mock.patch.object(verify, "admit", return_value=[]), \
+                        mock.patch.object(verify, "census_judgment", return_value=([], [])), \
+                        contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+                    verify.main(argv)
+                    verify.main([*argv, "--receipt", str(evidence / "receipt.json"), "--read-only"])
+                try:
+                    reports = [json.loads(line) for line in out.getvalue().splitlines()]
+                except ValueError:
+                    self.fail(f"no JSON report: {out.getvalue()!r}")
+                self.assertEqual(len(reports), 2, reports)
+                for report in reports:
+                    self.assertIn("tool-failure", self.codes(report), report)
+
+    def test_a_saved_positive_report_that_differs_in_one_verdict_field_is_refused(self):
+        """The honest run credits, so each edited field of the saved credited report differs from the judgment
+        alone, and the receipt's execution count is the judgment's."""
+        honest = self.evidence()
+        code, report = self.credit(honest)
+        self.assertEqual((code, report["executions"]), (0, len(select.selection_of(INVENTORY["qualified"][REJUDGED_LANE]))), report)
+        edits = {"rows": lambda r: r["rows"][0].update(id="another-row"), "module": lambda r: r.update(module="search"),
+                 "targets": lambda r: next(iter(r["targets"].values())).update(executed=1000)}
+        for field, edit in edits.items():
+            with self.subTest(field=field):
+                evidence = self.evidence()
+                saved = json.loads((evidence / "report.json").read_text())
+                edit(saved)
+                (evidence / "report.json").write_text(json.dumps(saved))
+                code, report = self.credit(evidence)
+                self.assertEqual((code, self.codes(report)), (1, ["raw-selection-mismatch"]), report)
+                self.assertIn(f"in ['{field}']", report["refusals"][0]["reason"])
+                self.assertEqual(report["executions"], len(select.selection_of(INVENTORY["qualified"][REJUDGED_LANE])))
+                code, report = self.credit(evidence, "--receipt", str(evidence / "receipt.json"), "--read-only")
+                self.assertEqual(self.codes(report), ["raw-selection-mismatch"], report)
+                self.assertIn("raw-selection-mismatch", self.aggregated(evidence)["reason"])
+
+    def test_an_option_like_loom_module_is_the_lanes_own_refusal(self):
+        """A receipt's module reaches the selection judge as one `--module=` token, so a module that reads as an
+        option is judged as a module name, which the inventory lacks, and the other lanes are still judged."""
+        self.assertEqual(verify.selection_args("loom", "--help"), ["--cfg=loom", "--module=--help"])
+        evidence = self.evidence()
+        self.assertEqual(self.credit(evidence)[0], 0)
+        loom = evidence.parent / f"evidence-loom-credit_model-{RUN}-1"
+        shutil.copytree(complete_evidence("loom", "credit_model"), loom)
+        receipt = {**lane_receipt("loom", "credit_model", loom), "module": "--help"}
+        (loom / "receipt.json").write_text(json.dumps(receipt))
+        _, entries, _ = verify.aggregate(evidence.parent, "schedule", expected(), INVENTORY)
+        self.assertIn("a receipt for loom --help", {entry["lane"]: entry for entry in entries}["loom --help"]["reason"])
+        self.assertTrue(self.aggregated(evidence)["complete"])
+
+    def test_a_missing_or_malformed_raw_input_is_unbound(self):
+        cases = (("no listing", lambda e: (e / "list.txt").unlink(), "the lane holds no list.txt"),
+                 ("no ignored listing", lambda e: (e / "ignored.txt").unlink(), "the lane holds no ignored.txt"),
+                 ("no exit code", lambda e: (e / "exit.txt").unlink(), "the lane holds no exit.txt"),
+                 ("a malformed exit code", lambda e: (e / "exit.txt").write_text("zero\n"), "exit.txt holds 'zero'"))
+        for name, edit, reason in cases:
+            with self.subTest(name):
+                evidence = self.evidence()
+                edit(evidence)
+                code, report = self.credit(evidence)
+                self.assertEqual(code, 1, report)
+                self.assertTrue(any(refusal["code"] == "unbound-input" and reason in refusal["reason"]
+                                    for refusal in report["refusals"]), report)
+
+    def test_a_stale_credited_report_beside_a_run_short_of_its_row_is_refused_on_the_direct_path(self):
+        for name, drop, reason in self.STALE:
+            with self.subTest(name):
+                evidence = self.evidence(drop)
+                code, report = self.credit(evidence)
+                self.assertEqual((code, self.codes(report)), (1, ["raw-selection-mismatch"]), report)
+                self.assertTrue(any(reason in refusal["reason"] for refusal in report["refusals"]), report)
+
+    def test_a_stale_credited_report_beside_a_run_short_of_its_row_is_refused_on_import(self):
+        for name, drop, reason in self.STALE:
+            with self.subTest(name):
+                evidence = self.evidence(drop)
+                code, report = self.imported(evidence)
+                self.assertEqual((code, self.codes(report)), (1, ["raw-selection-mismatch"]), report)
+                self.assertTrue(any(reason in refusal["reason"] for refusal in report["refusals"]), report)
+
+    def test_a_stale_credited_report_of_each_selection_lane_is_refused_on_each_path(self):
+        """A lane whose saved report says credited while the exit code beside it is a failing one is refused on the
+        direct path, on import and at aggregation: the run judged again is an execution mismatch."""
+        for job, module in (("workspace", None), ("loom", "credit_model"), ("miri", None), ("sweep", None), ("asan", None),
+                            ("qemu", None)):
+            with self.subTest(job=job):
+                lanes = Path(tempfile.mkdtemp(dir=self.temp.name))
+                evidence = lanes / f"evidence-{job}-{RUN}-1"
+                shutil.copytree(complete_evidence(job, module), evidence)
+                (evidence / "exit.txt").write_text("1\n")
+                argv = ["--job", job, *(["--module", module] if module else []), "--evidence", str(evidence), "--revision", REVISION]
+                ci = {"GITHUB_RUN_ID": RUN, "GITHUB_RUN_ATTEMPT": "1"}
+                with mock.patch.dict(os.environ, ci), mock.patch.object(verify, "admit", return_value=[]), \
+                        mock.patch.object(verify, "census_judgment", return_value=([], [])), \
+                        contextlib.redirect_stdout(io.StringIO()) as direct, contextlib.redirect_stderr(io.StringIO()):
+                    verify.main(["credit", *argv])
+                    verify.main(["credit", *argv, "--receipt", str(evidence / "receipt.json"), "--read-only"])
+                reports = [json.loads(line) for line in direct.getvalue().splitlines()]
+                for path, report in zip(("direct", "import"), reports):
+                    self.assertIn("raw-selection-mismatch", self.codes(report), (path, report))
+                (evidence / "credit.json").write_text(json.dumps({"refusals": []}))
+                _, entries, _ = verify.aggregate(lanes, "schedule", expected(), INVENTORY)
+                entry = next(entry for entry in entries if entry.get("artifact") == evidence.name)
+                self.assertIn("raw-selection-mismatch", entry["reason"] or "", entry)
+
+    def test_a_stale_credited_report_beside_a_run_short_of_its_row_is_refused_at_aggregation(self):
+        """The lane's saved `credit.json` holds no refusal, as a credit step that judged the run before the line was
+        lost writes; aggregation judges the run again and refuses the lane."""
+        for name, drop, _ in self.STALE:
+            with self.subTest(name):
+                evidence = self.evidence(drop)
+                self.assertEqual(self.main("receipt", "--evidence", str(evidence))[0], 0)
+                (evidence / "credit.json").write_text(json.dumps({"refusals": []}))
+                entry = self.aggregated(evidence)
+                self.assertEqual((entry["complete"], entry["reason"]), (False, "credit refused: ['raw-selection-mismatch']"), entry)
+
+
 class Aggregate(unittest.TestCase):
     """The aggregate gate over downloaded lane evidence."""
 
@@ -2393,8 +2711,31 @@ class Aggregate(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def lane(self, name, job, module=None, executed=(), executions=None, completion="completed", refusals=(), attempt="1"):
+    def lane(self, name, job, module=None, executed=(), executions=None, completion="completed", refusals=(), attempt="1", drop=None,
+             edit=None):
+        """Write a lane's receipt and its `credit.json` with `refusals`. A lane whose report a selection judge writes
+        holds complete evidence, a qualified test lane's a run of `executed` and `drop` removed from its run after
+        its report is written, and every other's the evidence `complete_evidence` writes, which `edit` then changes;
+        the tool derives its receipt, whose `executions`, `completion` and `attempt` the arguments then replace,
+        and its `executed` too where they differ."""
         path = self.lanes / name
+        if verify.selection_args(job, module) is not None:
+            if job in verify.QUALIFIED:
+                qualified_evidence(path, job, ran=executed, drop=drop)
+            else:
+                shutil.copytree(complete_evidence(job, module), path)
+                if edit is not None:
+                    edit(path)
+            receipt = lane_receipt(job, module, path)
+            receipt["completion"] = completion
+            receipt["ci"]["GITHUB_RUN_ATTEMPT"] = attempt
+            if executions is not None:
+                receipt["executions"] = executions
+            if job not in verify.QUALIFIED and executed and sorted(executed) != receipt["executed"]:
+                receipt["executed"] = sorted(executed)
+            (path / "receipt.json").write_text(json.dumps(receipt))
+            (path / "credit.json").write_text(json.dumps({"refusals": list(refusals)}))
+            return
         path.mkdir()
         receipt = {"job": job, "module": module, "completion": completion, "executed": sorted(executed),
                    "executions": len(executed) if executions is None else executions, "revision": REVISION,
@@ -2422,7 +2763,7 @@ class Aggregate(unittest.TestCase):
         (path / "identity.json").write_text(json.dumps(identity, indent=2) + "\n")
 
     def fast(self, rc11=None):
-        self.lane("evidence-workspace-7-1", "workspace", executed=["a", "b"], executions=2000)
+        self.lane("evidence-workspace-7-1", "workspace")
         self.lane("evidence-rc11-7-1", "rc11", executed=rc11 or read_json(verify.CHECKER_JOBS["rc11"])["tests"])
         if "barriers" in verify.FAST_JOBS:
             self.barriers()
@@ -2437,20 +2778,21 @@ class Aggregate(unittest.TestCase):
             if lane not in verify.HEAVY_JOBS:
                 continue
             self.lane(f"evidence-{lane}-7-1", lane, executed=select.selection_of(inventory["qualified"][lane]))
-        self.lane("evidence-miri-7-1", "miri", executed=inventory["miri"]["tests"])
-        self.lane("evidence-sweep-7-1", "sweep", executed=sweep["tests"], executions=sweep["seeds"] * len(sweep["tests"]))
-        for module, declared in inventory["loom"].items():
-            self.lane(f"evidence-loom-{module}-7-1", "loom", module, executed=declared["tests"])
+        self.lane("evidence-miri-7-1", "miri")
+        self.lane("evidence-sweep-7-1", "sweep")
+        for module in inventory["loom"]:
+            self.lane(f"evidence-loom-{module}-7-1", "loom", module)
         profiles = read_json(verify.CHECKER_JOBS["genmc"])["profiles"]
         cases = profiles["pr"] + (profiles["scheduled"] if profile == "scheduled" else [])
         self.lane("evidence-genmc-7-1", "genmc", profile, executed=cases)
-        for job in ("fuzz", "verus", "asan"):
+        for job in ("fuzz", "verus"):
             self.lane(f"evidence-{job}-7-1", job, executed=["x"])
+        self.lane("evidence-asan-7-1", "asan")
         for job in ("kani", "tlc"):
             self.lane(f"evidence-{job}-7-1", job, profile, executed=["x"])
         self.lane("evidence-quint-7-1", "quint", executed=sorted(set(read_json(verify.CHECKER_JOBS["quint"])["tests"]) - set(read_json(verify.CHECKER_JOBS["quint"]).get("blocked", {}))))
         if "qemu" in verify.HEAVY_JOBS:
-            self.lane("evidence-qemu-7-1", "qemu", executed=inventory["qemu"]["tests"])
+            self.lane("evidence-qemu-7-1", "qemu")
 
     def verdict(self, event="pull_request", attempt="1"):
         complete, entries, other = verify.aggregate(self.lanes, event, expected(attempt), self.INVENTORY)
@@ -2496,9 +2838,10 @@ class Aggregate(unittest.TestCase):
         for event in ("pull_request", "push", "schedule"):
             for name, receipt, reason in (
                 ("missing artifact", None, "no receipt"),
-                ("skipped selection", dict(executed=selection[1:]), f"missing ['{selection[0]}']"),
-                ("repeated run", dict(executed=selection, executions=len(selection) + 1), f"declared {len(selection)}"),
-                ("blocked row", dict(executed=selection, refusals=[{"code": "selection-refused", "reason": "blocked rows"}]), "credit refused"),
+                ("skipped selection", dict(executed=selection[1:]), "'selection-refused'"),
+                ("repeated run", dict(executed=selection, executions=len(selection) + 1), "credit refused: ['unbound-input']"),
+                ("blocked row", dict(executed=selection, drop=select_fixture.ROW_LINES["fleet-replay"][-1]),
+                 "credit refused: ['raw-selection-mismatch']"),
             ):
                 with self.subTest(event=event, case=name):
                     for path in list(self.lanes.iterdir()):
@@ -2516,11 +2859,12 @@ class Aggregate(unittest.TestCase):
     def test_the_long_run_lane_credits_its_cases_executed_once_on_heavy_events_only(self):
         gate = select.selection_of(self.INVENTORY["qualified"]["long-run"])
         cases = {
-            "zero selection": (dict(executed=(), executions=0), "zero executions"),
-            "a repeated run": (dict(executed=gate, executions=len(gate) + 1), f"{len(gate) + 1} executions, declared {len(gate)}"),
-            "another case": (dict(executed=["long_run::another"]), "outside the domain"),
+            "zero selection": (dict(executed=(), executions=0), "'selection-refused', 'zero-executions'"),
+            "a repeated run": (dict(executed=gate, executions=len(gate) + 1), "credit refused: ['unbound-input']"),
+            "another case": (dict(executed=["long_run::another"]), "'selection-refused'"),
             "interrupted": (dict(executed=gate, completion="timeout"), "completion timeout"),
-            "refused selection": (dict(executed=gate, refusals=[{"code": "selection-refused", "reason": "x"}]), "credit refused"),
+            "refused selection": (dict(executed=gate, drop=select_fixture.ROW_LINES["long-run-gate"][0]),
+                                  "credit refused: ['raw-selection-mismatch']"),
         }
         for event in ("schedule", "workflow_dispatch"):
             for name, (receipt, reason) in cases.items():
@@ -2599,34 +2943,32 @@ class Aggregate(unittest.TestCase):
                 self.assertIn(reason, lanes["rc11"]["reason"])
 
     def test_a_partial_seed_range_and_a_missing_artifact_are_incomplete(self):
+        """A sweep whose run lost its last seed block beside the report that judged the whole range is refused."""
         self.fast()
         self.heavy("scheduled")
-        receipt = self.lanes / "evidence-sweep-7-1" / "receipt.json"
-        data = json.loads(receipt.read_text())
-        data["executions"] = 191
-        receipt.write_text(json.dumps(data))
+        shutil.rmtree(self.lanes / "evidence-sweep-7-1")
+        last = f"Trying seed: {INVENTORY['miri_sweep']['seeds'] - 1}\n"
+
+        def cut(path):
+            run = (path / "run.txt").read_text()
+            (path / "run.txt").write_text(run[:run.index(last)])
+
+        self.lane("evidence-sweep-7-1", "sweep", edit=cut)
         for item in (self.lanes / "evidence-loom-fill_model-7-1").iterdir():
             item.unlink()
         complete, lanes, _ = self.verdict("schedule")
         self.assertFalse(complete)
-        self.assertIn("declared 192", lanes["sweep"]["reason"])
+        self.assertIn("'raw-selection-mismatch'", lanes["sweep"]["reason"])
         self.assertIn("no receipt", lanes["loom fill_model"]["reason"])
 
     def test_a_declared_loom_ignore_leaves_the_module_domain(self):
+        """The module's domain is its declared tests less its declared ignores; the lane's credit, judged from its
+        evidence against the committed inventory, is the selection judge's."""
         inventory = copy.deepcopy(self.INVENTORY)
         declared = inventory["loom"]["fill_model"]
         declared["ignored"] = declared["tests"][:1]
-        self.fast()
-        self.heavy("scheduled")
-        receipt = self.lanes / "evidence-loom-fill_model-7-1" / "receipt.json"
-        data = json.loads(receipt.read_text())
-        data["executed"] = sorted(declared["tests"][1:])
-        data["executions"] = len(data["executed"])
-        receipt.write_text(json.dumps(data))
-        complete, entries, _ = verify.aggregate(self.lanes, "schedule", expected("1"), inventory)
-        lanes = {entry["lane"]: entry for entry in entries}
-        self.assertTrue(complete, lanes["loom fill_model"]["reason"])
-        self.assertEqual(lanes["loom fill_model"]["executed"], len(declared["tests"]) - 1)
+        domain, count = verify.lane_domains("schedule", inventory)[("loom", "fill_model")]
+        self.assertEqual((domain, count), (set(declared["tests"][1:]), None))
 
     def test_an_uncredited_barrier_scan_is_incomplete(self):
         self.activate(("barriers",), "fast")
@@ -2767,19 +3109,63 @@ class Aggregate(unittest.TestCase):
         self.assertEqual(code, verify.CRASHED)
         self.assertEqual(json.loads(out.getvalue())["code"], verify.CRASHED)
 
+    def test_a_wrong_shape_receipt_is_its_own_lanes_incomplete_entry(self):
+        """A saved receipt that parses and is no receipt, as a whole or in its `ci`, `job`, `module` or `executed`,
+        leaves its own lane incomplete; the aggregate returns and judges the other lanes. A null module is a
+        receipt's own shape."""
+        self.fast()
+        path = self.lanes / "evidence-workspace-7-1" / "receipt.json"
+        saved = verify.read_json(path)
+        for field in (None, "ci", "job", "module", "executed"):
+            for value in (None, [], "x", 7, {"a": []}, {"a": "x"}, [[]], True):
+                if field == "module" and value is None:
+                    continue
+                with self.subTest(field=field, value=value):
+                    path.write_text(json.dumps(value if field is None else {**saved, field: value}))
+                    complete, lanes, _ = self.verdict()
+                    self.assertFalse(complete)
+                    self.assertFalse(lanes["workspace"]["complete"], lanes["workspace"])
+                    self.assertEqual([lanes[lane]["reason"] for lane in ("rc11", "campaigns", "search")], [None] * 3)
+        for value in ([], "x", 7, True):
+            with self.subTest(document=value):
+                path.write_text(json.dumps(value))
+                self.assertIn("evidence-workspace-7-1 holds no receipt", self.verdict()[1]["workspace"]["reason"])
+
+    def test_a_saved_credit_that_holds_no_list_of_refusals_is_its_lanes_missing_result(self):
+        """A lane whose credit aggregation reads from `credit.json` is complete only on a `refusals` list that is
+        empty. A document of another shape, an empty mapping in the list's place included, is that lane's
+        `missing-result`, and the other lanes are judged."""
+        self.fast()
+        path = self.lanes / "evidence-rc11-7-1" / "credit.json"
+        self.assertTrue(self.verdict()[1]["rc11"]["complete"])
+        shapes = ({"refusals": {}}, {"refusals": None}, {"refusals": "x"}, {"refusals": [7]}, {"refusals": [{"reason": "x"}]},
+                  {"refusals": [{"code": 7}]}, {"refusals": [{"code": []}]}, {}, [], [1], "x", 7, None, True)
+        for value in shapes:
+            with self.subTest(value=value):
+                path.write_text(json.dumps(value))
+                complete, lanes, _ = self.verdict()
+                self.assertFalse(complete)
+                self.assertEqual(lanes["rc11"]["reason"], "credit refused: ['missing-result']", lanes["rc11"])
+                self.assertEqual([lanes[lane]["reason"] for lane in ("workspace", "campaigns", "search")], [None] * 3)
+        path.write_text(json.dumps({"refusals": [{"code": "raw-failed", "reason": "x"}]}))
+        self.assertEqual(self.verdict()[1]["rc11"]["reason"], "credit refused: ['raw-failed']")
+
     def test_an_advisory_lane_reports_its_gap_without_holding_the_gate(self):
         def repeated():
             self.lane("evidence-asan-7-1-again", "asan", executed=["x"])
 
         def refused():
             shutil.rmtree(self.lanes / "evidence-asan-7-1")
-            self.lane("evidence-asan-7-1", "asan", executed=["x"], refusals=[{"code": "unqualified", "reason": "x"}])
+            self.lane("evidence-asan-7-1", "asan", edit=lambda path: (path / "qualified.json").write_text("{}"))
 
         def absent():
             shutil.rmtree(self.lanes / "evidence-asan-7-1")
 
-        for name, edit, reason in (("repeated", repeated, "2 receipts"), ("refused", refused, "credit refused: ['unqualified']"),
-                                   ("absent", absent, "no receipt")):
+        def truncated():
+            (self.lanes / "evidence-asan-7-1" / "report.json").write_text("{")
+
+        for name, edit, reason in (("repeated", repeated, "2 receipts"), ("refused", refused, "'unqualified'"),
+                                   ("absent", absent, "no receipt"), ("truncated report", truncated, "'unbound-input'")):
             with self.subTest(case=name):
                 shutil.rmtree(self.lanes)
                 self.lanes.mkdir()
@@ -2840,7 +3226,7 @@ class Aggregate(unittest.TestCase):
                 complete, lanes, _ = self.verdict(event)
                 self.assertFalse(complete)
                 self.assertIn("no receipt: the lane did not run", lanes["isa-aarch64"]["reason"])
-                self.assertIn(f"missing ['{rows[0]}']", lanes["isa-x86-64"]["reason"])
+                self.assertIn("'selection-refused'", lanes["isa-x86-64"]["reason"])
 
     def test_a_pending_lane_receipt_lies_outside_every_events_selection(self):
         """A disabled lane is visible but never credited; even a passing receipt is outside the selected domain."""

@@ -317,6 +317,8 @@ def parse_summaries(text):
         summary = SUMMARY.match(stripped)
         if summary is None:
             raise Refusal(EXECUTION_MISMATCH, f"malformed summary in {current}: {stripped!r}")
+        if (summary.group(1) == "FAILED") != (int(summary.group(3)) != 0):
+            raise Refusal(EXECUTION_MISMATCH, f"summary status disagrees with its failed count in {current}: {stripped!r}")
         counts = summaries.setdefault(current, new_summary())
         counts["lines"] += 1
         for key, group in (("passed", 2), ("failed", 3), ("ignored", 4), ("filtered", 6)):
@@ -1071,7 +1073,7 @@ def judge(args):
     if args.command == "run":
         text = read(args.output)
         try:
-            summaries = parse_summaries(text)
+            summaries = args.summaries = parse_summaries(text)
         except Refusal as refusal:
             if args.cfg == "qualified":
                 args.rows = [{"id": row["id"], "kind": row["kind"], "credited": False, "reasons": [str(refusal)]}
@@ -1090,23 +1092,19 @@ def judge(args):
     return report
 
 
-def emit(args, code, reason, report):
-    print(json.dumps(
-        {
-            "cfg": args.cfg, "baseline": args.baseline, "code": code, "verdict": VERDICTS[code],
-            "credited": code == CREDITED, "reason": reason, "targets": report, "policy_gaps": list(args.gaps),
-            "module": args.module, "rows": args.rows,
-        },
-        sort_keys=True,
-    ))
-    if reason:
-        print(f"select-tests: {reason}", file=sys.stderr)
-    for gap in args.gaps:
-        print(f"select-tests: policy gap: {gap}", file=sys.stderr)
-    return code
+def document(args, code, reason, report):
+    """The JSON report of a judgment that ended with `code`."""
+    return {
+        "cfg": args.cfg, "baseline": args.baseline, "code": code, "verdict": VERDICTS[code],
+        "credited": code == CREDITED, "reason": reason, "targets": report, "policy_gaps": list(args.gaps),
+        "module": args.module, "rows": args.rows,
+    }
 
 
-def main(argv=None):
+def verdict(argv=None):
+    """Judge the command line `argv` and return its JSON report and its parsed arguments. A run's arguments also
+    carry `summaries`, the run's parsed summaries, once the run has been parsed; the miri-sweep cfg parses each
+    seed's block apart and leaves them unset."""
     # argparse imports shutil at startup to measure the terminal unless the
     # formatter has a width. Width 78 is argparse's width off a terminal.
     parser = argparse.ArgumentParser(
@@ -1128,12 +1126,21 @@ def main(argv=None):
         parser.error("run needs --output and --exit")
     args.gaps, args.baseline, args.rows = [], None, []
     try:
-        report = judge(args)
+        return document(args, CREDITED, None, judge(args)), args
     except Refusal as refusal:
-        return emit(args, refusal.code, str(refusal), refusal.report)
+        return document(args, refusal.code, str(refusal), refusal.report), args
     except Exception as error:
-        return emit(args, TOOL_FAILURE, f"unexpected {type(error).__name__}: {error}", {})
-    return emit(args, CREDITED, None, report)
+        return document(args, TOOL_FAILURE, f"unexpected {type(error).__name__}: {error}", {}), args
+
+
+def main(argv=None):
+    report, args = verdict(argv)
+    print(json.dumps(report, sort_keys=True))
+    if report["reason"]:
+        print(f"select-tests: {report['reason']}", file=sys.stderr)
+    for gap in args.gaps:
+        print(f"select-tests: policy gap: {gap}", file=sys.stderr)
+    return report["code"]
 
 
 if __name__ == "__main__":

@@ -1312,9 +1312,19 @@ class SelectTests(unittest.TestCase):
         return (f"{self.GUEST_HEADER}\n[    0.000000] Linux version 6.12.0\nguest-binder: ready kernel=6.12.0\nrunning {len(ran)} tests\n"
                 f"{cases}\n{summary(passed, len(failed), 0, filtered)}\nguest-binder: exit 0\n{tail}")
 
+    def test_a_summary_whose_status_disagrees_with_its_failed_count_is_an_execution_mismatch(self):
+        for status, failed in (("FAILED", 0), ("ok", 1)):
+            with self.subTest(status=status):
+                text = (f"{ORDINARY_HEADER}\ntest a ... ok\ntest result: {status}. 1 passed; {failed} failed; 0 ignored; "
+                        "0 measured; 0 filtered out; finished in 0.1s\n")
+                with self.assertRaises(select_tests.Refusal) as refused:
+                    select_tests.parse_summaries(text)
+                self.assertEqual(refused.exception.code, select_tests.EXECUTION_MISMATCH)
+                self.assertIn("summary status disagrees with its failed count", str(refused.exception))
+
     def test_nocapture_outcomes_count_each_case_once_with_its_last_outcome_before_the_next_boundary(self):
         """libtest under --nocapture names a case before it runs and prints its outcome alone afterwards."""
-        result = "test result: ok. 3 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.1s"
+        result = "test result: FAILED. 3 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.1s"
         text = "\n".join([
             ORDINARY_HEADER,
             "test a ... first report", "second report", "ok",

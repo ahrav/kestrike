@@ -242,11 +242,12 @@ class ReceiptRunner(unittest.TestCase):
         pids = []
         try:
             deadline = time.monotonic() + 5
-            while not (self.directory / "grandchild").exists():
-                self.assertIsNone(process.poll(), "runner exited before the grandchild started")
-                self.assertLess(time.monotonic(), deadline, "grandchild did not start")
+            names = ("leader", "grandchild")
+            while not all((self.directory / name).exists() and (self.directory / name).read_text() for name in names):
+                self.assertIsNone(process.poll(), "runner exited before the grandchild wrote its pid")
+                self.assertLess(time.monotonic(), deadline, "the grandchild did not write its pid")
                 time.sleep(0.01)
-            pids = [int((self.directory / name).read_text()) for name in ("leader", "grandchild")]
+            pids = [int((self.directory / name).read_text()) for name in names]
             process.send_signal(signum)
             out, err = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 128 + signum, out + err)
