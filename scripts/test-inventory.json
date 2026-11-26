@@ -962,6 +962,8 @@
           "repair-and-host unknown-reserve-lost root 1",
           "repair-and-host unknown-page-lost root 1",
           "repair-and-host takeover-unknown-committed root 1",
+          "repair-and-host handoff root 2",
+          "repair-and-host handoff-ended root 2",
             "repair-and-host enroll-reserve-committed root 1",
             "repair-and-host enroll-reserve-lost root 1",
             "repair-and-host enroll-record-acknowledged root 1",
@@ -991,7 +993,7 @@
           "witnesses": [
             "^fleet: scheduled volume: 11 checks and 21 crash cells passed$",
             "^fleet: scheduled zone: 3 checks passed$",
-            "^fleet: scheduled repair-and-host: 30 checks and 25 crash cells passed$"
+            "^fleet: scheduled repair-and-host: 32 checks and 25 crash cells passed$"
           ]
         }
       ]

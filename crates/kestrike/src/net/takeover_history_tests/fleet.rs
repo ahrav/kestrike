@@ -101,6 +101,7 @@ pub(crate) mod actors;
 pub(crate) mod bounds;
 pub(crate) mod draws;
 pub(crate) mod faults;
+pub(crate) mod handoff;
 pub(crate) mod hosts;
 pub(crate) mod oracles;
 pub(crate) mod owners;
@@ -111,6 +112,8 @@ pub(crate) mod zones;
 
 #[cfg(test)]
 mod driven;
+#[cfg(test)]
+mod handoff_tests;
 #[cfg(test)]
 mod host_tests;
 #[cfg(test)]
@@ -242,10 +245,24 @@ pub(crate) enum Plant {
     /// Each view period of the standby wait of the shard at the index starts its fencer's device before the period
     /// runs: the mutant of the exit and phase table whose waiting phase holds a device.
     WaitDevice,
+    /// The standby wait of the shard at the index stops once the shard record names its host owner, so a planned
+    /// handoff's target reads no restart role and starts no incarnation.
+    TargetUnwaited,
+    /// The parked process of the shard at the index publishes a `Held` status with a volume entry while it parks.
+    ParkedPublishes,
+    /// The ended-target handoff of the shard at the index leaves every agent's restart grace at
+    /// `RESTART_GRACE_US`, so the parked target's host reads healthy for the whole run.
+    UnscaledGrace,
+    /// The restart of the shard at the index whose incarnation ended with a parking exit issues one extended Report
+    /// through its host's device double before it parks, and its park issues one more in its first view period.
+    ParkedCommand,
+    /// The parked process of the shard at the index publishes a `Withdrawn` status with no volume entry in each
+    /// report period while it parks.
+    ParkedWithdraws,
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 28] = [
+    pub(crate) const ALL: [Self; 33] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -274,6 +291,11 @@ impl Plant {
         Self::UnhealthyOnAnyHold,
         Self::RoleReadActivation,
         Self::WaitDevice,
+        Self::TargetUnwaited,
+        Self::ParkedPublishes,
+        Self::UnscaledGrace,
+        Self::ParkedCommand,
+        Self::ParkedWithdraws,
     ];
 
     /// `Config::identity` encodes the hostile profile with the plant code.
@@ -307,6 +329,11 @@ impl Plant {
             Self::UnhealthyOnAnyHold => 58,
             Self::RoleReadActivation => 59,
             Self::WaitDevice => 41,
+            Self::TargetUnwaited => 42,
+            Self::ParkedPublishes => 43,
+            Self::UnscaledGrace => 44,
+            Self::ParkedCommand => 119,
+            Self::ParkedWithdraws => 118,
         }
     }
 }
@@ -579,6 +606,14 @@ impl Config {
         }
     }
 
+    pub(crate) fn handoff(root: u64) -> Self {
+        Self::repair(root, Scenario::Handoff)
+    }
+
+    pub(crate) fn handoff_ended(root: u64) -> Self {
+        Self::repair(root, Scenario::HandoffEnded)
+    }
+
     pub(crate) fn impaired(root: u64) -> Self {
         Self::repair(root, Scenario::Impaired)
     }
@@ -791,7 +826,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v23";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v24";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1136,7 +1171,7 @@ impl Report {
         if self.config.scenario.hosted() {
             let log = &self.hosts;
             lines.push(format!(
-                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} refused-reruns {} gray-readings {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} boot {:?} fired {:?} arrivals {:?}",
+                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} refused-reruns {} gray-readings {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} handoffs {:?} parks {:?} role-changes {:?} boot {:?} fired {:?} arrivals {:?}",
                 log.nominations,
                 log.addressed,
                 log.vetoes,
@@ -1162,6 +1197,9 @@ impl Report {
                 log.headrooms,
                 log.stores,
                 log.takeovers,
+                log.handoffs,
+                log.parks,
+                log.role_changes,
                 log.boot,
                 log.fired,
                 log.arrivals,
@@ -2151,17 +2189,18 @@ struct Fleet<'c> {
     /// `returning` holds an entry only while a next incarnation is queued. A new hold of the same process replaces
     /// the entry ([`Fleet::held`]).
     held_returns: std::collections::BTreeSet<(usize, usize)>,
-    /// The entries of `refused` that a serving tenure's rerun queued (`Fleet::rerun`), by cell and member, with the
-    /// round that tenure ended. The next incarnation's recovery counts its rounds from that round.
+    /// The entries of `refused` that a serving tenure's rerun (`Fleet::rerun`), a standby wait or a park's end
+    /// queued, by cell and member, with the round that tenure, wait or park ended. The next incarnation's recovery
+    /// counts its rounds from that round.
     rerun_starts: std::collections::BTreeMap<(usize, usize), u64>,
     /// The refusals that recurred, by cell and member: an entry of `refused` that the rerun of a refused incarnation
     /// queued, and a fresh activation's retry that was refused again. The host loop runs on for a refusal outside
     /// this set until its next incarnation's turn, and ends over one inside it.
     recurred: std::collections::BTreeSet<(usize, usize)>,
-    /// The processes whose restart, takeover or standby view period ended with an exit that names a rerun
+    /// The processes whose restart, takeover, standby view period or park ended with an exit that names a rerun
     /// (`host::Exit::Rerun`, or a role read that failed), by cell and member, with the round it ended and whether it
-    /// followed a loss. The host loop runs the next incarnation from the round after that, as the process's
-    /// supervisor starts it.
+    /// followed a loss. A standby wait's period that read its host named owner is such a view period. The host loop
+    /// runs the next incarnation from the round after that, as the process's supervisor starts it.
     refused: std::collections::BTreeMap<(usize, usize), (u64, bool)>,
     /// The cells whose named standby waits again as a standby, by that standby's member: `Fleet::retake` records the
     /// wait after the next incarnation of a takeover that ended `Rerun::Takeover`, and after each rerun of a refused
@@ -2188,6 +2227,13 @@ struct Fleet<'c> {
     /// Whether [`Fleet::runnable`] records the round's runnable actors: true in every run but the replay control's
     /// sibling, which shows the decision is what refuses another set of actors.
     record_actors: bool,
+    /// The processes parked after a restart that ended with a parking exit (`host::Exit::parks`), each holding the
+    /// tenure slot its incarnation took until a view period of its park (`host::serve::wait`) ends it.
+    parks: Vec<handoff::Parked>,
+    /// The tenure slots of parks that ended since the host loop last ran, which it frees before its next step.
+    unparked: Vec<usize>,
+    /// The restart grace the ended-target handoff set on every agent, which an agent built later takes too.
+    grace_us: Option<u64>,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2210,6 +2256,19 @@ impl<'w> Slots<'w> {
     /// Whether `member` holds a tenure slot no tenure took.
     fn free(&self, member: usize) -> bool {
         (0..self.members.len()).any(|at| !self.used[at] && self.members[at] == member)
+    }
+
+    /// The index of the taken slot of `grounds`, which a parked process keeps.
+    fn index_of(&self, grounds: &'w Grounds) -> usize {
+        (0..self.members.len())
+            .find(|&at| self.used[at] && std::ptr::eq(&self.grounds[at], grounds))
+            .expect("a taken tenure slot")
+    }
+
+    /// Frees the slot at `at`, which a park held.
+    fn release_at(&mut self, at: usize) {
+        assert!(self.used[at], "a parked process's slot is taken");
+        self.used[at] = false;
     }
 
     /// Frees the slot of `grounds`, which `member` took for an incarnation that acquired no tenure.
@@ -2332,6 +2391,9 @@ impl<'c> Fleet<'c> {
             horizon: hosts::HORIZON_ROUNDS,
             actor_turns: 0,
             record_actors: true,
+            parks: Vec::new(),
+            unparked: Vec::new(),
+            grace_us: None,
             standby_extra: None,
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));
@@ -2727,6 +2789,7 @@ impl<'c> Fleet<'c> {
             self.host_round(live);
             if self.round.is_multiple_of(DUTY_VIEW_US / ROUND_US) {
                 self.standby_waits();
+                self.park_periods();
             }
         }
         if self.repairs() {

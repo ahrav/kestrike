@@ -422,7 +422,8 @@ impl Fleet<'_> {
     /// loads warm, and it ends the member's device hold; a successor that held before its preempt returns through
     /// the restart's lineage arm. An incarnation that ends `Exit::Held` holds, `RecordedHolder` as
     /// `RecordedHolderHold`; a failed role read and an exit that names a rerun queue the next incarnation
-    /// ([`Fleet::queue_rerun`]).
+    /// ([`Fleet::queue_rerun`]); an incarnation that ends with a parking exit parks with its tenure slot
+    /// ([`Fleet::park`]).
     pub(super) fn restart_named<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -470,16 +471,16 @@ impl Fleet<'_> {
         restarted.map(|_| ())
     }
 
-    /// The next incarnation of `member`'s process for cell `at`, whose restart ended with an exit that names a rerun
-    /// ([`Fleet::queue_rerun`]): its role read and `host::recover` through [`Fleet::restart_by`], on a free tenure
+    /// The next incarnation of `member`'s process for cell `at`, whose restart, standby wait or park ended with an
+    /// exit that names a rerun ([`Fleet::queue_rerun`]): its role read and `host::recover` through [`Fleet::restart_by`], on a free tenure
     /// slot of the host, while the host runs and serves no tenure of the cell. The next incarnation of a returned
     /// host's restart ([`Fleet::returning`]) runs through [`Fleet::restart_returned`], which completes the return. A
     /// role read that names the member standby of another owner makes the process wait there (a retake). The next
-    /// incarnation of a serving tenure's rerun ([`Fleet::rerun_starts`]) counts its recovery's rounds from the round
-    /// that tenure ended, as [`Fleet::rerun`] does. An incarnation that ends with a rerun exit again is queued as a
-    /// refusal that recurred ([`Fleet::recurred`]) and records no wait. A rerun of a host that stopped, already
-    /// serves the cell or has the cell's restart queued as its return, and one with no free slot, runs no
-    /// incarnation and is counted, as [`Fleet::rerun`] counts its own.
+    /// incarnation of a serving tenure's rerun, a standby wait or a park ([`Fleet::rerun_starts`]) counts its
+    /// recovery's rounds from the round that tenure, wait or park ended, as [`Fleet::rerun`] does. An incarnation
+    /// that ends with a rerun exit again is queued as a refusal that recurred ([`Fleet::recurred`]) and records no
+    /// wait. A rerun of a host that stopped, already serves the cell or has the cell's restart queued as its
+    /// return, and one with no free slot, runs no incarnation and is counted, as [`Fleet::rerun`] counts its own.
     pub(super) fn rerun_refused<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -541,8 +542,12 @@ impl Fleet<'_> {
     /// role from the read, the refusal's blocker or the read error, or `None` for an incarnation that acquired a
     /// tenure. The fleet drops that incarnation unserved and leaves the cell unchanged. Under a record that names
     /// the member's host a refusal is the cell's blocker: an incarnation that ended `Exit::Held` holds as
-    /// [`Fleet::restart_named`] states. An exit that names a rerun and a failed role read queue the next incarnation
-    /// under either record ([`Fleet::queue_rerun`]).
+    /// [`Fleet::restart_named`] states. Under that record an incarnation that ended with a parking exit
+    /// (`host::Exit::parks`) parks ([`Fleet::park`]): the process keeps its tenure slot until a view period of its
+    /// park reads another role or its host crashes, so the host has one slot fewer for a later incarnation
+    /// meanwhile. Under [`super::Plant::ParkedCommand`] that incarnation first issues one extended Report through
+    /// the host's device double. Every other ended incarnation gives its slot back. An exit that names a rerun and
+    /// a failed role read queue the next incarnation under either record ([`Fleet::queue_rerun`]).
     pub(super) fn restart_by<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -557,6 +562,7 @@ impl Fleet<'_> {
         let cell = &self.cells[at];
         let (pair, local) = cell.local_of(member).expect("the owner's local record");
         let before = self.record_now(at);
+        let from = self.cells[at].world.reservation.borrow().log.len();
         let ground = slots.take(member);
         let mut client = self.client(member);
         let mut local = super::owners::OwnerLocal(local);
@@ -600,7 +606,16 @@ impl Fleet<'_> {
                 return Ok(Restarted::Deposed { check, attempts });
             }
             super::owners::Incarnation::Ended(exit, refusal) => {
-                slots.put_back(member, ground.0);
+                // A parking exit keeps the process running with its tenure slot.
+                let parks = exit.parks() && before.owner == of.host;
+                if parks && self.config.planted_at(super::Plant::ParkedCommand, at) {
+                    super::owners::report_as(&self.cells[at], pair, ground.0);
+                    self.planted = true;
+                }
+                match parks {
+                    true => self.park(slots, (at, member, from), ground.0, &exit),
+                    false => slots.put_back(member, ground.0),
+                }
                 self.end_wait(at, member);
                 // An exit that names a rerun ends the process under either record: its next incarnation reads its
                 // role again.

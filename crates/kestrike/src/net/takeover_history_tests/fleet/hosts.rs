@@ -45,6 +45,7 @@ const H: u64 = ROUND_US;
 pub(crate) const REPORT_ROUNDS: u64 = 10;
 pub(crate) const TAIL_ROUNDS: u64 = 60;
 pub(super) const HORIZON_ROUNDS: u64 = 4_000;
+pub(crate) const HANDOFF_GRACE_ROUNDS: u64 = 100;
 const PAUSE_ROUNDS: u64 = 240;
 const DETECT_HOSTS: usize = 12;
 /// The attachment slots of every fleet instance.
@@ -139,6 +140,14 @@ pub(crate) enum Scenario {
     /// H0's loss of [`Scenario::HostLoss`]; once s4's boot tenure acknowledged its INVALIDATE, its next record view
     /// reads the shard record's version before the last.
     RecordRegressed,
+    /// The planned handoff of [`HANDOFF_CELL`] on the small layout with one reconciler: the serving owner
+    /// transfers the shard to its named standby, whose wait reads the restart role and whose next incarnation
+    /// serves through the lineage arm.
+    Handoff,
+    /// [`Scenario::Handoff`] with the target's attach ended inside the transfer: the target's restart refuses and
+    /// parks, every agent takes the scaled restart grace, and the host the zone loop designates takes the shard
+    /// over.
+    HandoffEnded,
 }
 
 /// The cell whose boot tenure's serving duties the store-result scenarios fault: s4, owned by H2, which H0's loss
@@ -205,6 +214,8 @@ pub(crate) const FAULTED: usize = 3;
 pub(crate) const BESIDE: usize = 4;
 /// The cell whose volume the exhausted-attach scenarios seed with a third attach: s2.
 pub(crate) const ATTACH_CELL: usize = 2;
+/// The cell the handoff scenarios hand over: s6, owned by H4 with H1 its standby.
+pub(crate) const HANDOFF_CELL: usize = 5;
 pub(crate) const STALL_ROUNDS: u64 = 160;
 pub(crate) const BRIEF_ROUNDS: u64 = 2;
 pub(crate) const IMPAIRED_ROUNDS: u64 = 40;
@@ -247,6 +258,8 @@ impl Scenario {
             Self::StoreUnknown(_) => 31,
             Self::PageRegressed => 32,
             Self::RecordRegressed => 33,
+            Self::Handoff => 34,
+            Self::HandoffEnded => 35,
         };
         let cell = match self {
             Self::Crash(cell) => cell.code(),
@@ -385,7 +398,9 @@ impl Scenario {
             | Self::PartitionLossAt
             | Self::OwnerPause
             | Self::OwnerIsolation => verdict != "settle or blocker",
-            Self::Settle => verdict != "volume kept" && verdict != "untouched shards",
+            Self::Settle | Self::Handoff | Self::HandoffEnded => {
+                verdict != "volume kept" && verdict != "untouched shards"
+            }
             Self::ImpairedBrief | Self::StandbySilent => verdict != "untouched shards",
             _ => true,
         }
@@ -501,6 +516,17 @@ impl Scenario {
                 release(),
             ],
             Self::Replace(_) => vec![volume(Action::LoseVolume(0), None)],
+            Self::Handoff | Self::HandoffEnded => vec![Episode {
+                trigger: Trigger::When(|fleet| {
+                    booted(fleet) && fleet.cells[HANDOFF_CELL].waiting.is_some()
+                }),
+                scope: Vec::new(),
+                action: Action::Handoff {
+                    at: HANDOFF_CELL,
+                    ended: self == Self::HandoffEnded,
+                },
+                heal: None,
+            }],
             Self::PartitionLoss => vec![crash(vec![0, 1], Trigger::AtTime(1))],
             Self::PartitionLossAt => vec![crash(
                 super::topology::Placing::TRIO_LOST.to_vec(),
@@ -675,11 +701,12 @@ pub(crate) struct HostLog {
     pub(crate) unslotted: u32,
     /// The reruns that ran no incarnation when their turn came: a serving tenure's rerun whose shard record named
     /// another owner or another tenure of its host, whose cell served a tenure, or whose host was down, and the
-    /// rerun of an ended restart or takeover whose host had stopped, already served the cell or had the cell's
-    /// restart queued as its return. A paused host's rerun stays queued until the host resumes.
+    /// rerun of an ended restart, takeover, standby wait or park whose host had stopped, already served the cell or
+    /// had the cell's restart queued as its return. A paused host's rerun stays queued until the host resumes.
     pub(crate) rerun_dropped: u32,
-    /// The next incarnations the host loop ran for a restart, takeover or held process whose incarnation ended with
-    /// an exit naming a rerun (`host::Exit::Rerun`, or a failed role read), each a role read and `host::recover`.
+    /// The next incarnations the host loop ran for a restart, takeover, held process, standby wait or park whose
+    /// incarnation ended with an exit naming a rerun (`host::Exit::Rerun`, or a failed role read), each a role read
+    /// and `host::recover`.
     pub(crate) refused_reruns: u32,
     /// The agent turns after which the observer's detector read a peer `Dead` with a failure that needs a second
     /// observer class (`Failure::Gray`), the evidence the arbiter declines with `GrayNeedsSecondClass` when every
@@ -724,6 +751,16 @@ pub(crate) struct HostLog {
     /// Each start of a host's held entry: the round since the hosts started, the host and the shard, at the first
     /// accepted report of the host's boot that carries the shard's entry in phase `Held` after one that did not.
     pub(crate) held: Vec<(u64, u64, u32)>,
+    pub(crate) handoffs: Vec<super::handoff::Handed>,
+    pub(crate) parks: Vec<super::handoff::Park>,
+    /// Each status a parked process published while its park stood: the round since the hosts started, the host and
+    /// the shard. The `Withdrawn` the fleet publishes once for the ended wait's publication that stopped is the
+    /// wait's and is not listed.
+    pub(crate) parked_published: Vec<(u64, u64, u32)>,
+    /// Each standby wait that read its host named owner, ended `Rerun::RoleChanged` and queued its process's next
+    /// incarnation: the round since the hosts started, the shard and the host. A wait of a process whose next
+    /// incarnation was already queued is not listed.
+    pub(crate) role_changes: Vec<(u64, u32, u64)>,
 }
 
 /// One entry of [`HostLog::stores`]: the round since the hosts started, the host, the shard, and the entry's store
@@ -866,6 +903,14 @@ pub(crate) const OTHER_ZONE: &str =
 pub(crate) const DEPOSED_SERVED: &str = "a deposed host served after its zone returned";
 pub(crate) const NO_BUMP: &str = "a returning owner restarted without an attempt bump";
 pub(crate) const COLD_RETURN: &str = "a returning owner did not serve its retained set warm";
+pub(crate) const HANDED_OFF: &str = "witness handoff-committed missing";
+pub(crate) const TARGET_SERVED: &str = "witness target-lineage-served missing";
+pub(crate) const TARGET_PARKED: &str = "witness target-parked missing";
+pub(crate) const FRESH_DESIGNATED: &str = "witness fresh-host-designated missing";
+pub(crate) const DESIGNATED_RECOVERED: &str = "witness designated-host-recovered missing";
+pub(crate) const PARKED_DEVICE: &str =
+    "a restart that refused its ended attach issued a reservation command";
+pub(crate) const PARKED_STATUS: &str = "a parked process published a status";
 
 /// The outcomes every zone scenario requires of its [`ZoneLog`](super::zones::ZoneLog): the outage wrote nothing for
 /// the down zone and called no provider, changed nothing in another zone, each returning owner's tenure is one
@@ -946,7 +991,8 @@ pub(crate) const SILENT_WINDOW: &str = "witness silent-past-the-window missing";
 /// deposition's exit (`Deposed`, or `Rerun(RecordedHolder)` from the successor's reservation) of a tenure a later
 /// tenure of its shard superseded is scripted; so are
 /// `Rerun(Withdrawn)` of a regression scenario's faulted boot tenure of [`DUTY_CELL`] and the `Retire` of s0's
-/// tenure when the foreign registrant's Report triggers its retirement. Any other exit of a shard's last tenure
+/// tenure when the foreign registrant's Report triggers its retirement, and `Stopped` of the outgoing tenure whose
+/// planned handoff committed and whose `serve::ended` named `Stopped`. Any other exit of a shard's last tenure
 /// fails, whatever the tenure's authority reads.
 pub(crate) fn unscripted_exit(report: &super::Report) -> Option<super::Verdict> {
     let regressed = matches!(
@@ -967,7 +1013,14 @@ pub(crate) fn unscripted_exit(report: &super::Report) -> Option<super::Verdict> 
         let foreign = report.config.scenario == Scenario::Foreign
             && *at == 1
             && matches!(exit, crate::host::Exit::Retire(_));
-        let scripted = regression || foreign;
+        let handed = *exit == crate::host::Exit::Stopped
+            && (report.hosts.handoffs.iter()).any(|handed| {
+                handed.shard == *at
+                    && handed.tenure == *tenure
+                    && handed.committed
+                    && handed.exit == Some(crate::host::Exit::Stopped)
+            });
+        let scripted = regression || foreign || handed;
         let deposition = matches!(
             exit,
             crate::host::Exit::Deposed
@@ -1047,6 +1100,22 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
     }
     if log.refused > 0 {
         return Verdict::Fail(REFUSED_INPUT, format!("{} refused", log.refused));
+    }
+    let ended = crate::host::Exit::Refused(crate::host::Refusal::Restart(
+        crate::failover::restart::Check::Local(crate::failover::restart::Local::Ended),
+    ));
+    if let Some(park) =
+        (log.parks.iter()).find(|park| park.exit == ended && !park.commands.is_empty())
+    {
+        let at = format!(
+            "shard {} host {}: {:?}",
+            park.shard, park.host, park.commands
+        );
+        return Verdict::Fail(PARKED_DEVICE, at);
+    }
+    if let Some((round, host, shard)) = log.parked_published.first() {
+        let at = format!("shard {shard} host {host} round {round}");
+        return Verdict::Fail(PARKED_STATUS, at);
     }
     let config = report.config;
     let scenario = config.scenario;
@@ -1418,11 +1487,73 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
             (taken.len() >= 3, TAKEOVERS),
         ],
         Scenario::FalseSuspicion => vec![(log.vetoes >= 1 && log.contested >= 1, VETO)],
+        Scenario::Handoff | Scenario::HandoffEnded => handed_off(report),
     };
     match witnesses.into_iter().find(|(reached, _)| !reached) {
         Some((_, missing)) => Verdict::Unrun(missing),
         None => Verdict::Pass,
     }
+}
+
+fn handed_off(report: &super::Report) -> Vec<(bool, &'static str)> {
+    let log = &report.hosts;
+    let ended = report.config.scenario == Scenario::HandoffEnded;
+    let Some(handed) = (log.handoffs.iter()).find(|handed| {
+        handed.committed && handed.ended == ended && handed.exit == Some(crate::host::Exit::Stopped)
+    }) else {
+        return vec![(false, HANDED_OFF)];
+    };
+    let shard = handed.shard;
+    let last = report.shards[shard as usize - 1].recoveries.last();
+    // The recovery is a later tenure than the outgoing one.
+    let full = |host: u64| {
+        last.is_some_and(|last| {
+            last.host.get() == host
+                && (last.tenure.g, last.tenure.a) > (handed.tenure.g, handed.tenure.a)
+                && last
+                    .sweep
+                    .is_some_and(|(of, served)| of > 0 && of == served)
+        })
+    };
+    if !ended {
+        let changed =
+            (log.role_changes.iter()).any(|&(_, of, host)| of == shard && host == handed.to);
+        let arm =
+            (report.volumes.arm.iter()).any(|&(of, host, _)| of == shard && host == handed.to);
+        return vec![
+            (true, HANDED_OFF),
+            (changed && arm && full(handed.to), TARGET_SERVED),
+        ];
+    }
+    let parked = log.parks.iter().any(|park| {
+        park.shard == shard
+            && park.host == handed.to
+            && park.exit
+                == crate::host::Exit::Refused(crate::host::Refusal::Restart(
+                    crate::failover::restart::Check::Local(crate::failover::restart::Local::Ended),
+                ))
+            && park.left.as_ref().is_some_and(|(_, exit)| {
+                *exit == Some(crate::host::Exit::Rerun(crate::host::Rerun::RoleChanged))
+            })
+    });
+    let designated: Vec<u64> = (report.recon.designations.iter())
+        .filter(|d| {
+            d.shard == shard && d.host != handed.to && d.repair == Repair::Need(Need::Fresh)
+        })
+        .map(|d| d.host)
+        .collect();
+    let recovered = designated.iter().any(|&host| {
+        let taken = (log.takeovers.iter()).any(|attempt| {
+            attempt.shard == shard && attempt.host == host && attempt.refused.is_none()
+        });
+        taken && full(host)
+    });
+    vec![
+        (true, HANDED_OFF),
+        (parked, TARGET_PARKED),
+        (!designated.is_empty(), FRESH_DESIGNATED),
+        (log.nominations > 0 && recovered, DESIGNATED_RECOVERED),
+    ]
 }
 
 /// What ends the cause of a loss. A loss whose cause ended closes once its GETs drained and a tenure whose host
@@ -1567,7 +1698,12 @@ impl<'c> Fleet<'c> {
             keys,
             (writer, AGENT_BUILD),
         );
-        host.agent = Some(agent.expect("the fleet's agent bounds"));
+        let mut agent = agent.expect("the fleet's agent bounds");
+        if let Some(grace) = self.grace_us {
+            agent.set_restart_grace(grace);
+        }
+        let host = &mut self.hosts[member];
+        host.agent = Some(agent);
         self.list_instance(member, InstanceState::Running);
         self.read_records(member);
         self.sync(member);
@@ -2097,7 +2233,31 @@ impl<'c> Fleet<'c> {
                 ..LinkStatus::idle(shard, volume, pid(at), OwnerPhase::Held)
             });
         }
-        self.planted |= !hidden.is_empty();
+        let mut published = false;
+        for parked in self.parks.iter().filter(|parked| parked.member == member) {
+            let cell = &self.cells[parked.at];
+            let (shard, volume) = (cell.placement.shard, cell.placement.volume);
+            if self.config.planted_at(Plant::ParkedWithdraws, parked.at) {
+                let pid = pid(parked.at);
+                statuses.push(LinkStatus::idle(shard, volume, pid, OwnerPhase::Withdrawn));
+                published = true;
+            }
+            if !self.config.planted_at(Plant::ParkedPublishes, parked.at) {
+                continue;
+            }
+            let entry = report::VolumeEntry {
+                shard,
+                phase: Some(report::Phase::Held),
+                ..report::tests::bare(volume.as_str(), report::RecordedRole::Owner)
+            };
+            statuses.push(LinkStatus {
+                entry: Some(entry),
+                ended: Some(report::Ended::Held),
+                ..LinkStatus::idle(shard, volume, pid(parked.at), OwnerPhase::Held)
+            });
+            published = true;
+        }
+        self.planted |= published || !hidden.is_empty();
         // Each standby process publishes `Standby` from its own wait, with the target its last role read returned.
         for at in 0..cells {
             let Some((of, target, volume)) = self.cells[at].waiting else {
@@ -2125,6 +2285,8 @@ impl<'c> Fleet<'c> {
                 statuses.push(status);
             }
         }
+        // The statuses pushed from here on are the fleet's own: one `Withdrawn` for each publication that stopped.
+        let stopped = statuses.len();
         let last = std::mem::take(&mut self.hosts[member].published);
         for (shard, volume, pid, phase) in last {
             let ended = matches!(phase, OwnerPhase::Withdrawn | OwnerPhase::Closing);
@@ -2135,6 +2297,17 @@ impl<'c> Fleet<'c> {
         self.hosts[member].published = (statuses.iter())
             .map(|status| (status.shard, status.volume, status.pid, status.phase))
             .collect();
+        let since = self.round - self.host_start;
+        for parked in self.parks.iter().filter(|parked| parked.member == member) {
+            let shard = self.cells[parked.at].placement.shard;
+            let pid = pid(parked.at);
+            // The `Withdrawn` that follows the ended wait's last status is the wait's, not the park's.
+            let parks = |status: &&LinkStatus| status.shard == shard && status.pid == pid;
+            if statuses[..stopped].iter().any(|status| parks(&status)) {
+                let host = self.topology.members[member].host.get();
+                self.log.parked_published.push((since, host, shard.get()));
+            }
+        }
         statuses
     }
 
@@ -2213,6 +2386,7 @@ impl<'c> Fleet<'c> {
                 Effect::Impair(at, on) => self.impair(at, on),
                 Effect::Release(at) => self.release_hold(at),
                 Effect::Rerun(at) => self.rerun_held(at),
+                Effect::Handoff(at, ended) => self.hand_off(live, at, ended)?,
                 Effect::Crash(member) if self.hosts[member].up == Up::Down => {}
                 Effect::Crash(member) => {
                     crashed = true;
@@ -2296,6 +2470,9 @@ impl<'c> Fleet<'c> {
         if up == Up::Down {
             for cell in &mut self.cells {
                 cell.held.retain(|(of, _)| *of != member);
+            }
+            while let Some(index) = self.parks.iter().position(|parked| parked.member == member) {
+                self.leave_park(index, None);
             }
         }
         // A stopped or paused host's standby processes publish nothing until a later wait reads their role again.
@@ -2431,6 +2608,7 @@ impl<'c> Fleet<'c> {
         slots: &mut Slots<'w>,
     ) -> Result<(), Stopped> {
         loop {
+            self.free_unparked(slots);
             self.episodes(live, slots)?;
             if let Some(refusal) = self.draw_refusal.take() {
                 return Err(Stopped::Choice(refusal));

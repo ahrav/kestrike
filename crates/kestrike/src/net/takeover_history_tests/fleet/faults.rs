@@ -76,6 +76,13 @@ pub(crate) enum Action {
     /// The stalled volume of the shard at this cell index completes commands again, and each process of the shard
     /// that ended `Exit::Held` runs its next incarnation at once, as its supervisor starts it.
     Rerun(usize),
+    /// The planned handoff of the shard at this cell index: its serving owner withdraws for a planned exit and the
+    /// transfer to its named standby commits (`Fleet::hand_off`). With `ended`, the standby's attach ends after the
+    /// transfer's reads and before its write, so the committed record names an ended target.
+    Handoff {
+        at: usize,
+        ended: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +98,8 @@ pub(crate) enum Kind {
     /// A stall, a loss or a control-plane impairment of one volume.
     Volume,
     OperatorRelease,
+    /// A planned handoff of one shard to its named standby.
+    Handoff,
     /// `Hostile(StoreKill)` covers the kill arms of the store double: a lost write, a double win or a stale
     /// current read.
     Hostile(Hostile),
@@ -155,6 +164,7 @@ impl Kind {
                 Self::Volume
             }
             Action::Release(_) => Self::OperatorRelease,
+            Action::Handoff { .. } => Self::Handoff,
         }
     }
 
@@ -288,6 +298,8 @@ pub(crate) enum Effect {
     Impair(usize, bool),
     Release(usize),
     Rerun(usize),
+    /// The planned handoff of the cell at the index; `true` ends the target's attach inside the transfer.
+    Handoff(usize, bool),
 }
 
 /// [`Faulted`] stores read `store`.
@@ -477,9 +489,12 @@ impl Faults {
             Action::Impair(at) => vec![Effect::Impair(*at, on)],
             Action::Release(at) if on => vec![Effect::Release(*at)],
             Action::Rerun(at) if on => vec![Effect::Rerun(*at)],
-            Action::Register(_) | Action::LoseVolume(_) | Action::Release(_) | Action::Rerun(_) => {
-                Vec::new()
-            }
+            Action::Handoff { at, ended } if on => vec![Effect::Handoff(*at, *ended)],
+            Action::Register(_)
+            | Action::LoseVolume(_)
+            | Action::Release(_)
+            | Action::Rerun(_)
+            | Action::Handoff { .. } => Vec::new(),
         }
     }
 }

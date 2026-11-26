@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2243",
+  "kind": "contract-change",
+  "pull_request": 2243,
+  "changed": "A new obligation record, fleet-handoff-target-reads-its-role-and-an-ended-target-parks-until-the-designated-host-takes-over, and the invariants of fleet-host-driver-keeps-no-epoch-reuse-one-exit-named-standby-and-the-health-rule and fleet-zone-repair-and-host-scenarios-pass-on-their-second-root. The fleet gains the planned handoff and its ended-target form: the target of a committed transfer reads its role in its standby wait and restarts through its lineage arm, and a target whose attach ended refuses its restart, parks and publishes no status until the designated host takes the shard over. Two rules judge every fleet run: a restart that refused its ended attach, or a view period of its park, logged a reservation command, and a parked process published a status. The host-driver record's FP-HOST-09 sentence and LIMITS name the ended-target handoff as the fleet's run of the health rule's silent clause under the scaled restart grace, with plant UnscaledGrace (44) as its control. The scheduled repair and host case counts 32 checks, where it counted 30, and the record's two scheduled cases together count 60 member lines (3 zone checks, 32 repair and host checks and 25 crash cells), where they counted 58.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-handoff-target-reads-its-role-and-an-ended-target-parks-until-the-designated-host-takes-over",
+    "reason": "Its invariant states the new contract: the outgoing tenure settles on the acknowledged transfer and ends Stopped with no rerun, the record names the target owner at E + 1 with no standby on the same generation and volume, the target's wait ends Rerun(RoleChanged) and its restart bumps once, takes the lineage arm and serves every retained object; in the ended-target form the target's restart refuses at its record reads with no reservation command, parks with no status, and the designated host's takeover serves the shard warm. Before this change no fleet record stated a planned transfer's target or a parked owner process."
+  }
+}

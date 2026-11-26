@@ -1308,7 +1308,7 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
     use super::hosts::Unknown;
     /// A scenario's name, the root it runs on and the check that runs it on a root.
     type Check = (&'static str, u64, fn(u64));
-    let checks: [Check; 19] = [
+    let checks: [Check; 21] = [
         (
             "settle",
             2,
@@ -1390,6 +1390,14 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
         ("takeover-unknown-committed", 1, |_| {
             host_tests::a_takeover_whose_swap_reply_is_unknown_recovers_on(true)
         }),
+        ("handoff", 2, |root| {
+            let _ = super::handoff_tests::an_admitted_transfer_s_target_reads_its_role_and_serves_through_its_lineage_arm_on(root);
+        }),
+        (
+            "handoff-ended",
+            2,
+            super::handoff_tests::a_transfer_to_an_ended_target_parks_it_and_the_designated_host_takes_the_shard_over_warm_on,
+        ),
     ];
     for (name, root, check) in checks {
         check(root);

@@ -282,6 +282,8 @@ pub struct Agent {
     watch: Watch,
     keys: Prepared,
     statuses: Vec<Received>,
+    /// The restart grace defaults to [`RESTART_GRACE_US`].
+    grace_us: u64,
     /// The time of the last turn, and zero before the first.
     turned_at: u64,
     /// The shards, each with its record's active volume, that the last sync lists with this host owner and a
@@ -370,6 +372,7 @@ impl Agent {
                     .collect(),
             },
             statuses: Vec::new(),
+            grace_us: RESTART_GRACE_US,
             turned_at: 0,
             standby_named: Vec::new(),
             unreported: Vec::new(),
@@ -748,10 +751,10 @@ impl Agent {
         self.owned = Some(owned);
         // A status of a role the records no longer list stays for the restart grace, so the fresh-status readers keep
         // the entry of a process that still runs.
-        let roles = &self.roles;
+        let (roles, grace) = (&self.roles, self.grace());
         self.statuses.retain(|kept| {
             roles.contains(&(kept.status.shard, kept.status.volume))
-                || now.saturating_sub(kept.at) <= RESTART_GRACE_US
+                || now.saturating_sub(kept.at) <= grace
         });
         // A standby-named role that stays named and unreported keeps its original `since`, so repeated syncs
         // preserve its grace deadline.
@@ -835,14 +838,15 @@ impl Agent {
     /// `Held` exit of its last incarnation and no serving tenure, and it is silent once its last status, other than
     /// a parked or closing one, is older than [`RESTART_GRACE_US`].
     pub fn healthy(&self, now: u64) -> bool {
+        let grace = self.grace();
         // A process that died before its first status reached the agent leaves its role unreported.
-        let unreported = (self.unreported.iter())
-            .any(|&(.., since)| now.saturating_sub(since) > RESTART_GRACE_US);
+        let unreported =
+            (self.unreported.iter()).any(|&(.., since)| now.saturating_sub(since) > grace);
         let quiet = |kept: &Received| {
             let status = &kept.status;
             let held = status.phase == Phase::Held
                 || (status.ended == Some(Ended::Held) && status.phase != Phase::Serving);
-            let silent = now.saturating_sub(kept.at) > RESTART_GRACE_US
+            let silent = now.saturating_sub(kept.at) > grace
                 && !matches!(status.phase, Phase::Parked | Phase::Closing);
             held || silent
         };
@@ -853,6 +857,15 @@ impl Agent {
         #[cfg(test)]
         let unhealthy = unhealthy || tests::any_hold(self.statuses.iter().any(quiet));
         !unhealthy
+    }
+
+    fn grace(&self) -> u64 {
+        self.grace_us
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_restart_grace(&mut self, grace_us: u64) {
+        self.grace_us = grace_us;
     }
 
     fn keep(&mut self) {

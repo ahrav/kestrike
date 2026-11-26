@@ -3199,6 +3199,53 @@ fn a_status_received_on_the_first_turn_is_dated_from_the_clock_origin() {
     assert_eq!(ages, [(Some(5 + t), 7 + t)]);
 }
 
+#[test]
+fn the_restart_grace_is_the_constant_unless_a_test_sets_it_and_the_set_value_moves_all_three_reads()
+{
+    assert_eq!(agent().grace(), RESTART_GRACE_US);
+    let grace = 10 * H;
+    let named = [record(1, OWN, Some(11))];
+    let moved = [record(1, 11, Some(14))];
+    let healthy_at = |agent: &mut Agent, now: u64| beat_to(&at(agent, now, &[]), 11).0.healthy;
+    for scaled in [false, true] {
+        let make = |statuses: &[Status]| {
+            let mut agent = synced(&named, statuses);
+            if scaled {
+                agent.set_restart_grace(grace);
+            }
+            agent
+        };
+        let mut silent = make(&[status(1, Phase::Serving)]);
+        assert!(healthy_at(&mut silent, grace), "silence inside the grace");
+        assert_eq!(
+            healthy_at(&mut silent, grace + H),
+            !scaled,
+            "silence past the set grace, scaled {scaled}"
+        );
+        let mut unreported = make(&[]);
+        assert!(
+            healthy_at(&mut unreported, grace),
+            "no status inside the grace"
+        );
+        assert_eq!(
+            healthy_at(&mut unreported, grace + H),
+            !scaled,
+            "no status past the set grace, scaled {scaled}"
+        );
+        let mut evicted = make(&[status(1, Phase::Parked)]);
+        sync_at(&mut evicted, H, &moved, &[]);
+        sync_at(&mut evicted, grace + 2 * H, &moved, &[]);
+        sync_at(&mut evicted, grace + 3 * H, &named, &[]);
+        let start = grace + 3 * H;
+        assert!(healthy_at(&mut evicted, start + grace));
+        assert_eq!(
+            healthy_at(&mut evicted, start + grace + H),
+            !scaled,
+            "the parked row is evicted past the set grace, scaled {scaled}"
+        );
+    }
+}
+
 /// The status a waiting standby publishes for shard `shard` as the wait builds it: phase `Standby` at a target with
 /// no tenure, and an entry in the standby role with no tenure and no serving state.
 fn waiting_status(shard: u32) -> Status {

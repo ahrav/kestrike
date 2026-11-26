@@ -741,6 +741,7 @@ fn the_legal_profile_admits_no_hostile_kind_and_a_hostile_run_names_its_kind() {
         Kind::StoreOutage,
         Kind::Volume,
         Kind::OperatorRelease,
+        Kind::Handoff,
     ];
     assert!(legal.iter().all(|kind| kind.admitted(Profile::Legal)));
     for arm in [Arm::LostWrite, Arm::DoubleWin, Arm::StaleCurrentRead] {
@@ -3106,6 +3107,49 @@ fn a_refused_rerun_whose_role_read_fails_under_another_owners_record_runs_again_
     assert_eq!(fleet.retakes.get(&at), Some(&member));
     assert_eq!(fleet.log.refused_reruns, 2);
     assert_eq!(slots.used, [false]);
+}
+
+/// A wait's rerun exit queues its process's next incarnation once. s0's record comes to name its standby's host owner
+/// while the boot owner holds the cell, so the standby's next period reads the restart role and ends
+/// `Rerun(RoleChanged)`: the host log lists the role change, and the next incarnation is queued from that round with
+/// no loss before it. When the process is already queued after a loss, the period queues nothing: the entry keeps
+/// its round and its loss, and the host log lists no role change.
+#[test]
+fn a_wait_that_reads_its_host_owner_queues_one_next_incarnation_and_keeps_an_earlier_one() {
+    let waited = |queued: bool| {
+        let config = Config::host_loss(1);
+        let (mut fleet, _draws) = hosted(&config);
+        let at = 0;
+        let read = fleet.record_now(at);
+        let host = read.standby.expect("s0's standby");
+        let member = fleet.member_of(host).expect("the standby's member");
+        fleet.standby_waits();
+        assert_eq!(fleet.cells[at].waiting.map(|(of, ..)| of), Some(member));
+        let named = ShardRecord {
+            owner: host,
+            standby: None,
+            attempts: read.attempts + 1,
+            ..read
+        };
+        commit_shard(&fleet, &named);
+        let earlier = (fleet.round, true);
+        if queued {
+            fleet.refused.insert((at, member), earlier);
+        }
+        fleet.standby_waits();
+        assert_eq!(fleet.cells[at].wait_exits, ["Rerun(RoleChanged)"]);
+        let key = (at, member);
+        let entry = fleet.refused.get(&key).copied();
+        let start = fleet.rerun_starts.get(&key).copied();
+        (entry, start, fleet.log.role_changes.len(), fleet.round)
+    };
+    let (entry, start, listed, round) = waited(false);
+    assert_eq!(
+        (entry, start, listed),
+        (Some((round, false)), Some(round), 1)
+    );
+    let (entry, start, listed, round) = waited(true);
+    assert_eq!((entry, start, listed), (Some((round, true)), None, 0));
 }
 
 /// A restart's incarnation whose role read returns the standby role waits as that standby, and its wait publishes

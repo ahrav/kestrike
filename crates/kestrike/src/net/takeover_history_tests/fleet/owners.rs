@@ -480,6 +480,33 @@ impl Fleet<'_> {
     }
 }
 
+/// One extended Report issued as `pair` through a fencer over the host's device double on `cell`, on the arena and
+/// clock of `grounds`. The fencer's table ends with no command before the call returns.
+pub(super) fn report_as(cell: &Cell, pair: Pair, grounds: &Grounds) {
+    use crate::failover::restart::Device;
+    let (disk, control) = device(cell, pair);
+    grounds.fencer.drive(&control);
+    let gate = HostGate::qualified();
+    let mut fencer = host::fencer::Fencer::new(
+        &gate,
+        move || Ok((disk, pair)),
+        limits(),
+        &grounds.buffers,
+        &grounds.fencer,
+    );
+    let reported = fencer.start().is_ok() && fencer.ready().is_ok() && fencer.report().is_ok();
+    grounds.fencer.release();
+    assert!(reported, "the device double completes a Report");
+    if let host::fencer::Release::Outstanding(table) = fencer.release() {
+        stop_table(table, &control);
+    }
+}
+
+/// [`report_as`] on the arena and clock the standby waits' view periods take.
+pub(super) fn report_in_wait(cell: &Cell, pair: Pair) {
+    WAITS.with(|grounds| report_as(cell, pair, grounds));
+}
+
 /// Resets `control`'s device and drains `table`, which then holds no command.
 fn stop_table(mut table: crate::storage::CommandTable<'_, Reserving>, control: &SimControl) {
     use crate::storage::{QuiesceProgress, Quiesced};
@@ -651,19 +678,31 @@ impl Fleet<'_> {
     /// period's reads and writes join the shard's wait tally (`Cell::waits`), and a period that ended other than
     /// `Exit::Stopped` is listed (`Cell::wait_exits`); the untouched-shard rule bounds every period at two reads and
     /// no write. Under [`super::Plant::StandbyExtraRead`] the standby of the shard at the index reads the
-    /// shard record once more in each period.
+    /// shard record once more in each period. A waiting process whose host the record names owner while another
+    /// member holds the cell, the target of a planned handoff, keeps its period too: that period reads the restart
+    /// role and ends `Rerun(RoleChanged)`, the host log lists the role change, and the process's next incarnation is
+    /// queued ([`Fleet::queue_rerun`]), as it is after a period that ended `Rerun(Records)` under such a record.
     pub(super) fn standby_waits(&mut self) {
         for at in 0..self.cells.len() {
             let record = self.record_now(at);
-            let waiter = (record.standby)
+            let runs = |member: usize| {
+                self.cells[at].holder != member
+                    && self.hosts[member].up == super::hosts::Up::Running
+            };
+            let standby = (record.standby)
                 .and_then(|standby| self.member_of(standby))
-                .filter(|&member| {
-                    self.cells[at].holder != member
-                        && self.hosts[member].up == super::hosts::Up::Running
-                });
-            // The fleet runs a wait only for the standby the stored record names. A process that record stopped
-            // naming, that holds the shard, or whose host stopped runs no wait here, so its `Standby` status ends in
-            // this view period.
+                .filter(|&member| runs(member));
+            // A waiting process whose host the record names owner at a tenure the cell's holder does not hold, the
+            // planned handoff's target, keeps its period, which reads the restart role.
+            let unwaited = self.config.planted_at(super::Plant::TargetUnwaited, at);
+            self.planted |= unwaited && self.cells[at].waiting.is_some() && standby.is_none();
+            let target = (self.cells[at].waiting)
+                .map(|(of, ..)| of)
+                .filter(|&of| self.topology.members[of].host == record.owner && runs(of))
+                .filter(|_| !unwaited);
+            let waiter = standby.or(target);
+            // A process that the record stopped naming standby, that holds the shard, or whose host stopped publishes
+            // no `Standby` for the shard: its wait reads another role, or no wait runs.
             if self.cells[at]
                 .waiting
                 .is_some_and(|(of, ..)| Some(of) != waiter)
@@ -711,12 +750,26 @@ impl Fleet<'_> {
                 panic!("a view period with no witness acquired a tenure");
             };
             let (reads, writes) = counts.tally();
+            let after = self.record_now(at);
             let cell = &mut self.cells[at];
             cell.excuse(&counts);
             cell.waits.push((reads, writes));
             if exit != Exit::Stopped {
                 cell.wait_exits.push(format!("{exit:?}"));
                 cell.waiting = None;
+                let rerun = matches!(
+                    exit,
+                    Exit::Rerun(crate::host::Rerun::RoleChanged | crate::host::Rerun::Records)
+                );
+                if rerun && after.owner == of.host && !self.refused.contains_key(&(at, member)) {
+                    if exit == Exit::Rerun(crate::host::Rerun::RoleChanged) {
+                        let since = self.round - self.host_start;
+                        let shard = cell.placement.shard.get();
+                        self.log.role_changes.push((since, shard, of.host.get()));
+                    }
+                    self.queue_rerun(at, member, &exit, false);
+                    self.rerun_starts.insert((at, member), self.round);
+                }
             } else {
                 self.publish_read(at, member, &counts.returned);
             }
