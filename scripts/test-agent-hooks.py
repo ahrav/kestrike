@@ -530,6 +530,16 @@ class PrePushChecks(unittest.TestCase):
                 self.assertEqual(hook.checks_for([path], set(), set(), gameday_held=False, host_stop_held=False), [])
         self.assertEqual(hook.checks_for(["scripts/test-gameday-judge.py"], set(), set(), gameday_held=False),
                          list(hook.GAMEDAY_TEST))
+        # Each file the judge's FLEET_BOUNDS names runs both self-tests beside the checks a Rust change selects.
+        judge = ast.parse((ROOT / "scripts/gameday-judge.py").read_text(encoding="utf-8"))
+        bounds = [ast.literal_eval(node.value) for node in judge.body if isinstance(node, ast.Assign)
+                  and [getattr(target, "id", None) for target in node.targets] == ["FLEET_BOUNDS"]]
+        self.assertEqual(len(bounds), 1)
+        for path in sorted({rel for rel, _ in bounds[0].values()}):
+            with self.subTest(fleet_bound=path):
+                for test, held in ((hook.GAMEDAY_TEST[0], "gameday_held"), (hook.HOST_STOP_TEST[0], "host_stop_held")):
+                    self.assertIn(test, hook.checks_for([path], set(), set()))
+                    self.assertNotIn(test, hook.checks_for([path], set(), set(), **{held: False}))
         tree = ast.parse((ROOT / "scripts/readiness.py").read_text(encoding="utf-8"))
         owning = [ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                   and [getattr(target, "id", None) for target in node.targets] == ["OWNING"]]

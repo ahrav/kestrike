@@ -46,7 +46,10 @@ worktree of the tip:
 - `scripts/gameday-judge.py`, `scripts/test-gameday-judge.py`, a path under
   `scripts/gameday-fixtures/`, `scripts/readiness.py`, a script of its
   `OWNING` tuple (which it loads or hashes at import),
-  `scripts/fis-profiles.json`, `verification/readiness/gamedays.json` or
+  `scripts/fis-profiles.json`, `verification/readiness/gamedays.json`, a file
+  that declares one of the judge's `FLEET_BOUNDS`
+  (`crates/kestrike/src/failover/zone_loop/directory.rs`,
+  `crates/kestrike/src/failover/standbys.rs`) or
   `verification/readiness/failover.json`, at a tip that holds the judge's
   self-test: `scripts/test-gameday-judge.py`. A change to the judge or its
   self-test runs it at any tip, so a push that removes the self-test fails on
@@ -56,7 +59,8 @@ worktree of the tip:
   a file the controller or its self-test loads or reads:
   `scripts/fis-controller.py`, `scripts/gameday-judge.py` or a file the judge
   reads (`scripts/readiness.py`, a script of its `OWNING` tuple,
-  `scripts/fis-profiles.json` or `verification/readiness/gamedays.json`), at a
+  `scripts/fis-profiles.json`, `verification/readiness/gamedays.json` or a
+  file that declares one of its `FLEET_BOUNDS`), at a
   tip that holds the controller's self-test:
   `scripts/test-host-stop-controller.py`. A change to the controller or its
   self-test runs it at any tip, so a push that removes the self-test fails on
@@ -182,7 +186,8 @@ GAMEDAY_OWN = ("scripts/gameday-judge.py", GAMEDAY)
 # A self-test that imports `readiness.py` depends on every script in `OWNING` because the module loads or hashes each
 # script at import.
 JUDGE_READS = ("scripts/gameday-judge.py", "scripts/readiness.py", "scripts/fis-profiles.json",
-               "verification/readiness/gamedays.json",
+               "verification/readiness/gamedays.json", "crates/kestrike/src/failover/zone_loop/directory.rs",
+               "crates/kestrike/src/failover/standbys.rs",
                *(f"scripts/{name}" for name in ("acceptance.py", "verify-receipts.py", "hit-gate.py",
                                                 "hardware-lane.py", "recovery-packages.py", "measurement-frame.py",
                                                 "sizing-worksheet.py", "reproduce-test.py", "select-tests.py")))

@@ -15,7 +15,9 @@
 //! row of a successor's sweep stands at the loss round plus its recovery's `rounds`, the round the successor's
 //! client session opened. The report carries one round for each recovery: the sweep sends its first GET in that
 //! round and every later GET in that round or a later one, so the stamp is a lower bound of a row's send round.
-//! The run window ends one round after the latest of the loss and those stamps.
+//! The run window ends one round after the latest of the loss and those stamps. The export seals its collected files
+//! and `coverage.json` at that end in `injection/collected.json`, the SHA-256 of each file's bytes, as the stop
+//! controller's `seal` does.
 //!
 //! The package is of kind `simulation`, so the judge's record reads mode `simulation`. Its revision is forty zeros
 //! and its date is [`DATE`]. A host scenario runs the fleet's hosts alone, so the package marks the origin,
@@ -46,6 +48,8 @@ use crate::failover::loss::Receipt;
 use crate::failover::loss::Request;
 use crate::failover::loss::tests::receipt;
 use crate::failover::records::{Host, ShardRecord};
+use crate::failover::standbys::MAX_SLOTS;
+use crate::failover::zone_loop::directory::MAX_HOSTS;
 use crate::net::ownership::ShardGeneration;
 use crate::storage::store_tests::fresh_directory;
 
@@ -420,6 +424,13 @@ fn export(report: &Report) -> Files {
         })
         .collect();
     files.insert("coverage.json".into(), json_file(&Value::Object(coverage)));
+    let sealed: Map<String, Value> = (files.iter())
+        .map(|(rel, bytes)| (rel.clone(), json!(hex(&Sha256::digest(bytes)))))
+        .collect();
+    files.insert(
+        "injection/collected.json".into(),
+        json_file(&json!({"time": end, "files": sealed})),
+    );
     files.insert("injection/roles.json".into(), json_file(&roles));
     files.insert("injection/stop.json".into(), json_file(&stop));
     files.insert("injection/stopped.json".into(), json_file(&stopped));
@@ -442,14 +453,13 @@ impl Drop for Scratch {
     }
 }
 
-/// `judged` returns the judge's exit code and parsed run record for the evidence `files`. The judge must exit with
-/// code `0` or `1` and write a readable JSON record of the package in `files`.
-fn judged(files: Files) -> (i32, Value) {
+/// `judgment` writes `files` to a fresh evidence directory and runs the judge over it. It returns the judge's exit
+/// code, its standard error, and the bytes of the record it wrote, or `None` when no record stands.
+fn judgment(files: Files) -> (i32, String, Option<Vec<u8>>) {
     static CASES: AtomicUsize = AtomicUsize::new(0);
     let case = CASES.fetch_add(1, Ordering::Relaxed);
     let scratch = Scratch(fresh_directory(&format!("gameday-export-{case}")));
     let evidence = scratch.0.join("evidence");
-    let package = hex(&Sha256::digest(&files["package.json"]));
     for (rel, bytes) in files {
         let path = evidence.join(rel);
         std::fs::create_dir_all(path.parent().expect("a file under the directory"))
@@ -465,25 +475,44 @@ fn judged(files: Files) -> (i32, Value) {
         .arg(&record_path)
         .output()
         .expect("python3 starts the judge");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let Some(code) = output.status.code() else {
         panic!("the judge ended by {}: {stderr}", output.status);
     };
+    // After a refusal the record path is looked up without following a link, so any entry there counts as a record.
+    let record = if code == 2 {
+        match std::fs::symlink_metadata(&record_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Ok(_) => Some(Vec::new()),
+            Err(error) => panic!(
+                "the judge exited {code} and {} cannot be looked up: {error}: {stderr}",
+                record_path.display()
+            ),
+        }
+    } else {
+        Some(std::fs::read(&record_path).unwrap_or_else(|error| {
+            panic!(
+                "the judge exited {code} and {} reads {error}: {stderr}",
+                record_path.display()
+            )
+        }))
+    };
+    (code, stderr, record)
+}
+
+/// `judged` returns the judge's exit code and parsed run record for the evidence `files`. The judge must exit with
+/// code `0` or `1` and write a readable JSON record of the package in `files`.
+fn judged(files: Files) -> (i32, Value) {
+    let package = hex(&Sha256::digest(&files["package.json"]));
+    let (code, stderr, record) = judgment(files);
     assert!(
         code == 0 || code == 1,
         "the judge wrote no record, exit {code}: {stderr}"
     );
-    let bytes = std::fs::read(&record_path).unwrap_or_else(|error| {
-        panic!(
-            "the judge exited {code} and {} reads {error}: {stderr}",
-            record_path.display()
-        )
-    });
+    let bytes =
+        record.unwrap_or_else(|| panic!("the judge exited {code} and wrote no record: {stderr}"));
     let record: Value = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-        panic!(
-            "the judge exited {code} and {} is not JSON: {error}: {stderr}",
-            record_path.display()
-        )
+        panic!("the judge exited {code} and its record is not JSON: {error}: {stderr}")
     });
     assert_eq!(
         record["package_sha256"],
@@ -491,6 +520,15 @@ fn judged(files: Files) -> (i32, Value) {
         "the record judges the exported package; the judge exited {code}: {stderr}"
     );
     (code, record)
+}
+
+/// `refused` returns the judge's standard error for the evidence `files`, which the judge must refuse with exit 2
+/// and no record.
+fn refused(files: Files) -> String {
+    let (code, stderr, record) = judgment(files);
+    assert_eq!(code, 2, "the judge refuses the evidence: {stderr}");
+    assert!(record.is_none(), "a refusal leaves no record: {stderr}");
+    stderr
 }
 
 /// GD-2's eleven rules as the judge names them.
@@ -1036,4 +1074,69 @@ fn a_skipped_sweep_planted_in_the_run_leaves_the_witness_first_hit_unobserved() 
         record["rules"]["witness-first-hit"]["result"], "unobserved",
         "{record:#}"
     );
+}
+
+/// The export seals its collections as the stop controller's `seal` does. A witness row removed after the seal, with
+/// the file's count in `coverage.json` lowered to match, changes the file's digest, and the judge refuses it.
+#[test]
+fn a_witness_row_removed_after_the_exports_seal_is_refused() {
+    let mut files = export(&root_one());
+    let rows = lines(&files, "witness.jsonl");
+    assert!(rows.len() > 1, "the export holds witness rows to remove");
+    let kept = &rows[..rows.len() - 1];
+    files.insert("witness.jsonl".into(), json_lines(kept.iter().cloned()));
+    let mut coverage: Value = serde_json::from_slice(&files["coverage.json"]).expect("JSON");
+    coverage["witness.jsonl"]["lines"] = json!(kept.len());
+    files.insert("coverage.json".into(), json_file(&coverage));
+    let stderr = refused(files);
+    assert!(
+        stderr.contains("witness.jsonl differs from the bytes injection/collected.json seals"),
+        "{stderr}"
+    );
+}
+
+/// A package that lists every host the fleet directory admits, [`MAX_HOSTS`], is judged, and one more host is
+/// refused; a shard list one past [`MAX_SLOTS`] is refused too. The judge reads both bounds from their declarations,
+/// and the test compares them with the compiled constants.
+#[test]
+fn a_package_host_list_past_the_fleet_directorys_bound_is_refused() {
+    let files = export(&root_one());
+    let mut package: Value = serde_json::from_slice(&files["package.json"]).expect("JSON");
+    let hosts = package["hosts"].as_array_mut().expect("a host list");
+    let spares = MAX_HOSTS - hosts.len();
+    hosts.extend((0..spares).map(|n| json!(format!("spare-{n}"))));
+    let repackaged = |package: &Value| {
+        let mut files = files.clone();
+        let bytes = json_file(package);
+        let mut roles: Value =
+            serde_json::from_slice(&files["injection/roles.json"]).expect("JSON");
+        roles["package_sha256"] = json!(hex(&Sha256::digest(&bytes)));
+        files.insert("injection/roles.json".into(), json_file(&roles));
+        files.insert("package.json".into(), bytes);
+        files
+    };
+    let (code, record) = judged(repackaged(&package));
+    assert_eq!(code, 1, "{record:#}");
+    assert_eq!(
+        record["rules"]["one-owner-per-tenure"]["result"], "unobserved",
+        "a spare host has no activation records: {record:#}"
+    );
+    let hosts = package["hosts"].as_array_mut().expect("a host list");
+    hosts.push(json!("spare-past-the-bound"));
+    let stderr = refused(repackaged(&package));
+    let words = format!(
+        "package.json hosts holds {} entries, more than the {MAX_HOSTS}",
+        MAX_HOSTS + 1
+    );
+    assert!(stderr.contains(&words), "{stderr}");
+    let mut package: Value = serde_json::from_slice(&files["package.json"]).expect("JSON");
+    let shards = package["shards"].as_array_mut().expect("a shard list");
+    let spares = MAX_SLOTS + 1 - shards.len();
+    shards.extend((0..spares).map(|n| json!(format!("spare-{n}"))));
+    let stderr = refused(repackaged(&package));
+    let words = format!(
+        "package.json shards holds {} entries, more than the {MAX_SLOTS}",
+        MAX_SLOTS + 1
+    );
+    assert!(stderr.contains(&words), "{stderr}");
 }

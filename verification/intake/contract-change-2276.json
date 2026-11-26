@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2276",
+  "kind": "contract-change",
+  "pull_request": 2276,
+  "changed": "Two obligation records are added for the game-day judge, scripts/gameday-judge.py. The evidence layout gains the required mark injection/collected.json, the host stop controller's seal of coverage.json and each collected file, which the controller's new seal command writes once the run window has ended; the judge refuses a file whose bytes differ from the seal's digest, a seal dated before the run window's end and a coverage span ending after the seal, and its run record carries the seal's digest and time. A package's hosts and shards lists are bounded by MAX_HOSTS and MAX_SLOTS, the bounds the zone's fleet directory refuses a longer listing by, and its witness list by MAX_SLOTS keys, a working value; each count is checked once package.json is decoded and before any entry is checked against the schema. An evidence directory written before this change holds no seal and is refused with exit 2.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "gameday-judge-refuses-a-collection-changed-after-the-controllers-seal",
+    "reason": "Its invariant states the new contract of the seal: a collection shortened after the controller sealed it, with its count in coverage.json lowered to match, is refused, where before the judge credited its absent rows. The record gameday-judge-refuses-a-package-list-past-the-fleet-directorys-bound states the list bounds."
+  }
+}

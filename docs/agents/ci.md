@@ -838,8 +838,8 @@ The header of `scripts/readiness.py` states the inputs and the grade rules.
 `python3 scripts/gameday-judge.py --evidence DIR --record FILE` derives the
 verdict of one run of GD-2 from an evidence directory and writes the run
 record that `scripts/readiness.py judge` reads under `gamedays`. It reads GD-2
-from `verification/readiness/gamedays.json` of its own tree and makes no git
-or network call. It creates FILE and replaces no entry, and exits 0 on a
+from `verification/readiness/gamedays.json` and the fleet bounds below from
+two Rust files, all of its own tree, and makes no git or network call. It creates FILE and replaces no entry, and exits 0 on a
 `HELD` record, 1 on any other record and 2 when the run delivers no record.
 Exit 2 acknowledges no record of this run, and an entry at FILE after it is
 no judged record: one that stood before the run, one another writer made
@@ -866,6 +866,7 @@ subsection below states each field's type, its writer and every refusal.
 | `injection/stopped.json` | `instance`, `state`, `time`, `request` {`instance`, `time`, `identity`} |
 | `injection/abort.json` | `cause`, `guardrail`, `time`, `detail` |
 | `injection/restoration.json` | `instance`, `state`, `time`, `reviewed_sha256` (the SHA-256 of the operator's record of GD-2's abort steps after an abort, else null) |
+| `injection/collected.json` | `time`, `files` {file: SHA-256} for `coverage.json` and each collected file present |
 | `records/<shard>.jsonl` | `time`, `owner`, `standby`, `generation`, `volume`, `attempts` |
 | `records/receipts.jsonl` | `time`, `shard`, `principal` |
 | `activations.jsonl` | `host`, `activations` [{`shard`, `generation`, `attempt`, `time`}] |
@@ -875,11 +876,24 @@ subsection below states each field's type, its writer and every refusal.
 | `blockers.jsonl` | `shard`, `time`, `name` |
 | `coverage.json` | {file: {`from`, `to`, `lines`}} for each collected file present |
 
-`injection/roles.json` is required; the other four marks under `injection/`
-are optional. `origin.jsonl`, `provider.jsonl` and `blockers.jsonl` hold the
-observations `origin`, `provider` and `re-enrollment`; a `simulation` package
-names those its world lacks under `outside`, their files stand absent, and
-the rules that read them read `outside`. The judge compares GD-2's five
+`injection/roles.json` and `injection/collected.json` are required; the other
+four marks under `injection/` are optional. `collected.json` is the stop
+controller's seal of the collections, written by its `seal` once the run
+window has ended; the judge refuses a collected file or `coverage.json` whose
+bytes differ from the digest it names, so an evidence directory without it is
+refused (exit 2). `origin.jsonl`, `provider.jsonl` and `blockers.jsonl` hold
+the observations `origin`, `provider` and `re-enrollment`; a `simulation`
+package names those its world lacks under `outside`, their files stand
+absent, and the rules that read them read `outside`. A package whose `hosts`,
+`shards` or `witness` list holds more entries than its bound in
+`FLEET_BOUNDS` is refused once `package.json` is decoded, before any entry is
+checked against the schema, put in a set or used to lay out files. The zone's
+fleet directory refuses a listing of more than `MAX_HOSTS` hosts
+(`crates/kestrike/src/failover/zone_loop/directory.rs`) or `MAX_SLOTS`
+shards (`crates/kestrike/src/failover/standbys.rs`), and the judge bounds
+`hosts` and `shards` by those constants. No record declares a count of
+witness keys, so the judge bounds `witness` by `MAX_SLOTS` too, a working
+value in keys: one key for each shard a zone may hold. The judge compares GD-2's five
 clauses with their bound names, its eight guardrails and both oracle texts
 with the texts its eleven rules were written from, and exits 2 on any
 difference. The record holds `id`, `mode` (`causal` for `staging`,
@@ -887,7 +901,8 @@ difference. The record holds `id`, `mode` (`causal` for `staging`,
 `verdict`, `package_sha256` (the SHA-256 of `package.json`), `catalog_sha256`
 (the package digest `readiness.py check` reports), `reach`, `abort`, `rules`
 (each rule's `result`, `text`, `guardrail`, `past_stop_condition` and
-`detail`), `budgets` (each bound's `value` and `source`) and `result`. While
+`detail`), `budgets` (each bound's `value` and `source`), `seal` (the SHA-256
+of `injection/collected.json` and its `time`) and `result`. While
 GD-2 is blocked, `readiness.py judge` reads a `HELD` staging record as
 UNVERIFIED, and it refuses a `simulation` record under a staging item.
 `python3 -I scripts/test-gameday-judge.py` runs the judge over the committed
@@ -895,7 +910,8 @@ fixture `scripts/gameday-fixtures/held/` and the copies it plants. The
 pre-push hook runs it for a push that changes the judge, its self-test, its
 fixtures, `scripts/readiness.py` or a script it loads or hashes at import,
 `scripts/fis-profiles.json`,
-`verification/readiness/gamedays.json` or
+`verification/readiness/gamedays.json`, a file that declares one of its
+`FLEET_BOUNDS` or
 `verification/readiness/failover.json`. No CI job runs it yet: the line that
 adds it to the "Script self-checks" step after `python3 scripts/readiness.py
 check` waits for a login with the `workflow` scope, so a clone without the
@@ -933,6 +949,10 @@ stands in DIR, which the judge names by its last component and opens following n
                              outside the cache; `baseline` and `run` {start, end}, the baseline window and the run
                              window, the baseline ending at or before the stop and at or after the run window's
                              start, and the run window holding the stop;
+                             `hosts` holds at most the MAX_HOSTS and `shards` at most the MAX_SLOTS that their
+                             FLEET_BOUNDS files declare, the bounds the zone's fleet directory refuses a longer
+                             listing by, and `witness` at most MAX_SLOTS keys, a working value; a longer list is
+                             refused after the file is decoded and before any of its entries is checked;
                              `interval` the seconds of one origin-rate interval, positive, a whole number of which
                              spans the run window; `reconciler_principal`; `working_budgets` {budget: positive
                              number}, a working value for a budget GD-2's clauses name; `outside` {observation: reason}
@@ -964,6 +984,10 @@ stands in DIR, which the judge names by its last component and opens following n
                              operator's record that GD-2's abort steps were done before the start: 64 hex digits when
                              `abort.json` stands, null when it does not. Its `time` inside the run window ends
                              observation (the rules' common part below). Optional.
+  injection/collected.json  {time, files}: the controller's seal of the collections, `time` at or after the run
+                             window's end and each `coverage.json` span's `to`, `files` {file: sha256} for exactly
+                             `coverage.json` and each file `coverage.json` names, the SHA-256 of its bytes. A file whose
+                             bytes differ from its digest is refused, collected files before `coverage.json`. Required.
   records/<shard>.jsonl     one per package shard: each committed version of the shard record over both windows, in
                              commit order (times never decrease): {time, owner, standby, generation, volume, attempts}.
   records/receipts.jsonl    each replacement receipt: {time, shard, principal}.
@@ -984,8 +1008,9 @@ stands in DIR, which the judge names by its last component and opens following n
   coverage.json             {file: {from, to, lines}} for exactly each `records/` file, `activations.jsonl`,
                              `witness.jsonl`, `origin.jsonl`, `provider.jsonl` and `blockers.jsonl` present: the span its
                              collector covered (`from` <= `to`, on the package's clock) and its line count, which equals
-                             the file's. A span that does not cover the window a rule reads leaves the rule
-                             unobserved: the run window up to the end of observation, the baseline window too for
+                             the file's, and its `to` at or before the seal's `time`. A span that does not cover the
+                             window a rule reads leaves the rule unobserved: the run window up to the end of
+                             observation, the baseline window too for
                              origin-load and for the versions and activations one-owner-per-tenure reads, and for a
                              shard's `records/` file the span from the roles read on when that read precedes the
                              window. A rule that reads a collection ending before the end of
@@ -995,10 +1020,11 @@ stands in DIR, which the judge names by its last component and opens following n
                              takeover's end state, the version an activation is made under) reads unobserved.
 A file of an observation the package names in `outside` stands absent, with no coverage entry. Every other file above is
 required, except the four optional marks under `injection/`. The writers: `package.json` and `coverage.json` the
-operator; `injection/` the controller; `records/` the operator's collection of the store; `activations.jsonl` the hosts;
-`witness.jsonl` the client; `origin.jsonl` the origin; `provider.jsonl` the provider; `blockers.jsonl` the hosts and the
-reconciler. Stamps of one writer compare exactly. Two stamps of different writers within `clock_error_seconds` of each
-other, a difference of exactly that bound included, are undecided, and the rule that reads the comparison reads
+operator; `injection/` the controller, `collected.json` by its `seal` once every collection is in DIR; `records/` the
+operator's collection of the store; `activations.jsonl` the hosts; `witness.jsonl` the client; `origin.jsonl` the
+origin; `provider.jsonl` the provider; `blockers.jsonl` the hosts and the reconciler. Stamps of one writer compare
+exactly. Two stamps of different writers within `clock_error_seconds` of each other, a difference of exactly that
+bound included, are undecided, and the rule that reads the comparison reads
 unobserved: a witness GET against the stop or its
 shard's takeover write, an origin request against the stop or a first hit, an enrollment or a blocker against the
 drain's ends, an activation against the reference of its shard, the shard versions against the roles read and the
@@ -1009,18 +1035,24 @@ following no link, lists each directory and reads each file relative to the dire
 the layout it names before any of them is read. The catalog and `scripts/fis-profiles.json` are parsed as
 `scripts/readiness.py` parses them.
 
-What the record vouches for. The judge derives each rule's result from the row files under the committed GD-2 texts.
-It refuses a file, host, shard or key outside the package's lists, a package off the digest `roles.json` carries and a
+What the record vouches for. The judge derives each rule's result from the row files under the committed GD-2 texts. It
+refuses a file, host, shard or key outside the package's lists, a package off the digest `roles.json` carries and a
 coverage count other than its file's. Four statements it takes as their writers' declarations and checks for shape
-alone: that `hosts` and `shards` are every host and shard of the zone, that each collected file holds every row of the
-span `coverage.json` names, that the run ran `revision` on `date`, and that `reviewed_sha256` names the operator's
-record. The run's producers write every file of DIR, so a directory with a shard, a row or a date left out or changed
-reads as an honest one does, and a `HELD` record states that the evidence delivered meets GD-2's oracle. The record's
-`package_sha256` covers `package.json` alone (the lists, the revision and the date): `readiness.py judge` compares it
-with its inputs entry, which binds them when that entry's digest was taken from the package as filled before the
-injection, and compares `revision` with the release revision. `coverage.json`, the row files and `reviewed_sha256`
-stand in no digest the record carries. While GD-2 is blocked, `readiness.py judge` grades a `HELD` staging record
-UNVERIFIED.
+alone: that `hosts` and `shards` are every host and shard of the zone, that each collected file held every row of the
+span `coverage.json` names when the controller sealed it, that the run ran `revision` on `date`, and that
+`reviewed_sha256` names the operator's record. The seal binds each collected file and `coverage.json` to the bytes the
+controller read after the run window's end: a row removed from a collection after the seal, with its count lowered to
+match, or a span widened after it, changes a digest the seal names, and the judge refuses it. The seal itself is a file
+of DIR, checked for shape: a seal removed and written again over changed files, by the controller or another writer,
+reads as the first one does. The record carries the seal's SHA-256 and time, and `seal` prints that digest, so an
+approver who kept the printed digest can tell a second seal from the first. The run's producers write every file of DIR,
+so a directory with a shard, a row or a date left out or changed reads as an honest one does, and a `HELD` record states
+that the evidence delivered meets GD-2's oracle. The record's `package_sha256` covers `package.json` alone (the lists,
+the revision and the date): `readiness.py judge` compares it with its inputs entry, which binds them when that entry's
+digest was taken from the package as filled before the injection, and compares `revision` with the release revision.
+`coverage.json` and the row files stand in the seal's digests, inside DIR, and the record's `seal` carries the seal's
+own digest; `reviewed_sha256` stands in no digest the record carries. While GD-2 is blocked, `readiness.py judge` grades
+a `HELD` staging record UNVERIFIED.
 
 GD-2's texts. The judge holds the five hypothesis clauses with their bound names, the eight guardrail texts, and the
 SHA-256 of `oracle.reach` and of `oracle.expected` its rules were written from (WRITTEN), and a catalog that holds any other text, or
@@ -1170,6 +1202,7 @@ byte-equal:
                           stamps), or null.
   budgets                 {budget: {value, source}}: the bound each bounded rule used, `source` "catalog", "package"
                           (a working value) or null (none).
+  seal                    {sha256, time}: the SHA-256 of `injection/collected.json`'s bytes and its `time`.
   result                  one line: "held on N rules", with ", K outside its world" for a simulation package, then the
                           rules disproven and unobserved by name, and a note when the abort mark precedes the stop
                           request.
@@ -1182,8 +1215,13 @@ restoration mark of another instance, another state or a time
 before the stop request, the abort mark or the matching stopped report; a baseline window that ends before the run
 window starts; a run window that is not a whole number of origin intervals, from 1 to
 MAX_INTERVALS; an owned shard with no witness key, or, with the reach met, a witness key of a shard the target did not
-own; a coverage entry missing, extra, backwards or with another line count; a `simulation` package with a clock error
-other than 0; a `staging` package naming an observation as outside; a file of an outside observation present; a GD-2 text other
+own; a coverage entry missing, extra, backwards, with another line count or spanning past the seal's time; a seal
+missing, dated before the run window's end, naming other files than `coverage.json` and the collected files present,
+or naming a digest other than its file's; a `hosts`, `shards` or `witness` list longer than its FLEET_BOUNDS bound, or
+a FLEET_BOUNDS file that cannot be read, is not UTF-8 or declares its constant other than once as `pub const NAME:
+usize = N;` (a CRLF read as LF); a `simulation`
+package with a clock error other than 0; a `staging` package naming an observation as outside; a file of an outside
+observation present; a GD-2 text other
 than WRITTEN or a catalog budget other than null or a positive number; a record path at which an entry exists or whose
 directory lies inside DIR; and a failed write. The record's directory is opened once, before the evidence is read, as
 the kernel resolves the path given (a missing or non-directory component before `..` is refused), and every check and
@@ -1253,10 +1291,30 @@ CLI reference ("the time that the instance was last launched"); the self-test's
 fake pins the field, and no test reads a real control plane.
 `restore` reads and writes the marks by the pathname
 `DIR/injection`, so the operator keeps that directory under that name until
-`restore` ends. All five
-calls run under the environment the run read at its start. The script's header states the
-operator file, the snapshot's two file shapes, the five AWS calls and the
-reply fields it reads. `python3 -I scripts/test-host-stop-controller.py` runs it
+`restore` ends. `seal --operator F --evidence DIR`, run once the run window
+has ended and every collection named in `DIR/coverage.json` is in DIR, writes
+`collected.json`: the SHA-256 of `coverage.json` and of each collected file,
+dated by the wall clock at its start, and prints the mark's own SHA-256,
+also for a mark it linked whose sync then failed (exit 1), since that mark
+stands or may stand again after a crash. It makes no AWS call. It reads each file relative to the descriptor of its
+directory, following no link, syncs each file and both directories, and runs
+the judge's loader over the bytes it seals with the mark it would write, so
+it refuses evidence the judge would refuse. It lists DIR and `records/` as
+the judge does and refuses an entry outside the layout. It also refuses a
+package other than the approval's, a package of kind other than `staging` (a
+simulation export seals its own files), a second seal, a held lock and a time
+before the run window's end, when a collection may still grow. A signal
+before the mark's write is held ends it with nothing written; one during the
+write waits for the write's end. `seal` checks for an existing mark and writes its own by
+the pathname `DIR/injection`, as `restore` does. The judge refuses a file
+whose bytes differ from the seal, so a row removed after the seal with its
+count lowered to match is refused. A collection that was short when sealed
+is the collector's declaration, and a seal removed and written again reads
+as the first, so the operator keeps the digest `seal` printed.
+The five AWS calls of `run` and `restore` run under the environment the run
+read at its start. The script's header states the operator file, the
+snapshot's two file shapes, the five AWS calls and the reply fields it reads.
+`python3 -I scripts/test-host-stop-controller.py` runs it
 over an in-process fake control plane and judges what it wrote on a copy of
 the held fixture; no test calls a real control plane. The pre-push hook runs
 it for a push that changes the controller, its self-test, its fixtures, the

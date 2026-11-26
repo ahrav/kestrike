@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -63,6 +64,7 @@ UNGRADED = {"takeover", "others-keep-owner", "standby-again", "origin-load", "wi
 OUTSIDE_REASONS = {"origin": "the simulated world runs no origin", "provider": "it runs no provider",
                    "re-enrollment": "it runs no reconciler"}
 SET_BUDGETS = {"re-enrollment-drain": 100, "origin-load": 2}
+SEAL = "injection/collected.json"
 PLAIN = json.JSONDecoder()
 
 
@@ -107,7 +109,7 @@ class Evidence:
             rel: [PLAIN.decode(line) for line in text.split("\n")[:-1]] if rel.endswith(".jsonl")
             else PLAIN.decode(text)
             for rel, text in HELD_TEXT.items()}
-        self.keep_digest = self.keep_coverage = False
+        self.keep_digest = self.keep_coverage = self.keep_seal = False
 
     def __getitem__(self, rel):
         return self.files[rel]
@@ -165,7 +167,13 @@ class Evidence:
             self.files["coverage.json"] = {
                 rel: {**spans.get(rel, {"from": 0, "to": end}), "lines": len(rows)} for rel, rows in self.files.items()
                 if rel.startswith("records/") or rel in gj.COLLECTED}
-        return {rel: package if rel == "package.json" else serialized(rel, value) for rel, value in self.files.items()}
+        files = {rel: package if rel == "package.json" else serialized(rel, value) for rel, value in self.files.items()}
+        if not self.keep_seal and SEAL in self.files:
+            # `keep_seal` preserves the original digests so changes to sealed files produce a digest mismatch.
+            self.files[SEAL]["files"] = {rel: hashlib.sha256(data).hexdigest() for rel, data in files.items()
+                                         if rel.startswith("records/") or rel in (*gj.COLLECTED, "coverage.json")}
+            files[SEAL] = serialized(SEAL, self.files[SEAL])
+        return files
 
     def write(self, root):
         for rel, data in self.bytes().items():
@@ -758,7 +766,8 @@ class Held(Judging):
 
     def test_the_judge_takes_the_zone_the_coverage_and_the_revision_as_their_writers_declare_them(self):
         # The stated limit of the record: these directories read as an honest one does, since every file of the
-        # directory is a producer's and nothing outside it is read.
+        # directory is a producer's and nothing outside it is read. A collection that holds no provider row when the
+        # controller seals it is one of them; the seal shows a row removed after it.
         def without_s5(ev):
             ev.package["shards"].remove("s5")
             del ev["records/s5.jsonl"], ev.roles["shards"]["s5"]
@@ -835,6 +844,119 @@ class Refusals(Judging):
         self.assertEqual((code, record), (2, None))
         self.assertIn(words, str(refusal))
 
+    def test_a_collection_shortened_after_the_seal_with_its_count_lowered_is_refused(self):
+        # The collector drops the CreateVolume row that disproves no-volume-created and lowers the file's count in
+        # coverage.json to match; the controller's seal still names the bytes it sealed.
+        ev = planted(control("no-volume-created"))
+        self.assert_disproven(ev, {"no-volume-created"})
+        ev.keep_seal = True
+        ev["provider.jsonl"] = [r for r in ev["provider.jsonl"] if r["time"] != 200]
+        files = ev.bytes()
+        self.assertEqual(gj.decode(files["coverage.json"].decode(), "coverage")["provider.jsonl"]["lines"], 3)
+        self.assert_refused(ev, "provider.jsonl differs from the bytes injection/collected.json seals")
+        # A seal written again over the shortened files reads as the first, and the record's seal digest tells them
+        # apart.
+        first = self.record(planted(control("no-volume-created")))[1]["seal"]
+        ev.keep_seal = False
+        again = self.assert_pair(ev, "COMPLETED", "HELD")["seal"]
+        self.assertEqual((first["time"], again["time"]), (430, 430))
+        self.assertNotEqual(first["sha256"], again["sha256"])
+        # A wider span claimed after the seal is refused by the seal of coverage.json.
+        widened = planted(lambda ev: ev["coverage.json"]["origin.jsonl"].update({"to": 399}))
+        widened.bytes()
+        widened.keep_seal = widened.keep_coverage = True
+        widened["coverage.json"]["origin.jsonl"]["to"] = 400
+        self.assert_refused(widened, "coverage.json differs from the bytes injection/collected.json seals")
+
+        def sealed(edit):
+            def plant(ev):
+                ev.bytes()
+                ev.keep_seal = True
+                edit(ev[SEAL])
+            return plant
+
+        cases = [(sealed(lambda seal: seal["files"].pop("witness.jsonl")), "not exactly the sealeds"),
+                 (sealed(lambda seal: seal["files"].update({"records/s9.jsonl": "0" * 64})), "not exactly the sealeds"),
+                 (sealed(lambda seal: seal["files"].update({"package.json": "0" * 64})), "not exactly the sealeds"),
+                 (sealed(lambda seal: seal.update({"time": 399.5})), "before the run window's end 400"),
+                 (lambda ev: ev["coverage.json"]["witness.jsonl"].update({"to": 431}),
+                  "to 431, after the seal's time 430"),
+                 (sealed(lambda seal: seal.update({"files": []})), "files is no object")]
+        for plant, words in cases:
+            with self.subTest(words=words):
+                self.assert_refused(planted(plant), words)
+        # A seal at the run window's end, and a span that ends at the seal, are read.
+        self.assert_pair(planted(lambda ev: ev[SEAL].update(time=400)), "COMPLETED", "HELD")
+        self.assert_pair(planted(lambda ev: ev["coverage.json"]["witness.jsonl"].update({"to": 430})), "COMPLETED",
+                         "HELD")
+
+    def test_lists_past_the_fleets_declared_bounds_are_refused_before_any_set_is_built(self):
+        # The test reads MAX_HOSTS and MAX_SLOTS from their Rust declarations so its boundary cases track the fleet
+        # limits.
+        def declared(rel, name):
+            found = re.findall(rf"^pub const {name}: usize = ([0-9]+);$", (ROOT / rel).read_text(), re.MULTILINE)
+            self.assertEqual(len(found), 1, f"{rel} declares {name} once")
+            return int(found[0])
+
+        hosts = declared("crates/kestrike/src/failover/zone_loop/directory.rs", "MAX_HOSTS")
+        slots = declared("crates/kestrike/src/failover/standbys.rs", "MAX_SLOTS")
+        entry = {"hosts": lambda i: f"x{i}", "shards": lambda i: f"x{i}",
+                 "witness": lambda i: {"key": f"img/x{i}", "shard": "s1", "sha256": "0" * 64}}
+        for field, bound in (("hosts", hosts), ("shards", slots), ("witness", slots)):
+            with self.subTest(field=field):
+                package = Evidence().package
+                package[field] += [entry[field](i) for i in range(bound - len(package[field]))]
+                gj.check_package(package)
+                package[field].append(entry[field](bound))
+                with self.assertRaisesRegex(gj.Refusal, f"package.json {field} holds {bound + 1} entries, more "
+                                            f"than the {bound}"):
+                    gj.check_package(package)
+                # An unhashable last entry shows that the count is checked before the entries are hashed.
+                package[field][-1] = [[]]
+                with self.assertRaisesRegex(gj.Refusal, f"holds {bound + 1} entries"):
+                    gj.check_package(package)
+
+    def test_a_fleet_bound_is_read_from_its_own_declaration_or_refused(self):
+        # Planted declarations with distinct values show which constant bounds each list; the cache is cleared around
+        # each variant so neither the tree's values nor planted ones mask a read.
+        gj.declared_bound.cache_clear()
+        self.addCleanup(gj.declared_bound.cache_clear)
+        with tempfile.TemporaryDirectory() as scratch:
+            hosts, slots = Path(scratch, "hosts.rs"), Path(scratch, "slots.rs")
+            bounds = {"hosts": (str(hosts), "MAX_HOSTS"), "shards": (str(slots), "MAX_SLOTS"),
+                      "witness": (str(slots), "MAX_SLOTS")}
+            hosts.write_bytes(b"/// The most hosts.\r\npub const MAX_HOSTS: usize = 4;\r\n")
+            slots.write_bytes(b"pub const MAX_SLOTS: usize = 5;\n")
+            with mock.patch.dict(gj.FLEET_BOUNDS, bounds):
+                self.assertEqual([gj.fleet_bound(f) for f in ("hosts", "shards", "witness")], [4, 5, 5])
+                package = Evidence().package
+                package["witness"] += [{"key": f"img/x{i}", "shard": "s1", "sha256": "0" * 64} for i in range(2)]
+                gj.check_package(package)
+                for field, entry, count, bound in (("hosts", "h5", 5, 4), ("shards", "s6", 6, 5),
+                                                   ("witness", {"key": "img/x9", "shard": "s1", "sha256": "0" * 64},
+                                                    6, 5)):
+                    with self.subTest(field=field):
+                        planted_package = copy.deepcopy(package)
+                        planted_package[field].append(entry)
+                        with self.assertRaisesRegex(gj.Refusal, f"{field} holds {count} entries, more than the "
+                                                    f"{bound} that"):
+                            gj.check_package(planted_package)
+            for text, words in ((b"pub const MAX_HOSTS: usize = 1 << 12;\n", "declares MAX_HOSTS 0 times"),
+                                (b"pub const MAX_HOSTS: usize = 4;\npub const MAX_HOSTS: usize = 4;\n",
+                                 "declares MAX_HOSTS 2 times"),
+                                (b"pub const MAX_HOSTS: usize = 4;\n\xff\n", "is not UTF-8")):
+                with self.subTest(words=words):
+                    hosts.write_bytes(text)
+                    gj.declared_bound.cache_clear()
+                    with mock.patch.dict(gj.FLEET_BOUNDS, bounds):
+                        with self.assertRaisesRegex(gj.Refusal, f"{hosts} {words}" if "declares" in words else words):
+                            gj.check_package(Evidence().package)
+            hosts.unlink()
+            gj.declared_bound.cache_clear()
+            with mock.patch.dict(gj.FLEET_BOUNDS, bounds):
+                with self.assertRaisesRegex(gj.Refusal, f"{hosts} cannot be read"):
+                    gj.check_package(Evidence().package)
+
     def test_incomplete_or_inconsistent_evidence_is_refused(self):
         def missing(rel):
             def plant(ev):
@@ -862,7 +984,8 @@ class Refusals(Judging):
         cases = [(missing(rel), "is missing") for rel in ("package.json", "witness.jsonl", "origin.jsonl",
                                                           "records/s2.jsonl", "injection/roles.json",
                                                           "activations.jsonl", "records/receipts.jsonl",
-                                                          "provider.jsonl", "blockers.jsonl", "coverage.json")]
+                                                          "provider.jsonl", "blockers.jsonl", "coverage.json",
+                                                          "injection/collected.json")]
         cases += [(lambda ev, value=value: ev.version("s1", 150, attempts=value),
                    f"no attempts of the layout: {value!r}") for value in (-1, True, 1.5)]
         cases += [(lambda ev: ev.package["hosts"].append(None), "hosts [4] is no name of the layout"),

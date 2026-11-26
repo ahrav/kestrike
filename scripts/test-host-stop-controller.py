@@ -819,7 +819,7 @@ class Run(Case):
                 finally:
                     hsc.unlock(holders[0])
         return {
-            "a lock another descriptor holds": (another_holder, "is held by a run or restore that has not ended"),
+            "a lock another descriptor holds": (another_holder, "is held by a run, restore or seal that has not ended"),
             "the evidence directory's sync": (lambda: failing_once(
                 hsc.fis, "sync_directory", lambda d: Path(d) == self.evidence, OSError(5, "Input/output error")),
                 "OSError: [Errno 5] Input/output error"),
@@ -1795,7 +1795,7 @@ class AbortAfterStop(Case):
         self.plane.fault = lambda op: restore if op == ALARMS and self.shown() else None
         self.assertEqual(self.run_controller(), 0, self.output)
         self.assertEqual(len(refusals), 1)
-        self.assertIn("is held by a run or restore that has not ended", refusals[0])
+        self.assertIn("is held by a run, restore or seal that has not ended", refusals[0])
 
     def test_a_failed_output_stream_changes_no_outcome(self):
         class Broken(io.TextIOBase):
@@ -2551,17 +2551,32 @@ class Restore(Case):
 
 
 class Judged(Case):
-    """The marks the controller wrote stand in place of the held fixture's `injection/` in a copy of it, and the
-    judge of scripts/gameday-judge.py reads the copy as the verdict table states."""
+    """The marks the controller wrote stand in place of the held fixture's `injection/` in a copy of it, `seal` seals
+    the copy, and the judge of scripts/gameday-judge.py reads the copy as the verdict table states. A seal refusal
+    writes no mark and makes no call."""
 
     @classmethod
     def setUpClass(cls):
         cls.readiness = hsc.readiness
 
     def judge(self, records=None, versions=None):
-        """The (run_status, verdict) of the copy; `records` {shard: change} applies the store's history the snapshot
-        was read from to the copy's first version of each named shard, and `versions` {shard: [version]} adds
-        versions to its history in commit order."""
+        """The (run_status, verdict) of the copy, sealed by the controller once the run window has ended; `records`
+        {shard: change} applies the store's history the snapshot was read from to the copy's first version of each
+        named shard, and `versions` {shard: [version]} adds versions to its history in commit order."""
+        root = self.copy(records, versions)
+        self.clock.advance(max(0.0, parse(self.package)["run"]["end"] + 30 - self.clock.t))
+        self.assertEqual(self.seal(root), 0, self.output)
+        record = self.tmp / "record.json"
+        with contextlib.redirect_stdout(io.StringIO()):
+            gj.run(str(root), str(record), CATALOG, FIS, self.readiness)
+        found = parse(record)
+        return found["run_status"], found["verdict"]
+
+    def seal(self, root):
+        return self.main(["seal", "--operator", str(self.write_operator()), "--evidence", str(root)])
+
+    def copy(self, records=None, versions=None):
+        """The held fixture's collections with the controller's marks, unsealed, as `judge` states."""
         root = self.tmp / "judged"
         shutil.copytree(HELD, root, ignore=shutil.ignore_patterns("injection"))
         shutil.copytree(self.evidence / "injection", root / "injection")
@@ -2575,11 +2590,7 @@ class Judged(Case):
             coverage = parse(root / "coverage.json")
             coverage[f"records/{shard}.jsonl"]["lines"] = len(rows)
             (root / "coverage.json").write_text(json.dumps(coverage, indent=1) + "\n", encoding="utf-8")
-        record = self.tmp / "record.json"
-        with contextlib.redirect_stdout(io.StringIO()):
-            gj.run(str(root), str(record), CATALOG, FIS, self.readiness)
-        found = parse(record)
-        return found["run_status"], found["verdict"]
+        return root
 
     def restore_after_the_run_window(self, initializing=0):
         """The operator's start and the restore once the run window has ended, as the held fixture's restoration
@@ -2685,6 +2696,261 @@ class Judged(Case):
         self.patch(hsc.fis, "sync_directory", interrupted)
         self.assertEqual(self.run_controller(), 1, self.output)
         self.assertEqual(self.judge(), ("FAILED_TO_INJECT", "INCONCLUSIVE"))
+
+
+    def restored_copy(self):
+        """A copy of a clean run restored after the run window, unsealed, for the cases of `seal`."""
+        self.assertEqual(self.run_controller(), 0, self.output)
+        self.restore_after_the_run_window()
+        return self.copy()
+
+    def assert_seal_refused(self, root, reason):
+        calls, before, seen = len(self.plane.log), sorted(p.name for p in (root / "injection").iterdir()), len(self.output)
+        self.assertEqual(self.seal(root), 2, self.output)
+        self.assertIn(reason, self.output[seen:])
+        self.assertEqual((len(self.plane.log), sorted(p.name for p in (root / "injection").iterdir())),
+                         (calls, before))
+
+    def test_the_seal_names_each_collected_file_and_a_row_removed_after_it_is_refused(self):
+        root = self.restored_copy()
+        calls = len(self.plane.log)
+        self.assertEqual(self.seal(root), 0, self.output)
+        self.assertEqual(len(self.plane.log), calls, "the seal makes no call")
+        mark = parse(root / "injection" / "collected.json")
+        coverage = parse(root / "coverage.json")
+        self.assertEqual(mark["time"], self.clock())
+        self.assertEqual(sorted(mark["files"]), sorted([*coverage, "coverage.json"]))
+        for rel, digest in mark["files"].items():
+            self.assertEqual(digest, hashlib.sha256((root / rel).read_bytes()).hexdigest(), rel)
+        self.assert_seal_refused(root, "injection/collected.json exists")
+        # The collector drops the CreateVolume row and lowers the count to match: the judge names the file.
+        path = root / "provider.jsonl"
+        rows = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        path.write_text("".join(rows[:-1]), encoding="utf-8")
+        coverage["provider.jsonl"]["lines"] -= 1
+        (root / "coverage.json").write_text(json.dumps(coverage, indent=1) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(gj.Refusal, "provider.jsonl differs from the bytes injection/collected.json "
+                                    "seals"):
+            gj.run(str(root), str(self.tmp / "record.json"), CATALOG, FIS, self.readiness)
+
+    def test_a_seal_before_the_window_ends_or_off_its_collections_is_refused(self):
+        root = self.restored_copy()
+        end = parse(self.package)["run"]["end"]
+        self.clock.advance(end - 1 - self.clock.t)
+        self.assert_seal_refused(root, "its collections may still grow")
+        self.clock.advance(31)
+
+        def rewrite(rel, change):
+            path = root / rel
+            original = path.read_bytes()
+            value = parse(path)
+            change(value)
+            path.write_text(json.dumps(value, indent=1) + "\n", encoding="utf-8")
+            return lambda: path.write_bytes(original)
+
+        for rel, change, reason in (
+                ("coverage.json", lambda c: c["provider.jsonl"].update(lines=2), "provider.jsonl holds 3 lines, but "
+                 "coverage.json counts 2"),
+                ("coverage.json", lambda c: c["origin.jsonl"].update(to=end + 60), f"coverage.json spans origin.jsonl "
+                 f"to {end + 60}, after the seal's time"),
+                ("coverage.json", lambda c: c.pop("witness.jsonl"), "not exactly the observeds"),
+                ("injection/roles.json", lambda r: r.update(package_sha256="0" * 64), "names another package")):
+            with self.subTest(reason=reason):
+                undo = rewrite(rel, change)
+                self.assert_seal_refused(root, reason)
+                undo()
+        (root / "blockers.jsonl").unlink()
+        self.assert_seal_refused(root, "blockers.jsonl cannot be read")
+        (root / "package.json").write_bytes(PACKAGE + b" ")
+        self.assert_seal_refused(root, "package.json holds other bytes than the approval's package")
+
+    def test_a_seal_at_the_run_windows_end_is_written_and_a_second_racing_seal_is_refused(self):
+        root = self.restored_copy()
+        end = parse(self.package)["run"]["end"]
+        self.clock.t = end
+        self.assertEqual(self.clock(), end)
+        self.assertEqual(self.seal(root), 0, self.output)
+        self.assertEqual(parse(root / "injection" / "collected.json")["time"], end)
+        first = (root / "injection" / "collected.json").read_bytes()
+        # A seal that passes the existence check while another seal links its mark ends as the same refusal.
+        real = hsc.stands
+        self.patch(hsc, "stands", lambda path, what: False if path.name == "collected.json" else real(path, what))
+        self.assert_seal_refused(root, "injection/collected.json exists: the seal is written once")
+        self.assertEqual((root / "injection" / "collected.json").read_bytes(), first)
+
+    def test_a_linked_root_records_or_injection_or_a_simulation_package_writes_no_seal(self):
+        root = self.restored_copy()
+        twin = self.tmp / "twin"
+        shutil.copytree(root, twin, symlinks=True)
+        shutil.rmtree(root / "records")
+        (root / "records").symlink_to(twin / "records")
+        self.assert_seal_refused(root, "records is no directory")
+        linked = self.tmp / "linked"
+        linked.symlink_to(twin)
+        self.assertEqual(self.seal(linked), 2, self.output)
+        self.assertIn("is no directory", self.output)
+        self.assertFalse((twin / "injection" / "collected.json").exists())
+        shutil.rmtree(twin / "injection")
+        (twin / "injection").symlink_to(root / "injection")
+        self.assertEqual(self.seal(twin), 2, self.output)
+        self.assertIn("is no directory: no run to seal", self.output)
+        # A simulation package, approved and named by roles.json, is the export's to seal.
+        sim = self.tmp / "sim"
+        shutil.copytree(root, sim, ignore=shutil.ignore_patterns("records"))
+        shutil.copytree(twin / "records", sim / "records")
+        package = parse(sim / "package.json")
+        package.update(kind="simulation", clock_error_seconds=0)
+        data = (json.dumps(package, indent=1) + "\n").encode()
+        (sim / "package.json").write_bytes(data)
+        self.operator["approval"]["package_sha256"] = hashlib.sha256(data).hexdigest()
+        roles = parse(sim / "injection" / "roles.json")
+        roles["package_sha256"] = self.operator["approval"]["package_sha256"]
+        (sim / "injection" / "roles.json").write_text(json.dumps(roles), encoding="utf-8")
+        self.assert_seal_refused(sim, "package.json is of kind simulation")
+
+    def test_a_backwards_span_or_an_off_schema_row_is_refused_before_the_seal(self):
+        root = self.restored_copy()
+        coverage, original = parse(root / "coverage.json"), (root / "coverage.json").read_bytes()
+        coverage["blockers.jsonl"]["from"] = 401
+        (root / "coverage.json").write_text(json.dumps(coverage, indent=1) + "\n", encoding="utf-8")
+        self.assert_seal_refused(root, "coverage.json spans blockers.jsonl backwards")
+        (root / "coverage.json").write_bytes(original)
+        path = root / "blockers.jsonl"
+        rows = path.read_bytes()
+        path.write_bytes(rows.replace(b'"name"', b'"label"', 1))
+        self.assert_seal_refused(root, "blockers.jsonl line 1 holds the keys")
+        path.write_bytes(rows)
+        self.assertEqual(self.seal(root), 0, self.output)
+
+    def test_a_signal_during_the_collection_reads_ends_the_seal_with_nothing_written(self):
+        root = self.restored_copy()
+        real = hsc.synced
+
+        def signalled(name, rel, dir_fd):
+            if rel == "witness.jsonl":
+                os.kill(os.getpid(), signal.SIGTERM)
+            return real(name, rel, dir_fd)
+        self.patch(hsc, "synced", signalled)
+        self.assertEqual(self.seal(root), 2, self.output)
+        self.assertIn("signal SIGTERM", self.output)
+        self.assertFalse((root / "injection" / "collected.json").exists())
+        hsc.unlock(hsc.lock(root / "injection"))
+
+    def test_a_signal_during_the_marks_write_waits_for_it(self):
+        root = self.restored_copy()
+        publish = hsc.publish
+
+        def signalled(path, data):
+            os.kill(os.getpid(), signal.SIGTERM)
+            publish(path, data)
+        self.patch(hsc, "publish", signalled)
+        self.assertEqual(self.seal(root), 0, self.output)
+        self.assertTrue((root / "injection" / "collected.json").exists())
+
+    def test_a_signal_just_before_the_marks_write_is_held_ends_the_seal_with_nothing_written(self):
+        root = self.restored_copy()
+        real, sent = hsc.Controller.hold, []
+
+        def signalled(controller):
+            # The first hold of a seal is its mark's: the signal lands after every read and before the write is held.
+            if not sent:
+                sent.append(True)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return real(controller)
+        self.patch(hsc.Controller, "hold", signalled)
+        self.assertEqual(self.seal(root), 2, self.output)
+        self.assertIn("signal SIGTERM", self.output)
+        self.assertFalse((root / "injection" / "collected.json").exists())
+        hsc.unlock(hsc.lock(root / "injection"))
+
+    def test_an_entry_outside_the_layout_in_the_root_or_records_writes_no_seal(self):
+        root = self.restored_copy()
+        for rel, reason in (("records/unlisted.jsonl", "records/unlisted.jsonl is no file of the layout"),
+                            ("notes.txt", "notes.txt is no file of the layout")):
+            with self.subTest(rel=rel):
+                (root / rel).write_bytes(b"")
+                # The judge refuses the directory as it stands, so a seal of it would name evidence the judge refuses.
+                with self.assertRaisesRegex(gj.Refusal, reason):
+                    gj.read_evidence(str(root))
+                self.assert_seal_refused(root, reason)
+                (root / rel).unlink()
+        (root / "spare").mkdir()
+        self.assert_seal_refused(root, "spare is no directory of the layout")
+        (root / "spare").rmdir()
+        (root / "records" / "linked.jsonl").symlink_to(root / "records" / "receipts.jsonl")
+        self.assert_seal_refused(root, "records/linked.jsonl is a link or a special file")
+        (root / "records" / "linked.jsonl").unlink()
+        self.assertEqual(self.seal(root), 0, self.output)
+
+    def test_a_signal_while_a_seals_refusal_is_printed_leaves_the_refusal(self):
+        root = self.restored_copy()
+        (root / "blockers.jsonl").unlink()
+        say = hsc.say
+
+        def signalled(text, err=False):
+            if "refused" in text:
+                os.kill(os.getpid(), signal.SIGTERM)
+            say(text, err=err)
+        self.patch(hsc, "say", signalled)
+        self.assert_seal_refused(root, f"blockers.jsonl cannot be read: {os.strerror(errno.ENOENT)}; nothing written")
+
+    def test_a_failed_sync_of_a_collection_or_its_directory_writes_no_seal(self):
+        root = self.restored_copy()
+        real = os.fsync
+        for rel, reason in (("witness.jsonl", "witness.jsonl cannot be read and synced"),
+                            ("records/receipts.jsonl", "records/receipts.jsonl cannot be read and synced"),
+                            ("records", "records cannot be synced"), ("", f"{root} cannot be synced")):
+            with self.subTest(rel=rel):
+                failed = os.stat(root / rel)
+
+                def failing(fd, failed=failed):
+                    if os.path.samestat(os.fstat(fd), failed):
+                        raise OSError(errno.EIO, "I/O error")
+                    return real(fd)
+                with patched(hsc.os, "fsync", failing):
+                    self.assert_seal_refused(root, reason)
+        self.assertEqual(self.seal(root), 0, self.output)
+
+    def test_a_seal_held_by_a_restore_is_refused_and_one_unwritten_or_left_standing_ends_with_exit_1(self):
+        root = self.restored_copy()
+        self.clock.advance(parse(self.package)["run"]["end"] + 30 - self.clock.t)
+        held = hsc.lock(root / "injection")
+        self.assert_seal_refused(root, "is held by a run, restore or seal that has not ended")
+        hsc.unlock(held)
+        mark = root / "injection" / "collected.json"
+
+        def failing(*args, **kwargs):
+            raise OSError(errno.EIO, "I/O error")
+        # A write that fails before the link prints no digest.
+        seen = len(self.output)
+        with patched(hsc, "publish", failing):
+            self.assertEqual(self.seal(root), 1, self.output)
+        self.assertIn("collected.json is unwritten", self.output[seen:])
+        self.assertNotIn("sha256", self.output[seen:])
+        self.assertFalse(mark.exists())
+        # A sync that fails after the link, with the mark removed again: the seal prints the digest of the mark it
+        # linked, which may stand again after a crash.
+        publish, linked = hsc.publish, []
+
+        def recorded(path, data):
+            linked.append(hashlib.sha256(data).hexdigest())
+            publish(path, data)
+        seen = len(self.output)
+        with patched(hsc, "publish", recorded), patched(hsc, "sync", failing):
+            self.assertEqual(self.seal(root), 1, self.output)
+        self.assertIn("the removal is unsynced", self.output[seen:])
+        self.assertIn(f"injection/collected.json sha256 {linked[-1]}\n", self.output[seen:])
+        self.assertFalse(mark.exists())
+        # The sync after the link and the removal both fail: the seal stands, and a second seal is refused.
+        seen = len(self.output)
+        with patched(hsc, "sync", failing), patched(hsc.os, "unlink", failing):
+            self.assertEqual(self.seal(root), 1, self.output)
+        self.assertIn("collected.json stands, but it cannot be synced", self.output[seen:])
+        self.assertIn(f"injection/collected.json sha256 {hashlib.sha256(mark.read_bytes()).hexdigest()}\n",
+                      self.output[seen:])
+        self.assertEqual(sorted(parse(mark)["files"]), sorted([*parse(root / "coverage.json"), "coverage.json"]))
+        self.assert_seal_refused(root, "injection/collected.json exists: the seal is written once")
+        self.assertEqual(gj.read_evidence(str(root))["seal_sha256"], hashlib.sha256(mark.read_bytes()).hexdigest())
 
 
 class Script(unittest.TestCase):

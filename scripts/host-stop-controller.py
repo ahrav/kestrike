@@ -5,12 +5,14 @@ the stop request, and write the `injection/` marks that `scripts/gameday-judge.p
 Usage:
   host-stop-controller.py run --operator F --package F --evidence DIR
   host-stop-controller.py restore --operator F --evidence DIR [--reviewed F]
+  host-stop-controller.py seal --operator F --evidence DIR
 
 Every file read is UTF-8 JSON (`.json`) or JSON lines (`.jsonl`), opened without following a link or waiting on a
 pipe, and checked by the judge's `decode`, `parsed` and `conform` (loaded by path): distinct keys, finite numbers,
-exactly the keys listed. A time in a file is POSIX seconds on the wall clock, which the package's `clock` names and
-which agrees with AWS's within SKEW_SECONDS (chrony on EC2 keeps it so); an ISO time reads `YYYY-MM-DDTHH:MM:SSZ`,
-seconds 00 to 59. The deadline, the effect timeout, the observation, the snapshot's age at the stop and the restoration's poll
+exactly the keys listed. The judge's `check_package`, which `run` and `seal` call, also reads the two Rust files its
+FLEET_BOUNDS names for their list bounds. A time in a file is POSIX seconds on the wall clock, which the package's
+`clock` names and which agrees with AWS's within SKEW_SECONDS (chrony on EC2 keeps it so); an ISO time reads
+`YYYY-MM-DDTHH:MM:SSZ`, seconds 00 to 59. The deadline, the effect timeout, the observation, the snapshot's age at the stop and the restoration's poll
 run on the monotonic clock; the snapshot's age is also checked on the wall clock, which counts a suspend, and a stop leaves only
 while the two clocks have moved within SKEW_SECONDS of each other since the run's start. `roles.json` holds the SHA-256
 of the `--package` bytes, which the judge requires `DIR/package.json` to hold: the operator copies the package there
@@ -96,7 +98,8 @@ with `; restoration steps sha256 ` and the SHA-256 of the restoration steps text
 read and GD-2's restoration steps from the catalog, and exits 1. It sends no call that changes an instance, and the
 controller holds no call that starts one. A signal raises only before `injection/` is made (exit 2; one that arrives
 before step 1 waits for it) and in steps 3 to 7 (the abort path); during a mark's write it waits for the write's end,
-and during the abort path and the final `stopped.json` it is left unraised.
+and during the abort path and the final `stopped.json` it is left unraised. In `restore` a signal raises during the
+poll; in `seal` it raises from the lock to the mark's write, which writes nothing (exit 2), and waits for that write.
 
 `restore`, run by the operator after starting the instance themselves, refuses: an evidence root or `injection/` that
 is a link, no directory or one that takes no unnamed file; a missing or malformed `stop.json`, or one of another
@@ -130,14 +133,35 @@ the second `LaunchTime` leaves out, so a start less than that after the run wind
 the directory it opened, keeping that directory under that name until `restore` ends is the operator's, and exit 0
 says the mark stands in the directory so named when the mark was linked.
 
+`seal`, run by the operator once the run window has ended and every collection named in `DIR/coverage.json` is in
+DIR, makes no AWS call and refuses: an evidence root or `injection/` that is a link, no directory or one that takes no
+unnamed file; evidence a run, restore or seal still holds; an existing `collected.json`; a `records/` that is a link
+or no directory; a `package.json` whose SHA-256 is not the approval's, of kind other than `staging` (a simulation
+export seals its own files), or a `roles.json` of another package; a wall clock before the package's run window ends;
+a `coverage.json` off the judge's layout or naming other files than the package's collected files (the judge's
+`collected`: each `records/` file, `activations.jsonl`, `witness.jsonl` and each observation file of its world); a
+collected file missing, malformed, holding another line count than its coverage entry or spanned past the seal's time;
+an entry of DIR or `records/` outside the judge's layout, which the judge refuses when it lists them; a file or
+directory sync that fails; and any evidence the judge's `load_evidence` refuses, run over the bytes it read
+with the mark it would write. It reads every file relative to the descriptor of its directory, following no link, and
+syncs each file it reads, then `records/` and DIR, before the mark. It writes `collected.json` {time, files}: `time`
+the wall clock read at its start, at or after the run window's end, and `files` the SHA-256 of `coverage.json` and of
+each collected file's bytes as it read them; it prints the mark's own SHA-256, also (exit 1) for a mark it linked
+whose sync then failed, which stands or may stand again after a crash. The judge refuses a file whose bytes
+differ from that digest, so a row removed from a collection after the seal, with its count lowered to match, is
+refused. A collection short before the seal stays the collector's declaration, and a seal removed and written again
+reads as the first, so the operator keeps the printed digest, which the judge's record carries. `seal` checks for an
+existing mark and links its own by the pathname `DIR/injection`, as `restore` does, and keeping DIR under that name
+until `seal` ends is the operator's.
+
 The marks, in the judge's field names, each written once by `publish`: an unnamed file in `injection/`, synced, linked
 to the mark's name (failing when an entry stands there), synced again, then the directory synced; when a sync after
 the link fails the mark is removed again, and when the removal fails it stands with its durability unknown, as the
 controller says. roles.json {package_sha256, time, shards, standbys}, `time` the snapshot's cut and `standbys` each
 standby host of the target's owned shards whose snapshot line names a declared instance; stop.json {instance, time,
 identity}; stopped.json {instance, state, time, request}; abort.json, its detail DETAIL_MAX characters at most, cut
-ahead of the steps' digest; restoration.json. Each is at most the judge's file size. Nothing is written outside
-DIR/injection.
+ahead of the steps' digest; restoration.json; collected.json. Each is at most the judge's file size. Nothing is
+written outside DIR/injection.
 
 The five calls, each made through `Controller.aws` and the one process launch of `aws_cli`, and the fields read: `sts
 get-caller-identity` (Arn); `ec2 describe-instance-status --include-all-instances` (InstanceStatuses[]: InstanceId,
@@ -151,9 +175,11 @@ environment the run read at its start, so all five use one profile and one set o
 object, holds a `NextToken`, names an instance or alarm twice or outside the request, holds a composite alarm, or
 holds a read field off its type counts as a failed call, whose outcome is unknown.
 
-Exit 0: a run ended with the restoration pending, or a restoration written. 1: an abort, a restoration not shown
-within its bound, cut by a signal or unwritten. 2: a refusal or a signal before `roles.json` stands,
-which leave no mark, or a failure the controller did not foresee, whose message names the marks that stand.
+Exit 0: a run ended with the restoration pending, a restoration written, or a seal written. 1: an abort, a
+restoration not shown within its bound, cut by a signal or unwritten, or a seal unwritten or left standing with its
+durability unknown, which a later `seal` refuses as existing and the judge reads. 2: a refusal or a signal
+before `roles.json` stands, which leave no mark, or a failure the controller did not foresee, whose message names the
+marks that stand.
 """
 
 import argparse
@@ -669,13 +695,14 @@ def check_stopped(stopped_path, stop, now):
 
 
 class Controller:
-    """One run or restoration under one operator file, `env` the environment read when it is made. `call(argv, retry=, timeout=,
+    """One run, restoration or seal under one operator file, `env` the environment read when it is made. `call(argv, retry=, timeout=,
     env=)` runs one AWS CLI call, `clock` gives wall seconds, `elapsed` monotonic seconds and `sleep` passes seconds;
     the self-test replaces all four. `deadline` and every `until` are on the monotonic clock.
 
     A signal raises Interrupted only while `armed` and no mark is `held`; otherwise it waits in `pending`, and a hold
     ends by raising it only while armed. `armed` stands only inside code whose caller turns Interrupted into its end:
-    the steps before `injection/` is made, `inject` and the restoration's poll, so the abort path runs unarmed."""
+    the steps before `injection/` is made, `inject`, the restoration's poll and a seal's reads, so the abort path and
+    every mark's write run unarmed."""
 
     def __init__(self, operator, gd2, call, clock, sleep, elapsed):
         self.operator, self.gd2, self.call, self.clock, self.sleep = operator, gd2, call, clock, sleep
@@ -831,11 +858,11 @@ class Controller:
             raise RuntimeError("a poll pauses with no deadline set")
         self.sleep(max(0, min(POLL_SECONDS, min(until, self.deadline) - self.elapsed())))
 
-    def mark(self, name, value):
+    def mark(self, name, value, names=None):
         """Writes the mark `name` once, with a signal held to the write's end, checked first against the judge's layout
-        (roles.json in `build_roles`); one standing with its durability unknown counts as written."""
+        under `names` (roles.json in `build_roles`); one standing with its durability unknown counts as written."""
         if name != "roles":
-            judge.conform(value, judge.LAYOUT[f"injection/{name}.json"][0], f"injection/{name}.json", {})
+            judge.conform(value, judge.LAYOUT[f"injection/{name}.json"][0], f"injection/{name}.json", names or {})
         data = encoded(value, f"injection/{name}.json")
         if self.injection is None:
             raise RuntimeError(f"the mark {name} has no injection directory to stand in")
@@ -1143,9 +1170,124 @@ class Controller:
         return 0
 
 
+    def seal(self, evidence):
+        """The header's `seal`, holding the evidence's lock from its read of the collections to its mark."""
+        try:
+            return self.sealing(evidence)
+        finally:
+            self.armed = False
+            unlock(self.lock)
+
+    def sealing(self, evidence):
+        """Returns 0 with collected.json written, or 1 with none written or with one that stands with its durability
+        unknown, or raises a Refusal, or Interrupted before the mark's write. Every file is read relative to the
+        descriptor of the directory it stands in, following no link, and synced before the mark; the mark is checked
+        first by the judge's own loader over the bytes it seals. The digest of a mark it linked is printed."""
+        now, root = self.clock(), Path(evidence)
+        injection = root / "injection"
+        need(root.is_dir() and not root.is_symlink(), f"{evidence} is no directory")
+        need(injection.is_dir() and not injection.is_symlink(), f"{injection} is no directory: no run to seal")
+        probe(injection)
+        self.lock = lock(injection)
+        # Armed once the lock is held, so a signal from here to the mark's write ends the seal with nothing written.
+        self.armed = True
+        self.release()
+        need(not stands(injection / "collected.json", "injection/collected.json"), "injection/collected.json exists: "
+             "the seal is written once")
+        with contextlib.ExitStack() as held:
+            fds = {}
+            for rel, parent in (("", None), ("records", ""), ("injection", "")):
+                fds[rel] = judge.open_dir(rel or str(root), rel or evidence, fds.get(parent))
+                held.callback(os.close, fds[rel])
+
+            def read(rel):
+                where, _, name = rel.rpartition("/")
+                return synced(name, rel, fds[where])
+
+            files = {"package.json": read("package.json")}
+            approved = self.operator["approval"]["package_sha256"]
+            need(hashlib.sha256(files["package.json"]).hexdigest() == approved, "package.json holds other bytes than "
+                 "the approval's package")
+            package, names = judge.package_of(files["package.json"])
+            need(package["kind"] == "staging", f"package.json is of kind {package['kind']}: seal serves the "
+                 "controller's staging runs, and a simulation export seals its own files")
+            need(package["run"]["end"] <= now, f"the run window ends at {package['run']['end']}, after the seal's time "
+                 f"{now}, so its collections may still grow")
+            try:
+                marks = sorted(os.listdir(fds["injection"]))
+            except OSError as error:
+                raise Refusal(f"injection cannot be listed: {error.strerror}") from error
+            files.update((f"injection/{name}", read(f"injection/{name}")) for name in marks)
+            roles = judge.parsed(files.get("injection/roles.json", b"null"), "injection/roles.json")
+            need(isinstance(roles, dict) and roles.get("package_sha256") == approved,
+                 "injection/roles.json names another package than the approval's")
+            names["observed"] = judge.collected(package)
+            names["sealed"] = names["observed"] | {"coverage.json"}
+            files["coverage.json"] = read("coverage.json")
+            coverage = judge.parsed(files["coverage.json"], "coverage.json")
+            judge.conform(coverage, judge.LAYOUT["coverage.json"][0], "coverage.json", names)
+            for rel in sorted(names["observed"]):
+                files[rel] = read(rel)
+                rows, span = judge.parsed(files[rel], rel), coverage[rel]
+                need(len(rows) == span["lines"], f"{rel} holds {len(rows)} lines, but coverage.json counts "
+                     f"{span['lines']}")
+                need(span["to"] <= now, f"coverage.json spans {rel} to {span['to']}, after the seal's time {now}")
+            # The judge lists DIR and `records/` and refuses an entry outside the layout, so the seal lists them too.
+            stand = {rel for at in ("", "records") for rel, is_dir in judge.entries(fds[at], at and f"{at}/").items()
+                     if not is_dir}
+            judge.admit(package, stand | {rel for rel in files if rel.startswith("injection/")}
+                        | {"injection/collected.json"})
+            for rel in ("records", ""):
+                try:
+                    os.fsync(fds[rel])
+                except OSError as error:
+                    raise Refusal(f"{rel or evidence} cannot be synced: {error.strerror}") from error
+        mark = {"time": now, "files": {rel: hashlib.sha256(files[rel]).hexdigest() for rel in sorted(names["sealed"])}}
+        data = encoded(mark, "injection/collected.json")
+        digest = hashlib.sha256(data).hexdigest()
+        # The judge's loader refuses here what it would refuse once the seal stands, so no seal names such evidence.
+        judge.load_evidence({**files, "injection/collected.json": data})
+        self.injection = injection
+        try:
+            # The hold starts armed, so a signal raises until the write is held and waits from then on.
+            with self.hold():
+                self.armed = False
+                self.mark("collected", mark, names)
+        except FileExistsError as error:
+            raise Refusal("injection/collected.json exists: the seal is written once") from error
+        except Unwritten as error:
+            # The mark was linked, and it stands or may stand again after a crash, so its digest is printed too.
+            say(f"host-stop-controller: {error}", err=True)
+            say(f"host-stop-controller: the mark this seal linked: injection/collected.json sha256 {digest}")
+            return 1
+        except OSError as error:
+            say(f"host-stop-controller: collected.json is unwritten: {error}", err=True)
+            return 1
+        say(f"host-stop-controller: sealed {len(mark['files'])} files at {now}; injection/collected.json sha256 "
+            f"{digest}")
+        return 0
+
+def synced(name, rel, dir_fd):
+    """The bytes of the regular file `name` in the directory open at `dir_fd`, at most the judge's FILE_LIMIT, read
+    following no link and without blocking, and the file synced, or a Refusal naming `rel`."""
+    try:
+        handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError as error:
+        raise Refusal(f"{rel} cannot be read: {error.strerror}") from error
+    with os.fdopen(handle, "rb") as file:
+        need(stat.S_ISREG(os.fstat(file.fileno()).st_mode), f"{rel} is no regular file")
+        try:
+            data = file.read(judge.FILE_LIMIT + 1)
+            os.fsync(file.fileno())
+        except OSError as error:
+            raise Refusal(f"{rel} cannot be read and synced: {error.strerror}") from error
+    need(len(data) <= judge.FILE_LIMIT, f"{rel} holds more than {judge.FILE_LIMIT} bytes")
+    return data
+
+
 def lock(directory):
-    """An open descriptor of `directory` holding its exclusive lock, so a run and a restore of one evidence directory
-    exclude each other; a Refusal when another holds it. The lock adds no file to the layout."""
+    """An open descriptor of `directory` holding its exclusive lock, so a run, a restore and a seal of one evidence
+    directory exclude each other; a Refusal when another holds it. The lock adds no file to the layout."""
     try:
         fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as error:
@@ -1154,7 +1296,7 @@ def lock(directory):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as error:
         os.close(fd)
-        raise Refusal(f"{directory} is held by a run or restore that has not ended: {error.strerror}") from error
+        raise Refusal(f"{directory} is held by a run, restore or seal that has not ended: {error.strerror}") from error
     return fd
 
 
@@ -1190,12 +1332,16 @@ def parser():
     restore.add_argument("--evidence", required=True, help="the evidence directory")
     restore.add_argument("--reviewed", help="the operator's record, kept outside DIR, that GD-2's restoration steps "
                          "were done")
+    seal = commands.add_parser("seal", help="seal the collected files once the run window has ended")
+    seal.add_argument("--operator", required=True, help="the operator file")
+    seal.add_argument("--evidence", required=True, help="the evidence directory")
     return p
 
 
 def main(argv=None, call=aws_cli, clock=time.time, sleep=time.sleep, elapsed=time.monotonic):
     previous = {s: signal.getsignal(s) for s in SIGNALS}
-    # The handler stands before the first read, unarmed: a signal waits in `pending` until `run` or `restore` arms.
+    # The handler stands before the first read, unarmed: a signal waits in `pending` until `run`, `restore` or `seal`
+    # arms.
     controller = Controller({}, {}, call, clock, sleep, elapsed)
     try:
         for s, handler in previous.items():
@@ -1206,6 +1352,8 @@ def main(argv=None, call=aws_cli, clock=time.time, sleep=time.sleep, elapsed=tim
         controller.operator = read_operator(args.operator, controller.gd2)
         if args.command == "run":
             return controller.run(args.package, args.evidence)
+        if args.command == "seal":
+            return controller.seal(args.evidence)
         return controller.restore(args.evidence, args.reviewed)
     except Refusal as error:
         say(f"host-stop-controller: refused: {error}" + ("" if error.written else "; nothing written"), err=True)

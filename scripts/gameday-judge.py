@@ -5,9 +5,10 @@
 Usage:
   gameday-judge.py --evidence DIR --record FILE
 
-The judge reads DIR in the layout `docs/agents/ci.md` states, GD-2 from `verification/readiness/gamedays.json` and
-`scripts/fis-profiles.json`, both of its own tree, and nothing else; it makes no git or network call. It writes FILE
-once and replaces no entry. Exit 0 delivers a HELD record, 1 any other record, 2 no record of this run. The layout
+The judge reads DIR in the layout `docs/agents/ci.md` states, GD-2 from `verification/readiness/gamedays.json`,
+`scripts/fis-profiles.json` and the two Rust files that declare FLEET_BOUNDS, all of its own tree, and nothing else;
+it makes no git or network call. It writes FILE once and replaces no entry. Exit 0 delivers a HELD record, 1 any
+other record, 2 no record of this run. The layout
 (each file, its writer and its keys), the texts, the reach, the eleven rules, the record and every refusal are stated
 once, in the subsection "The evidence layout, the rules and the record" of `docs/agents/ci.md`; its capitalized names
 are this script's constants.
@@ -18,6 +19,7 @@ import contextlib
 import datetime
 import decimal
 import fractions
+import functools
 import hashlib
 import importlib.util
 import json
@@ -45,6 +47,11 @@ COMMIT = re.compile(r"[0-9a-f]{40}")
 DIGEST = re.compile(r"[0-9a-f]{64}")
 DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 SHARD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# The longest `hosts`, `shards` and `witness` lists of a package, each the constant its file declares, which the zone's
+# fleet directory refuses a longer host or shard listing by: {list: (file of this tree, constant)}.
+FLEET_BOUNDS = {"hosts": ("crates/kestrike/src/failover/zone_loop/directory.rs", "MAX_HOSTS"),
+                "shards": ("crates/kestrike/src/failover/standbys.rs", "MAX_SLOTS"),
+                "witness": ("crates/kestrike/src/failover/standbys.rs", "MAX_SLOTS")}
 
 WITNESS = ("each of the filled package's witness keys from the certified pre-fault cut, at least one per shard, is "
            "first hit on the successor with its recorded bytes and no origin request for that key before the hit")
@@ -265,6 +272,7 @@ LAYOUT = {
                               "detail": "name?"}, True),
     "injection/restoration.json": ({"instance": "name", "state": "name", "time": "time",
                                     "reviewed_sha256": "digest?"}, True),
+    "injection/collected.json": ({"time": "time", "files": Each("sealed", "digest", True)}, False),
     "records/receipts.jsonl": ({"time": "time", "shard": "shard", "principal": "name"}, False),
     "activations.jsonl": ({"host": "host", "activations": [{"shard": "shard", "generation": "generation",
                                                              "attempt": "epoch", "time": "time"}]}, False),
@@ -280,8 +288,38 @@ LAYOUT = {
 COLLECTED = ("activations.jsonl", "witness.jsonl", "origin.jsonl", "provider.jsonl", "blockers.jsonl")
 
 
+def fleet_bound(field):
+    """The longest package list `field` may hold: the value of the declaration FLEET_BOUNDS names for it."""
+    return declared_bound(*FLEET_BOUNDS[field])
+
+
+@functools.cache
+def declared_bound(rel, name):
+    """The value of the one `pub const NAME: usize = N;` line of the Rust file `rel` of this tree, read once per
+    process with each CRLF read as LF as rustc reads it, or a Refusal. The file is read apart from the evidence."""
+    try:
+        with open(HERE.parent / rel, "rb") as handle:
+            data = handle.read(FILE_LIMIT + 1)
+        text = data.replace(b"\r\n", b"\n").decode("utf-8")
+    except OSError as error:
+        raise Refusal(f"{rel} cannot be read: {error.strerror}") from error
+    except UnicodeDecodeError as error:
+        raise Refusal(f"{rel} is not UTF-8: {error}") from error
+    need(len(data) <= FILE_LIMIT, f"{rel} holds more than {FILE_LIMIT} bytes")
+    found = re.findall(rf"^pub const {name}: usize = ([0-9]+);$", text, re.MULTILINE)
+    need(len(found) == 1, f"{rel} declares {name} {len(found)} times as `pub const {name}: usize = N;`, not once")
+    return int(found[0])
+
+
 def check_package(p):
-    """Refuse a package object off its schema or its windows; return the names its other files are read against."""
+    """Refuse a package object off its schema or its windows; return the names its other files are read against. A
+    decoded list longer than its FLEET_BOUNDS bound is refused before any of its entries is checked against the
+    schema, put in a set or used to lay out files."""
+    for field in FLEET_BOUNDS:
+        if isinstance(p.get(field), list):
+            bound, (rel, name) = fleet_bound(field), FLEET_BOUNDS[field]
+            need(len(p[field]) <= bound, f"package.json {field} holds {len(p[field])} entries, more than the {bound} "
+                 f"that {name} of {rel} declares")
     for field in ("hosts", "shards"):
         conform(p.get(field), ["name"], f"package.json {field}", {})
         need(p[field] and len(set(p[field])) == len(p[field]), f"package.json {field} is empty or repeats a name")
@@ -365,6 +403,13 @@ def package_of(data):
     return p, check_package(p)
 
 
+def collected(p):
+    """The collected files of package `p`, which `coverage.json` spans and the seal names beside it: each `records/`
+    file and each COLLECTED file whose observation `p` names inside its world."""
+    absent = {OBSERVATION_FILES[o] for o in p["outside"]}
+    return {f"records/{s}.jsonl" for s in p["shards"]} | {"records/receipts.jsonl"} | (set(COLLECTED) - absent)
+
+
 def layout_of(p):
     """{relative path: (schema, optional)} of every file the package's layout holds but `package.json`."""
     return {**{f"records/{s}.jsonl": ({"time": "time", **VERSION}, False) for s in p["shards"]}, **LAYOUT}
@@ -387,7 +432,8 @@ def load_evidence(files):
     admit(p, set(files))
     ev = {"package": p, "package_sha256": hashlib.sha256(files["package.json"]).hexdigest(),
           "outside": set(p["outside"])}
-    names["observed"] = {rel for rel in files if rel.startswith("records/") or rel in COLLECTED}
+    names["observed"] = collected(p)
+    names["sealed"] = names["observed"] | {"coverage.json"}
     for rel, (schema, _) in layout_of(p).items():
         if rel not in files:
             ev[rel] = None
@@ -395,6 +441,12 @@ def load_evidence(files):
         ev[rel] = value = parsed(files[rel], rel)
         for n, row in enumerate(value, 1) if rel.endswith(".jsonl") else [(None, value)]:
             conform(row, schema, rel if n is None else f"{rel} line {n}", names)
+    # A row file is compared before coverage.json, so a shortened file is named itself.
+    for rel in [*sorted(names["observed"]), "coverage.json"]:
+        held, digest = hashlib.sha256(files[rel]).hexdigest(), ev["injection/collected.json"]["files"][rel]
+        need(held == digest, f"{rel} differs from the bytes injection/collected.json seals: it holds SHA-256 {held}, "
+             f"the seal {digest}")
+    ev["seal_sha256"] = hashlib.sha256(files["injection/collected.json"]).hexdigest()
     check_order(ev, p)
     return ev
 
@@ -437,9 +489,14 @@ def check_order(ev, p):
              "(a hit needs one; another outcome may read null)")
         need(stop is None or later(row["time"], stop["time"], error) is not False, f"witness.jsonl line {n} "
              "precedes the stop")
+    seal = ev["injection/collected.json"]
+    need(p["run"]["end"] <= seal["time"], f"injection/collected.json seals the collections at {seal['time']}, before "
+         f"the run window's end {p['run']['end']}")
     for rel, span in ev["coverage.json"].items():
         need(span["from"] <= span["to"] and span["lines"] == len(ev[rel]), f"coverage.json spans {rel} backwards or "
              f"counts {span['lines']} lines, not its {len(ev[rel])}")
+        need(span["to"] <= seal["time"], f"coverage.json spans {rel} to {span['to']}, after the seal's time "
+             f"{seal['time']}")
     hosts = [row["host"] for row in ev["activations.jsonl"]]
     need(len(set(hosts)) == len(hosts), "activations.jsonl repeats a host")
     need(abort is None or (abort["cause"] == "guardrail") == (abort["guardrail"] is not None), "injection/abort.json "
@@ -972,6 +1029,7 @@ def judge(ev, catalog, fis, readiness):
             "abort": None if abort is None else {"cause": abort["cause"], "guardrail": abort["guardrail"],
                                                  "before_stop": early},
             "rules": rules, "budgets": budgets,
+            "seal": {"sha256": ev["seal_sha256"], "time": ev["injection/collected.json"]["time"]},
             "result": summary(rules, p["kind"]) + ("; the abort mark precedes the stop request" if early else "")}
 
 
