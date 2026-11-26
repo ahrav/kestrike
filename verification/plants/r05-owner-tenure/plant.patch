@@ -1,0 +1,62 @@
+diff --git a/crates/kestrike/src/net/owner_view.rs b/crates/kestrike/src/net/owner_view.rs
+index 2304750f7..2c62a5ff9 100644
+--- a/crates/kestrike/src/net/owner_view.rs
++++ b/crates/kestrike/src/net/owner_view.rs
+@@ -12,7 +12,7 @@ use crate::storage::AuthorityReport;
+ use crate::storage::Session;
+ use crate::storage::store::{Read, Version};
+ 
+-use super::ownership::{ActivatedEpoch, OwnershipBody, ShardGeneration, Tenure, Validity, Volume};
++use super::ownership::{ActivatedEpoch, OwnershipBody, Tenure, Validity, Volume};
+ 
+ #[derive(Default)]
+ pub(super) struct OwnerView {
+@@ -24,12 +24,10 @@ pub(super) struct OwnerView {
+     local: Option<Host>,
+     /// The attached volume, fixed by the first observation.
+     own: Option<VolumeId>,
+-    /// The `(g, attempts, owner)` that the last observation in which both reads returned a value named, when its
+-    /// accepted shard read names the own volume active; cleared by any returned read that contradicts that, whatever
+-    /// the other read returned. A read that returned no value, a store outage, is no evidence. The judgment holds
+-    /// only for the tenure it names: an accepted read alone that names a later tenure leaves it in place, and `body`
+-    /// grants it to no other tenure.
+-    fresh: Option<(ShardGeneration, u32, Host)>,
++    /// Set by an observation in which both reads returned a value and the accepted shard read names the own volume
++    /// active; cleared by any returned read that contradicts that, whatever the other read returned. A read that
++    /// returned no value, a store outage, is no evidence.
++    fresh: bool,
+     /// Set once the own volume's record reaches `VolumeState::Retired` or a later shard record names another active
+     /// volume; `retired` stays true thereafter.
+     retired: bool,
+@@ -132,16 +130,11 @@ impl OwnerView {
+         // A read that returned no value, a store outage, is no evidence; a read that returned a value contradicting
+         // the view clears it, an accepted shard read naming another active volume included.
+         match (shard_returned, volume_active) {
+-            (true, Some(active)) => {
+-                self.fresh = accepted
+-                    .filter(|_| active)
+-                    .map(|read| read.value())
+-                    .map(|record| (record.generation, record.attempts, record.owner))
+-            }
++            (true, Some(active)) => self.fresh = accepted.is_some() && active,
+             (true, None) if accepted.is_none_or(|read| read.value().active != *own) => {
+-                self.fresh = None
++                self.fresh = false
+             }
+-            (false, Some(false)) => self.fresh = None,
++            (false, Some(false)) => self.fresh = false,
+             _ => {}
+         }
+         // A retired own volume shows a later tenure, which outranks a regressed shard read in the same observation.
+@@ -209,9 +202,8 @@ impl OwnerView {
+                 },
+             })
+         });
+-        let current = self.fresh.is_some_and(|judged| {
+-            record.is_some_and(|r| (r.generation, r.attempts, r.owner) == judged)
+-        }) && !self.retired
++        let current = self.fresh
++            && !self.retired
+             && record.is_some_and(|r| self.own.as_ref() == Some(&r.active))
+             && tenure == Some(tenure_of(token));
+         let reported = current

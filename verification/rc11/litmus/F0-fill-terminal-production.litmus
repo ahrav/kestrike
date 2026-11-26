@@ -1,0 +1,21 @@
+C F0-fill-terminal-production
+(* A failed producer's terminal and the follower that observes its
+   departure. The terminal word starts at 1, upload-granted, and the state
+   word at 0, undeparted. P0 is the producer: its relaxed store of the
+   failure terminal, 2, then its release read-modify-write that sets the
+   departed bit. P1 is the follower: its acquire load of the state word,
+   then its relaxed load of the terminal. Departure observed with the
+   upload-granted terminal: 1:r0=1 and 1:r1=1. *)
+{ terminal = 1; state = 0; }
+
+P0 (atomic_int* terminal, atomic_int* state) {
+  atomic_store_explicit(terminal, 2, memory_order_relaxed);
+  int r0 = atomic_fetch_add_explicit(state, 1, memory_order_release);
+}
+
+P1 (atomic_int* terminal, atomic_int* state) {
+  int r0 = atomic_load_explicit(state, memory_order_acquire);
+  int r1 = atomic_load_explicit(terminal, memory_order_relaxed);
+}
+
+exists (1:r0=1 /\ 1:r1=1)

@@ -1,0 +1,27 @@
+{
+  "id": "r08-place-owner",
+  "row": 8,
+  "fix": {
+    "pull_request": 1586,
+    "commit": "7aa8b9ca3b09bdf289b5bd501bcab54769b85587"
+  },
+  "files": [
+    "crates/kestrike/src/storage/place_claim.rs",
+    "crates/kestrike/src/storage/publish.rs",
+    "crates/kestrike/src/storage/attempt.rs",
+    "crates/kestrike/src/storage/remove.rs"
+  ],
+  "restores": "The place-claim check of a publication ignores the pending pair's tag and owner, so a place word naming another fill's pending pair is accepted.",
+  "proof": "storage::publication_tests::a_place_word_naming_another_fills_pending_pair_refuses_corrupt_before_the_bracket",
+  "expected": [
+    "upload",
+    "faulted",
+    "cluster-broad",
+    "cluster-pressure",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "workload",
+    "evidence": "Every traced run of six profiles, the five expected and `cluster-long`, checks a claimed place in `publish::prepare` (a scratch trace there panicked in all 126,946 upload, 126,619 faulted, 127,591 cluster-broad, 127,764 cluster-pressure, 114,919 cluster-swarm and 481,765 cluster-long runs on the code of commit c6a14e9f1), and a trace at the head's refusal of that check, which covers every place word the plant accepts and the head refuses, fired in none of 261,651 runs of the five other than cluster-long and none of 2,051,103 runs of all 21 live profiles with their controls and histories on that code, so no publication meets a place word naming another fill's pending pair; `cluster-long` stays out of `expected`, although each of its traced runs checks a claimed place there, because the profile has no passing run at the default counts."
+  }
+}

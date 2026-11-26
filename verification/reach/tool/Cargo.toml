@@ -1,0 +1,21 @@
+[package]
+name = "reach"
+version = "0.1.0"
+edition = "2024"
+description = "Measures which variants of Kestrike's listed outcome enums a named simulation run constructed, and keeps verification/reach/ in step with the source."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+[dependencies]
+# `full` and `visit` parse and walk expressions; `span-locations` gives each
+# token its line and column, which the coverage export is keyed by.
+proc-macro2 = { version = "1.0.107", features = ["span-locations"] }
+syn = { version = "2.0.119", features = ["full", "visit"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.10.9"
+
+# Its own workspace, so the repository's workspace neither builds this crate
+# nor resolves its dependencies.
+[workspace]

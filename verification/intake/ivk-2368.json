@@ -1,0 +1,51 @@
+{
+  "id": "ivk-2368",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/net/put.rs",
+    "function": "PutCore::receive_wait"
+  },
+  "defect": "With two peers uploading, a receive refused for an empty receive-write buffer pool, for an upload of a peer below its write-command share, does not end the lending; a peer at or beyond its share takes the freed write command.",
+  "property": {
+    "text": "From the turn after a peer below its write-command share first finds no command, and while a PUT of such a peer ends each turn with a write to submit and no command for it, every command goes to a peer below its share.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/net/put.rs, module documentation, \"Write commands\"; stated by merged blotter pull request 1522"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "property",
+  "evidence": {
+    "unjudged": "PutCore::receive_wait ends the lending only for ReceiveError::Budget. The rule is the module documentation of crates/kestrike/src/net/put.rs, \"Write commands\"; no rule text of net/world_tests/narrate/rules.rs, no observer check, no obligation record of verification/obligations.json and no model under tla/ or quint/ judges which peer a freed write command goes to. The texts that name a share judge the request share, and both uploads publish inside their deadlines.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. In cluster-swarm and cluster-pressure only logical client 0 uploads (net/world_tests/cluster.rs), so each owner takes uploads from one peer, and upload runs UPLOAD_PLAN (net/world_tests.rs), whose one PUT client 0 issues; no owner in these three profiles holds two peers' uploads at once."
+  },
+  "catch": {
+    "history": "lw2-waiter-receive-finds-no-buffer",
+    "rule": "a write command went to a peer at its share while a peer below its share waited",
+    "tally": {
+      "build": "07fbf7bafa5c1c4bb0be4f7dc81625c21612c1e1c6ae62193af047609ee3b5e0",
+      "revision": "c165d175a",
+      "campaign": "bsw-ct1-2154-lw-c165d175a",
+      "root": "bsw-ct1-2154-lw-c165d175a under the campaign root",
+      "workers": 28,
+      "seconds": 180,
+      "runs": "0..238910",
+      "endings": {
+        "violation: a write command went to a peer at its share while a peer below its share waited": 238910,
+        "pass": 0,
+        "unsuccessful or inconclusive": 0
+      },
+      "missed": 0,
+      "suspects": 0,
+      "replays": 22
+    }
+  },
+  "property_action": {
+    "action": "added",
+    "place": "rule",
+    "reference": "a write command went to a peer at its share while a peer below its share waited",
+    "reason": "The text enters array MIXED of crates/kestrike/src/net/world_tests/narrate/rules.rs under the progress obligation. It states the sentence of the module documentation of crates/kestrike/src/net/put.rs, \"Write commands\", that the row's property quotes, which no rule text judged before."
+  },
+  "note": "The history runs over the storage of three fill records (six receive-write buffers) with a waiter of four fragments and a write-command budget of one: in a turn that lends nothing the waiter's receive is refused PoolExhausted while the volume admits a command (the premise reads the owner's count of refused receives with no device refusal in that turn; the reason, PoolExhausted, is the schedule's account of the six buffers), and the next turn lends the borrower a fourth command while the waiter holds one. On the fixture's four buffers the state does not form: the waiter's one buffer is taken at its PREPARE and the borrower empties the pool at its share of two with no segment staged. Sibling lw2-waiter-fragments-one-turn-later passes; the text's control is lw1-accepted-turn-judged-as-bound. The falsifier lw2-later-fragments-read-as-refused runs outside the listing, in process under three pinned roots (the seeded test of lent_commands.rs), and ends unsuccessful; the sweep at d6cc2e180 (build d5b9f4a2a42c1f8136f26804252a03cef4d112e91b1b1477d3bb08255695810b), the last revision that listed it, ran it 147035 times, every run unsuccessful under the pin's premise. Known-findings row for #335. The catch covers the refused receive alone. By a reading of WritableFill::receive_piece and PutCore::consume, and no run that isolates it: in turn 2 of the pin and turn 3 of the sibling the waiter's receive submits its second segment on the turn's one command, finds no buffer for its last fragment's tail and returns the bytes it took; consume notes a wait after a receive that takes part of a fragment only for a submit the budget refused, so the next turn lends and the borrower, at its share in the pin and beyond it in the sibling, takes a command while the waiter holds that tail. With a buffer free the same receive takes the tail, the budget refuses the submit of the last segment and the owner notes the wait. The premises EXHAUSTED and SPARED require those two commands, so no history judges that stop: a fix confined to receive_wait leaves it as it is, and an owner that notes a wait there ends lw2-waiter-receive-finds-no-buffer and lw2-waiter-fragments-one-turn-later unsuccessful under those premises. The \"Write commands\" text names a volume that admits no command and a spent budget as the causes of a wait and does not say whether the turn after such a stop lends; the owner decides which holds."
+}

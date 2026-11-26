@@ -1,0 +1,29 @@
+diff --git a/crates/kestrike/src/net/serve.rs b/crates/kestrike/src/net/serve.rs
+index 7793cb8d5..d294b3dc3 100644
+--- a/crates/kestrike/src/net/serve.rs
++++ b/crates/kestrike/src/net/serve.rs
+@@ -864,23 +864,7 @@ impl ServeCore {
+             fingerprint,
+             deadline_us,
+         };
+-        if u32::from(id.slot()) >= session.caps.slots {
+-            return self.refuse(&ask, Status::InvalidRequest);
+-        }
+-        if header.grant > session.caps.window {
+-            // The refusal settles a fresh identity, so no GET under this request ID is admitted after its ERROR. A retransmission is refused again, and the same ID with another grant conflicts with the retained row.
+-            requests.settle(
+-                session.peer,
+-                id,
+-                Some(Cached {
+-                    epoch: session.epoch,
+-                    expires_us: deadline_us.saturating_add(self.config.linger_us),
+-                    outcome: Outcome::Get(GetRow {
+-                        fingerprint,
+-                        terminal: Terminal::Error(Status::InvalidRequest),
+-                    }),
+-                }),
+-            );
++        if header.grant > session.caps.window || u32::from(id.slot()) >= session.caps.slots {
+             return self.refuse(&ask, Status::InvalidRequest);
+         }
+         match requests.route(session.peer, id, Operation::Get) {

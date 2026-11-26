@@ -1,0 +1,476 @@
+{
+ "catalog": "failover-gamedays",
+ "version": 1,
+ "run_rule": "Before any injection the filled package of a run pins each target or the rule that selects it, each phase and each precondition that a correct system needs to produce its entry's expected outcome, named in the entry or not, with the baselines and reference records its clauses compare against. Each precondition is read from records before the phase it gates. A phase in which a pinned precondition is unmet, or in which an injected step did not occur, failed to inject and grades none of its clauses; a safety violation the run observed is kept. A clause is graded from observations made after its injection and inside its window, compared with the pinned records.",
+ "budgets": {
+  "planned-handoff-dark-time": {"unit": "s", "meaning": "the longest time a handed-off shard serves no hit", "value": null},
+  "fresh-host-recovery-time": {"unit": "s", "meaning": "from the double loss to the fresh host's first served hit", "value": null},
+  "re-enrollment-drain": {"unit": "s", "meaning": "from the event that leaves a shard without an enrolled standby (a takeover, a planned transfer write or its standby host's stop), or from the reconciler's return or the deny's end when an outage held repair back, to the shard's next enrolled standby", "value": null},
+  "origin-load": {"unit": "requests/s", "meaning": "the origin request rate a recovering zone may add above its baseline before the injection", "value": null},
+  "alarm-delivery-time": {"unit": "s", "meaning": "from the injected condition to the page reaching the route", "value": null}
+ },
+ "entries": [
+  {
+   "id": "GD-1",
+   "mode": "rehearsal",
+   "class": "planned-handoff",
+   "claim": "a planned handoff moves one shard, then every shard of one host, to each shard's named standby on the same volume with a warm load",
+   "not_claimed": ["a handoff under a store outage", "a handoff whose target is not the named standby"],
+   "hypothesis": [
+    {"clause": "no generation or volume changes and each shard has one owner per tenure through the handoff", "bound": null, "items": ["planned-handoff-staging-safety"]},
+    {"clause": "the outgoing owner stops mutation admission, publishes the recoverable cut and stops emission before it makes the transfer write", "bound": null, "items": ["planned-handoff-staging"]},
+    {"clause": "the transfer write names the record's standby as owner, consumes the attempt counter, clears the standby and names no replacement", "bound": null, "items": ["planned-handoff-staging"]},
+    {"clause": "the target activates only through its own acknowledged bump and serves warm", "bound": null, "items": ["planned-handoff-staging"]},
+    {"clause": "each handed-off shard serves no hit for at most the planned-handoff dark time", "bound": "planned-handoff-dark-time", "items": ["planned-handoff-staging"]},
+    {"clause": "the ordinary enrollment path restores a standby for each moved shard within the re-enrollment drain", "bound": "re-enrollment-drain", "items": ["planned-handoff-staging"]}
+   ],
+   "injection": {"action": "a planned-handoff request for one shard, then for each shard of one host", "profile": null},
+   "oracle": {"reach": "the shard records read before submission name each target as its shard's standby and show that the first phase's plan holds exactly one shard, that the selected host owns at least one shard and that the second phase's plan equals the set it owns, and a first phase of another size, a host that owns none or a plan that omits one failed to inject; the drill's own submission log names each shard of the run plan with its target and the time its signed handoff request went out", "expected": "each shard of the run plan moves: the outgoing owner's own record shows its admission stop, cut publication, emission stop and acknowledged transfer write in that order; the shard record then names the target as owner and no standby at an unchanged generation and volume with the attempt counter consumed once; the target's acknowledged restart bump follows the transfer write and precedes its first admission, and each of the filled package's witness keys from the certified pre-fault cut, at least one per shard, is first hit on the target with its recorded bytes and no origin request for that key before the hit, the first within the planned-handoff dark time; a new standby is enrolled within the re-enrollment drain; no host of the run plan is suspected or taken over; the provider's audit log lists no CreateVolume call by the reconciler principal over the run; a shard of the run plan left unmoved is a disproof; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "a shard dark past the planned-handoff dark time",
+    "a standby takeover of a shard of the run plan",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "the moved shards keep their new owners; a shard returns only by a planned handoff once ordinary enrollment names its former owner as standby. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "the planned-handoff request command and its signer: TBD - BLOCKS EXECUTION",
+    "the cooperative transfer of D19 and the restart arm of D20 (milestone M5, #279) in the staging build: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["planned-handoff-staging", "planned-handoff-staging-safety"]
+  },
+  {
+   "id": "GD-2",
+   "mode": "causal",
+   "class": "host-loss-multi-shard",
+   "claim": "stopping a host that owns several shards and stands by for others starts one takeover per owned shard on each shard's standby host",
+   "not_claimed": [
+    "a gray or slow owner",
+    "loss of two hosts at once",
+    "a partitioned but running owner, which #148 and #137 judge"
+   ],
+   "hypothesis": [
+    {"clause": "each owned shard is taken over by its named standby at the same generation and volume", "bound": null, "items": ["host-loss-multi-shard-staging"]},
+    {"clause": "every shard the stopped host did not own keeps its owner", "bound": null, "items": ["host-loss-multi-shard-staging"]},
+    {"clause": "no volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["host-loss-multi-shard-staging-safety"]},
+    {"clause": "each shard the stopped host owned or stood by for has an enrolled standby again within the re-enrollment drain or reports a named blocker", "bound": "re-enrollment-drain", "items": ["host-loss-multi-shard-staging"]},
+    {"clause": "the zone's origin request rate above its baseline before the injection stays within the origin-load budget", "bound": "origin-load", "items": ["host-loss-multi-shard-staging"]}
+   ],
+   "injection": {"action": "stop the instance of one host that owns several shards and is the named standby of others", "profile": null},
+   "oracle": {"reach": "the shard records read before the stop name the host as owner of several shards, each with a named standby, and as the named standby of others, the control plane and each such standby host's report read before the stop show its instance running and the host healthy, and a host that holds fewer of either role, owns a shard without a standby or has a standby that is stopped or unhealthy failed to inject; the control plane records the stop request and reports the instance stopped", "expected": "each owned shard's record names its standby as owner at an unchanged generation and volume, and each of the filled package's witness keys from the certified pre-fault cut, at least one per shard, is first hit on the successor with its recorded bytes and no origin request for that key before the hit; the owner history of every shard the host did not own shows no owner change; each shard the host owned or stood by for has an enrolled standby within the re-enrollment drain or reports a named blocker; the provider lists no volume created and the provider's audit log lists no CreateVolume call by the reconciler principal over the run; and the zone's origin request rate above its baseline, measured over a window the filled package names that ends before the stop, stays within the origin-load budget; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, no tenure activated twice, and each activation at generation g and activated epoch a made by the host that a version of that shard's record names owner at generation g and attempt a / 2, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "a takeover of a shard with no role on the stopped host",
+    "a shard that changes hands twice",
+    "the zone's origin request rate above its baseline past the origin-load budget",
+    "a shard without a standby or a named blocker past the re-enrollment drain",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator starts the instance again; it rejoins as a candidate, never as the owner it was. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "a staging fleet that keeps the arbiter's quorum of placement partitions with live probers besides the hosts the run stops: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["host-loss-multi-shard-staging", "host-loss-multi-shard-staging-safety"]
+  },
+  {
+   "id": "GD-3",
+   "mode": "causal",
+   "class": "owner-standby-loss",
+   "claim": "stopping a shard's owner and its standby together makes the reconciler attach a fresh host to the surviving volume, which takes over warm",
+   "not_claimed": ["a lost volume", "a third host lost during the recovery"],
+   "hypothesis": [
+    {"clause": "the reconciler designates a fresh host and attaches it to the surviving volume", "bound": null, "items": ["owner-standby-loss-staging"]},
+    {"clause": "no volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["owner-standby-loss-staging-safety"]},
+    {"clause": "the fresh host takes over warm at the same generation within the fresh-host recovery time", "bound": "fresh-host-recovery-time", "items": ["owner-standby-loss-staging"]},
+    {"clause": "each other shard a stopped host owned moves as its own roles decide, to its surviving standby or, when both of its roles were stopped, to a fresh host; every shard with no role on either stopped host keeps its owner", "bound": null, "items": ["owner-standby-loss-staging"]},
+    {"clause": "a new standby follows within the re-enrollment drain", "bound": "re-enrollment-drain", "items": ["owner-standby-loss-staging"]}
+   ],
+   "injection": {"action": "stop the instances of one shard's owner and of its named standby", "profile": null},
+   "oracle": {"reach": "the shard record read before the stops names the stopped owner and standby; before the stops, for that shard and for each other shard whose owner and standby are both on the stopped hosts, the fleet holds a host with no role on the shard that passes every designation check and the volume record shows a free attach slot, and a fleet without them failed to inject; the provider's instance state records show both instances stopped together before any takeover write on the shard; a record history with a takeover by the stopped standby reached the successor-death case and failed to inject", "expected": "the shard's record names the fresh host as owner at an unchanged generation and volume with the attempt counter consumed once, by the fresh host's takeover, which follows its attach; each of the filled package's witness keys from the certified pre-fault cut, at least one per shard, is first hit on the fresh host with its recorded bytes and no origin request for that key before the hit, the first within the fresh-host recovery time; a new standby is enrolled within the re-enrollment drain; each other shard a stopped host owned is served by its surviving standby or a fresh host, and every shard with no role on either stopped host keeps its owner; the provider lists no volume created and the provider's audit log lists no CreateVolume call by the reconciler principal over the run; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "a fresh host attached to another volume than the shard's",
+    "a takeover of a shard with no role on either stopped host",
+    "no served hit past the fresh-host recovery time",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator starts both instances again; they rejoin as candidates. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "the attachment-end steps of milestone M4 in the staging build, which the new standby's attach needs once the volume has held MAX_ATTACHED attaches: TBD - BLOCKS EXECUTION",
+    "the detector's self-suspicion threshold for the staging fleet above the two hosts the run stops: TBD - BLOCKS EXECUTION",
+    "a staging fleet that keeps the arbiter's quorum of placement partitions with live probers besides the hosts the run stops: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["owner-standby-loss-staging", "owner-standby-loss-staging-safety"]
+  },
+  {
+   "id": "GD-4",
+   "mode": "causal",
+   "class": "partition-loss",
+   "claim": "stopping a placement partition that holds one tracked host fewer than the self-suspicion threshold starts the lost shards' standby takeovers, and stopping one that holds exactly the threshold's tracked hosts starts none",
+   "not_claimed": ["a partition of the store service", "an asymmetric network partition"],
+   "hypothesis": [
+    {"clause": "with a partition of one tracked host fewer than the threshold stopped, each lost shard's standby takes it over at the same generation and volume", "bound": null, "items": ["partition-loss-staging"]},
+    {"clause": "with a partition of exactly the threshold's tracked hosts stopped, each survivor's detector counts that many suspects, suspects itself, starts no takeover and reports a repair demand and a named blocker", "bound": null, "items": ["partition-loss-staging"]},
+    {"clause": "in both phases every shard with no role on the stopped partition keeps its owner", "bound": null, "items": ["partition-loss-staging"]},
+    {"clause": "in both phases every volume is retained, no volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["partition-loss-staging-safety"]}
+   ],
+   "injection": {"action": "phase one: stop every instance of one placement partition that holds one tracked host fewer than the threshold, counting only hosts named owner or standby in the records every survivor syncs and tracked past peer grace; phase two, once phase one's standby repair completes, the restarted hosts' heartbeats are admitted and no self-suspicion dwell is live: stop every instance of one partition that holds exactly the threshold's tracked hosts", "profile": null},
+   "oracle": {"reach": "the shard records read before each phase's stop name a host of the stopped partition as owner of at least one shard and, in phase one, a standby outside the partition for every shard the partition owns, and a phase whose partition owns no shard or a phase-one partition that holds a shard's owner and its standby failed to inject; the control plane records each phase's stop requests and reports every instance of that partition stopped at once, and each survivor's detector reports the suspect count the phase intends; before phase two's stop each survivor's detector shows the restarted hosts' heartbeats admitted and no self-suspicion dwell live; a phase that misses its intended count or that state failed to inject", "expected": "phase one's records show each lost shard taken over by its standby; in phase two each surviving observer reports its repair demand with a suspect count equal to the threshold, and the records show no takeover and the named blockers; in both phases every shard with no role on the stopped partition keeps its owner, no shard record changes its generation or active volume, every volume record keeps its state, the provider lists no volume created and the provider's audit log lists no CreateVolume call by the reconciler principal over the run; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "a takeover of a shard with no role on the stopped partition",
+    "a takeover in phase two",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator starts each partition's instances again and waits for the control plane to report them running before the next phase. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "the detector's self-suspicion threshold for the staging fleet, by default 3 under #255 O-2, two partitions that hold one tracked host fewer than it and exactly as many, and the arbiter's quorum of further partitions with live probers in each phase: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["partition-loss-staging", "partition-loss-staging-safety"]
+  },
+  {
+   "id": "GD-5",
+   "mode": "rehearsal",
+   "class": "az-loss-return",
+   "claim": "stopping and returning one AZ leaves its shards dark or origin-served until return, then each restarts, fences coverage before any admission and loads warm",
+   "not_claimed": ["a real AZ outage", "a store outage in the same AZ"],
+   "hypothesis": [
+    {"clause": "while the AZ is down, no shard of it is served by another AZ", "bound": null, "items": ["az-loss-return-staging"]},
+    {"clause": "no volume is created, no generation changes and each shard has one owner per tenure through the outage and the return", "bound": null, "items": ["az-loss-return-staging-safety"]},
+    {"clause": "on return, each shard restarts, fences coverage before its first admission and serves warm at an unchanged generation", "bound": null, "items": ["az-loss-return-staging"]},
+    {"clause": "during the return, the zone's origin request rate above its baseline before the injection stays within the origin-load budget", "bound": "origin-load", "items": ["az-loss-return-staging"]}
+   ],
+   "injection": {"action": "stop every instance of one staging AZ, then start them again", "profile": null},
+   "oracle": {"reach": "the shard records read before the stop name hosts of the AZ as owners of at least one shard, and an AZ that owns none failed to inject; the control plane reports every instance of the AZ stopped at once before the first start request, and then every instance running", "expected": "while the AZ is down, serving-side logs show no host outside it serving its shards, no record names an owner outside it for them and the provider lists no volume created; after the return each shard of the AZ restarts, its first admission follows its coverage fence, each of the filled package's witness keys from the certified pre-fault cut, at least one per shard, is first hit on it with its recorded bytes and no origin request for that key before the hit, and it serves at its recorded generation; during the return the zone's origin request rate above its baseline, measured over a window the filled package names that ends before the stop, stays within the origin-load budget; the provider's audit log lists no CreateVolume call by the reconciler principal over the run; a shard of the AZ that never restarts is a disproof; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "an admission before the coverage fence",
+    "the zone's origin request rate above its baseline past the origin-load budget during the return",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator starts every instance of the AZ. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["az-loss-return-staging", "az-loss-return-staging-safety"]
+  },
+  {
+   "id": "GD-6",
+   "mode": "causal",
+   "class": "store-outage",
+   "claim": "a store-wide outage, by an IAM deny and by a network drop, holds ownership writes and publication, leaves INVALIDATE unacknowledged and keeps current hits",
+   "not_claimed": [
+    "a store data loss",
+    "a store restore",
+    "a partial store cut that reaches some zone hosts later than the withhold margin, under which owners answer misses by the withhold rule"
+   ],
+   "hypothesis": [
+    {"clause": "hits of a current tenure continue and make no store request", "bound": null, "items": ["store-outage-staging"]},
+    {"clause": "ownership writes and checkpoint publication wait", "bound": null, "items": ["store-outage-staging"]},
+    {"clause": "no INVALIDATE is acknowledged while the store is unavailable, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["store-outage-staging-safety"]},
+    {"clause": "after the outage, each held write resolves through its own exact-version path: a commit at the version it read, a condition refusal that grants nothing, or, for an unknown outcome, a reread or a same-host restart", "bound": null, "items": ["store-outage-staging"]}
+   ],
+   "injection": {"action": "deny the store principal by an IAM policy, then, once the probe succeeds again, drop the store's network path; in each phase, once the probe shows the outage, make a checkpoint publication due and submit one ownership write and one INVALIDATE by the run plan's method", "profile": null},
+   "oracle": {"reach": "the provider's audit log records the policy attachment, its detachment, then the route change and its restoration, and between the detachment and the route change a probe from every host of the target zone succeeds; from every host of the target zone, in the deny phase a probe with the store principal is refused, and in the drop phase a probe over the store client's path fails or times out; in each phase, after the probe showed the outage and before restoration, the drill's own client log records its requests for the filled package's witness keys from the certified pre-fault cut, its submission log records the ownership write and the INVALIDATE it submitted, and an owner's own record shows the checkpoint publication the drill made due; each host's store-client records show no zone peer's successful shard-record read following any host's first failed read by more than the withhold margin; a run that misses a request, a submission, the due publication or that condition failed to inject", "expected": "each of the drill's requests for a witness key is served as a hit with its recorded bytes, and each host's store client records no store request for a hit of a current tenure in either phase; no INVALIDATE is acknowledged during either phase, and no ownership write submitted after the probe shows the outage, the drill's own included, commits until it ends; in each phase the due checkpoint's cut is recorded, and neither the store's checkpoint pointer nor the host's publication acknowledgment advances while the outage holds; afterwards each held write and the held publication end in a commit at the version they read, a condition refusal that grants nothing, or, for an unknown outcome, a reread or a same-host restart; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": ["any generation change", "an acknowledged INVALIDATE during the outage", "two hosts activating one tenure of a shard"],
+   "restoration": {"class": "persistent-manual", "steps": "an operator removes the deny policy and restores the route, and reads each held write's outcome from the store"},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "a method that submits one ownership write and one INVALIDATE under the outage, with its submission log: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["store-outage-staging", "store-outage-staging-safety"]
+  },
+  {
+   "id": "GD-7",
+   "mode": "causal",
+   "class": "control-plane-outage",
+   "claim": "a control-plane deny and a stopped reconciler change no ownership, and with either in place one host stop still ends in its standby's takeover",
+   "not_claimed": ["a provider-side outage", "a reconciler that writes wrong records"],
+   "hypothesis": [
+    {"clause": "a denied control-plane call is never read as host or volume loss: on a healthy fleet the reconciler defers, provisions nothing and moves no designation", "bound": null, "items": ["control-plane-outage-staging"]},
+    {"clause": "with the control-plane calls denied, the stopped host's standby takes each of its shards over", "bound": null, "items": ["control-plane-outage-staging"]},
+    {"clause": "under the deny no volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["control-plane-outage-staging-safety"]},
+    {"clause": "after the deny lifts, the same running reconciler resumes standby repair within the re-enrollment drain", "bound": "re-enrollment-drain", "items": ["control-plane-outage-staging"]},
+    {"clause": "with the reconciler stopped, the stopped host's standby takes each of its shards over", "bound": null, "items": ["reconciler-stop-staging"]},
+    {"clause": "with the reconciler stopped, no volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["reconciler-stop-staging-safety"]},
+    {"clause": "standby repair resumes when the reconciler returns, within the re-enrollment drain", "bound": "re-enrollment-drain", "items": ["reconciler-stop-staging"]}
+   ],
+   "injection": {"action": "phase one: deny the reconciler principal's control-plane calls, hold the deny on a healthy fleet for the window the filled package names, then stop one host; after the deny lifts and standby repair completes, phase two: stop every reconciler instance of the zone, then stop one host that holds no role on a shard the phase-one host held a role on, read after phase one's repair", "profile": null},
+   "oracle": {"reach": "each phase has an observation window the filled package fixes before the run, starting before the host stop, within which the control plane reports the stopped host's instance stopped; the store read before the deny shows every shard with an enrolled standby and no replacement receipt, hold or designation in flight, and a fleet with one pending failed to inject; through phase one's window the provider's audit log shows the deny policy attached, each host-state and volume-state observation call the reconciler reads for a loss decision, which the filled package lists, refused from the reconciler's own instance under its principal, and a probe with that principal refused, a window in which one of those calls succeeds having failed to inject; through phase two's window, which starts after the deny policy is detached, the control plane reports every reconciler instance of the zone stopped, and after it a reconciler instance running again; the shard records read before each host stop name that host as owner of at least one shard, with a named standby for every shard it owns, and, in phase two, as holder of no role on a shard the phase-one host held a role on, and a stop that misses it failed to inject", "expected": "in the healthy-fleet window every shard keeps its owner and the store holds no new replacement receipt, hold or designation; in each phase every shard of a host not stopped keeps its owner, no volume is created, no generation changes, and each shard of the stopped host is served by its standby by the window's end, a shard its standby has not taken over by then being a disproof; a CreateVolume call by the reconciler principal, refused by the deny or not, is a disproof; the store read before the deny lifts shows no replacement receipt, hold or census slot move for any volume of the stopped host, and it is read again after the re-enrollment drain; after the deny lifts and after the reconciler returns, each shard the stopped host owned or stood by for has a new enrolled standby within the re-enrollment drain; in phase one the reconciler's process incarnation, read before the deny, is unchanged when standby repair resumes after the deny lifts, and a replaced reconciler is a disproof; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "a takeover of a shard with no role on a stopped host",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator removes the deny, starts the reconciler and the stopped hosts. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "a staging fleet that keeps the arbiter's quorum of placement partitions with live probers besides the hosts the run stops: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": [
+    "control-plane-outage-staging",
+    "reconciler-stop-staging",
+    "control-plane-outage-staging-safety",
+    "reconciler-stop-staging-safety"
+   ]
+  },
+  {
+   "id": "GD-8",
+   "mode": "causal",
+   "class": "volume-impairment-hold",
+   "claim": "a fault-injection pause of one volume, then of several in one zone, retains each volume and provisions nothing",
+   "not_claimed": [
+    "actual volume loss, which has no live injection against the real provider",
+    "the correlated-impairment hold, which latches only beside an actual volume loss that staging cannot inject; its release is graded by the hold-release runbook's rehearsal and the fleet world's scenario under the assumed default of blotter issue 1874 O-13",
+    "a pause longer than the profile's duration"
+   ],
+   "hypothesis": [
+    {"clause": "each paused volume, one and then several, is retained, no replacement receipt or volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["volume-impairment-hold-staging-safety"]},
+    {"clause": "the reconciler orders no takeover for a paused volume", "bound": null, "items": ["volume-impairment-hold-staging"]},
+    {"clause": "in the one-volume phase, a takeover started by the owner host's false health bit may commit; if a successor device step fails during the pause, the successor holds at it, its host stays healthy, the owner host's other shards may move warm and the shard changes hands at most once", "bound": null, "items": ["volume-impairment-hold-staging"]},
+    {"clause": "after the pause, a successor that held restarts and preempts the recorded holder's pair, and a successor whose device steps complete after the pause finishes its own preempt", "bound": null, "items": ["volume-impairment-hold-staging"]}
+   ],
+   "injection": {"action": "pause the owner's volume with the named fault-injection profile, then pause several volumes of one zone", "profile": "fis-pause"},
+   "oracle": {"reach": "the shard records read before each phase name each target as a shard's active volume; the fault-injection experiment reports its action running on each target volume, in the several-volume phase, which starts after the first experiment is terminal and its target reads I/O status ok, on two or more distinct volumes of one zone, a phase with fewer having failed to inject, and an I/O probe the drill drives on each target stalls within the action window; the provider's impaired I/O status corroborates where it appears", "expected": "no replacement receipt or volume is created and the provider's audit log lists no CreateVolume call by the reconciler principal over the run; each paused volume stays its shard's active volume at the generation its shard record held before the pause; no takeover order comes from the reconciler; no shard of a host that owns no paused volume moves; in the one-volume phase a successor whose device step failed during the pause reports its hold at that step while its host's health bit reads healthy, and each shard changes hands at most once; after the pause such a successor's restart preempts the recorded holder's pair and holds the reservation, a successor whose device steps completed after the pause finishes its own preempt, and with no committed takeover the owner keeps the shard; in the several-volume phase each host's health bit is read against all of its local owners, and retention and no provisioning are judged; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "a shard that changes hands twice",
+    "a takeover of a shard of a host that owns no paused volume",
+    "a pause on a volume other than the target",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "the pause ends when the controller observes the experiment terminal and each volume the experiment resolved as a target reads I/O status ok; the next phase and any return wait for that end, and a missing end halts the run with the incident open. A committed takeover stays; a shard returns only by a planned handoff once ordinary enrollment names its former owner as standby and the at-most-once observation window has closed. On an abort, an operator stops the fault-injection experiment by its recorded id and waits for its terminal state, confirms I/O status ok on every volume the experiment resolved as a target, then stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart; an aborted stop is no release proof."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "a fault-injection episode that pauses a Multi-Attach volume with the owner and its standby attached, and several volumes in one episode, which the fis-multi-attach gate waits on (#292, #47); the fis-pause profile admits a single-attachment target only, so the run waits on a pause profile that admits a Multi-Attach target, which this package then names: TBD - BLOCKS EXECUTION",
+    "the planned-handoff request command and its signer: TBD - BLOCKS EXECUTION",
+    "the restart arm of D20 (milestone M5, #279) and the D28 health and standby-planning rule in the staging build: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["volume-impairment-hold-staging", "volume-impairment-hold-staging-safety"]
+  },
+  {
+   "id": "GD-9",
+   "mode": "causal",
+   "class": "census-full",
+   "claim": "with the census at its cap, no shard gains a standby past the cap and each shard keeps serving in a named state",
+   "not_claimed": [
+    "a census cap changed during the drill",
+    "the loss of an owner while the census is full, which the fleet world judges"
+   ],
+   "hypothesis": [
+    {"clause": "no census version lists more than cap shards", "bound": null, "items": ["census-full-staging"]},
+    {"clause": "every incumbent census entry stays listed for its host and the added shard stays unlisted while the census is full, unless a recorded tenure move releases an entry", "bound": null, "items": ["census-full-staging"]},
+    {"clause": "each shard without a standby keeps serving and reports its named state apart from an enrollment in progress", "bound": null, "items": ["census-full-staging"]}
+   ],
+   "injection": {"action": "with the census cap of one staging zone fixed for the run, add shards until a census version lists cap shards and an added shard whose standby candidate passes every check but the cap stays unlisted, and hold that state for a window the filled package names, covering at least two reconciler passes", "profile": null},
+   "oracle": {"reach": "the drill's own record of the shards it added, a census record version listing exactly cap shards while an added shard with an otherwise eligible candidate is current, and two completed reconciler passes over that shard while the version holds; a run without that state across two passes failed to inject", "expected": "the census entries snapshotted before the excess demand, each a shard, host and target, all stay listed and the added shard stays unlisted while the census is full, apart from an entry a recorded tenure move releases; no census version lists more than cap shards; and every shard past the cap serves and reports its named state"},
+   "guardrail": [
+    "a census version above cap",
+    "a shard that stops serving",
+    "the loss or substitution of an incumbent census entry"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator removes the added shards; enrollment resumes"},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "a staging zone whose census cap is fixed for the run, named in the filled package: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["census-full-staging"]
+  },
+  {
+   "id": "GD-10",
+   "mode": "causal",
+   "class": "attach-slots-exhausted",
+   "claim": "with a volume's attach slots exhausted, no attach passes the attachment bound until an ended attachment frees a slot, and the shard keeps serving",
+   "not_claimed": [
+    "a provider limit on attachments",
+    "the loss of an owner while the slots are exhausted, which the fleet world judges"
+   ],
+   "hypothesis": [
+    {"clause": "no attach request passes the attachment bound", "bound": null, "items": ["attach-slots-exhausted-staging"]},
+    {"clause": "no volume is created, no generation changes and each shard has one owner per tenure", "bound": null, "items": ["attach-slots-exhausted-staging-safety"]},
+    {"clause": "an ended attachment frees its slot in recorded steps, and the next attach then succeeds", "bound": null, "items": ["attach-slots-exhausted-staging"]}
+   ],
+   "injection": {"action": "replace the standby of one shard until its volume record shows MAX_ATTACHED live attaches, then raise a standby demand from a host with no attach and hold that state for a window covering at least two reconciler passes before an attachment ends", "profile": null},
+   "oracle": {"reach": "the volume record version showing MAX_ATTACHED live attaches, the provider's volume description listing the attachment entries at the bound, the standby demand, from a host that passes every check but the attachment bound through both passes, recorded while that version holds, and two completed reconciler passes over the demand while it holds; after both passes the volume record shows one of those attachments ended by the run plan's step; a run without both passes or that end failed to inject", "expected": "the provider's audit log shows no attach call for the demand until a recorded attachment end frees a slot, the same demand then attaches, each shard record keeps its generation and active volume, the shard keeps serving and the provider's audit log lists no CreateVolume call by the reconciler principal over the run; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "an attach past the bound",
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator starts each host the run stopped again, checks the provider's volume description and the volume record against the run plan's attachment entries and recorded pairs, and keeps the new standby or returns it by the run plan's step. On an abort, an operator stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "the attachment-end steps of milestone M4 in the staging build: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["attach-slots-exhausted-staging", "attach-slots-exhausted-staging-safety"]
+  },
+  {
+   "id": "GD-11",
+   "mode": "tabletop",
+   "class": "unknown-write",
+   "claim": "operators walk an unknown outcome of a takeover and of a transfer write through the runbook and reach the restart path",
+   "not_claimed": [
+    "a live unknown write, which staging cannot produce on purpose",
+    "how the system behaves, which the fleet world judges"
+   ],
+   "hypothesis": [
+    {"clause": "the operator issues no device command after an unknown write", "bound": null, "items": ["unknown-write-tabletop"]},
+    {"clause": "the operator continues only through the restart the reread record decides: the writer's same-host restart, or, when the reread after a transfer write names the target, the withdrawn owner's exit and the target's own restart", "bound": null, "items": ["unknown-write-tabletop"]},
+    {"clause": "the operator reads the shard record before any action", "bound": null, "items": ["unknown-write-tabletop"]}
+   ],
+   "injection": {"action": "the facilitator presents a takeover write whose reply was lost and then a transfer write whose reply was lost, each once committed and once not by the script's ground truth", "profile": null},
+   "oracle": {"reach": "the tabletop script's ground truth, held outside the repository, names the four presented cases, a takeover write and a transfer write each once committed and once not, and a run that presents fewer failed to inject; the run record names the executor and the author of the runbook the package names, and their handles differ when compared without case or surrounding space, and a tabletop its runbook's author executes failed to inject", "expected": "in each case the executor reads the record before any action and issues no device command; after the takeover write the executor chooses the writer's same-host restart; after the transfer write the executor names the owner the reread record holds and chooses the withdrawn owner's exit and the target's own restart when it names the target, and the withdrawn owner's one restart when it still names the withdrawn owner; a choice that differs from the script's ground truth in any case leaves the objective unmet"},
+   "guardrail": ["a real incident or a real mutation in any environment during the tabletop"],
+   "restoration": {"class": "automatic", "steps": "no system state changes"},
+   "prerequisites": [
+    "the tabletop script with its ground truth, held outside the repository: TBD - BLOCKS EXECUTION",
+    "the unknown-write runbook of #291 in the runbook index, which the package's runbooks then name: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["unknown-write-tabletop"]
+  },
+  {
+   "id": "GD-12",
+   "mode": "rehearsal",
+   "class": "deploy-restart",
+   "claim": "a deploy wave restarts hosts in place by color and zone under the admission gate, with one restart failing and one halt",
+   "not_claimed": ["a format-changing release"],
+   "hypothesis": [
+    {"clause": "each admitted restart is a same-host restart that loads warm, and a shard's owner and its named standby are never in flight together", "bound": null, "items": ["deploy-restart-staging"]},
+    {"clause": "no volume is created, no generation changes and each shard has one owner per tenure through the wave", "bound": null, "items": ["deploy-restart-staging-safety"]},
+    {"clause": "the failed restart leaves the standby able to take over, or a named blocker with the volume retained", "bound": null, "items": ["deploy-restart-staging"]},
+    {"clause": "a halted wave admits no further restart until an operator clears it, and clearing only the halt admits the same waiting restart", "bound": null, "items": ["wave-halt"]}
+   ],
+   "injection": {"action": "phase one: a staging wave over one zone and color, with one host's restart made to fail by the run plan's method; phase two: with a free slot and a waiting restart whose health is fresh and whose authorization is current, raise a halt, attempt that restart's admission, then clear only the halt", "profile": null},
+   "oracle": {"reach": "the failed host's own process record shows its restart failing, and the shard records read before the wave name that host as owner of at least one shard; the wave's in-flight set, the health records and the authorization record, read before the halt from records the gate does not write, show a free slot and the waiting restart's fresh health and current authorization; the operator command log records the signed halt, an admission attempt for that restart made while the halt is latched and those still hold, and the halt's clearing, and a restart refused for another reason failed to inject; the drill's own submission log records the wave, which names at least one host besides the failed one that the shard records read before the wave name as owner of at least one shard and whose health is fresh and authorization current by records the gate does not write, and a wave without one failed to inject", "expected": "no admitted set holds an owner and its standby, and each host's process incarnation shows no owner and its named standby restarting together, after the gate releases a slot as well; each host of the wave the gate admits, other than the failed one, completes its same-host restart, fences coverage before its first admission and serves each of the filled package's witness keys, at least one per shard it owns, with its recorded bytes and no origin request before the hit, and a wave in which no such host completes is a disproof; the failed restart ends with the standby able to take over or a named blocker with the volume retained; the waiting restart is refused while the halt is latched and admitted once only the halt clears; the provider's audit log lists no CreateVolume call by the reconciler principal over the run; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "an admitted set holding an owner and its standby",
+    "a restart admitted while the halt is latched",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator clears the halt and repairs the failed host. On an abort, an operator halts the wave at the deploy gate, stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "the deploy gate's command path and its authentication (O-12): TBD - BLOCKS EXECUTION",
+    "a method that makes one host's restart fail in staging, with its readback: TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["deploy-restart-staging", "wave-halt", "deploy-restart-staging-safety"]
+  },
+  {
+   "id": "GD-13",
+   "mode": "rehearsal",
+   "class": "rollback-refusal",
+   "claim": "a rollback whose stored formats are incompatible is refused before any restart, and a compatible one runs as a forward wave",
+   "not_claimed": ["a cold fleet restart, which no wave performs"],
+   "hypothesis": [
+    {"clause": "the incompatible rollback is refused before any host restarts", "bound": null, "items": ["rollback-refusal-staging"]},
+    {"clause": "the compatible rollback advances as a forward wave", "bound": null, "items": ["rollback-refusal-staging"]},
+    {"clause": "the compatible rollback rewinds no generation, attempt or fence, creates no volume and keeps one owner per shard per tenure", "bound": null, "items": ["rollback-refusal-staging-safety"]}
+   ],
+   "injection": {"action": "submit a rollback wave whose artifact cannot read the present formats, then a compatible one", "profile": null},
+   "oracle": {"reach": "before submission the drill reads each artifact's declared format set from the artifact and the fleet's stored format set from the store, and they show that the first artifact cannot read the stored formats and the second can, a pair that misses it having failed to inject; the drill's own submission log records each submitted wave with its artifact digest and at least one target host, and the shard records read before submission name a target host of the compatible wave as owner of at least one shard, a wave whose targets own none having failed to inject", "expected": "the gate refuses the incompatible wave naming the format mismatch, its refusal record precedes the compatible wave's submission, and from its submission to the compatible wave's submission no target host's boot or process incarnation changes and no controller restart dispatch goes out; the compatible wave, identified by its artifact digest, advances as a forward wave and completes the restart of at least one target host that owns a shard; per affected shard each successive generation, attempt and fence read through the compatible wave is at least the one before; the provider's audit log lists no CreateVolume call by the reconciler principal over the run; over the run each shard's record history names one owner per attempt, and the hosts' activation records show no two hosts activating one tenure of a shard, a host whose activation records are missing leaving the clause unobserved"},
+   "guardrail": [
+    "a restart of a target host under the refused wave, read from its boot or process incarnation or a controller restart dispatch",
+    "any generation change",
+    "any CreateVolume by the reconciler principal",
+    "any replacement receipt written by the reconciler principal",
+    "any rewind of a generation, an attempt or a fence",
+    "two hosts activating one tenure of a shard"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "the compatible wave's release stays deployed; an operator rolls forward by the ordinary procedure. On an abort, an operator withdraws the wave at the deploy gate, stops the reconciler's actuation and reads the store's replacement receipts and shard records before any restart."},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a staging build that constructs the host gate, the standby gate and the operator release and runs the owner and agent binaries and reconciler actuation, all deferred in #255: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "a staging artifact with an incompatible format set: TBD - BLOCKS EXECUTION",
+    "the deploy gate's command path and its authentication (O-12): TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["rollback-refusal-staging", "rollback-refusal-staging-safety"]
+  },
+  {
+   "id": "GD-14",
+   "mode": "rehearsal",
+   "class": null,
+   "claim": "every structural safety alarm of the alarm catalog pages through its staging route, and every paging route of the catalog receives a page, in a fire drill",
+   "not_claimed": ["the page rate of any threshold", "the response of a person"],
+   "hypothesis": [
+    {"clause": "each structural safety alarm of the alarm catalog at the digest the run record pins reaches its route", "bound": null, "items": ["safety-alarm-routing-staging"]},
+    {"clause": "every distinct route of the catalog's page-severity alarms receives the page of the alarm the run plan drilled for it", "bound": null, "items": ["paging-route-drill-staging"]},
+    {"clause": "each drilled page arrives within the alarm delivery time measured from its own injection", "bound": "alarm-delivery-time", "items": ["paging-route-drill-staging"]},
+    {"clause": "a drilled alarm changes no ownership, store record or hold", "bound": null, "items": ["safety-alarm-routing-staging", "paging-route-drill-staging"]}
+   ],
+   "injection": {"action": "inject the control history of each structural safety alarm, and of one page-severity alarm the run plan selects for each paging route those leave undrilled, into the staging evaluator", "profile": null},
+   "oracle": {"reach": "before any injection the run plan resolves the route of each alarm it drills to its staging destination, and a route that resolves to a production destination stops the run before it injects; the drill's own injection log lists every structural safety alarm of the pinned catalog and the alarm the run plan selects for each remaining paging route, and the evaluator records each injected control history as received; an alarm of that required set missing from the log failed to inject", "expected": "by the end of the drill window the filled package names, the route the pinned catalog gives each structural safety alarm records that alarm's page, and each remaining paging route records the page of the alarm drilled for it; each drilled page's delivery time, a structural safety alarm's included, is measured from its own injection against the alarm delivery time, which grades paging-route-drill-staging only; and no record changes"},
+   "guardrail": [
+    "a page to a production route",
+    "a store write by the evaluator principal",
+    "a structural safety alarm of the pinned catalog undelivered by the end of the drill window the filled package names"
+   ],
+   "restoration": {"class": "persistent-manual", "steps": "an operator clears each drilled alarm"},
+   "prerequisites": [
+    "a staging environment with its accounts, hosts and principals named in the operator file outside the repository: TBD - BLOCKS EXECUTION",
+    "a change freeze over the target zone for the run's duration, named in the filled package: TBD - BLOCKS EXECUTION",
+    "the alarm catalog's routes and the staging evaluator (O-6): TBD - BLOCKS EXECUTION"
+   ],
+   "runbooks": [],
+   "items": ["safety-alarm-routing-staging", "paging-route-drill-staging"]
+  }
+ ]
+}

@@ -1,0 +1,28 @@
+capabilities: 1
+summary: 1
+manifest: 2
+key: version version=2
+key: profile text
+key: root count min=1 max=18446744073709551615
+key: executable sha256
+key: toolchain text
+key: build sha256
+key: platform text
+key: cpu text
+key: scenario text
+key: bytes count min=1 max=18446744073709551615
+key: every count min=1 max=18446744073709551615
+key: pending count min=1 max=18446744073709551615
+key: records count min=1 max=18446744073709551615
+key: ring count min=1 max=18446744073709551615
+key: turns count min=1 max=18446744073709551615
+constraint: min(records, bytes/48) >= ring+6 (+1 when every=1)
+constraint: min(records, bytes/48) >= c + c/every + ring+5, c = ceil(canonical bytes/43) <= 65536
+held: bytes,every,pending,records,ring,turns
+profile: upload class=live support=implemented campaign=unqualified held=bytes=1,every=1,pending=1,records=1,ring=1,turns=1
+profile: cluster-broad class=live support=implemented campaign=unqualified held=bytes=1,every=1,pending=1,records=1,ring=1,turns=1
+family: settled-WORDS words=batched,scaled each=at-most-once class=live,control-when-planted held=bytes=1,every=1,pending=1,records=1,ring=1,turns=1
+milestone: pending-put
+branch: suffixes=1..16 siblings=1..4
+topology: owners=1 clients=2 configurable=no; cluster profiles draw theirs
+cluster: cluster-broad generator=1 owners=2..4 keys=3..6 clients=2 minima=published:4,hits:1,cross:0,faults:1,healthy:3,reused:0 unavailable=node-lifecycle,membership

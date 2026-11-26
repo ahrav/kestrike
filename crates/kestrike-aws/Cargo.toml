@@ -1,0 +1,33 @@
+[package]
+name = "kestrike-aws"
+version = "0.1.0"
+edition = "2024"
+description = "Kestrike's AWS clients: one SigV4-signed blocking HTTPS request per call under one deadline, with instance-role credentials read through IMDSv2."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+# The tests' TLS server presents a certificate that no trust anchor signs.
+# rustls is the release ureq resolves, with features ureq already enables.
+[target.'cfg(all(target_os = "linux", target_pointer_width = "64"))'.dev-dependencies]
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+
+# The TLS stack is rustls with the ring provider and the bundled webpki-roots
+# trust anchors, through ureq's `rustls` feature; every other ureq feature is
+# off. ureq and hmac are pinned exactly, as the workspace pins its other large
+# third-party trees; sha2 and serde_json take the versions the workspace
+# already declares. `wire`'s `Connect` classification and its
+# one-request-per-send rule rest on ureq 3.5.2's behavior, so a ureq
+# version change re-reads them. The library builds on 64-bit Linux only,
+# where `kestrike::bind` exists.
+[target.'cfg(all(target_os = "linux", target_pointer_width = "64"))'.dependencies]
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+hmac = "=0.13.0"
+kestrike = { path = "../kestrike" }
+serde_json = "1.0.140"
+sha2 = "0.11.0"
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls"] }
+ureq-proto = { version = "=0.7.1", default-features = false }
+
+[dev-dependencies]
+serde = { version = "1.0.219", features = ["derive"] }

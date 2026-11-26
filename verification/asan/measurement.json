@@ -1,0 +1,19 @@
+{
+  "domain": "asan",
+  "date": "2026-10-16",
+  "host": "Linux 6.12.110-135.202.amzn2023.x86_64 x86_64, 128-CPU workstation, four-CPU affinity mask (taskset -c 0-3), CARGO_BUILD_JOBS=4, RUST_TEST_THREADS=4, cold target directory",
+  "cpus": 4,
+  "memory_mib": 12288,
+  "toolchain": "rustc 1.99.0-nightly (dc3f85158 2026-07-26), -Zbuild-std, RUSTFLAGS=-Zsanitizer=address -Cforce-frame-pointers=yes, ASAN_OPTIONS=detect_leaks=0, CARGO_PROFILE_DEV_OPT_LEVEL=1, CARGO_PROFILE_DEV_DEBUG=line-tables-only",
+  "install": "SPDK v25.05.1 44b23be7c35469bc0aba4b942c08c935125e2315 with bundled DPDK 25.03.0 cf36799c473a686fa14fde9af97f917a2125d3d5, configured with --enable-asan, CONFIG_ARCH native",
+  "build_seconds": 175,
+  "build_peak_rss_mib": 3468,
+  "run_seconds": 61,
+  "peak_rss_mib": 8815,
+  "executed": {
+    "kestrike": 2464,
+    "spdk_sys": 17
+  },
+  "method": "the summed VmRSS of the command's whole process tree sampled every two seconds, an upper bound that counts shared pages once per process",
+  "caveats": "the affinity mask bounded the CPUs; the process tree ran with the host's memory available, and the 12 GiB figure is the runner quota the peak is read against; re-measure on the runner at its first dispatch and update this record; the suite has since grown by the capture lifetime test and its sanitizer control, each running a child process of the test binary, so the re-measure at the runner's first dispatch also covers the grown suite"
+}

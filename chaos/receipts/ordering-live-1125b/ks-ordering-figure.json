@@ -1,0 +1,43 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/ordering/validity.py",
+      "ks-ordering-figure"
+    ],
+    "defect": "",
+    "detail": "valid: cluster-order-1 426713 runs of 1 required, 167 replays, 9741092 link faults; cluster-order-2 426378 runs of 1 required, 167 replays, 9735067 link faults; cluster-order-3 426357 runs of 1 required, 167 replays, 9735190 link faults",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "c942f8030e4dfa899a708a098350c379334beacc52d5d2dc8eedc745f7245b0f",
+      "run.json": "4cedcafd1cd0bd9c197dce940727f5ca445ba5d9635e6b48bd854e3c3279f066",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "bd4bf757c0ba11a14be23546a8b649147464f8dd7f338546e016849e6e2fd60c"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941",
+      "chaos/judges/ordering/figure.py": "bfa2f001498d75e9c92695d06709d9ccb8a9ebde27e2100fd0703fe885d910b2",
+      "chaos/judges/ordering/records.py": "72aaf10fe0f471d15c7b31207f552bc21b4e5f011cedbd1337a469d90e321617",
+      "chaos/judges/ordering/validity.py": "a36e0b7d78a50edb923d6d3c21003ac9ebdf1018489b5928004b2062266cce9c"
+    },
+    "mode": "live",
+    "outcome": "held",
+    "row": "ks-ordering-figure",
+    "rows": {
+      "ks-ordering-figure": "42a63b4f67c85edbfabf0167df559128db7ad5f647502ae20ade6ee0b4e8e0fd"
+    },
+    "scenario": "ks-ordering-figure",
+    "system_build": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-25T07:19:49Z",
+    "run_id": "ordering-live-1125b",
+    "started": "2026-11-25T07:09:46Z"
+  }
+}

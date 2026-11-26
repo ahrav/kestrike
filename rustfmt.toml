@@ -1,0 +1,2 @@
+# The format lane invokes rustfmt directly on all tracked Rust files.
+edition = "2024"

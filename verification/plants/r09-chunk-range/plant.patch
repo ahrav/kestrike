@@ -1,0 +1,26 @@
+diff --git a/crates/kestrike/src/storage/volume/read.rs b/crates/kestrike/src/storage/volume/read.rs
+index f2af512b3..58b96102a 100644
+--- a/crates/kestrike/src/storage/volume/read.rs
++++ b/crates/kestrike/src/storage/volume/read.rs
+@@ -254,7 +254,7 @@ impl<'a> ValidatedChunk<'a> {
+         self.buffer.index()
+     }
+ 
+-    /// The crc32c of the verified bytes `range` (relative to [`bytes`](Self::bytes)), from the verified checksums `window_crcs` of the [`windows`](Self::windows) the chunk spans and the bytes of the partial windows at the range's ends, so a whole window adds no byte read; `runs` keeps the zero runs of the lengths met for the caller's next range. Panics unless `range` is a forward range inside the bytes.
++    /// The crc32c of the verified bytes `range` (relative to [`bytes`](Self::bytes)), from the verified checksums `window_crcs` of the [`windows`](Self::windows) the chunk spans and the bytes of the partial windows at the range's ends, so a whole window adds no byte read; `runs` keeps the zero runs of the lengths met for the caller's next range.
+     pub fn crc(
+         &self,
+         crc: Crc32c,
+@@ -262,11 +262,8 @@ impl<'a> ValidatedChunk<'a> {
+         window_crcs: &[u32],
+         range: Range<usize>,
+     ) -> u32 {
+-        assert!(
+-            range.start <= range.end && range.end <= self.range.len(),
+-            "a range inside the chunk"
+-        );
+         let within = self.range.start + range.start..self.range.start + range.end;
++        assert!(within.end <= self.range.end, "a range inside the chunk");
+         window_crc(
+             crc,
+             runs,

@@ -1,0 +1,30 @@
+[Unit]
+Description=Kestrike zone reconciler (survey only)
+Wants=network-online.target
+After=network-online.target local-fs.target
+RequiresMountsFor=/var/lib/kestrike-reconciler
+
+[Service]
+Type=simple
+User=kestrike-reconciler
+Group=kestrike-reconciler
+ExecStart=/usr/local/bin/kestrike-reconciler run --config /etc/kestrike-reconciler/config.json
+Restart=always
+RestartSec=30
+# A refused configuration (2), a withdrawn store client (3) and a refused state directory (4) wait for an operator.
+RestartPreventExitStatus=2 3 4
+# SIGTERM ends the run after the tick in progress; a tick reads every shard's records under the store client's
+# 1 s request deadline and the zone listings under EC2's 10 s deadline per read.
+KillSignal=SIGTERM
+TimeoutStopSec=300
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+# The state directory is the one path the run writes. ReadWritePaths= preserves its owner and mode, which the run
+# checks (exit 4); with the leading "-", an absent directory reaches that check too.
+ReadWritePaths=-/var/lib/kestrike-reconciler
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

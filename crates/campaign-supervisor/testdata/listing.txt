@@ -1,0 +1,21 @@
+capabilities: 2
+summary: 1
+manifest: 2
+key: version version=2
+key: profile text
+key: executable sha256
+key: root count min=1 max=18446744073709551615
+constraint: min(records, bytes/48) >= ring+6 (+1 when every=1)
+held: actors,slots
+profile: upload class=live support=implemented campaign=unqualified held=actors=7,slots=1
+profile: planted class=control support=implemented campaign=unqualified held=actors=7,slots=1
+profile: recovery-512 class=recovery support=implemented campaign=unqualified held=actors=2,slots=1
+profile: h1-get-unheld class=history expected=unsuccessful support=implemented campaign=unqualified held=actors=7,slots=1
+profile: h6-get class=history expected=pass support=implemented campaign=unqualified held=actors=13,slots=1 owners=2 clients=4
+profile: cluster-broad class=live support=implemented campaign=unqualified held=actors=26,slots=1
+family: settled-WORDS words=batched,scaled each=at-most-once class=live,control-when-planted held=actors=7,slots=1
+milestone: pending-put
+milestone: recovery-reached
+branch: suffixes=1..16 siblings=1..4
+topology: owners=1 clients=2 configurable=no; cluster profiles draw theirs
+cluster: cluster-broad generator=1 owners=2..4 keys=3..6 clients=2 unavailable=node-lifecycle,membership

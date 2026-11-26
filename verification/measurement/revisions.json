@@ -1,0 +1,40 @@
+{
+ "frame": [
+  {
+   "version": 1,
+   "sha256": "e3fe8b5b87e698c4b8233db45b68618ba034540e888190ee26be4786ea296c25"
+  },
+  {
+   "version": 2,
+   "sha256": "63785b953f8e8d6e07c709dbe455fde0d15335a9f9af924689a38ced9ce29bd8"
+  },
+  {
+   "version": 3,
+   "sha256": "95e17f2df7733b023e441602fece4ec742521864c53a7d386ca46fd11e19d2b3"
+  }
+ ],
+ "statistics": [
+  {
+   "version": 1,
+   "sha256": "7b45f1a1cede850f97be89c434a77ff5f68cd34802c2ef772e5fd26659a56edb"
+  },
+  {
+   "version": 2,
+   "sha256": "f63dd09e006737a43da7dfe66cb7f011b23dd3df32bcd6e21b90ec135279bf64"
+  }
+ ],
+ "policy": [
+  {
+   "version": 1,
+   "sha256": "dfcc62a8450bada8204d39131ca98409e7328064f83d88687f5c36682a03ee1d"
+  },
+  {
+   "version": 2,
+   "sha256": "1253ead2f93f6d7408f0840b78b9c6a940acd573b23c32ff0ae5980af4f92df6"
+  },
+  {
+   "version": 3,
+   "sha256": "4beb2ac53945e9a7250af18bd126ded4090cd89033d68a2bf0168c0538b04895"
+  }
+ ]
+}

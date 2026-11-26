@@ -1,0 +1,53 @@
+diff --git a/passes/passes/Transforms/IntrinsicLoweringPass.cpp b/passes/passes/Transforms/IntrinsicLoweringPass.cpp
+index 8c7b589..88ca85e 100644
+--- a/passes/passes/Transforms/IntrinsicLoweringPass.cpp
++++ b/passes/passes/Transforms/IntrinsicLoweringPass.cpp
+@@ -167,6 +167,48 @@ static auto runOnBasicBlock(BasicBlock &bb, IntrinsicLowering *IL) -> bool
+ 			WITH_OVERFLOW_INST(I, CreateZExt, CreateSub)
+ 		case llvm::Intrinsic::umul_with_overflow:
+ 			WITH_OVERFLOW_INST(I, CreateZExt, CreateMul)
++		/* The interpreter has no code generation for the saturating and
++		 * min/max intrinsics rustc emits. For width w, uadd.sat(a, b) is
++		 * min(2^w - 1, a + b): the wrapped sum is below a exactly when the
++		 * true sum overflowed. usub.sat(a, b) is max(0, a - b). The min/max
++		 * forms select by a comparison of the intrinsic's signedness. */
++		case llvm::Intrinsic::uadd_sat: {
++			llvm::IRBuilder<> builder(I);
++			auto *sum = builder.CreateAdd(I->getOperand(0), I->getOperand(1));
++			auto *overflow = builder.CreateICmpULT(sum, I->getOperand(0));
++			auto *max = llvm::ConstantInt::getAllOnesValue(I->getType());
++			I->replaceAllUsesWith(builder.CreateSelect(overflow, max, sum));
++			I->eraseFromParent();
++			modified = true;
++			break;
++		}
++		case llvm::Intrinsic::usub_sat: {
++			llvm::IRBuilder<> builder(I);
++			auto *diff = builder.CreateSub(I->getOperand(0), I->getOperand(1));
++			auto *underflow = builder.CreateICmpULT(I->getOperand(0), I->getOperand(1));
++			auto *zero = llvm::ConstantInt::get(I->getType(), 0);
++			I->replaceAllUsesWith(builder.CreateSelect(underflow, zero, diff));
++			I->eraseFromParent();
++			modified = true;
++			break;
++		}
++		case llvm::Intrinsic::umin:
++		case llvm::Intrinsic::umax:
++		case llvm::Intrinsic::smin:
++		case llvm::Intrinsic::smax: {
++			llvm::IRBuilder<> builder(I);
++			auto id = I->getIntrinsicID();
++			auto pred = id == llvm::Intrinsic::umin   ? llvm::CmpInst::ICMP_ULT
++				    : id == llvm::Intrinsic::umax ? llvm::CmpInst::ICMP_UGT
++				    : id == llvm::Intrinsic::smin ? llvm::CmpInst::ICMP_SLT
++								  : llvm::CmpInst::ICMP_SGT;
++			auto *cmp = builder.CreateICmp(pred, I->getOperand(0), I->getOperand(1));
++			I->replaceAllUsesWith(
++				builder.CreateSelect(cmp, I->getOperand(0), I->getOperand(1)));
++			I->eraseFromParent();
++			modified = true;
++			break;
++		}
+ 		default:
+ 			IL->LowerIntrinsicCall(I);
+ 			modified = true;

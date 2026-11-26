@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CreateVolumeResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/">
+    <requestId>59dbff89-35bd-4eac-99ed-be587EXAMPLE</requestId>
+    <volumeId>vol-0f1e2d3c4b5a69788</volumeId>
+    <size>500</size>
+    <snapshotId/>
+    <availabilityZone>us-east-1a</availabilityZone>
+    <status>creating</status>
+    <createTime>2026-01-01T00:00:00.000Z</createTime>
+    <volumeType>io2</volumeType>
+    <iops>16000</iops>
+    <encrypted>true</encrypted>
+    <kmsKeyId>arn:aws:kms:us-east-1:123456789012:key/237eb1a7-2fa1-44dc-b95e-6c526EXAMPLE</kmsKeyId>
+    <tagSet>
+        <item>
+            <key>kestrike:create-token</key>
+            <value>000102030405060708090a0b0c0d0e0f-00000007-00000002-00000001</value>
+        </item>
+        <item>
+            <key>kestrike:layout</key>
+            <value>64/5/4/100</value>
+        </item>
+    </tagSet>
+    <multiAttachEnabled>true</multiAttachEnabled>
+</CreateVolumeResponse>

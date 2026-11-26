@@ -1,0 +1,219 @@
+name: hardware
+
+# The hardware job has its own workflow, so a run waiting for a provisioned `kestrike-hardware` host holds back
+# only the next hardware run while the nightly lanes of `agent-checks` proceed. A scheduled or manual `agent-checks`
+# run admits the lane when its completed attempt's workspace succeeded and its comment-policy and preflight
+# succeeded in any attempt.
+on:
+  workflow_run:
+    workflows: [agent-checks]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  gate:
+    # A nightly or manual agent-checks run admits the lane with successful comment-policy and preflight jobs and a
+    # workspace job that succeeded in its completed attempt.
+    if: >-
+      (github.event.workflow_run.event == 'schedule' ||
+      github.event.workflow_run.event == 'workflow_dispatch') &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 5
+    outputs:
+      admitted: ${{ steps.jobs.outputs.admitted }}
+      fis-admitted: ${{ steps.jobs.outputs.fis-admitted }}
+    steps:
+      - name: Comment policy, preflight, workspace and FIS controller suite of the completed run
+        id: jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        # curl reads the authorization header from a mode-0600 file to keep GH_TOKEN out of its argument list.
+        run: |
+          header=$(mktemp)
+          chmod 0600 "$header"
+          printf 'Authorization: Bearer %s\n' "$GH_TOKEN" > "$header"
+          curl --fail --silent --show-error --header @"$header" --header "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/jobs?per_page=100" > jobs.json
+          rm -f "$header"
+          verdicts=$(python3 - <<'PY'
+          import json, os
+          # A re-run of other failed jobs reports the earlier attempt's workspace. Workspace needs preflight, so an
+          # attempt that re-ran either job re-ran the workspace; the lane runs when that workspace succeeded. The FIS
+          # campaign runs the controller against live volumes, so it waits on the run's controller suite as well: the
+          # suite is the one automated run of the controller's tests on a merged revision. The suite needs the
+          # workspace, so the suite's own attempt names the campaign's, and a re-run of the failed suite alone admits it.
+          attempt = int(os.environ["RUN_ATTEMPT"])
+          jobs = {job["name"]: (job["conclusion"], job["run_attempt"]) for job in json.load(open("jobs.json"))["jobs"]}
+          policy = jobs.get("comment-policy", (None,))[0] == "success" \
+              and jobs.get("preflight", (None,))[0] == "success"
+          admitted = policy and jobs.get("workspace") == ("success", attempt)
+          fis = policy and jobs.get("workspace", (None,))[0] == "success" \
+              and jobs.get("fis-controller") == ("success", attempt)
+          print("true" if admitted else "false", "true" if fis else "false")
+          PY
+          )
+          rm -f jobs.json
+          read -r admitted fis <<< "$verdicts"
+          echo "admitted=${admitted}" >> "$GITHUB_OUTPUT"
+          echo "fis-admitted=${fis}" >> "$GITHUB_OUTPUT"
+          echo "comment-policy, preflight and workspace admitted the lane: ${admitted}; with the FIS suite: ${fis}"
+
+  hardware:
+    needs: gate
+    if: needs.gate.outputs.admitted == 'true'
+    # One leg per host architecture: a host runs the lane for the platform row KESTRIKE_HARDWARE_PLATFORM names,
+    # and the lane credits a row only on a host of its machine, so an aarch64 row's roles run on a native arm64 host.
+    # The arm64 leg builds against the host's native SPDK install, as the AArch64 barrier job does.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            spdk: ""
+          - arch: arm64
+            spdk: /usr/local/lib/pkgconfig
+    # Admitted runs of one architecture on one branch share a group, so a wait for a host holds back only the next
+    # hardware run of that architecture on that branch. The group is the job's, so a run the gate refuses never
+    # enters it and displaces nothing.
+    concurrency:
+      group: ${{ github.workflow }}-${{ matrix.arch }}-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    # Only a provisioned hardware host carries this label; it never carries kestrike-ci-heavy, so no other job
+    # lands beside a case group the lane may have left held.
+    runs-on: [self-hosted, linux, "${{ matrix.arch }}", kestrike-hardware]
+    timeout-minutes: 260
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      # This workflow runs from the default branch; the pins come from the revision checked out, so a dispatched
+      # branch that moves a pin builds the lane under that pin, as its workspace did. A revision whose
+      # agent-checks.yml still carries the hardware job ran the lane inside that workflow; this one runs it only
+      # for a revision that has adopted the split.
+      - name: Pins and workflow shape of the checked-out revision
+        id: revision
+        env:
+          NATIVE_SPDK: ${{ matrix.spdk }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          text = open(".github/workflows/agent-checks.yml").read()
+          block = re.search(r"(?m)^env:\n((?:  \S.*\n)+)", text).group(1)
+          with open(os.environ["GITHUB_ENV"], "a") as environment:
+              for name, value in re.findall(r"^  (\w+): (.+)$", block, re.M):
+                  value = value.strip()
+                  if len(value) >= 2 and value[0] == value[-1] == '"':
+                      value = value[1:-1]
+                  print(f"{name}={value}", file=environment)
+              # The later assignment of a name in GITHUB_ENV wins, so the native install replaces the portable one.
+              if os.environ["NATIVE_SPDK"]:
+                  print(f"SPDK_PKG_CONFIG_PATH={os.environ['NATIVE_SPDK']}", file=environment)
+          split = re.search(r"(?m)^  hardware:$", text) is None
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"split={'true' if split else 'false'}", file=output)
+          print("agent-checks.yml of this revision carries no hardware job:", split)
+          PY
+      - name: Pinned toolchains
+        if: steps.revision.outputs.split == 'true'
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Provisioned hardware roles by exact ID
+        if: steps.revision.outputs.split == 'true'
+        run: >-
+          exec timeout --kill-after=420s 240m
+          bash scripts/rust-lane.sh hardware
+      - name: Evidence
+        if: always() && steps.revision.outputs.split == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-hardware-${{ matrix.arch }}-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  fis:
+    needs: gate
+    # The FIS job runs when the run's preflight and workspace succeeded, at any attempt, and its controller suite
+    # succeeded in the attempt that completed, so re-running only a failed suite starts the campaign without the
+    # hardware job. It runs on its own registration: the campaign's own custody check refuses a host whose marker
+    # still holds, so a held case group on a host that carries both labels leaves the FIS cases unrun there, and a
+    # hardware host offline or quarantined elsewhere holds back no FIS result.
+    if: needs.gate.outputs.fis-admitted == 'true'
+    # Admitted FIS runs on one branch share their own group, so a wait for the host holds back only the next FIS
+    # run on that branch.
+    concurrency:
+      group: ${{ github.workflow }}-fis-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    # GitHub routes each job to any idle runner carrying its labels, so the FIS job names the label only a
+    # registration provisioned with the FIS contract carries, and that label alone: a registration provisioned for
+    # FIS alone then receives no hardware job. A registration runs one job at a time, and a host provisioned for both
+    # runs one registration carrying both labels, so the two device jobs, which start together, never share a host.
+    runs-on: [self-hosted, linux, x64, kestrike-fis]
+    # The toolchains step with its grace, the campaign step with its grace, the checkout and the upload fit the job.
+    timeout-minutes: 265
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      # As for the hardware job: the pins come from the revision checked out. The campaign runs only for a
+      # revision whose rust-lane.sh has the fis lane and whose agent-checks.yml no longer carries the FIS job;
+      # a revision from before the lane has nothing to run, and one that still carries the job ran it there.
+      - name: Pins and workflow shape of the checked-out revision
+        id: revision
+        run: |
+          python3 - <<'PY'
+          import os, re
+          text = open(".github/workflows/agent-checks.yml").read()
+          lane = open("scripts/rust-lane.sh").read()
+          block = re.search(r"(?m)^env:\n((?:  \S.*\n)+)", text).group(1)
+          with open(os.environ["GITHUB_ENV"], "a") as environment:
+              for name, value in re.findall(r"^  (\w+): (.+)$", block, re.M):
+                  value = value.strip()
+                  if len(value) >= 2 and value[0] == value[-1] == '"':
+                      value = value[1:-1]
+                  print(f"{name}={value}", file=environment)
+          split = re.search(r"(?m)^  fis\) ", lane) is not None and re.search(r"(?m)^  fis:$", text) is None
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"split={'true' if split else 'false'}", file=output)
+          print("this revision has the fis lane and agent-checks.yml carries no FIS job:", split)
+          PY
+      - name: Pinned toolchains
+        if: steps.revision.outputs.split == 'true'
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      # The kill grace outlasts the controller's cleanup after the signal on its longest path, a start whose
+      # outcome is unknown: the discovery listing, the stop's end and its restoration poll, the abandon wait and
+      # the template's deletion, five windows of the operator's effect timeout each ending in one AWS call of up
+      # to --aws-seconds, then the listing of the deleted template's experiments, one more call, the lane's close
+      # and the close-out that writes the quarantine marker and the receipt.
+      - name: FIS qualification episodes
+        if: steps.revision.outputs.split == 'true'
+        run: >-
+          exec timeout --kill-after=900s 225m
+          bash scripts/rust-lane.sh fis
+      - name: Evidence
+        if: always() && steps.revision.outputs.split == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-fis-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error

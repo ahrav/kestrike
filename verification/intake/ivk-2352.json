@@ -1,0 +1,74 @@
+{
+  "id": "ivk-2352",
+  "kind": "escape",
+  "class": "safety bug",
+  "site": {
+    "path": "crates/kestrike/src/net/owner.rs",
+    "function": "Owner::cover_begin"
+  },
+  "defect": "Sorting more than 20 held INVALIDATEs by page could reorder one key's entries. Its page write then merged them out of hold order and covered a version no INVALIDATE named, so a fault-free takeover lost an object the lost tenure had published.",
+  "property": {
+    "text": "a retained entry outside every damage set was lost on host loss",
+    "place": "rule",
+    "pointer": "array ORACLE of crates/kestrike/src/net/world_tests/narrate/rules.rs"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1902,
+    "regression": {
+      "path": "crates/kestrike/src/net/takeover_history_tests/hold_order.rs",
+      "tests": [
+        "net::takeover_history_tests::hold_order::a_takeover_serves_a_member_published_after_the_last_invalidate_of_its_key",
+        "net::takeover_history_tests::hold_order::a_takeover_after_a_burst_of_twenty_serves_the_member"
+      ]
+    }
+  },
+  "note": "Cause and evidence set by M1b-1 (#332); the catch by its second pull request. Also agreed at the obligation record warm-takeover-retains-s-across-host-loss. The regressions are library tests; the catch is the listed history `wl5-burst-held-in-order-served` of `net/world_tests/histories/warm_loads.rs` and its control `wl5-burst-reversed-lost`, which reverses the held entries of key 2's page through `Owner::reverse_held_on_page` of `net/owner_tenure_tests.rs` one step before the page writes. With `sort_unstable_by_key` put back in `Owner::cover_begin` in a local build under rustc 1.99.0 (not committed), the passing history ended in the rule text under root 1.",
+  "cause": "workload",
+  "evidence": {
+    "steps": "The trigger needs a tenure with fenced coverage whose held list is longer than 20 entries, the length from which the unfixed unstable sort could reorder it, two of them of one key at versions on either side of a version it then publishes that key at, writes the page, and a successor that loads warm under the stored pages. At 12d4fd315, before the catch, no world ran those steps: `rg -ln 'invalidate_interval|cover_pending' crates/kestrike/src/net/world_tests crates/kestrike/src/sim` listed `net/world_tests/cluster.rs` and `histories/covered_successors.rs`, and lists `histories/warm_loads.rs` beside them at the catch's head. The cluster world's versioned INVALIDATE of a key covers the versions from 1 to the newest the key has taken (`request_invalidation`), so the entries one key holds before a page write are nested intervals that all start at 1: their hull is an interval some INVALIDATE named, and in no order do they cover a published version that lies between two of the key's intervals and outside both. No cluster run loads a successor warm under the stored pages; `covered_successors.rs` holds one INVALIDATE at a time and writes its page in the same step, and its relaunch is cold. At 12d4fd315 the warm relaunch of `histories/warm_loads.rs` attached under an empty coverage. `wl5-burst-held-in-order-served` of that file now runs the steps above.",
+    "sweep": "One sweep at 628788031 of cluster-swarm, cluster-pressure and upload, archive build de9f5a81b9f2842e24b746246d280b07aaf9610a887ea2b188a1d915a4cfc2be, campaign bsw-ct1-2100-profiles, 28 workers, 121 s, counts {}: cluster-swarm 13891 runs (0..13890), 10755 pass, 3136 uncredited, 0 suspects; cluster-pressure 34765 runs (0..34764), 34320 pass, 445 uncredited, 0 suspects; upload 392404 runs (0..392403), 392404 pass, 0 uncredited, 0 suspects; controls 4509 runs, 3372 caught, 0 missed; 79 replays, 0 suspects, none of class replay differs. The trigger's code is unchanged since that commit: `git log 628788031..c4c5813fe` lists no commit that touches crates/kestrike/src/net/owner.rs. Every run of the three profiles reaches the steps above at most in part: a cluster run's held entries of one key are nested intervals from version 1, and no run of the three loads a successor warm under stored pages. The sweep recorded no count of the entries a page write held."
+  },
+  "catch": {
+    "history": "wl5-burst-held-in-order-served",
+    "control": "wl5-burst-reversed-lost",
+    "rule": "a retained entry outside every damage set was lost on host loss",
+    "tally": {
+      "build": "49e8efed3bf6b6bc97e3ad5cc9be9ca77141893d40084e676f632d608e718151",
+      "campaign": "bsw-ct1-2150-take-2154",
+      "commit": "73110fcbd",
+      "counts": {},
+      "workers": 28,
+      "seconds": 121,
+      "history": {
+        "name": "wl5-burst-held-in-order-served",
+        "runs": 120265,
+        "run_range": "0..120264",
+        "ended": {
+          "pass": 120265,
+          "violation": 0,
+          "uncredited": 0
+        },
+        "missed": 0,
+        "suspects": 0,
+        "replays": 13
+      },
+      "controls": [
+        {
+          "name": "wl5-burst-reversed-lost",
+          "runs": 121365,
+          "run_range": "0..121364",
+          "ended": {
+            "pass": 0,
+            "violation": 121365,
+            "uncredited": 0
+          },
+          "missed": 0,
+          "suspects": 0,
+          "replays": 13,
+          "rule": "a retained entry outside every damage set was lost on host loss"
+        }
+      ]
+    }
+  }
+}

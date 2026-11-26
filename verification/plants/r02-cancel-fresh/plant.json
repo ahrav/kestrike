@@ -1,0 +1,21 @@
+{
+  "id": "r02-cancel-fresh",
+  "row": 2,
+  "fix": {
+    "pull_request": 1479,
+    "commit": "9a5518b05e255fab11c9d1de6ffcc377f971e2fa"
+  },
+  "files": [
+    "crates/kestrike/src/net/serve.rs"
+  ],
+  "restores": "`ServeCore::cancel` returns on a fresh route without settling the identity, so a GET behind its CANCEL is admitted.",
+  "proof": "net::serve_tests::a_cancel_ahead_of_its_get_admits_no_read",
+  "expected": [
+    "cluster-broad",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "property",
+    "evidence": "On the plant, a scratch trace fired when the owner admitted a GET whose session and request ID an earlier CANCEL on a fresh route had named, a GET the head drops, in 104,218 of 118,859 cluster-broad runs and 6,386 of 18,112 cluster-swarm runs on the code of commit c6a14e9f1, and the effect, an admitted GET with no client to drive it that takes a table slot and the peer's request share and can hold them until its deadline, is judged by no rule of the boundary and cluster checks that judge a cluster run; a trace at the entry of the planted `ServeCore::cancel` fired in all 170,539 `cluster-long` runs swept, each of them a call to `cancel`, and `cluster-long` stays out of `expected` because the profile has no passing run at the default counts."
+  }
+}

@@ -1,0 +1,28 @@
+[Unit]
+Description=Fuzz campaign of the archived simulation worker
+After=local-fs.target
+RequiresMountsFor=/data/fuzz
+
+[Service]
+Type=simple
+User=fuzz
+Group=fuzz
+# Controllers are enabled for a cgroup's children only while the cgroup
+# itself holds no process, so the shell moves to command/ before the
+# +cpu +memory +pids write. systemd replaces ${NAME} inside a word and
+# leaves $NAME inside a word and $( to the shell, so the script writes $D
+# without braces.
+ExecStart=/bin/sh -c 'D=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup) && mkdir -p "$D/command" "$D/campaign" && echo 0 > "$D/command/cgroup.procs" && echo "+cpu +memory +pids" > "$D/cgroup.subtree_control" && exec /usr/local/bin/campaign fuzz --root /data/fuzz/root --archive /data/fuzz/archive --for 14400 --workers 8 --cgroup-root "$D/campaign"'
+Restart=on-success
+RestartPreventExitStatus=SIGHUP SIGINT SIGTERM SIGPIPE
+RestartSec=30
+Delegate=cpu memory pids
+KillMode=mixed
+TimeoutStopSec=300
+LimitNOFILE=65536
+TasksMax=infinity
+CPUAccounting=yes
+MemoryAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

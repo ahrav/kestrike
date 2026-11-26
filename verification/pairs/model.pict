@@ -1,0 +1,42 @@
+# Constrained pairwise model of the kestrike configuration factors.
+# Generate the rows with `pict model.pict > rows.tsv`: order two over the
+# 23,040-combination product gives 21 rows with PICT built from commit
+# ab76c2548f551fcb46314e58653a1bd1172f3a72, whose generation without `/r`
+# is deterministic. The fault profile selects the link and media faults of
+# each row's GET. The exact unit, clean-reserve and slot boundaries have
+# their own probes. The factors are the activation envelope's inputs too:
+# every row's owner starts on exactly its envelope share.
+# A row's derived values (the clean reserve, the retired allowance, the
+# headroom target, read commands, response buffers, peer shares, the
+# per-peer GET reserve, the batch, the receive reserve and the PUT shape)
+# follow from its factors; the GET reserve factor is the request slots PUTs
+# leave to GETs, so the PUT caps derive within the slots and shares the two
+# reserves leave. The global cap is the most PUTs whose structural floor
+# under an allowance of one largest charge leaves a unit for the published
+# object, so the volume units and the record sizes can lower the cap, down
+# to zero. Validation bounds the headroom target by the volume's whole
+# charges of the largest record's first extent; the smallest volume, 19
+# units, lowers a 9-unit largest record's cap to zero and still holds its
+# target in whole 9-unit charges beside a one-unit object. The retired
+# allowance is every slot's largest charge, within half
+# the units the clean reserve, the cap's largest charges and the published
+# object leave, and at least one largest charge; the headroom target is the
+# cap's structural floor under that allowance. Only a factor combination
+# that no derived choice satisfies is
+# constrained here. A command span below the record chunk length leaves the
+# header windows and the receive-write buffer without a whole chunk, so a
+# 16-KiB chunk needs a 16-KiB span.
+
+VolumeUnits:      19, 63, 64, 65, 129
+StorageSlots:     4, 16, 33
+ChunkBytes:       4096, 8192, 16384
+SpanBytes:        8192, 16384
+Depth:            4, 8
+RequestSlots:     2, 4
+ReadAhead:        0, 1
+Principals:       1, 2
+GetReserve:       1, 2
+BodyCap:          200, 32768
+FaultProfile:     healthy, gray, error-omission, hostile-media
+
+IF [ChunkBytes] = 16384 THEN [SpanBytes] = 16384;

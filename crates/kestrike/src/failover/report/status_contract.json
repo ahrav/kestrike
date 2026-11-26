@@ -1,0 +1,1920 @@
+{
+ "schema": 1,
+ "magic": "RSTS",
+ "key": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+ "status_key": "5f08cba0205390e8c4418bc66b77414d31c90591b42ba84484475c623d6df118",
+ "status_key_derivation": "HMAC-SHA256 under the reconciler key over the ASCII bytes \"ebs-recon-status-key\"; readers hold the status key, and the tag is HMAC-SHA256 under it over \"ebs-recon-status\" and the body",
+ "layout": {
+  "header": 48,
+  "part": 548,
+  "row": 14,
+  "tag": 32,
+  "max_zones": 16,
+  "max_rows": 32,
+  "max_len": 16016,
+  "bound": "a status is 80 + sum over its parts of (548 + 14 * rows) bytes; at 16 parts of 32 rows it is 16,016 bytes, within 16 KiB"
+ },
+ "wire": {
+  "order": "a status is the header, one part per zone in ascending zone order and the tag; a part lists its fields in wire order with their widths in bytes and is followed by its rows; every integer is big-endian",
+  "encodings": {
+   "count": "a 4-byte count",
+   "flags": "one byte, bit k set when flag k of labels.flags holds",
+   "flagged": "a flag byte then an 8-byte value: 1 carries the value, 0 with zero value bytes reads null; any other flag, or 0 with a nonzero value byte, refuses",
+   "members": "a flag byte, used (8) and limit (8): 1 carries a reading with used at most limit, 0 with zero bytes reads null; any other flag refuses as a flag and used above limit as a field",
+   "label": "one byte naming the k-th listed label at code k; a code past the table refuses",
+   "pair": "a flag byte, used (8) and limit (8) read as independent values: 1 carries a reading, 0 with zero bytes reads null; the census and the recorded pairs are the two pairs"
+  },
+  "header": [
+   [
+    "magic",
+    4
+   ],
+   [
+    "schema",
+    2
+   ],
+   [
+    "writer.host",
+    8
+   ],
+   [
+    "writer.boot",
+    16
+   ],
+   [
+    "sequence",
+    8
+   ],
+   [
+    "sealed_at_us",
+    8
+   ],
+   [
+    "zones",
+    1
+   ],
+   [
+    "zero",
+    1
+   ]
+  ],
+  "part": [
+   [
+    "zone",
+    2
+   ],
+   [
+    "tick",
+    8
+   ],
+   [
+    "flags",
+    1
+   ],
+   [
+    "classes.served",
+    4
+   ],
+   [
+    "classes.recovering",
+    4
+   ],
+   [
+    "classes.withdrawn",
+    4
+   ],
+   [
+    "classes.blocked",
+    4
+   ],
+   [
+    "classes.silent",
+    4
+   ],
+   [
+    "classes.cold",
+    4
+   ],
+   [
+    "classes.fresh",
+    4
+   ],
+   [
+    "stale_serving",
+    4
+   ],
+   [
+    "stale_oldest_us",
+    9
+   ],
+   [
+    "standby.named",
+    4
+   ],
+   [
+    "standby.enrolling",
+    4
+   ],
+   [
+    "standby.within",
+    4
+   ],
+   [
+    "standby.past",
+    4
+   ],
+   [
+    "standby.unknown",
+    4
+   ],
+   [
+    "needs.standby",
+    4
+   ],
+   [
+    "needs.fresh",
+    4
+   ],
+   [
+    "blockers.census-full",
+    4
+   ],
+   [
+    "blockers.no-eligible-host",
+    4
+   ],
+   [
+    "blockers.attach-closed",
+    4
+   ],
+   [
+    "blockers.headroom",
+    4
+   ],
+   [
+    "blockers.control-plane-unavailable",
+    4
+   ],
+   [
+    "blockers.store-unavailable",
+    4
+   ],
+   [
+    "blockers.self-suspect",
+    4
+   ],
+   [
+    "blockers.recorded-holder-hold",
+    4
+   ],
+   [
+    "blockers.device-failure-hold",
+    4
+   ],
+   [
+    "blockers.volume-impaired",
+    4
+   ],
+   [
+    "blockers.correlated-hold",
+    4
+   ],
+   [
+    "blockers.retirement-requested",
+    4
+   ],
+   [
+    "blockers.loss-unconfirmed",
+    4
+   ],
+   [
+    "blockers.replacement-exhausted",
+    4
+   ],
+   [
+    "blockers.owner-not-ready",
+    4
+   ],
+   [
+    "blockers.placement",
+    4
+   ],
+   [
+    "blockers.per-host-cap",
+    4
+   ],
+   [
+    "census",
+    17
+   ],
+   [
+    "attaches.live",
+    4
+   ],
+   [
+    "attaches.ended_paired",
+    4
+   ],
+   [
+    "attaches.ended_unpaired",
+    4
+   ],
+   [
+    "attaches.gone",
+    4
+   ],
+   [
+    "attaches.pairs",
+    17
+   ],
+   [
+    "attaches.closed.live-cap",
+    4
+   ],
+   [
+    "attaches.closed.entry-cap",
+    4
+   ],
+   [
+    "attaches.closed.pair-cap",
+    4
+   ],
+   [
+    "attaches.closed.own-entry",
+    4
+   ],
+   [
+    "attaches.closed.key-taken",
+    4
+   ],
+   [
+    "receipts.open",
+    4
+   ],
+   [
+    "receipts.issued",
+    4
+   ],
+   [
+    "receipts.created",
+    4
+   ],
+   [
+    "receipts.held",
+    4
+   ],
+   [
+    "volumes.available",
+    4
+   ],
+   [
+    "volumes.impaired",
+    4
+   ],
+   [
+    "volumes.lost",
+    4
+   ],
+   [
+    "volumes.unknown",
+    4
+   ],
+   [
+    "unnamed_volumes",
+    9
+   ],
+   [
+    "hosts.verdicts.live",
+    4
+   ],
+   [
+    "hosts.verdicts.lost",
+    4
+   ],
+   [
+    "hosts.verdicts.conflict",
+    4
+   ],
+   [
+    "hosts.verdicts.unknown",
+    4
+   ],
+   [
+    "hosts.silent",
+    17
+   ],
+   [
+    "hosts.self_suspect",
+    4
+   ],
+   [
+    "budgets.attempts",
+    17
+   ],
+   [
+    "budgets.generation",
+    17
+   ],
+   [
+    "store.alarm",
+    1
+   ],
+   [
+    "store.outcomes.unknown",
+    4
+   ],
+   [
+    "store.outcomes.unavailable",
+    4
+   ],
+   [
+    "store.outcomes.refused",
+    4
+   ],
+   [
+    "store.outcomes.log",
+    4
+   ],
+   [
+    "events.refused.length",
+    4
+   ],
+   [
+    "events.refused.magic",
+    4
+   ],
+   [
+    "events.refused.schema",
+    4
+   ],
+   [
+    "events.refused.writer",
+    4
+   ],
+   [
+    "events.refused.tag",
+    4
+   ],
+   [
+    "events.refused.flag",
+    4
+   ],
+   [
+    "events.refused.field",
+    4
+   ],
+   [
+    "events.refused.foreign",
+    4
+   ],
+   [
+    "events.reservations.reserved",
+    4
+   ],
+   [
+    "events.reservations.headroom",
+    4
+   ],
+   [
+    "events.reservations.full",
+    4
+   ],
+   [
+    "events.reservations.taken",
+    4
+   ],
+   [
+    "events.reservations.ineligible",
+    4
+   ],
+   [
+    "events.reservations.closed",
+    4
+   ],
+   [
+    "events.enrollments.records",
+    4
+   ],
+   [
+    "events.enrollments.tenure",
+    4
+   ],
+   [
+    "events.enrollments.persist",
+    4
+   ],
+   [
+    "events.enrollments.binding",
+    4
+   ],
+   [
+    "events.enrollments.enrollment",
+    4
+   ],
+   [
+    "events.enrollments.write",
+    4
+   ],
+   [
+    "events.decisions.provision",
+    4
+   ],
+   [
+    "events.decisions.hold",
+    4
+   ],
+   [
+    "events.decisions.exhausted",
+    4
+   ],
+   [
+    "events.errors.store",
+    4
+   ],
+   [
+    "events.errors.conflict",
+    4
+   ],
+   [
+    "events.errors.stale",
+    4
+   ],
+   [
+    "events.errors.retry",
+    4
+   ],
+   [
+    "events.errors.named",
+    4
+   ],
+   [
+    "events.errors.unclean",
+    4
+   ],
+   [
+    "events.errors.layout",
+    4
+   ],
+   [
+    "events.errors.population",
+    4
+   ],
+   [
+    "events.errors.held",
+    4
+   ],
+   [
+    "events.errors.exhausted",
+    4
+   ],
+   [
+    "events.errors.create",
+    4
+   ],
+   [
+    "events.creates.created",
+    4
+   ],
+   [
+    "events.creates.unknown",
+    4
+   ],
+   [
+    "events.creates.failed",
+    4
+   ],
+   [
+    "events.attaches.recorded",
+    4
+   ],
+   [
+    "events.attaches.requested",
+    4
+   ],
+   [
+    "events.attaches.failed",
+    4
+   ],
+   [
+    "events.attaches.unknown",
+    4
+   ],
+   [
+    "events.reclaims.ended",
+    4
+   ],
+   [
+    "events.reclaims.ended-named",
+    4
+   ],
+   [
+    "events.reclaims.refused-owner",
+    4
+   ],
+   [
+    "events.reclaims.refused-standby",
+    4
+   ],
+   [
+    "events.reclaims.detach-requested",
+    4
+   ],
+   [
+    "events.reclaims.detach-unknown",
+    4
+   ],
+   [
+    "events.reclaims.gone",
+    4
+   ],
+   [
+    "events.reclaims.removed",
+    4
+   ],
+   [
+    "omitted",
+    4
+   ],
+   [
+    "rows",
+    1
+   ]
+  ],
+  "row": [
+   [
+    "shard",
+    4
+   ],
+   [
+    "class",
+    1
+   ],
+   [
+    "standby",
+    1
+   ],
+   [
+    "age_us",
+    8
+   ]
+  ]
+ },
+ "json_integers": "every integer in a status view is an unsigned 64-bit value; a reader parses it losslessly, beyond 2^53",
+ "labels": {
+  "blockers": [
+   "census-full",
+   "no-eligible-host",
+   "attach-closed",
+   "headroom",
+   "control-plane-unavailable",
+   "store-unavailable",
+   "self-suspect",
+   "recorded-holder-hold",
+   "device-failure-hold",
+   "volume-impaired",
+   "correlated-hold",
+   "retirement-requested",
+   "loss-unconfirmed",
+   "replacement-exhausted",
+   "owner-not-ready",
+   "placement",
+   "per-host-cap"
+  ],
+  "class": [
+   "served",
+   "recovering",
+   "withdrawn",
+   "blocked",
+   "silent",
+   "cold",
+   "fresh"
+  ],
+  "closed": [
+   "live-cap",
+   "entry-cap",
+   "pair-cap",
+   "own-entry",
+   "key-taken"
+  ],
+  "events.attaches": [
+   "recorded",
+   "requested",
+   "failed",
+   "unknown"
+  ],
+  "events.creates": [
+   "created",
+   "unknown",
+   "failed"
+  ],
+  "events.decisions": [
+   "provision",
+   "hold",
+   "exhausted"
+  ],
+  "events.enrollments": [
+   "records",
+   "tenure",
+   "persist",
+   "binding",
+   "enrollment",
+   "write"
+  ],
+  "events.errors": [
+   "store",
+   "conflict",
+   "stale",
+   "retry",
+   "named",
+   "unclean",
+   "layout",
+   "population",
+   "held",
+   "exhausted",
+   "create"
+  ],
+  "events.reclaims": [
+   "ended",
+   "ended-named",
+   "refused-owner",
+   "refused-standby",
+   "detach-requested",
+   "detach-unknown",
+   "gone",
+   "removed"
+  ],
+  "events.refused": [
+   "length",
+   "magic",
+   "schema",
+   "writer",
+   "tag",
+   "flag",
+   "field",
+   "foreign"
+  ],
+  "events.reservations": [
+   "reserved",
+   "headroom",
+   "full",
+   "taken",
+   "ineligible",
+   "closed"
+  ],
+  "flags": [
+   "reports",
+   "instances",
+   "volumes",
+   "store",
+   "warm-up",
+   "zone-host",
+   "operator",
+   "cap-below"
+  ],
+  "needs": [
+   "standby",
+   "fresh"
+  ],
+  "receipts": [
+   "open",
+   "issued",
+   "created",
+   "held"
+  ],
+  "standby": [
+   "named",
+   "enrolling",
+   "within",
+   "past",
+   "unknown",
+   "unneeded"
+  ],
+  "standby.counts": [
+   "named",
+   "enrolling",
+   "within",
+   "past",
+   "unknown"
+  ],
+  "store.alarm": [
+   "clear",
+   "regression",
+   "checkpoint",
+   "log",
+   "namespace"
+  ],
+  "store.outcomes": [
+   "unknown",
+   "unavailable",
+   "refused",
+   "log"
+  ],
+  "verdicts": [
+   "live",
+   "lost",
+   "conflict",
+   "unknown"
+  ],
+  "volumes": [
+   "available",
+   "impaired",
+   "lost",
+   "unknown"
+  ]
+ },
+ "fields": [
+  "sealed_at_us",
+  "sequence",
+  "writer",
+  "writer.boot",
+  "writer.host",
+  "zones",
+  "zones.attaches",
+  "zones.attaches.closed",
+  "zones.attaches.closed.entry-cap",
+  "zones.attaches.closed.key-taken",
+  "zones.attaches.closed.live-cap",
+  "zones.attaches.closed.own-entry",
+  "zones.attaches.closed.pair-cap",
+  "zones.attaches.ended_paired",
+  "zones.attaches.ended_unpaired",
+  "zones.attaches.gone",
+  "zones.attaches.live",
+  "zones.attaches.pairs",
+  "zones.attaches.pairs.limit",
+  "zones.attaches.pairs.used",
+  "zones.blockers",
+  "zones.blockers.attach-closed",
+  "zones.blockers.census-full",
+  "zones.blockers.control-plane-unavailable",
+  "zones.blockers.correlated-hold",
+  "zones.blockers.device-failure-hold",
+  "zones.blockers.headroom",
+  "zones.blockers.loss-unconfirmed",
+  "zones.blockers.no-eligible-host",
+  "zones.blockers.owner-not-ready",
+  "zones.blockers.per-host-cap",
+  "zones.blockers.placement",
+  "zones.blockers.recorded-holder-hold",
+  "zones.blockers.replacement-exhausted",
+  "zones.blockers.retirement-requested",
+  "zones.blockers.self-suspect",
+  "zones.blockers.store-unavailable",
+  "zones.blockers.volume-impaired",
+  "zones.budgets",
+  "zones.budgets.attempts",
+  "zones.budgets.attempts.limit",
+  "zones.budgets.attempts.used",
+  "zones.budgets.generation",
+  "zones.budgets.generation.limit",
+  "zones.budgets.generation.used",
+  "zones.census",
+  "zones.census.limit",
+  "zones.census.used",
+  "zones.classes",
+  "zones.classes.blocked",
+  "zones.classes.cold",
+  "zones.classes.fresh",
+  "zones.classes.recovering",
+  "zones.classes.served",
+  "zones.classes.silent",
+  "zones.classes.withdrawn",
+  "zones.events",
+  "zones.events.attaches",
+  "zones.events.attaches.failed",
+  "zones.events.attaches.recorded",
+  "zones.events.attaches.requested",
+  "zones.events.attaches.unknown",
+  "zones.events.creates",
+  "zones.events.creates.created",
+  "zones.events.creates.failed",
+  "zones.events.creates.unknown",
+  "zones.events.decisions",
+  "zones.events.decisions.exhausted",
+  "zones.events.decisions.hold",
+  "zones.events.decisions.provision",
+  "zones.events.enrollments",
+  "zones.events.enrollments.binding",
+  "zones.events.enrollments.enrollment",
+  "zones.events.enrollments.persist",
+  "zones.events.enrollments.records",
+  "zones.events.enrollments.tenure",
+  "zones.events.enrollments.write",
+  "zones.events.errors",
+  "zones.events.errors.conflict",
+  "zones.events.errors.create",
+  "zones.events.errors.exhausted",
+  "zones.events.errors.held",
+  "zones.events.errors.layout",
+  "zones.events.errors.named",
+  "zones.events.errors.population",
+  "zones.events.errors.retry",
+  "zones.events.errors.stale",
+  "zones.events.errors.store",
+  "zones.events.errors.unclean",
+  "zones.events.reclaims",
+  "zones.events.reclaims.detach-requested",
+  "zones.events.reclaims.detach-unknown",
+  "zones.events.reclaims.ended",
+  "zones.events.reclaims.ended-named",
+  "zones.events.reclaims.gone",
+  "zones.events.reclaims.refused-owner",
+  "zones.events.reclaims.refused-standby",
+  "zones.events.reclaims.removed",
+  "zones.events.refused",
+  "zones.events.refused.field",
+  "zones.events.refused.flag",
+  "zones.events.refused.foreign",
+  "zones.events.refused.length",
+  "zones.events.refused.magic",
+  "zones.events.refused.schema",
+  "zones.events.refused.tag",
+  "zones.events.refused.writer",
+  "zones.events.reservations",
+  "zones.events.reservations.closed",
+  "zones.events.reservations.full",
+  "zones.events.reservations.headroom",
+  "zones.events.reservations.ineligible",
+  "zones.events.reservations.reserved",
+  "zones.events.reservations.taken",
+  "zones.flags",
+  "zones.flags.cap-below",
+  "zones.flags.instances",
+  "zones.flags.operator",
+  "zones.flags.reports",
+  "zones.flags.store",
+  "zones.flags.volumes",
+  "zones.flags.warm-up",
+  "zones.flags.zone-host",
+  "zones.hosts",
+  "zones.hosts.self_suspect",
+  "zones.hosts.silent",
+  "zones.hosts.silent.limit",
+  "zones.hosts.silent.used",
+  "zones.hosts.verdicts",
+  "zones.hosts.verdicts.conflict",
+  "zones.hosts.verdicts.live",
+  "zones.hosts.verdicts.lost",
+  "zones.hosts.verdicts.unknown",
+  "zones.needs",
+  "zones.needs.fresh",
+  "zones.needs.standby",
+  "zones.omitted",
+  "zones.receipts",
+  "zones.receipts.created",
+  "zones.receipts.held",
+  "zones.receipts.issued",
+  "zones.receipts.open",
+  "zones.rows",
+  "zones.rows.age_us",
+  "zones.rows.class",
+  "zones.rows.shard",
+  "zones.rows.standby",
+  "zones.stale_oldest_us",
+  "zones.stale_serving",
+  "zones.standby",
+  "zones.standby.enrolling",
+  "zones.standby.named",
+  "zones.standby.past",
+  "zones.standby.unknown",
+  "zones.standby.within",
+  "zones.store",
+  "zones.store.alarm",
+  "zones.store.outcomes",
+  "zones.store.outcomes.log",
+  "zones.store.outcomes.refused",
+  "zones.store.outcomes.unavailable",
+  "zones.store.outcomes.unknown",
+  "zones.tick",
+  "zones.unnamed_volumes",
+  "zones.volumes",
+  "zones.volumes.available",
+  "zones.volumes.impaired",
+  "zones.volumes.lost",
+  "zones.volumes.unknown",
+  "zones.zone"
+ ],
+ "units": {
+  "sealed_at_us": "the writer's wall-clock stamp in microseconds since the Unix epoch, nondecreasing within a boot",
+  "sequence": "the writer boot's status sequence, from 1, one per sealed status",
+  "writer": "the status writer: the reconciler identity and the boot nonce its writer drew at start",
+  "writer.boot": "the 16-byte nonzero nonce the writer drew at start, hex",
+  "writer.host": "the reconciler identity, a nonzero 64-bit number the deployment assigns",
+  "zones": "one part per zone the reconciler runs, ascending by zone number, at most 16",
+  "zones.attaches": "the attach entries of the zone's active volumes on the tick, from their records, and the survey's closed shards by the cause it names",
+  "zones.attaches.closed": "shards in the survey's closed state by the first check of the attach rule that fails for the one host the survey judged: the census slot's host when the shard's slot decides, otherwise the lowest-numbered candidate that reached the attach check; the cell names that host's bound, which need not close every other candidate; for a host with a live attach the rule checks only that attach's key, entry-cap for an entry number with no key and key-taken for a key a recorded pair holds, and an enrolled pair passes; for a new attach it checks, in order, own-entry, live-cap, entry-cap for a full entry list, the next entry's key (entry-cap or key-taken) and pair-cap; a closed shard whose active volume no census reservation accepts, one neither fresh nor active or whose provisioned origin changed, carries no cause and counts in no cell, so in a status the survey builds the cells sum to at most zones.blockers.attach-closed; the decoder checks no relation between these counts",
+  "zones.attaches.closed.entry-cap": "shards in the survey's closed state by the first check of the attach rule that fails for the host the survey judged: entry-cap, for a new attach the volume's entry list is full with no gone entry the record can shed for the host, or the entry number the attach takes (the next entry's for a new attach, the host's live unenrolled entry's own otherwise) has no key",
+  "zones.attaches.closed.key-taken": "shards in the survey's closed state by the first check of the attach rule that fails for the host the survey judged: key-taken, a recorded pair holds the key of the entry number the attach takes: the next entry's for a new attach, or the host's live unenrolled entry's own",
+  "zones.attaches.closed.live-cap": "shards in the survey's closed state by the first check of the attach rule that fails for the host the survey judged: live-cap, the volume holds its most live attaches",
+  "zones.attaches.closed.own-entry": "shards in the survey's closed state by the first check of the attach rule that fails for the host the survey judged: own-entry, the host holds a retained ended entry, which blocks a new attach until reclamation marks it gone, or its latest event is a format-2 detach or force-detach, which blocks a new attach while that event stays the host's latest",
+  "zones.attaches.closed.pair-cap": "shards in the survey's closed state by the first check of the attach rule that fails for the host the survey judged: pair-cap, the recorded pairs and the attaches awaiting enrollment reach the owner's pair cap",
+  "zones.attaches.ended_paired": "ended entries that a recorded pair pins",
+  "zones.attaches.ended_unpaired": "hosts whose latest entry is ended with no pair pinning it, an end awaiting its detach",
+  "zones.attaches.gone": "hosts whose latest entry is gone",
+  "zones.attaches.live": "live attach entries",
+  "zones.attaches.pairs": "recorded pairs, of the pair cap summed over the active volumes; used exceeds limit only when the zone's recorded pairs exceed the summed cap, and used at or below limit does not rule out one volume over its cap; null when the tick read no volume",
+  "zones.attaches.pairs.limit": "the pair cap summed over the active volumes",
+  "zones.attaches.pairs.used": "recorded pairs",
+  "zones.blockers": "shards by the survey blocker of the tick, one per shard at most",
+  "zones.blockers.attach-closed": "shards by the survey blocker of the tick, one per shard at most: attach-closed",
+  "zones.blockers.census-full": "shards by the survey blocker of the tick, one per shard at most: census-full",
+  "zones.blockers.control-plane-unavailable": "shards by the survey blocker of the tick, one per shard at most: control-plane-unavailable",
+  "zones.blockers.correlated-hold": "shards by the survey blocker of the tick, one per shard at most: correlated-hold",
+  "zones.blockers.device-failure-hold": "shards by the survey blocker of the tick, one per shard at most: device-failure-hold",
+  "zones.blockers.headroom": "shards by the survey blocker of the tick, one per shard at most: headroom",
+  "zones.blockers.loss-unconfirmed": "shards by the survey blocker of the tick, one per shard at most: loss-unconfirmed",
+  "zones.blockers.no-eligible-host": "shards by the survey blocker of the tick, one per shard at most: no-eligible-host",
+  "zones.blockers.owner-not-ready": "shards by the survey blocker of the tick, one per shard at most: owner-not-ready",
+  "zones.blockers.per-host-cap": "shards by the survey blocker of the tick, one per shard at most: per-host-cap",
+  "zones.blockers.placement": "shards by the survey blocker of the tick, one per shard at most: placement",
+  "zones.blockers.recorded-holder-hold": "shards by the survey blocker of the tick, one per shard at most: recorded-holder-hold",
+  "zones.blockers.replacement-exhausted": "shards by the survey blocker of the tick, one per shard at most: replacement-exhausted",
+  "zones.blockers.retirement-requested": "shards by the survey blocker of the tick, one per shard at most: retirement-requested",
+  "zones.blockers.self-suspect": "shards by the survey blocker of the tick, one per shard at most: self-suspect",
+  "zones.blockers.store-unavailable": "shards by the survey blocker of the tick, one per shard at most: store-unavailable",
+  "zones.blockers.volume-impaired": "shards by the survey blocker of the tick, one per shard at most: volume-impaired",
+  "zones.budgets": "the highest attempt counter and generation among the zone's shard records; null when the tick read none",
+  "zones.budgets.attempts": "the highest attempt counter E, of 2^31 - 2",
+  "zones.budgets.attempts.limit": "ATTEMPTS_MAX, 2^31 - 2; a reader refuses any other limit",
+  "zones.budgets.attempts.used": "the highest attempt counter",
+  "zones.budgets.generation": "the highest generation, of 2^32 - 2, the last a replacement can activate",
+  "zones.budgets.generation.limit": "2^32 - 2; a reader refuses any other limit",
+  "zones.budgets.generation.used": "the highest generation",
+  "zones.census": "the census length beside the configured cap; null when the tick could not read the census; a cap lowered below a census already written leaves the length above the cap, which the decoder accepts",
+  "zones.census.limit": "the configured cap, at most 4096",
+  "zones.census.used": "shards the census lists, at most 4096, which may exceed the cap",
+  "zones.classes": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count",
+  "zones.classes.blocked": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: blocked",
+  "zones.classes.cold": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: cold",
+  "zones.classes.fresh": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: fresh",
+  "zones.classes.recovering": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: recovering",
+  "zones.classes.served": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: served",
+  "zones.classes.silent": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: silent",
+  "zones.classes.withdrawn": "shards of the zone by serving class on the tick; the classes sum to the zone's shard count: withdrawn",
+  "zones.events": "the loop's event counts since it started, saturating at 2^32 - 1",
+  "zones.events.attaches": "attach step results",
+  "zones.events.attaches.failed": "attach step results: failed",
+  "zones.events.attaches.recorded": "attach step results: recorded",
+  "zones.events.attaches.requested": "attach step results: requested",
+  "zones.events.attaches.unknown": "attach step results: unknown",
+  "zones.events.creates": "provider create results",
+  "zones.events.creates.created": "provider create results: created",
+  "zones.events.creates.failed": "provider create results: failed",
+  "zones.events.creates.unknown": "provider create results: unknown",
+  "zones.events.decisions": "loss decisions that act",
+  "zones.events.decisions.exhausted": "loss decisions that act: exhausted",
+  "zones.events.decisions.hold": "loss decisions that act: hold",
+  "zones.events.decisions.provision": "loss decisions that act: provision",
+  "zones.events.enrollments": "standby enrollment refusals",
+  "zones.events.enrollments.binding": "standby enrollment refusals: binding",
+  "zones.events.enrollments.enrollment": "standby enrollment refusals: enrollment",
+  "zones.events.enrollments.persist": "standby enrollment refusals: persist",
+  "zones.events.enrollments.records": "standby enrollment refusals: records",
+  "zones.events.enrollments.tenure": "standby enrollment refusals: tenure",
+  "zones.events.enrollments.write": "standby enrollment refusals: write",
+  "zones.events.errors": "reconciler step errors",
+  "zones.events.errors.conflict": "reconciler step errors: conflict",
+  "zones.events.errors.create": "reconciler step errors: create",
+  "zones.events.errors.exhausted": "reconciler step errors: exhausted",
+  "zones.events.errors.held": "reconciler step errors: held",
+  "zones.events.errors.layout": "reconciler step errors: layout",
+  "zones.events.errors.named": "reconciler step errors: named",
+  "zones.events.errors.population": "reconciler step errors: population",
+  "zones.events.errors.retry": "reconciler step errors: retry",
+  "zones.events.errors.stale": "reconciler step errors: stale",
+  "zones.events.errors.store": "reconciler step errors: store",
+  "zones.events.errors.unclean": "reconciler step errors: unclean",
+  "zones.events.reclaims": "attachment reclamation step results",
+  "zones.events.reclaims.detach-requested": "attachment reclamation step results: detach-requested",
+  "zones.events.reclaims.detach-unknown": "attachment reclamation step results: detach-unknown",
+  "zones.events.reclaims.ended": "attachment reclamation step results: ended",
+  "zones.events.reclaims.ended-named": "attachment reclamation step results: ended-named",
+  "zones.events.reclaims.gone": "attachment reclamation step results: gone",
+  "zones.events.reclaims.refused-owner": "attachment reclamation step results: refused-owner",
+  "zones.events.reclaims.refused-standby": "attachment reclamation step results: refused-standby",
+  "zones.events.reclaims.removed": "attachment reclamation step results: removed",
+  "zones.events.refused": "host reports the loop refused, by kind; a duplicate delivery counts nothing",
+  "zones.events.refused.field": "host reports the loop refused, by kind; a duplicate delivery counts nothing: field",
+  "zones.events.refused.flag": "host reports the loop refused, by kind; a duplicate delivery counts nothing: flag",
+  "zones.events.refused.foreign": "host reports the loop refused, by kind; a duplicate delivery counts nothing: foreign",
+  "zones.events.refused.length": "host reports the loop refused, by kind; a duplicate delivery counts nothing: length",
+  "zones.events.refused.magic": "host reports the loop refused, by kind; a duplicate delivery counts nothing: magic",
+  "zones.events.refused.schema": "host reports the loop refused, by kind; a duplicate delivery counts nothing: schema",
+  "zones.events.refused.tag": "host reports the loop refused, by kind; a duplicate delivery counts nothing: tag",
+  "zones.events.refused.writer": "host reports the loop refused, by kind; a duplicate delivery counts nothing: writer",
+  "zones.events.reservations": "census reservation results",
+  "zones.events.reservations.closed": "census reservation results: closed",
+  "zones.events.reservations.full": "census reservation results: full",
+  "zones.events.reservations.headroom": "census reservation results: headroom",
+  "zones.events.reservations.ineligible": "census reservation results: ineligible",
+  "zones.events.reservations.reserved": "census reservation results: reserved",
+  "zones.events.reservations.taken": "census reservation results: taken",
+  "zones.flags": "the tick's source completeness, the survey's holds and the census cap flag, one bit each",
+  "zones.flags.cap-below": "the configured census cap is below the zone's shard count",
+  "zones.flags.instances": "the instance listing was whole on the tick and the loop admitted it, with no two differing rows for one tracked instance",
+  "zones.flags.operator": "the operator zone hold held new attaches",
+  "zones.flags.reports": "every zone host's report source answered on the tick",
+  "zones.flags.store": "the tick read the census, every shard's records, every volume record the loss count looked up and every receipt it reread, a looked-up record or reread receipt the store answered with bytes that do not decode counting as read; when false, the counts the records decide (classes, standby states, needs, blockers, receipts, volumes, attaches, budgets and stale_serving) cover only the shards the tick read, and each unread shard reads silent with its standby unknown; a shard left unread by a store read failure adds one store-unavailable blocker, while a failed lookup or receipt reread alone leaves every shard read and adds no store-unavailable blocker, and a lost active volume can then read loss-unconfirmed, as it can with the flag true on a tick whose looked-up record or reread receipt does not decode: the volume of such a record counts nothing beside a loss, and a loss confirmed on an earlier tick keeps its hold only while the tick still counts another impaired volume; on a tick whose directory read failed or was refused, which reads all four source flags false, the loop reads no record, and every shard of the directory it last admitted reads silent and unknown with no blocker; a monitor reads a positive count on a tick with the flag false as proven by the shards read, and a zero as inconclusive",
+  "zones.flags.volumes": "the volume listing was whole on the tick and the loop admitted it, with no two differing rows for one volume",
+  "zones.flags.warm-up": "the survey held every step for warm-up",
+  "zones.flags.zone-host": "the zone host hold held new attaches",
+  "zones.hosts": "the zone's hosts on the tick; a tick whose directory read failed or was refused lists no host, so silent reads null and self_suspect and every verdict count read zero, which a monitor reads as inconclusive",
+  "zones.hosts.self_suspect": "hosts whose last report advance lies within the fresh window and whose report's detector holds a self-suspicion dwell",
+  "zones.hosts.silent": "hosts the directory does not retire whose last report advance is older than the fresh window or that have none, of those hosts; null with no such host, and on a tick whose directory read failed or was refused",
+  "zones.hosts.silent.limit": "hosts the directory does not retire, at most 4096",
+  "zones.hosts.silent.used": "silent hosts",
+  "zones.hosts.verdicts": "hosts by the loop's verdict, every count zero on a tick whose directory read failed or was refused",
+  "zones.hosts.verdicts.conflict": "hosts by the loop's verdict, every count zero on a tick whose directory read failed or was refused: conflict",
+  "zones.hosts.verdicts.live": "hosts by the loop's verdict, every count zero on a tick whose directory read failed or was refused: live",
+  "zones.hosts.verdicts.lost": "hosts by the loop's verdict, every count zero on a tick whose directory read failed or was refused: lost",
+  "zones.hosts.verdicts.unknown": "hosts by the loop's verdict, every count zero on a tick whose directory read failed or was refused: unknown",
+  "zones.needs": "shards by the need `standbys::need_of` gives them on the tick",
+  "zones.needs.fresh": "shards by the need `standbys::need_of` gives them on the tick: fresh",
+  "zones.needs.standby": "shards by the need `standbys::need_of` gives them on the tick: standby",
+  "zones.omitted": "shards outside the served class and served shards with no standby past their target that the rows leave out; nonzero only beside 32 rows",
+  "zones.receipts": "replacement receipts of a later generation than their shard record, by phase, and the held ones among them",
+  "zones.receipts.created": "replacement receipts of a later generation than their shard record, by phase, and the held ones among them: created",
+  "zones.receipts.held": "replacement receipts of a later generation than their shard record, by phase, and the held ones among them: held",
+  "zones.receipts.issued": "replacement receipts of a later generation than their shard record, by phase, and the held ones among them: issued",
+  "zones.receipts.open": "replacement receipts of a later generation than their shard record, by phase, and the held ones among them: open",
+  "zones.rows": "at most 32 shards, each outside the served class or served with no standby past its target, oldest first and then by shard",
+  "zones.rows.age_us": "microseconds on the loop clock since the loop first observed the shard in its class, and for a served shard first observed served with no standby past its target",
+  "zones.rows.class": "the shard's serving class; served only beside the standby state past; a shard whose enrollment holds its census slot, or whose reservation the tick's plan admitted, reads enrolling at any exposure and takes no served row",
+  "zones.rows.shard": "the shard number, a field and never a label",
+  "zones.rows.standby": "the shard's standby state",
+  "zones.stale_oldest_us": "the longest time, in microseconds on the loop clock, that any counted stale entry has been observed stale; null when none is counted",
+  "zones.stale_serving": "entries of fresh reports, whose last advance lies within the zone's fresh window, that read serving for a shard at a tenure below the shard record's, one per host and shard, each counted once the loop has observed the host claiming that same lower tenure for longer than the fresh window, a claim at another tenure starting a new dwell; a host the directory retires counts while its report is fresh",
+  "zones.standby": "shards by standby state on the tick; a shard that needs no standby is in no slot",
+  "zones.standby.enrolling": "shards by standby state on the tick; a shard that needs no standby is in no slot: enrolling",
+  "zones.standby.named": "shards by standby state on the tick; a shard that needs no standby is in no slot: named",
+  "zones.standby.past": "shards by standby state on the tick; a shard that needs no standby is in no slot: past",
+  "zones.standby.unknown": "shards by standby state on the tick; a shard that needs no standby is in no slot: unknown",
+  "zones.standby.within": "shards by standby state on the tick; a shard that needs no standby is in no slot: within",
+  "zones.store": "the reconciler store client's state",
+  "zones.store.alarm": "the store client's watermark alarm, the first cause that withdrew it",
+  "zones.store.outcomes": "the store client's tallied outcomes since the zone loop took the client, summed over record classes, saturating at 2^32 - 1",
+  "zones.store.outcomes.log": "the store client's tallied outcomes since the zone loop took the client, summed over record classes, saturating at 2^32 - 1: log",
+  "zones.store.outcomes.refused": "the store client's tallied outcomes since the zone loop took the client, summed over record classes, saturating at 2^32 - 1: refused",
+  "zones.store.outcomes.unavailable": "the store client's tallied outcomes since the zone loop took the client, summed over record classes, saturating at 2^32 - 1: unavailable",
+  "zones.store.outcomes.unknown": "the store client's tallied outcomes since the zone loop took the client, summed over record classes, saturating at 2^32 - 1: unknown",
+  "zones.tick": "the zone loop's tick count since the loop started",
+  "zones.unnamed_volumes": "the listed volumes that read impaired or lost, hold a volume record short of retired and are named by no shard record or replacement receipt the tick read, such as a displaced volume whose retirement no process finished; null on a tick whose volume listing, census, shard records or volume-record lookups were incomplete; the active volume of a shard the directory omits counts here while it reads impaired or lost",
+  "zones.volumes": "the zone's active volumes by the loop's health judgement; unknown when unjudged",
+  "zones.volumes.available": "the zone's active volumes by the loop's health judgement; unknown when unjudged: available",
+  "zones.volumes.impaired": "the zone's active volumes by the loop's health judgement; unknown when unjudged: impaired",
+  "zones.volumes.lost": "the zone's active volumes by the loop's health judgement; unknown when unjudged: lost",
+  "zones.volumes.unknown": "the zone's active volumes by the loop's health judgement; unknown when unjudged: unknown",
+  "zones.zone": "the zone number, `standbys::Zone`"
+ },
+ "resets": {
+  "per-tick": "every field outside zones.events and zones.store.outcomes holds the value of the part's tick",
+  "zones.events": "the loop's start: counts rise from zero when the status writer's process starts the zone loop, whose first tick is 1",
+  "zones.store.outcomes": "the zone loop's construction, which takes the store client's tally then as the count's zero, before the loop's tick 1"
+ },
+ "refusals": {
+  "forged-tag": {
+   "bytes": "5253545300010a0b0c0d0e0f10113c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c00000000000000010006379da05b600001000001000000000000004dcb0001000100000002000000030000000400000005000000060000000700000002010000000002aea5400000000a0000000b0000000c0000000d0000000e00000003000000040000001400000015000000160000001700000018000000190000001a0000001b0000001c0000001d0000001e0000001f0000002000000021000000220000002300000024010000000000000028000000000000004000000005000000060000000700000008010000000000000009000000000000004000000001000000020000000300000004000000050000000b0000000c0000000d0000000e0000000f00000010000000110000001201000000000000001c00000013000000140000001500000016010000000000000002000000000000003d00000017010000000000000009000000007ffffffe01000000000000000400000000fffffffe0400000018000000190000001a0000001b0000006400000065000000660000006700000068000000690000006a0000006b0000006e0000006f0000007000000071000000720000007300000078000000790000007a0000007b0000007c0000007d0000008200000083000000840000008c0000008d0000008e0000008f00000090000000910000009200000093000000940000009500000096000000a0000000a1000000a2000000aa000000ab000000ac000000ad000000b4000000b5000000b6000000b7000000b8000000b9000000ba000000bb0000000003000003e8010200000002540be400000003e902030000000253fca1c0000003ea03010000000253ed5f800ce5a5be182a289147d614c9b30245d7fa53007bccb58fb19c708570948d897e",
+   "error": "Tag"
+  },
+  "schema-2": {
+   "bytes": "5253545300020a0b",
+   "error": "Schema { found: 2 }"
+  }
+ },
+ "cases": {
+  "empty": {
+   "bytes": "5253545300010a0b0c0d0e0f10113c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c00000000000000010006379da05b600000001b385d5c8fa9357896f3a20ac3baea99e446b12d604e7a6780a6d8205bab496d",
+   "view": {
+    "sealed_at_us": 1750000000000000,
+    "sequence": 1,
+    "writer": {
+     "boot": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+     "host": 723685415333072913
+    },
+    "zones": []
+   }
+  },
+  "one-zone": {
+   "bytes": "5253545300010a0b0c0d0e0f10113c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c00000000000000010006379da05b600001000001000000000000004dcb00000001000000020000000300000004000000050000000600000007000000000000000000000000000000000a0000000b0000000c0000000d0000000e00000003000000040000001400000015000000160000001700000018000000190000001a0000001b0000001c0000001d0000001e0000001f0000002000000021000000220000002300000024000000000000000000000000000000000000000005000000060000000700000008010000000000000009000000000000004000000001000000020000000300000004000000050000000b0000000c0000000d0000000e0000000f00000010000000110000001200000000000000000000000013000000140000001500000016010000000000000002000000000000003d00000017010000000000000009000000007ffffffe01000000000000000400000000fffffffe0000000018000000190000001a0000001b0000006400000065000000660000006700000068000000690000006a0000006b0000006e0000006f0000007000000071000000720000007300000078000000790000007a0000007b0000007c0000007d0000008200000083000000840000008c0000008d0000008e0000008f00000090000000910000009200000093000000940000009500000096000000a0000000a1000000a2000000aa000000ab000000ac000000ad000000b4000000b5000000b6000000b7000000b8000000b9000000ba000000bb0000000000b75a5ee6664a06f69a7665f0b3c6468152e1be2c21c73cc18f148d17b0993a06",
+   "view": {
+    "sealed_at_us": 1750000000000000,
+    "sequence": 1,
+    "writer": {
+     "boot": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+     "host": 723685415333072913
+    },
+    "zones": [
+     {
+      "attaches": {
+       "closed": {
+        "entry-cap": 2,
+        "key-taken": 5,
+        "live-cap": 1,
+        "own-entry": 4,
+        "pair-cap": 3
+       },
+       "ended_paired": 6,
+       "ended_unpaired": 7,
+       "gone": 8,
+       "live": 5,
+       "pairs": {
+        "limit": 64,
+        "used": 9
+       }
+      },
+      "blockers": {
+       "attach-closed": 22,
+       "census-full": 20,
+       "control-plane-unavailable": 24,
+       "correlated-hold": 30,
+       "device-failure-hold": 28,
+       "headroom": 23,
+       "loss-unconfirmed": 32,
+       "no-eligible-host": 21,
+       "owner-not-ready": 34,
+       "per-host-cap": 36,
+       "placement": 35,
+       "recorded-holder-hold": 27,
+       "replacement-exhausted": 33,
+       "retirement-requested": 31,
+       "self-suspect": 26,
+       "store-unavailable": 25,
+       "volume-impaired": 29
+      },
+      "budgets": {
+       "attempts": {
+        "limit": 2147483646,
+        "used": 9
+       },
+       "generation": {
+        "limit": 4294967294,
+        "used": 4
+       }
+      },
+      "census": null,
+      "classes": {
+       "blocked": 4,
+       "cold": 6,
+       "fresh": 7,
+       "recovering": 2,
+       "served": 1,
+       "silent": 5,
+       "withdrawn": 3
+      },
+      "events": {
+       "attaches": {
+        "failed": 172,
+        "recorded": 170,
+        "requested": 171,
+        "unknown": 173
+       },
+       "creates": {
+        "created": 160,
+        "failed": 162,
+        "unknown": 161
+       },
+       "decisions": {
+        "exhausted": 132,
+        "hold": 131,
+        "provision": 130
+       },
+       "enrollments": {
+        "binding": 123,
+        "enrollment": 124,
+        "persist": 122,
+        "records": 120,
+        "tenure": 121,
+        "write": 125
+       },
+       "errors": {
+        "conflict": 141,
+        "create": 150,
+        "exhausted": 149,
+        "held": 148,
+        "layout": 146,
+        "named": 144,
+        "population": 147,
+        "retry": 143,
+        "stale": 142,
+        "store": 140,
+        "unclean": 145
+       },
+       "reclaims": {
+        "detach-requested": 184,
+        "detach-unknown": 185,
+        "ended": 180,
+        "ended-named": 181,
+        "gone": 186,
+        "refused-owner": 182,
+        "refused-standby": 183,
+        "removed": 187
+       },
+       "refused": {
+        "field": 106,
+        "flag": 105,
+        "foreign": 107,
+        "length": 100,
+        "magic": 101,
+        "schema": 102,
+        "tag": 104,
+        "writer": 103
+       },
+       "reservations": {
+        "closed": 115,
+        "full": 112,
+        "headroom": 111,
+        "ineligible": 114,
+        "reserved": 110,
+        "taken": 113
+       }
+      },
+      "flags": {
+       "cap-below": true,
+       "instances": true,
+       "operator": true,
+       "reports": true,
+       "store": true,
+       "volumes": false,
+       "warm-up": false,
+       "zone-host": false
+      },
+      "hosts": {
+       "self_suspect": 23,
+       "silent": {
+        "limit": 61,
+        "used": 2
+       },
+       "verdicts": {
+        "conflict": 21,
+        "live": 19,
+        "lost": 20,
+        "unknown": 22
+       }
+      },
+      "needs": {
+       "fresh": 4,
+       "standby": 3
+      },
+      "omitted": 0,
+      "receipts": {
+       "created": 13,
+       "held": 14,
+       "issued": 12,
+       "open": 11
+      },
+      "rows": [],
+      "stale_oldest_us": null,
+      "stale_serving": 0,
+      "standby": {
+       "enrolling": 11,
+       "named": 10,
+       "past": 13,
+       "unknown": 14,
+       "within": 12
+      },
+      "store": {
+       "alarm": "clear",
+       "outcomes": {
+        "log": 27,
+        "refused": 26,
+        "unavailable": 25,
+        "unknown": 24
+       }
+      },
+      "tick": 77,
+      "unnamed_volumes": null,
+      "volumes": {
+       "available": 15,
+       "impaired": 16,
+       "lost": 17,
+       "unknown": 18
+      },
+      "zone": 1
+     }
+    ]
+   }
+  },
+  "two-zones": {
+   "bytes": "5253545300010a0b0c0d0e0f10113c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c00000000000000010006379da05b600002000001000000000000004dcb0000000100000002000000030000000400000005000000060000000700000002010000000002aea5400000000a0000000b0000000c0000000d0000000e00000003000000040000001400000015000000160000001700000018000000190000001a0000001b0000001c0000001d0000001e0000001f0000002000000021000000220000002300000024010000000000000028000000000000004000000005000000060000000700000008010000000000000009000000000000004000000001000000020000000300000004000000050000000b0000000c0000000d0000000e0000000f00000010000000110000001201000000000000001c00000013000000140000001500000016010000000000000002000000000000003d00000017010000000000000009000000007ffffffe01000000000000000400000000fffffffe0400000018000000190000001a0000001b0000006400000065000000660000006700000068000000690000006a0000006b0000006e0000006f0000007000000071000000720000007300000078000000790000007a0000007b0000007c0000007d0000008200000083000000840000008c0000008d0000008e0000008f00000090000000910000009200000093000000940000009500000096000000a0000000a1000000a2000000aa000000ab000000ac000000ad000000b4000000b5000000b6000000b7000000b8000000b9000000ba000000bb0000000003000003e8010200000002540be400000003e902030000000253fca1c0000003ea03010000000253ed5f800002000000000000004dcb0000000100000002000000030000000400000005000000060000000700000002010000000002aea5400000000a0000000b0000000c0000000d0000000e00000003000000040000001400000015000000160000001700000018000000190000001a0000001b0000001c0000001d0000001e0000001f0000002000000021000000220000002300000024010000000000000028000000000000004000000005000000060000000700000008010000000000000009000000000000004000000001000000020000000300000004000000050000000b0000000c0000000d0000000e0000000f00000010000000110000001201000000000000001c00000013000000140000001500000016010000000000000002000000000000003d00000017010000000000000009000000007ffffffe01000000000000000400000000fffffffe0400000018000000190000001a0000001b0000006400000065000000660000006700000068000000690000006a0000006b0000006e0000006f0000007000000071000000720000007300000078000000790000007a0000007b0000007c0000007d0000008200000083000000840000008c0000008d0000008e0000008f00000090000000910000009200000093000000940000009500000096000000a0000000a1000000a2000000aa000000ab000000ac000000ad000000b4000000b5000000b6000000b7000000b8000000b9000000ba000000bb0000000320000003e8010200000002540be400000003e902030000000253fca1c0000003ea03010000000253ed5f80000003eb04040000000253de1d40000003ec05020000000253cedb00000003ed01030000000253bf98c0000003ee02010000000253b05680000003ef03040000000253a11440000003f00402000000025391d200000003f105030000000253828fc0000003f201010000000253734d80000003f302040000000253640b40000003f40302000000025354c900000003f5040300000002534586c0000003f605010000000253364480000003f701040000000253270240000003f80202000000025317c000000003f903030000000253087dc0000003fa04010000000252f93b80000003fb05040000000252e9f940000003fc01020000000252dab700000003fd02030000000252cb74c0000003fe03010000000252bc3280000003ff04040000000252acf04000000400050200000002529dae0000000401010300000002528e6bc000000402020100000002527f298000000403030400000002526fe740000004040402000000025260a50000000405050300000002525162c00000040601010000000252422080000004070204000000025232de40a7ebe25c45432c5d81ecd70e8bb8e67580eb65bcca4d9b2980e1672d0f45a632",
+   "view": {
+    "sealed_at_us": 1750000000000000,
+    "sequence": 1,
+    "writer": {
+     "boot": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+     "host": 723685415333072913
+    },
+    "zones": [
+     {
+      "attaches": {
+       "closed": {
+        "entry-cap": 2,
+        "key-taken": 5,
+        "live-cap": 1,
+        "own-entry": 4,
+        "pair-cap": 3
+       },
+       "ended_paired": 6,
+       "ended_unpaired": 7,
+       "gone": 8,
+       "live": 5,
+       "pairs": {
+        "limit": 64,
+        "used": 9
+       }
+      },
+      "blockers": {
+       "attach-closed": 22,
+       "census-full": 20,
+       "control-plane-unavailable": 24,
+       "correlated-hold": 30,
+       "device-failure-hold": 28,
+       "headroom": 23,
+       "loss-unconfirmed": 32,
+       "no-eligible-host": 21,
+       "owner-not-ready": 34,
+       "per-host-cap": 36,
+       "placement": 35,
+       "recorded-holder-hold": 27,
+       "replacement-exhausted": 33,
+       "retirement-requested": 31,
+       "self-suspect": 26,
+       "store-unavailable": 25,
+       "volume-impaired": 29
+      },
+      "budgets": {
+       "attempts": {
+        "limit": 2147483646,
+        "used": 9
+       },
+       "generation": {
+        "limit": 4294967294,
+        "used": 4
+       }
+      },
+      "census": {
+       "limit": 64,
+       "used": 40
+      },
+      "classes": {
+       "blocked": 4,
+       "cold": 6,
+       "fresh": 7,
+       "recovering": 2,
+       "served": 1,
+       "silent": 5,
+       "withdrawn": 3
+      },
+      "events": {
+       "attaches": {
+        "failed": 172,
+        "recorded": 170,
+        "requested": 171,
+        "unknown": 173
+       },
+       "creates": {
+        "created": 160,
+        "failed": 162,
+        "unknown": 161
+       },
+       "decisions": {
+        "exhausted": 132,
+        "hold": 131,
+        "provision": 130
+       },
+       "enrollments": {
+        "binding": 123,
+        "enrollment": 124,
+        "persist": 122,
+        "records": 120,
+        "tenure": 121,
+        "write": 125
+       },
+       "errors": {
+        "conflict": 141,
+        "create": 150,
+        "exhausted": 149,
+        "held": 148,
+        "layout": 146,
+        "named": 144,
+        "population": 147,
+        "retry": 143,
+        "stale": 142,
+        "store": 140,
+        "unclean": 145
+       },
+       "reclaims": {
+        "detach-requested": 184,
+        "detach-unknown": 185,
+        "ended": 180,
+        "ended-named": 181,
+        "gone": 186,
+        "refused-owner": 182,
+        "refused-standby": 183,
+        "removed": 187
+       },
+       "refused": {
+        "field": 106,
+        "flag": 105,
+        "foreign": 107,
+        "length": 100,
+        "magic": 101,
+        "schema": 102,
+        "tag": 104,
+        "writer": 103
+       },
+       "reservations": {
+        "closed": 115,
+        "full": 112,
+        "headroom": 111,
+        "ineligible": 114,
+        "reserved": 110,
+        "taken": 113
+       }
+      },
+      "flags": {
+       "cap-below": true,
+       "instances": true,
+       "operator": true,
+       "reports": true,
+       "store": true,
+       "volumes": false,
+       "warm-up": false,
+       "zone-host": false
+      },
+      "hosts": {
+       "self_suspect": 23,
+       "silent": {
+        "limit": 61,
+        "used": 2
+       },
+       "verdicts": {
+        "conflict": 21,
+        "live": 19,
+        "lost": 20,
+        "unknown": 22
+       }
+      },
+      "needs": {
+       "fresh": 4,
+       "standby": 3
+      },
+      "omitted": 0,
+      "receipts": {
+       "created": 13,
+       "held": 14,
+       "issued": 12,
+       "open": 11
+      },
+      "rows": [
+       {
+        "age_us": 10000000000,
+        "class": "recovering",
+        "shard": 1000,
+        "standby": "within"
+       },
+       {
+        "age_us": 9999000000,
+        "class": "withdrawn",
+        "shard": 1001,
+        "standby": "past"
+       },
+       {
+        "age_us": 9998000000,
+        "class": "blocked",
+        "shard": 1002,
+        "standby": "enrolling"
+       }
+      ],
+      "stale_oldest_us": 45000000,
+      "stale_serving": 2,
+      "standby": {
+       "enrolling": 11,
+       "named": 10,
+       "past": 13,
+       "unknown": 14,
+       "within": 12
+      },
+      "store": {
+       "alarm": "namespace",
+       "outcomes": {
+        "log": 27,
+        "refused": 26,
+        "unavailable": 25,
+        "unknown": 24
+       }
+      },
+      "tick": 77,
+      "unnamed_volumes": 28,
+      "volumes": {
+       "available": 15,
+       "impaired": 16,
+       "lost": 17,
+       "unknown": 18
+      },
+      "zone": 1
+     },
+     {
+      "attaches": {
+       "closed": {
+        "entry-cap": 2,
+        "key-taken": 5,
+        "live-cap": 1,
+        "own-entry": 4,
+        "pair-cap": 3
+       },
+       "ended_paired": 6,
+       "ended_unpaired": 7,
+       "gone": 8,
+       "live": 5,
+       "pairs": {
+        "limit": 64,
+        "used": 9
+       }
+      },
+      "blockers": {
+       "attach-closed": 22,
+       "census-full": 20,
+       "control-plane-unavailable": 24,
+       "correlated-hold": 30,
+       "device-failure-hold": 28,
+       "headroom": 23,
+       "loss-unconfirmed": 32,
+       "no-eligible-host": 21,
+       "owner-not-ready": 34,
+       "per-host-cap": 36,
+       "placement": 35,
+       "recorded-holder-hold": 27,
+       "replacement-exhausted": 33,
+       "retirement-requested": 31,
+       "self-suspect": 26,
+       "store-unavailable": 25,
+       "volume-impaired": 29
+      },
+      "budgets": {
+       "attempts": {
+        "limit": 2147483646,
+        "used": 9
+       },
+       "generation": {
+        "limit": 4294967294,
+        "used": 4
+       }
+      },
+      "census": {
+       "limit": 64,
+       "used": 40
+      },
+      "classes": {
+       "blocked": 4,
+       "cold": 6,
+       "fresh": 7,
+       "recovering": 2,
+       "served": 1,
+       "silent": 5,
+       "withdrawn": 3
+      },
+      "events": {
+       "attaches": {
+        "failed": 172,
+        "recorded": 170,
+        "requested": 171,
+        "unknown": 173
+       },
+       "creates": {
+        "created": 160,
+        "failed": 162,
+        "unknown": 161
+       },
+       "decisions": {
+        "exhausted": 132,
+        "hold": 131,
+        "provision": 130
+       },
+       "enrollments": {
+        "binding": 123,
+        "enrollment": 124,
+        "persist": 122,
+        "records": 120,
+        "tenure": 121,
+        "write": 125
+       },
+       "errors": {
+        "conflict": 141,
+        "create": 150,
+        "exhausted": 149,
+        "held": 148,
+        "layout": 146,
+        "named": 144,
+        "population": 147,
+        "retry": 143,
+        "stale": 142,
+        "store": 140,
+        "unclean": 145
+       },
+       "reclaims": {
+        "detach-requested": 184,
+        "detach-unknown": 185,
+        "ended": 180,
+        "ended-named": 181,
+        "gone": 186,
+        "refused-owner": 182,
+        "refused-standby": 183,
+        "removed": 187
+       },
+       "refused": {
+        "field": 106,
+        "flag": 105,
+        "foreign": 107,
+        "length": 100,
+        "magic": 101,
+        "schema": 102,
+        "tag": 104,
+        "writer": 103
+       },
+       "reservations": {
+        "closed": 115,
+        "full": 112,
+        "headroom": 111,
+        "ineligible": 114,
+        "reserved": 110,
+        "taken": 113
+       }
+      },
+      "flags": {
+       "cap-below": true,
+       "instances": true,
+       "operator": true,
+       "reports": true,
+       "store": true,
+       "volumes": false,
+       "warm-up": false,
+       "zone-host": false
+      },
+      "hosts": {
+       "self_suspect": 23,
+       "silent": {
+        "limit": 61,
+        "used": 2
+       },
+       "verdicts": {
+        "conflict": 21,
+        "live": 19,
+        "lost": 20,
+        "unknown": 22
+       }
+      },
+      "needs": {
+       "fresh": 4,
+       "standby": 3
+      },
+      "omitted": 3,
+      "receipts": {
+       "created": 13,
+       "held": 14,
+       "issued": 12,
+       "open": 11
+      },
+      "rows": [
+       {
+        "age_us": 10000000000,
+        "class": "recovering",
+        "shard": 1000,
+        "standby": "within"
+       },
+       {
+        "age_us": 9999000000,
+        "class": "withdrawn",
+        "shard": 1001,
+        "standby": "past"
+       },
+       {
+        "age_us": 9998000000,
+        "class": "blocked",
+        "shard": 1002,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9997000000,
+        "class": "silent",
+        "shard": 1003,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9996000000,
+        "class": "cold",
+        "shard": 1004,
+        "standby": "within"
+       },
+       {
+        "age_us": 9995000000,
+        "class": "recovering",
+        "shard": 1005,
+        "standby": "past"
+       },
+       {
+        "age_us": 9994000000,
+        "class": "withdrawn",
+        "shard": 1006,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9993000000,
+        "class": "blocked",
+        "shard": 1007,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9992000000,
+        "class": "silent",
+        "shard": 1008,
+        "standby": "within"
+       },
+       {
+        "age_us": 9991000000,
+        "class": "cold",
+        "shard": 1009,
+        "standby": "past"
+       },
+       {
+        "age_us": 9990000000,
+        "class": "recovering",
+        "shard": 1010,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9989000000,
+        "class": "withdrawn",
+        "shard": 1011,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9988000000,
+        "class": "blocked",
+        "shard": 1012,
+        "standby": "within"
+       },
+       {
+        "age_us": 9987000000,
+        "class": "silent",
+        "shard": 1013,
+        "standby": "past"
+       },
+       {
+        "age_us": 9986000000,
+        "class": "cold",
+        "shard": 1014,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9985000000,
+        "class": "recovering",
+        "shard": 1015,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9984000000,
+        "class": "withdrawn",
+        "shard": 1016,
+        "standby": "within"
+       },
+       {
+        "age_us": 9983000000,
+        "class": "blocked",
+        "shard": 1017,
+        "standby": "past"
+       },
+       {
+        "age_us": 9982000000,
+        "class": "silent",
+        "shard": 1018,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9981000000,
+        "class": "cold",
+        "shard": 1019,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9980000000,
+        "class": "recovering",
+        "shard": 1020,
+        "standby": "within"
+       },
+       {
+        "age_us": 9979000000,
+        "class": "withdrawn",
+        "shard": 1021,
+        "standby": "past"
+       },
+       {
+        "age_us": 9978000000,
+        "class": "blocked",
+        "shard": 1022,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9977000000,
+        "class": "silent",
+        "shard": 1023,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9976000000,
+        "class": "cold",
+        "shard": 1024,
+        "standby": "within"
+       },
+       {
+        "age_us": 9975000000,
+        "class": "recovering",
+        "shard": 1025,
+        "standby": "past"
+       },
+       {
+        "age_us": 9974000000,
+        "class": "withdrawn",
+        "shard": 1026,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9973000000,
+        "class": "blocked",
+        "shard": 1027,
+        "standby": "unknown"
+       },
+       {
+        "age_us": 9972000000,
+        "class": "silent",
+        "shard": 1028,
+        "standby": "within"
+       },
+       {
+        "age_us": 9971000000,
+        "class": "cold",
+        "shard": 1029,
+        "standby": "past"
+       },
+       {
+        "age_us": 9970000000,
+        "class": "recovering",
+        "shard": 1030,
+        "standby": "enrolling"
+       },
+       {
+        "age_us": 9969000000,
+        "class": "withdrawn",
+        "shard": 1031,
+        "standby": "unknown"
+       }
+      ],
+      "stale_oldest_us": 45000000,
+      "stale_serving": 2,
+      "standby": {
+       "enrolling": 11,
+       "named": 10,
+       "past": 13,
+       "unknown": 14,
+       "within": 12
+      },
+      "store": {
+       "alarm": "namespace",
+       "outcomes": {
+        "log": 27,
+        "refused": 26,
+        "unavailable": 25,
+        "unknown": 24
+       }
+      },
+      "tick": 77,
+      "unnamed_volumes": 28,
+      "volumes": {
+       "available": 15,
+       "impaired": 16,
+       "lost": 17,
+       "unknown": 18
+      },
+      "zone": 2
+     }
+    ]
+   }
+  }
+ },
+ "reset_identities": {
+  "writer.boot": {
+   "key": [
+    "writer.host",
+    "writer.boot"
+   ],
+   "rule": "a count of zones.events or zones.store.outcomes rises from zero when its zone loop starts, which takes the store client's tally then as the zero of zones.store.outcomes, at the loop's tick 1, and the loop's tick rises by one per tick. A monitor reads the statuses of one (writer.host, writer.boot) in sequence order and ignores a status at or below the highest sequence it holds of that boot. It forms deltas within one (writer.host, writer.boot, zone): the first part it holds of that zone rises from zero when its tick is 1 and is the baseline otherwise, so a monitor that starts within a loop counts no event from before its first part; a later part whose tick is below the last tick held starts a new loop, and each of its counts rises from zero; a count that falls restarts that count, rising from zero, whether or not the tick rose. A writer that restarts a zone loop or its store client within its process draws a new boot nonce first, so every counter restart inside one (writer.host, writer.boot) is a fault of the writer; the tick and fall rules detect such a restart only through a lower tick or a fallen count"
+  },
+  "tick": {
+   "key": [
+    "writer.host",
+    "writer.boot",
+    "sequence"
+   ],
+   "rule": "every other field holds the value of the status's tick and forms no delta"
+  }
+ }
+}

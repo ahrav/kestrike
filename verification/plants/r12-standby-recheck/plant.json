@@ -1,0 +1,18 @@
+{
+  "id": "r12-standby-recheck",
+  "row": 12,
+  "fix": {
+    "pull_request": 1580,
+    "commit": "9cbc74f0d6c0a39105d063f755aad7dbd2ebe355"
+  },
+  "files": [
+    "crates/kestrike/src/failover/reconcile.rs"
+  ],
+  "restores": "The standby write in `enroll_standby` and `Reconciler::record_standby` skips the recheck that the standby still serves after its write.",
+  "proof": "failover::reconcile_tests::a_standby_write_across_a_committed_flip_returns_no_witness",
+  "expected": [],
+  "miss_cause": {
+    "cause": "environment",
+    "evidence": "A scratch trace that panicked at both planted writes fired in none of 1,438,013 runs of 19 of the 21 live profiles, all but cluster-long and contended, with their controls and 10 histories at commit 6240a6fd9, and no profile or history of the sweep worker calls `failover/reconcile.rs`, which runs only in library tests and in the worker's ignored fleet and cycles cases of the long-run lane."
+  }
+}

@@ -1,0 +1,25 @@
+# Before adding or changing an exception, follow the determinism lint rules in docs/agents/simulation.md.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "read monotonic ticks through the platform clock" },
+    { path = "std::time::SystemTime::now", reason = "read time through the supplied clock" },
+    { path = "libc::clock_gettime", reason = "read ticks through the supplied clock" },
+    { path = "libc::getrandom", reason = "draw bytes through the entropy seam" },
+    { path = "std::hash::RandomState::new", reason = "take hash keys from the caller so simulation can supply a deterministic pair" },
+    { path = "std::thread::spawn", reason = "run the work on the calling thread" },
+    { path = "std::thread::scope", reason = "run the work on the calling thread" },
+    { path = "std::thread::Builder::spawn", reason = "run the work on the calling thread" },
+    { path = "std::thread::Builder::spawn_scoped", reason = "run the work on the calling thread" },
+    { path = "std::thread::Scope::spawn", reason = "run the work on the calling thread" },
+    { path = "std::thread::sleep", reason = "return the next deadline to the caller that drives the clock" },
+    { path = "std::net::TcpStream::connect", reason = "send and receive through the supplied datagram transport" },
+    { path = "std::net::TcpListener::bind", reason = "send and receive through the supplied datagram transport" },
+    { path = "std::net::UdpSocket::bind", reason = "send and receive through the supplied datagram transport" },
+    { path = "std::os::unix::net::UnixStream::connect", reason = "send and receive through the supplied datagram transport" },
+    { path = "std::os::unix::net::UnixListener::bind", reason = "send and receive through the supplied datagram transport" },
+    { path = "std::os::unix::net::UnixDatagram::bind", reason = "send and receive through the supplied datagram transport" },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "use BTreeMap for traversal in key order" },
+    { path = "std::collections::HashSet", reason = "use BTreeSet for traversal in key order" },
+]

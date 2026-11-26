@@ -1,0 +1,10 @@
+{
+  "id": "disagreement-first-pass-fills",
+  "kind": "disagreement",
+  "escape": "ivk-2310",
+  "sources": [
+    "crates/kestrike/src/storage/capture.rs, the comment in `Storage::cut_intact`: \"A published proof makes the membership recoverable from its checkpoint, so every later change to it is recorded in the tenure's suffix or refused\"",
+    "crates/kestrike/src/storage/volume/suffix_entry_cap_tests.rs, test documentation merged with blotter pull request 1903, on fills a tenure acknowledges after the capture cut and before the suffix opens: \"Those keys remain in memory only.\""
+  ],
+  "disagrees": "Source 1 makes every acknowledged fill at the proof recoverable. Source 2 describes fills acknowledged in that window as lost at a host loss, as current behavior."
+}

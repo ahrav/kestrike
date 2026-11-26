@@ -1,0 +1,136 @@
+{
+  "archive": "/data/tsw/campaigns/2079-r6/A",
+  "archive_build_after": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3",
+  "batch_s": 30,
+  "campaign": "fixture-cluster-live",
+  "campaign_binary": {
+    "path": "/data/tsw/campaigns/2079-r6/campaign-b7a0414d",
+    "sha256": "f09cb27621560a7a2d7f6dfe5880b940b253e61e136139483a98de7a7a034420",
+    "sha256_after": "f09cb27621560a7a2d7f6dfe5880b940b253e61e136139483a98de7a7a034420",
+    "source_sha256_after": "f09cb27621560a7a2d7f6dfe5880b940b253e61e136139483a98de7a7a034420",
+    "staged": "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/campaign"
+  },
+  "cgroup_root": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/r2079g-cluster-live.scope/campaign",
+  "commands": {
+    "confirm": [
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/campaign",
+      "confirm",
+      "--root",
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live",
+      "--archive",
+      "/data/tsw/campaigns/2079-r6/A"
+    ],
+    "findings": [
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/campaign",
+      "findings",
+      "--state",
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live/confirm/state"
+    ],
+    "listing": [
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/campaign",
+      "sim",
+      "capabilities",
+      "--archive",
+      "/data/tsw/campaigns/2079-r6/A",
+      "--artifacts",
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/listing"
+    ],
+    "sweep": [
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/campaign",
+      "sweep",
+      "--root",
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live",
+      "--archive",
+      "/data/tsw/campaigns/2079-r6/A",
+      "--campaign",
+      "fixture-cluster-live",
+      "--profiles",
+      "cluster-broad",
+      "--workers",
+      "28",
+      "--batch",
+      "30",
+      "--for",
+      "120"
+    ],
+    "sweep-status": [
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live.harness/campaign",
+      "sweep-status",
+      "--root",
+      "/data/tsw/campaigns/2079-r6/fixture-cluster-live"
+    ]
+  },
+  "complete": true,
+  "confirm_dispatch": "queue_empty",
+  "confirm_exit": 0,
+  "constants": {
+    "checkpoint_bytes": 16777216,
+    "judge_wait_s": 600,
+    "ledger_bytes": 16777216,
+    "line_bytes": 16777216,
+    "output_bytes": 268435456,
+    "poll_s": 0.5,
+    "receipt_bytes": 16777216,
+    "stop_wait_s": 120
+  },
+  "counts": {},
+  "deadline_fired": false,
+  "deadline_s": 3600,
+  "defect": "",
+  "environment": [
+    "CAMPAIGN_CGROUP_ROOT",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "TMPDIR",
+    "USER",
+    "XDG_RUNTIME_DIR"
+  ],
+  "error": null,
+  "findings_exit": 0,
+  "for_s": 120,
+  "harness": {
+    "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+    "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+  },
+  "interpreter": "3.9.25",
+  "listing": {
+    "cluster-broad": {
+      "class": "live",
+      "cluster": true,
+      "fails": null
+    }
+  },
+  "listing_exit": 0,
+  "mode": "live",
+  "profiles": [
+    "cluster-broad"
+  ],
+  "restored": {
+    "archive_verified": true,
+    "cause": null,
+    "left_a_process": 0
+  },
+  "root": "/data/tsw/campaigns/2079-r6/fixture-cluster-live",
+  "root_build": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3",
+  "run_id": "fixture-cluster-live",
+  "runs": {
+    "cluster-broad": {
+      "first": 0,
+      "next": 245107
+    }
+  },
+  "scenario": "ks-cluster-link-faults",
+  "scenario_row": "c85eaabd9ff2c2bf0b8353bf0b8ca88d5f2d85546202b23a16c6050d6b766ae7",
+  "schema": 1,
+  "seconds": 122.814,
+  "signal": null,
+  "started": "2026-11-24T09:23:21Z",
+  "status_exit": 0,
+  "status_refusal": null,
+  "sweep_elapsed_s": 120.661,
+  "sweep_exit": 0,
+  "system_build": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3",
+  "workers": 28
+}

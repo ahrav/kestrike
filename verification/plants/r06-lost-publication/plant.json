@@ -1,0 +1,25 @@
+{
+  "id": "r06-lost-publication",
+  "row": 6,
+  "fix": {
+    "pull_request": 1607,
+    "commit": "ca4f74e3b5f7428b914caa4ef4577340e7d6bd85"
+  },
+  "files": [
+    "crates/kestrike/src/net/put.rs",
+    "crates/kestrike/src/storage/publication.rs"
+  ],
+  "restores": "`WritableFill::publish` no longer refuses a ready fill's publication on a lost volume, and the put service no longer records the loss from a `Lost` refusal.",
+  "proof": "storage::hit_tests::a_lost_volume_refuses_a_ready_fills_publication",
+  "expected": [
+    "upload",
+    "faulted",
+    "cluster-broad",
+    "cluster-pressure",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "workload",
+    "evidence": "Every traced run of six profiles, the five expected and `cluster-long`, reaches the planted `is_lost` check of `WritableFill::publish` (a scratch trace before it panicked in all 125,163 upload, 124,964 faulted, 125,499 cluster-broad, 126,220 cluster-pressure, 113,104 cluster-swarm and 493,086 cluster-long runs on the code of commit c6a14e9f1), and a trace inside the refusal the plant removes fired in none of 261,651 runs of the five other than cluster-long and none of 2,051,103 runs of all 21 live profiles with their controls and histories on that code, so no run publishes a fill on a lost volume; `cluster-long` stays out of `expected`, although each of its traced runs reaches the planted check, because the profile has no passing run at the default counts."
+  }
+}

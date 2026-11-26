@@ -1,0 +1,129 @@
+
+kestrike:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+000000000111a374 <tag_compare_early_return>:
+ 111a374:      	sub	sp, sp, #32
+ 111a378:      	stp	x29, x30, [sp, #16]
+ 111a37c:      	add	x29, sp, #16
+ 111a380:      	ldrb	w9, [x0]
+ 111a384:      	sub	x8, x29, #4
+ 111a388:      	sturb	w9, [x29, #-4]
+ 111a38c:      	ldrb	w8, [x1]
+ 111a390:      	ldurb	w9, [x29, #-4]
+ 111a394:      	cmp	w9, w8
+ 111a398:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a39c:      	ldrb	w8, [x0, #1]
+ 111a3a0:      	sturb	w8, [x29, #-4]
+ 111a3a4:      	sub	x8, x29, #4
+ 111a3a8:      	ldrb	w8, [x1, #1]
+ 111a3ac:      	ldurb	w9, [x29, #-4]
+ 111a3b0:      	cmp	w9, w8
+ 111a3b4:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a3b8:      	ldrb	w8, [x0, #2]
+ 111a3bc:      	sturb	w8, [x29, #-4]
+ 111a3c0:      	sub	x8, x29, #4
+ 111a3c4:      	ldrb	w8, [x1, #2]
+ 111a3c8:      	ldurb	w9, [x29, #-4]
+ 111a3cc:      	cmp	w9, w8
+ 111a3d0:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a3d4:      	ldrb	w8, [x0, #3]
+ 111a3d8:      	sturb	w8, [x29, #-4]
+ 111a3dc:      	sub	x8, x29, #4
+ 111a3e0:      	ldrb	w8, [x1, #3]
+ 111a3e4:      	ldurb	w9, [x29, #-4]
+ 111a3e8:      	cmp	w9, w8
+ 111a3ec:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a3f0:      	ldrb	w8, [x0, #4]
+ 111a3f4:      	sturb	w8, [x29, #-4]
+ 111a3f8:      	sub	x8, x29, #4
+ 111a3fc:      	ldrb	w8, [x1, #4]
+ 111a400:      	ldurb	w9, [x29, #-4]
+ 111a404:      	cmp	w9, w8
+ 111a408:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a40c:      	ldrb	w8, [x0, #5]
+ 111a410:      	sturb	w8, [x29, #-4]
+ 111a414:      	sub	x8, x29, #4
+ 111a418:      	ldrb	w8, [x1, #5]
+ 111a41c:      	ldurb	w9, [x29, #-4]
+ 111a420:      	cmp	w9, w8
+ 111a424:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a428:      	ldrb	w8, [x0, #6]
+ 111a42c:      	sturb	w8, [x29, #-4]
+ 111a430:      	sub	x8, x29, #4
+ 111a434:      	ldrb	w8, [x1, #6]
+ 111a438:      	ldurb	w9, [x29, #-4]
+ 111a43c:      	cmp	w9, w8
+ 111a440:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a444:      	ldrb	w8, [x0, #7]
+ 111a448:      	sturb	w8, [x29, #-4]
+ 111a44c:      	sub	x8, x29, #4
+ 111a450:      	ldrb	w8, [x1, #7]
+ 111a454:      	ldurb	w9, [x29, #-4]
+ 111a458:      	cmp	w9, w8
+ 111a45c:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a460:      	ldrb	w8, [x0, #8]
+ 111a464:      	sturb	w8, [x29, #-4]
+ 111a468:      	sub	x8, x29, #4
+ 111a46c:      	ldrb	w8, [x1, #8]
+ 111a470:      	ldurb	w9, [x29, #-4]
+ 111a474:      	cmp	w9, w8
+ 111a478:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a47c:      	ldrb	w8, [x0, #9]
+ 111a480:      	sturb	w8, [x29, #-4]
+ 111a484:      	sub	x8, x29, #4
+ 111a488:      	ldrb	w8, [x1, #9]
+ 111a48c:      	ldurb	w9, [x29, #-4]
+ 111a490:      	cmp	w9, w8
+ 111a494:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a498:      	ldrb	w8, [x0, #10]
+ 111a49c:      	sturb	w8, [x29, #-4]
+ 111a4a0:      	sub	x8, x29, #4
+ 111a4a4:      	ldrb	w8, [x1, #10]
+ 111a4a8:      	ldurb	w9, [x29, #-4]
+ 111a4ac:      	cmp	w9, w8
+ 111a4b0:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a4b4:      	ldrb	w8, [x0, #11]
+ 111a4b8:      	sturb	w8, [x29, #-4]
+ 111a4bc:      	sub	x8, x29, #4
+ 111a4c0:      	ldrb	w8, [x1, #11]
+ 111a4c4:      	ldurb	w9, [x29, #-4]
+ 111a4c8:      	cmp	w9, w8
+ 111a4cc:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a4d0:      	ldrb	w8, [x0, #12]
+ 111a4d4:      	sturb	w8, [x29, #-4]
+ 111a4d8:      	sub	x8, x29, #4
+ 111a4dc:      	ldrb	w8, [x1, #12]
+ 111a4e0:      	ldurb	w9, [x29, #-4]
+ 111a4e4:      	cmp	w9, w8
+ 111a4e8:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a4ec:      	ldrb	w8, [x0, #13]
+ 111a4f0:      	sturb	w8, [x29, #-4]
+ 111a4f4:      	sub	x8, x29, #4
+ 111a4f8:      	ldrb	w8, [x1, #13]
+ 111a4fc:      	ldurb	w9, [x29, #-4]
+ 111a500:      	cmp	w9, w8
+ 111a504:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a508:      	ldrb	w8, [x0, #14]
+ 111a50c:      	sturb	w8, [x29, #-4]
+ 111a510:      	sub	x8, x29, #4
+ 111a514:      	ldrb	w8, [x1, #14]
+ 111a518:      	ldurb	w9, [x29, #-4]
+ 111a51c:      	cmp	w9, w8
+ 111a520:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a524:      	ldrb	w8, [x0, #15]
+ 111a528:      	sturb	w8, [x29, #-4]
+ 111a52c:      	sub	x8, x29, #4
+ 111a530:      	ldrb	w8, [x1, #15]
+ 111a534:      	ldurb	w9, [x29, #-4]
+ 111a538:      	cmp	w9, w8
+ 111a53c:      	b.ne	0x111a550 <tag_compare_early_return+0x1dc>
+ 111a540:      	bl	0x10c7b38 <kestrike::net::tag_compare_tests::accepted>
+ 111a544:      	ldp	x29, x30, [sp, #16]
+ 111a548:      	add	sp, sp, #32
+ 111a54c:      	ret
+ 111a550:      	bl	0x10c7b54 <kestrike::net::tag_compare_tests::rejected>
+ 111a554:      	ldp	x29, x30, [sp, #16]
+ 111a558:      	add	sp, sp, #32
+ 111a55c:      	ret

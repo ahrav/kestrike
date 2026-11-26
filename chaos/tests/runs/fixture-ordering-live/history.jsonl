@@ -1,0 +1,3 @@
+{"build": "13056bc7ab0275221231118eb2ef21728bb42dc065048840a677a59c70fc1ea1", "campaign": "fixture-ordering-live", "counts": {}, "profile": "cluster-order-1", "runs": {"first": 0, "next": 85653}}
+{"build": "13056bc7ab0275221231118eb2ef21728bb42dc065048840a677a59c70fc1ea1", "campaign": "fixture-ordering-live", "counts": {}, "profile": "cluster-order-2", "runs": {"first": 0, "next": 85389}}
+{"build": "13056bc7ab0275221231118eb2ef21728bb42dc065048840a677a59c70fc1ea1", "campaign": "fixture-ordering-live", "counts": {}, "profile": "cluster-order-3", "runs": {"first": 0, "next": 85367}}

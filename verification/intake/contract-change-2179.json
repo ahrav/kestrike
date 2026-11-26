@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2179",
+  "kind": "contract-change",
+  "pull_request": 2179,
+  "changed": "The invariants of the obligation records fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure, fleet-repair-settles-every-shard-or-names-a-backed-blocker and fleet-zone-repair-and-host-scenarios-pass-on-their-second-root. The three-host loss at the host agent's self-suspicion threshold is the loss of the trio layout's largest partition, where it was a loss across two partitions of the small layout. The scheduled repair and host case counts 18 checks and 46 lines, where it counted 14 and 42. The LIMITS of fleet-repair-settles-every-shard-or-names-a-backed-blocker state that no scenario at the threshold leaves a lost owner's running standby without running probers in two partitions other than the owner's, and that F5 is not established for such a loss: the small layout's three-host loss left s4 unserved with no blocker.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure",
+    "reason": "Its invariant states the new contract: the loss of the trio layout's largest partition of three hosts reaches the threshold, so no detector publishes a nomination, a surviving observer reports a repair demand, no takeover starts and no volume moves (FC12). Before this change the invariant credited no FC12 for the three-host loss, which spanned two partitions. The record fleet-repair-settles-every-shard-or-names-a-backed-blocker states the same loss with the reconciler running: SelfSuspect on s0 and s1, the zone host hold read in the hosts' first report period alone, no nomination before the designation that drops H2 from s2's record, and every verdict passing."
+  }
+}

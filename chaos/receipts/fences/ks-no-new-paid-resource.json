@@ -1,0 +1,12 @@
+{
+  "command": "python3 -I chaos/harness/reach.py aws ec2 create-volume --dry-run --size 1 --availability-zone us-west-2a",
+  "exit_status": 1,
+  "fence": "ks-no-new-paid-resource",
+  "identity": {
+    "command": "python3 -I chaos/harness/reach.py identity",
+    "output": "unix user tsw; aws role bsw-ct1-worker-host; github login ahrav"
+  },
+  "output": "aws: [ERROR]: An error occurred (UnauthorizedOperation) when calling the CreateVolume operation: You are not authorized to perform this operation. User: arn:aws:sts::<account>:assumed-role/bsw-ct1-worker-host/i-02d283139ecb400e8 is not authorized to perform: ec2:CreateVolume on resource: arn:aws:ec2:us-west-2:<account>:volume/* because no identity-based policy allows the ec2:CreateVolume action. Encoded authorization failure message: <cut>\naws exit 254\n",
+  "ran": "2026-11-25T06:33:36Z",
+  "refused": true
+}

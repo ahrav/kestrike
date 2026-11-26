@@ -1,0 +1,12 @@
+{
+  "command": "python3 -I chaos/harness/reach.py token-scope workflow",
+  "exit_status": 1,
+  "fence": "ks-no-workflow-file-push",
+  "identity": {
+    "command": "python3 -I chaos/harness/reach.py identity",
+    "output": "unix user tsw; aws role bsw-ct1-worker-host; github login ahrav"
+  },
+  "output": "the token lacks the scope workflow; its scopes are admin:public_key, gist, read:org, repo\n",
+  "ran": "2026-11-25T06:33:37Z",
+  "refused": true
+}

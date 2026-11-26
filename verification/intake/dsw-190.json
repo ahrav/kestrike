@@ -1,0 +1,45 @@
+{
+  "id": "dsw-190",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/writable.rs",
+    "function": "PlacingFill::place and PlacingFill::reserve_storage"
+  },
+  "defect": "After the owner closes, a fill of several extents whose placement was promised before the close still places extents and is granted its shard hold; its receive is then refused `Closed`, so the grant only takes capacity.",
+  "property": {
+    "text": "Close refuses new receives, reservations and publications.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/storage/writable.rs, module documentation"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "workload",
+  "evidence": {
+    "steps": "No fault. Over a storage with a sequence arena, a fill of a two-extent object promises its placement with no extent placed (FillAttempt::promise_storage), the owner closes (Owner::close), and the kept placement then places both extents (PlacingFill::place) and takes its shard hold (PlacingFill::reserve_storage), which grants the fill. Owner::close closes the volume's readiness and leaves the storage's cutoff open, and the hold's revalidation reads only the cutoff. The history k9-placement-across-close (net/world_tests/histories/keyops.rs) runs these steps over Geometry::Sequenced.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. cluster-swarm and cluster-pressure build their storage with storage_shaped_as over the fixture geometry (net/world_tests/cluster.rs), and upload runs UPLOAD_PLAN, which keeps QUIET's Geometry::Fixture, through Geometry::storage (net/world_tests.rs); the fixture geometry's storage has no sequence arena, so no fill of the three named profiles promises a placement of several extents: promise_storage refuses MultipleExtents without one. This claim covers those three profiles; the sweep's history batches, which list the pins, ran no SS2 or K9 history in this sweep (each at runs 0)."
+  },
+  "catch": {
+    "history": "k9-placement-across-close",
+    "rule": "a fill admitted after the cache closed",
+    "tally": {
+      "build": "a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b",
+      "revision": "424e30371",
+      "campaign": "bsw-ct1-2101-probe-histories-424e30371",
+      "root": "bsw-ct1-2101-probe-histories-424e30371",
+      "workers": 28,
+      "seconds": 120,
+      "runs": "0..57367",
+      "endings": {
+        "violation: a fill admitted after the cache closed": 57367,
+        "pass": 0,
+        "unsuccessful or inconclusive": 0
+      },
+      "missed": 0,
+      "suspects": 0,
+      "replays": 3
+    }
+  },
+  "note": "Cause, evidence and catch are set by the unit of #297 that writes this family's history (M1-4). The record names the rule text \"a fill admitted after the cache closed\", arrays ORACLE and HISTORY_SHARED. The oracle reports it for an acknowledged fill whose action began after an acknowledged close (`closed_before` in crates/kestrike/src/oracle/candidates.rs); this defect's fill began before the close and its receive is refused, so that rule can hold while the defect occurs. disagreement-fill-after-close records the two texts on what close promises, this property as its first source; it stays open. A history needs a storage with a sequence arena. K9's module documentation names both texts. Siblings k9-promise-after-close and k9-placement-across-storage-close pass; controls k9-placement-judged-open, k9-promise-judged-kept, k9-grant-judged-refused and k9-promise-judged-open fail through the rule. Known-findings row for #298."
+}

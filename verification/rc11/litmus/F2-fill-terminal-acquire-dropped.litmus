@@ -1,0 +1,22 @@
+C F2-fill-terminal-acquire-dropped
+(* The control on the follower's side: its observation of the state word at
+   relaxed, so nothing orders its terminal load after the departed bit it
+   read. The same program is the service pass's observation with its
+   acquire fence dropped. Departure observed with the upload-granted
+   terminal: 1:r0=1 and 1:r1=1.
+   Events: P0 is the producer, its relaxed terminal store and its release
+   read-modify-write of the state word; P1 is the follower, its relaxed
+   load of the state word and its relaxed load of the terminal. *)
+{ terminal = 1; state = 0; }
+
+P0 (atomic_int* terminal, atomic_int* state) {
+  atomic_store_explicit(terminal, 2, memory_order_relaxed);
+  int r0 = atomic_fetch_add_explicit(state, 1, memory_order_release);
+}
+
+P1 (atomic_int* terminal, atomic_int* state) {
+  int r0 = atomic_load_explicit(state, memory_order_relaxed);
+  int r1 = atomic_load_explicit(terminal, memory_order_relaxed);
+}
+
+exists (1:r0=1 /\ 1:r1=1)

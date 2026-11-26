@@ -1,0 +1,86 @@
+[
+  {
+    "name": "describe-table",
+    "action": "DescribeTable",
+    "request": {"TableName": "kestrike-store"},
+    "status": 200,
+    "response": {"Table": {"AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}], "BillingModeSummary": {"BillingMode": "PAY_PER_REQUEST", "LastUpdateToPayPerRequestDateTime": 1767225600.0}, "CreationDateTime": 1767225600.0, "DeletionProtectionEnabled": true, "ItemCount": 0, "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}], "ProvisionedThroughput": {"NumberOfDecreasesToday": 0, "ReadCapacityUnits": 0, "WriteCapacityUnits": 0}, "TableArn": "arn:aws:dynamodb:us-east-1:111122223333:table/kestrike-store", "TableId": "8c2b0d9e-6f1a-4c3e-9b7d-2a5e4f6c1d03", "TableName": "kestrike-store", "TableSizeBytes": 0, "TableStatus": "ACTIVE"}}
+  },
+  {
+    "name": "get-item",
+    "action": "GetItem",
+    "request": {"TableName": "kestrike-store", "Key": {"pk": {"S": "shard#7"}}, "ConsistentRead": true},
+    "status": 200,
+    "response": {"Item": {"pk": {"S": "shard#7"}, "ver": {"N": "3"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAQ=="}}}
+  },
+  {
+    "name": "get-item-absent",
+    "action": "GetItem",
+    "request": {"TableName": "kestrike-store", "Key": {"pk": {"S": "shard#7"}}, "ConsistentRead": true},
+    "status": 200,
+    "response": {}
+  },
+  {
+    "name": "get-item-throttled",
+    "action": "GetItem",
+    "request": {"TableName": "kestrike-store", "Key": {"pk": {"S": "shard#7"}}, "ConsistentRead": true},
+    "status": 400,
+    "response": {"__type": "com.amazonaws.dynamodb.v20120810#ThrottlingException", "message": "Throughput exceeds the current capacity of your table or index. DynamoDB is automatically scaling your table or index so please try again shortly. If exceptions persist, check if you have a hot key: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-partition-key-design.html", "throttlingReasons": [{"reason": "TableReadKeyRangeThroughputExceeded", "resource": "arn:aws:dynamodb:us-east-1:111122223333:table/kestrike-store"}]}
+  },
+  {
+    "name": "put-item-create",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "1"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "attribute_not_exists(pk)", "ReturnValues": "ALL_OLD"},
+    "status": 200,
+    "response": {}
+  },
+  {
+    "name": "put-item-exact",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "5"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "ver = :expect", "ExpressionAttributeValues": {":expect": {"N": "4"}}, "ReturnValues": "ALL_OLD"},
+    "status": 200,
+    "response": {"Attributes": {"pk": {"S": "shard#7"}, "ver": {"N": "4"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAQ=="}}}
+  },
+  {
+    "name": "conditional-check-failed",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "5"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "ver = :expect", "ExpressionAttributeValues": {":expect": {"N": "4"}}, "ReturnValues": "ALL_OLD"},
+    "status": 400,
+    "response": {"__type": "com.amazonaws.dynamodb.v20120810#ConditionalCheckFailedException", "message": "The conditional request failed"}
+  },
+  {
+    "name": "validation-item-size",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "1"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "attribute_not_exists(pk)", "ReturnValues": "ALL_OLD"},
+    "status": 400,
+    "response": {"__type": "com.amazon.coral.validate#ValidationException", "message": "Item size has exceeded the maximum allowed size"}
+  },
+  {
+    "name": "access-denied",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "1"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "attribute_not_exists(pk)", "ReturnValues": "ALL_OLD"},
+    "status": 400,
+    "response": {"__type": "com.amazon.coral.service#AccessDeniedException", "Message": "User: arn:aws:sts::111122223333:assumed-role/kestrike-host/i-0123456789abcdef0 is not authorized to perform: dynamodb:PutItem on resource: arn:aws:dynamodb:us-east-1:111122223333:table/kestrike-store"}
+  },
+  {
+    "name": "throttling",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "1"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "attribute_not_exists(pk)", "ReturnValues": "ALL_OLD"},
+    "status": 400,
+    "response": {"__type": "com.amazonaws.dynamodb.v20120810#ThrottlingException", "message": "Throughput exceeds the current capacity of your table or index. DynamoDB is automatically scaling your table or index so please try again shortly."}
+  },
+  {
+    "name": "provisioned-throughput-exceeded",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "1"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "attribute_not_exists(pk)", "ReturnValues": "ALL_OLD"},
+    "status": 400,
+    "response": {"__type": "com.amazonaws.dynamodb.v20120810#ProvisionedThroughputExceededException", "message": "The level of configured provisioned throughput for the table was exceeded. Consider increasing your provisioning level with the UpdateTable API."}
+  },
+  {
+    "name": "internal-server-error",
+    "action": "PutItem",
+    "request": {"TableName": "kestrike-store", "Item": {"pk": {"S": "shard#7"}, "ver": {"N": "1"}, "val": {"B": "cmVjb3Jk"}, "wid": {"B": "AQIDBAUGBwgAAAAAAAAAAA=="}}, "ConditionExpression": "attribute_not_exists(pk)", "ReturnValues": "ALL_OLD"},
+    "status": 500,
+    "response": {"__type": "com.amazonaws.dynamodb.v20120810#InternalServerError", "message": "Internal server error"}
+  }
+]

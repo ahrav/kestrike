@@ -1,0 +1,25 @@
+{
+  "id": "dsw-239",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/volume/attach.rs",
+    "function": "Volume::wake_waiting"
+  },
+  "defect": "The close clears the waiting bit only of a record with tick work; a read whose command is at the device and whose kept grant waited for a command ahead keeps its bit, so each later tick with room moves the cursor and serves nothing until the held command returns.",
+  "property": {
+    "text": "A call with room and nothing to do leaves the cursor.",
+    "place": "obligation",
+    "pointer": "tick-cursor-moves-only-on-a-call-that-serves"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "property",
+  "evidence": {
+    "unjudged": "wake_waiting, called by Volume::close, clears the waiting bit only of a record with tick work. The effect is a moved tick cursor: no rule text of net/world_tests/narrate/rules.rs and no observer check reads the tick cursor or the waiting set, which are pub(super) fields of storage/volume/attach.rs outside VolumeReport. Under net::Owner the state does not form at any read_ahead, as the note and the exclusion state.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. A run that formed the state could fail no rule, since none judges the cursor."
+  },
+  "note": "Cause, evidence and catch are set by the unit of #297 that writes this family's history (M1-3). `Volume::close` in the same file calls it. The documentation of `Volume::poll_storage` states the same. The record supports cause property: the effect is the cursor only, no rule text or observer check reads the cursor or the waiting set, and the history world's storage has `read_ahead` 0. By reading, the state cannot form under net::Owner at any read_ahead: Owner::close retires every peer, which ends every request, then cancels every bound read that is not done (Owner::cancel_ended calls Volume::cancel_read, which clears the read's waiting bit), and only then calls Volume::close. Profiles and histories drive a volume only through net::Owner. Excluded by exclusions/volume-close-after-cancel.json, open for the owner.",
+  "exclusion": "volume-close-after-cancel"
+}

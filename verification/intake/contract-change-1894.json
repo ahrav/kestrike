@@ -1,0 +1,13 @@
+{
+  "id": "contract-change-1894",
+  "kind": "contract-change",
+  "pull_request": 1894,
+  "escape": "ivk-2330",
+  "changed": "The invariant and tests of the obligation record warm-activation-commits-allocation-before-fills, and the invariant of warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "warm-activation-commits-allocation-before-fills",
+    "reason": "Its invariant states the new contract: an entry is omitted as expired only when its portable deadline lies at or below the earliest bound of the load's reading, less one second on a stepped scale, and every other entry the load judges expired keeps its units or refuses the load, so an entry a later load restores serves its exact bytes."
+  }
+}

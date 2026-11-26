@@ -1,0 +1,307 @@
+diff --git a/crates/kestrike/src/storage/acquire.rs b/crates/kestrike/src/storage/acquire.rs
+index f8d2d3778..9730b6d4d 100644
+--- a/crates/kestrike/src/storage/acquire.rs
++++ b/crates/kestrike/src/storage/acquire.rs
+@@ -143,20 +143,8 @@ thread_local! {
+         const { std::cell::Cell::new(None) };
+ }
+ 
+-/// When the policy hit of a retain reaches the object's word.
+-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-pub(super) enum Hit {
+-    /// The retain's exchange sets the visited bit with the right.
+-    WithRight,
+-    /// The exchange leaves the bit as found. The holder calls
+-    /// [`LeaseCounters::visit`] once the verdict that follows its right
+-    /// grants the lease, so a right returned on a refusal leaves no hit.
+-    OnGrant,
+-}
+-
+ /// Adds one external right to `slot_word`, expecting `current`, the word
+-/// the caller loaded, and for [`Hit::WithRight`] sets the visited bit in the
+-/// same exchange. While
++/// the caller loaded, and sets the visited bit in the same exchange. While
+ /// the anchor is live the count holds it, so the rights are `refs - 1`. The
+ /// exchange admits only a well-formed word on `incarnation` with a nonzero
+ /// count, so a retain racing a reuse of the slot fails.
+@@ -173,7 +161,6 @@ pub(super) fn retain_right(
+     incarnation: u32,
+     retains: &RetainCounters,
+     limit: usize,
+-    hit: Hit,
+     budget: &mut WorkBudget,
+ ) -> Result<(), LeaseRefusal> {
+     // The word's own refusal first, so a moved incarnation, a reserved bit
+@@ -181,11 +168,7 @@ pub(super) fn retain_right(
+     // limit. The count holds at most `C + 1`, so a count above `C` has
+     // every right taken, and refusing it keeps the exchange from carrying
+     // the count past the word's width.
+-    let next = match hit {
+-        Hit::WithRight => word::retained,
+-        Hit::OnGrant => word::counted,
+-    };
+-    let admit = |current| match next(current, incarnation) {
++    let admit = |current| match word::retained(current, incarnation) {
+         None => Err(LeaseRefusal::Retired),
+         Some(_) if word::refs(current) > limit => Err(LeaseRefusal::RetainLimit),
+         Some(next) => Ok(next),
+@@ -258,10 +241,9 @@ impl<'a, P: Platform> LeaseCounters<'a, P> {
+     /// then one right on `incarnation` of the object within
+     /// `root.object_rights`, the retain expecting `current`, the word the
+     /// caller loaded, through the bounded loops, with the retain's failed
+-    /// exchanges counted in `retains` and its hit landing as `hit` says. On
+-    /// any refusal every reservation this call made is back before the error.
++    /// exchanges counted in `retains`. On any refusal every reservation this
++    /// call made is back before the error.
+     #[inline(always)]
+-    #[expect(clippy::too_many_arguments)]
+     pub(super) fn reserve(
+         self,
+         root: &RootDescriptor,
+@@ -269,7 +251,6 @@ impl<'a, P: Platform> LeaseCounters<'a, P> {
+         retains: &RetainCounters,
+         incarnation: u32,
+         current: u64,
+-        hit: Hit,
+         budget: &mut WorkBudget,
+     ) -> Result<(), LeaseRefusal> {
+         // READ-READY requires `Live` readiness before granting access to a slot carrying the recovered-origin marker.
+@@ -283,7 +264,6 @@ impl<'a, P: Platform> LeaseCounters<'a, P> {
+             incarnation,
+             retains,
+             root.object_rights,
+-            hit,
+             budget,
+         );
+         if let Err(error) = retained {
+@@ -293,15 +273,6 @@ impl<'a, P: Platform> LeaseCounters<'a, P> {
+         Ok(())
+     }
+ 
+-    /// Sets the visited bit of the object a [`Hit::OnGrant`] reservation
+-    /// counted. The caller holds that right, so the word's incarnation is
+-    /// the object's own and no reuse of the slot can receive the bit.
+-    #[inline(always)]
+-    pub(super) fn visit(self) {
+-        probe::note(Primitive::Rmw);
+-        word::visit(self.slot_word);
+-    }
+-
+     /// Gives back what [`reserve`](Self::reserve) took, in reverse order:
+     /// the right, then the credit to `credit`, each once. The caller holds
+     /// that right, so the count is positive and the word's incarnation is the
+@@ -329,24 +300,22 @@ impl<'a, P: Platform> LeaseCounters<'a, P> {
+ /// retain admits only a word on `incarnation` with a positive count, so a
+ /// slot returned or reused since the caller learned the incarnation refuses
+ /// `Retired` and gains no right. On any refusal every reservation this call
+-/// made is back before the error. The retain sets no visited bit; the
+-/// follower sets it through the returned counters once its cutoff read
+-/// grants the lease.
++/// made is back before the error.
+ ///
+ /// # Safety
+ ///
+ /// `slot` is below `pool`'s slot count, the count its tables were sized
+ /// from.
+ #[inline]
+-pub(super) unsafe fn reserve_incarnation<'a, P: Platform>(
+-    storage: &'a Storage<P>,
+-    pool: &'a Pool,
++pub(super) unsafe fn reserve_incarnation<P: Platform>(
++    storage: &Storage<P>,
++    pool: &Pool,
+     slot: usize,
+     root: &RootDescriptor,
+     incarnation: u32,
+     credit: Credit,
+     budget: &mut WorkBudget,
+-) -> Result<LeaseCounters<'a, P>, LeaseRefusal> {
++) -> Result<(), LeaseRefusal> {
+     // SAFETY: the caller's `slot < O`; the retain below validates the
+     // incarnation and a positive count itself, so it needs no protection
+     // beyond the slot index.
+@@ -358,10 +327,8 @@ pub(super) unsafe fn reserve_incarnation<'a, P: Platform>(
+         &pool.telemetry().retains,
+         incarnation,
+         current,
+-        Hit::OnGrant,
+         budget,
+-    )?;
+-    Ok(counters)
++    )
+ }
+ 
+ /// Reserves one engine credit within `L`, then one right on `id`'s object
+@@ -395,7 +362,6 @@ pub(super) unsafe fn reserve_lease<P: Platform>(
+         &pool.telemetry().retains,
+         id.incarnation(),
+         current,
+-        Hit::WithRight,
+         budget,
+     )
+ }
+diff --git a/crates/kestrike/src/storage/join.rs b/crates/kestrike/src/storage/join.rs
+index 8a1fafe75..9db51ef90 100644
+--- a/crates/kestrike/src/storage/join.rs
++++ b/crates/kestrike/src/storage/join.rs
+@@ -14,13 +14,13 @@
+ //! over a fill in progress. A refused lookup returns its refusal and joins
+ //! nothing.
+ //!
+-//! A follower's successful acquisition takes its right through the bounded
+-//! retain every lease takes, checked against the version's full 32-bit
+-//! incarnation, and sets the visited bit of that exact slot word once its
+-//! cutoff read grants the lease: the one policy hit of a successful joined
+-//! read, on the incarnation the follower reads. A follower whose
+-//! acquisition ends without a lease (missing, failed, expired or refused)
+-//! or that detaches first keeps no right and sets no bit.
++//! A follower's successful acquisition takes its right through the retain
++//! every lease takes, which sets the visited bit of the exact slot word it
++//! names, checked against the version's full 32-bit incarnation: the one
++//! policy hit of a successful joined read, on the incarnation the follower
++//! reads. A follower whose acquisition ends without a lease (missing,
++//! failed, expired or refused) or that detaches first takes no right and
++//! sets no bit.
+ //!
+ //! [`Storage::join_fill`] routes the key, takes its shard gate within the
+ //! caller's tries and scans the shard's fill table: one paid visit per record
+@@ -76,12 +76,12 @@
+ //! holds a right, and otherwise reports it missing. The incarnation-checked
+ //! exchange decides whether the right is taken. The admission cutoff is
+ //! read with `SeqCst` before the reservation, so a follower that finds it
+-//! closed refuses `Closed` having taken no right. It is read with `SeqCst`
+-//! again after the reservation, so a close that lands during the
+-//! reservation also rejects admission with `Closed`: the lease's drop
+-//! returns the right and then the credit. The follower's retain leaves the
+-//! visited bit as it found it, so neither refusal sets it. An open cutoff
+-//! sets the bit, under the right just counted, and detaches the follower.
++//! closed refuses `Closed` having taken no right and set no bit. It is read
++//! with `SeqCst` again after the reservation, so a close that lands during
++//! the reservation also rejects admission with `Closed`: the lease's drop
++//! returns the right and then the credit, and the visited bit the retain set
++//! stays, as it does for a direct lease. An open cutoff detaches the follower
++//! once its right is counted.
+ //!
+ //! Detaching, by [`FillFollower::detach`] or drop, lowers the observer count
+ //! with one `Release` subtraction outside the gate, sequenced after every
+@@ -98,7 +98,7 @@
+ use std::mem::ManuallyDrop;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+-use super::acquire::{LeaseCounters, LeaseRefusal, reserve_incarnation};
++use super::acquire::{LeaseRefusal, reserve_incarnation};
+ use super::allocation::AllocationId;
+ use super::attempt::FillHold;
+ use super::budget::{BudgetExhausted, WorkBudget, WorkKind};
+@@ -1015,22 +1015,18 @@ impl<'s, P: Platform> FillFollower<'s, P> {
+             Ok(Observed::Pending) => return Err((self, JoinedReadError::Pending)),
+             Err(error) => return Err((self, error.into())),
+         };
+-        // A cutoff already closed refuses before any reservation.
++        // A cutoff already closed refuses before the retain sets the visited bit.
+         if self.storage.is_closed() {
+             return Err((self, JoinedReadError::Closed));
+         }
+-        let counters = match self.reserve(&version, credit, budget) {
+-            Ok(counters) => counters,
+-            Err(error) => return Err((self, error)),
+-        };
++        if let Err(error) = self.reserve(&version, credit, budget) {
++            return Err((self, error));
++        }
+         let held = hold(self.storage, &version);
+         if self.storage.closed().load(Ordering::SeqCst) {
+             drop(held);
+             return Err((self, JoinedReadError::Closed));
+         }
+-        // The lease is granted, so the read earns its hit; `held` owns the
+-        // right that keeps the word on the version's incarnation.
+-        counters.visit();
+         // The right is counted, so the follower's interest ends here.
+         let follower = ManuallyDrop::new(self);
+         probe::note(Primitive::Rmw);
+@@ -1039,13 +1035,13 @@ impl<'s, P: Platform> FillFollower<'s, P> {
+     }
+ 
+     /// The deadline check, then the credit from `credit`'s source and the
+-    /// right on `version`'s exact incarnation, with no visited bit set.
++    /// right on `version`'s exact incarnation.
+     fn reserve(
+         &self,
+         version: &JoinedVersion,
+         credit: Credit,
+         budget: &mut WorkBudget,
+-    ) -> Result<LeaseCounters<'s, P>, JoinedReadError> {
++    ) -> Result<(), JoinedReadError> {
+         let ticks = self
+             .storage
+             .platform
+@@ -1070,8 +1066,8 @@ impl<'s, P: Platform> FillFollower<'s, P> {
+                 credit,
+                 budget,
+             )
+-        }
+-        .map_err(JoinedReadError::from)
++        }?;
++        Ok(())
+     }
+ 
+     /// Ends the follower's interest; its drop does the same.
+diff --git a/crates/kestrike/src/storage/lookup.rs b/crates/kestrike/src/storage/lookup.rs
+index 1b3acace2..a2fbc63e3 100644
+--- a/crates/kestrike/src/storage/lookup.rs
++++ b/crates/kestrike/src/storage/lookup.rs
+@@ -191,7 +191,7 @@
+ 
+ use std::sync::atomic::Ordering;
+ 
+-use super::acquire::{Hit, LeaseCounters, LeaseRefusal};
++use super::acquire::{LeaseCounters, LeaseRefusal};
+ use super::allocation::AllocationId;
+ use super::budget::{WorkBudget, WorkKind};
+ use super::image::RootDescriptor;
+@@ -700,7 +700,6 @@ impl<'s, P: Platform> Reserved<'s, P> {
+             retains,
+             incarnation,
+             validated.word,
+-            Hit::WithRight,
+             budget,
+         )?;
+         Ok(Self {
+diff --git a/crates/kestrike/src/storage/word.rs b/crates/kestrike/src/storage/word.rs
+index e35359561..e00a8a9a0 100644
+--- a/crates/kestrike/src/storage/word.rs
++++ b/crates/kestrike/src/storage/word.rs
+@@ -259,31 +259,13 @@ pub(crate) const fn parked(word: u64, incarnation: u32, marks: u64) -> Option<u6
+ /// its limit before exchanging, so the count never passes [`REFS_MAX`].
+ #[inline(always)]
+ pub(crate) const fn retained(word: u64, incarnation: u32) -> Option<u64> {
+-    match counted(word, incarnation) {
+-        Some(next) => Some(next | VISITED),
+-        None => None,
+-    }
+-}
+-
+-/// [`retained`] with [`VISITED`] left as found, for a holder whose hit
+-/// waits on a verdict that follows the right.
+-#[inline(always)]
+-pub(crate) const fn counted(word: u64, incarnation: u32) -> Option<u64> {
+     if word as u32 != incarnation || !well_formed(word) || refs(word) == 0 {
+         None
+     } else {
+-        Some(word.wrapping_add(REF))
++        Some(word.wrapping_add(REF) | VISITED)
+     }
+ }
+ 
+-/// Sets [`VISITED`] on `slot_word` and changes nothing else. The caller
+-/// holds a right it took through [`counted`], so the word stays on that
+-/// right's incarnation with a positive count.
+-#[inline(always)]
+-pub(crate) fn visit(slot_word: &AtomicU64) {
+-    slot_word.fetch_or(VISITED, Ordering::Relaxed);
+-}
+-
+ /// The word the anchor's release leaves when it finds `word`: [`ANCHORED`]
+ /// cleared and the count one lower, in one write.
+ #[inline(always)]

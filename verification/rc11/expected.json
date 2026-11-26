@@ -1,0 +1,259 @@
+{
+  "herd7": "7.58",
+  "model": "rc11.cat",
+  "options": [
+    "-model",
+    "rc11.cat",
+    "-speedcheck",
+    "false"
+  ],
+  "closure": {
+    "cos-no-opt.cat": "2c3d73a446502c08788e7fecd8ccfce3af7482da0da1b542b3a4890a160840df",
+    "cos-ok-opt.cat": "5d63ea4237c7a905cc60e739f5011dc4c7bb2e35c5f6072393d11a25a4967982",
+    "cos.cat": "d5c9581821cca37855f5099439f2e176fd6f3ddc3baa09e0153fa4a4d905459f",
+    "cross.cat": "8b2dbe9cc3175d5bd8067ab80b4c6024949c743d16e47b13f8230c52ca06bbde",
+    "rc11.cat": "62a095a30700722d4cf08a5ca4ee5bf6e76466a4c056bea1047c4ea8cd4d6128",
+    "stdlib.cat": "46c6eb7b5eb8820760d20b557280e9399ba247e30343ab8ad7e8cb72eee93624"
+  },
+  "tests": {
+    "L0-no-fences": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0)",
+      "outcome": "Sometimes",
+      "drops_from": "L1-both-fences"
+    },
+    "L1-both-fences": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0)",
+      "outcome": "Never",
+      "base": true
+    },
+    "L2a-park-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0)",
+      "outcome": "Sometimes",
+      "drops_from": "L1-both-fences"
+    },
+    "L2b-scan-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0)",
+      "outcome": "Sometimes",
+      "drops_from": "L1-both-fences"
+    },
+    "L3-intermediary-fence-unordered": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0 /\\ 2:r0=1)",
+      "outcome": "Sometimes"
+    },
+    "L4-intermediary-fence-hb-before-scan-fence": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0 /\\ 2:r0=1 /\\ 1:r1=1)",
+      "outcome": "Never"
+    },
+    "L5-scan-fence-hb-before-intermediary-fence": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0 /\\ 2:r0=1 /\\ 2:r1=1)",
+      "outcome": "Sometimes"
+    },
+    "L6-production-seqcst-accesses": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0)",
+      "outcome": "Never"
+    },
+    "L7-mixed-seqcst-rmw-vs-fenced": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 1:r0=0)",
+      "outcome": "Never"
+    },
+    "G0-grace-production-seqcst": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Never"
+    },
+    "G1-grace-all-fences": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Never",
+      "base": true
+    },
+    "G2-grace-pin-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Sometimes",
+      "drops_from": "G1-grace-all-fences"
+    },
+    "G3-grace-reader-fence-alone": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Sometimes",
+      "drops_from": "G1-grace-all-fences"
+    },
+    "G4-grace-retire-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Never",
+      "drops_from": "G1-grace-all-fences",
+      "redundant": "when the reader saw the entry and the pass read the bumped era, the reader's pin fence precedes the maintainer's certify fence in the SC fence order, so the pass's pin load reads the reader's pin store and the pinned reader stays protected within the one-reader domain; the record genmc-grace-control-adjudication-one-reader states the argument",
+      "joint": "G3-grace-reader-fence-alone"
+    },
+    "G5-grace-certify-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Never",
+      "drops_from": "G1-grace-all-fences",
+      "redundant": "the reader's pin fence and the writer's retire fence still order the removal before the bump and the pin store before the observation load, so the pinned reader stays protected within the one-reader domain; the record genmc-grace-control-adjudication-one-reader states the argument",
+      "joint": "G3-grace-reader-fence-alone"
+    },
+    "G6-grace-bump-relaxed": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Sometimes"
+    },
+    "G7-grace-start-relaxed": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Sometimes"
+    },
+    "G8-claim-production-seqcst": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Never"
+    },
+    "G9-claim-misencoded": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 2:r0=2 /\\ 2:r1=0)",
+      "outcome": "Sometimes"
+    },
+    "G10-composite-all-fences": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 0:r2=1 /\\ 2:r0=2 /\\ (2:r1=0 \\/ 2:r2=0))",
+      "outcome": "Never",
+      "base": true
+    },
+    "G11-composite-retire-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 0:r2=1 /\\ 2:r0=2 /\\ (2:r1=0 \\/ 2:r2=0))",
+      "outcome": "Never",
+      "drops_from": "G10-composite-all-fences",
+      "redundant": "the composite form of G4-grace-retire-fence-dropped, with the reader's claim fence beside its pin fence; the record genmc-grace-control-adjudication-one-reader states the argument",
+      "joint": "G13-composite-reader-fences-alone"
+    },
+    "G12-composite-certify-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 0:r2=1 /\\ 2:r0=2 /\\ (2:r1=0 \\/ 2:r2=0))",
+      "outcome": "Never",
+      "drops_from": "G10-composite-all-fences",
+      "redundant": "the composite form of G5-grace-certify-fence-dropped, with the reader's claim fence beside its pin fence; the record genmc-grace-control-adjudication-one-reader states the argument",
+      "joint": "G13-composite-reader-fences-alone"
+    },
+    "G13-composite-reader-fences-alone": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 0:r2=1 /\\ 2:r0=2 /\\ (2:r1=0 \\/ 2:r2=0))",
+      "outcome": "Sometimes",
+      "drops_from": "G10-composite-all-fences"
+    },
+    "G14-composite-claim-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 0:r2=1 /\\ 2:r0=2 /\\ (2:r1=0 \\/ 2:r2=0))",
+      "outcome": "Never",
+      "drops_from": "G10-composite-all-fences",
+      "redundant": "under this composite condition, which requires the reader to have seen the entry (0:r2=1), the pin fence follows the claim in the same thread, so it orders the claim before the observation load as the claim fence does; under the claim-bound condition of G8-claim-production-seqcst, which has no 0:r2 term, the claim fence and the certify fence together order the reader's claim before the pass's claimed-bound load, so there the outcome is forbidden only with the claim fence present; no test of this base declares that condition"
+    },
+    "G15-composite-pin-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (0:r1=1 /\\ 0:r2=1 /\\ 2:r0=2 /\\ (2:r1=0 \\/ 2:r2=0))",
+      "outcome": "Sometimes",
+      "drops_from": "G10-composite-all-fences"
+    },
+    "C0-cutoff-production-pin-first": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=0 /\\ 2:r0=1 /\\ 2:r1=0)",
+      "outcome": "Never"
+    },
+    "C1-cutoff-read-first": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=0 /\\ 2:r0=1 /\\ 2:r1=0)",
+      "outcome": "Sometimes"
+    },
+    "C2-cutoff-admitted-reachable": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=0 /\\ 2:r0=1 /\\ 2:r1=1)",
+      "outcome": "Sometimes"
+    },
+    "C3-cutoff-refused-reachable": {
+      "header": "Allowed",
+      "condition": "exists (0:r0=1)",
+      "outcome": "Sometimes"
+    },
+    "T0-terminal-removal-own-fence": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 2:r0=0 /\\ 2:r1=2 /\\ 2:r2=0)",
+      "outcome": "Never",
+      "base": true
+    },
+    "T1-terminal-removal-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 2:r0=0 /\\ 2:r1=2 /\\ 2:r2=0)",
+      "outcome": "Sometimes",
+      "drops_from": "T0-terminal-removal-own-fence"
+    },
+    "T2-terminal-removal-observed": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 2:r0=0 /\\ 2:r1=2)",
+      "outcome": "Sometimes"
+    },
+    "T3-terminal-removal-terminator-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 2:r0=0 /\\ 2:r1=2 /\\ 2:r2=0)",
+      "outcome": "Never",
+      "drops_from": "T0-terminal-removal-own-fence",
+      "redundant": "the next holder's own release fence, after its acquire of the handoff, makes the reader's load of the bare store synchronize with the holder, so the terminal store happens before the reader's recheck; S3-sequence-bracket-open-fence-dropped is the control for the terminator's fence"
+    },
+    "S0-sequence-bracket-committed": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=0 /\\ 1:r1=2 /\\ 1:r2=0)",
+      "outcome": "Never",
+      "base": true
+    },
+    "S1-sequence-bracket-committed-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=0 /\\ 1:r1=2 /\\ 1:r2=0)",
+      "outcome": "Sometimes",
+      "drops_from": "S0-sequence-bracket-committed"
+    },
+    "S2-sequence-bracket-open": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=0 /\\ 1:r1=2 /\\ 1:r2=0)",
+      "outcome": "Never",
+      "base": true
+    },
+    "S3-sequence-bracket-open-fence-dropped": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=0 /\\ 1:r1=2 /\\ 1:r2=0)",
+      "outcome": "Sometimes",
+      "drops_from": "S2-sequence-bracket-open"
+    },
+    "F0-fill-terminal-production": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 1:r1=1)",
+      "outcome": "Never"
+    },
+    "F1-fill-terminal-release-dropped": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 1:r1=1)",
+      "outcome": "Sometimes"
+    },
+    "F2-fill-terminal-acquire-dropped": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 1:r1=1)",
+      "outcome": "Sometimes",
+      "drops_from": "F3-fill-terminal-acquire-fence"
+    },
+    "F3-fill-terminal-acquire-fence": {
+      "header": "Allowed",
+      "condition": "exists (1:r0=1 /\\ 1:r1=1)",
+      "outcome": "Never",
+      "base": true
+    }
+  }
+}

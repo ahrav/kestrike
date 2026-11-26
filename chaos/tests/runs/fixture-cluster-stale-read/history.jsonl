@@ -1,0 +1,2 @@
+{"build": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3", "campaign": "fixture-cluster-stale-read", "counts": {}, "profile": "cluster-broad", "runs": {"first": 0, "next": 122233}}
+{"build": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3", "campaign": "fixture-cluster-stale-read", "counts": {}, "profile": "cluster-stale-read", "runs": {"first": 0, "next": 73294}}

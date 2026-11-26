@@ -1,0 +1,12 @@
+{
+  "command": "python3 -I chaos/harness/reach.py aws ec2 stop-instances --dry-run --instance-ids self",
+  "exit_status": 1,
+  "fence": "ks-fleet-compute-is-unreachable",
+  "identity": {
+    "command": "python3 -I chaos/harness/reach.py identity",
+    "output": "unix user tsw; aws role bsw-ct1-worker-host; github login ahrav"
+  },
+  "output": "aws: [ERROR]: An error occurred (UnauthorizedOperation) when calling the StopInstances operation: You are not authorized to perform this operation. User: arn:aws:sts::<account>:assumed-role/bsw-ct1-worker-host/i-02d283139ecb400e8 is not authorized to perform: ec2:StopInstances on resource: arn:aws:ec2:us-west-2:<account>:instance/i-02d283139ecb400e8 because no identity-based policy allows the ec2:StopInstances action. Encoded authorization failure message: <cut>\naws exit 254\n",
+  "ran": "2026-11-25T06:33:35Z",
+  "refused": true
+}

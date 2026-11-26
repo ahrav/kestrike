@@ -1,0 +1,10 @@
+{
+  "id": "disagreement-root-slot-layout",
+  "kind": "disagreement",
+  "escape": "ivk-2350",
+  "sources": [
+    "crates/kestrike/src/failover/records.rs, the prefix layout, which places the checkpoint slots from unit 1 of the metadata prefix, in 4096-byte units",
+    "crates/kestrike/src/storage/recovery/mod.rs, module documentation, invariant ONE-QUALIFIED-WRITE-PER-BLOCK: the prefix splits into blocks of the persistence profile's unit, \"block 0 root slot A and block 1 root slot B\""
+  ],
+  "disagrees": "With a persistence unit above 4096 bytes, root block 1 covers bytes that source 1 gives to checkpoint units, so a checkpoint-unit write overwrites a root slot."
+}

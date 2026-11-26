@@ -1,0 +1,61 @@
+diff --git a/crates/kestrike/src/storage/attempt.rs b/crates/kestrike/src/storage/attempt.rs
+index 09c531b1a..021ed4340 100644
+--- a/crates/kestrike/src/storage/attempt.rs
++++ b/crates/kestrike/src/storage/attempt.rs
+@@ -483,7 +483,7 @@ impl<P: Platform> Storage<P> {
+                 // its tables.
+                 let hold = unsafe { image.hold(&index.mapping) };
+                 let owner = AllocationId::of_record_tag(row.allocation());
+-                if place_claim::check(&hold, control, claimed, owner).is_none() {
++                if place_claim::check(&hold, control, claimed, owner, true).is_none() {
+                     return Err(());
+                 }
+                 place_claim::refund(&hold, control, &mut places[position]);
+diff --git a/crates/kestrike/src/storage/place_claim.rs b/crates/kestrike/src/storage/place_claim.rs
+index 55a488677..922bdc611 100644
+--- a/crates/kestrike/src/storage/place_claim.rs
++++ b/crates/kestrike/src/storage/place_claim.rs
+@@ -203,6 +203,7 @@ pub(crate) fn check(
+     control: &ShardControl,
+     claimed: Claimed,
+     owner: AllocationId,
++    match_owner: bool,
+ ) -> Option<Identity> {
+     if claimed.pair >= PAIRS || control.reserved.load(Ordering::Relaxed) == 0 {
+         return None;
+@@ -212,7 +213,7 @@ pub(crate) fn check(
+         return None;
+     }
+     let pending = Identity::unpack(bucket.pending_word(claimed.pair)?);
+-    (pending == Identity::new(pending.tag, owner)).then_some(pending)
++    (!match_owner || pending == Identity::new(pending.tag, owner)).then_some(pending)
+ }
+ 
+ /// Refunds the place the place word `word` names, under the shard gate
+diff --git a/crates/kestrike/src/storage/publish.rs b/crates/kestrike/src/storage/publish.rs
+index e4b1353cc..863c5228c 100644
+--- a/crates/kestrike/src/storage/publish.rs
++++ b/crates/kestrike/src/storage/publish.rs
+@@ -932,8 +932,7 @@ pub(super) fn prepare<P: Platform>(
+     // caller refunds it on every refusal except `Corrupt`, a terminal or
+     // exhausting sequence's `IndexFull` among them.
+     if let Some(claimed) = claimed
+-        && !place_claim::check(hold, control, claimed, id)
+-            .is_some_and(|pending| pending.tag == route.tag())
++        && place_claim::check(hold, control, claimed, id, false).is_none()
+     {
+         return Err(PublishError::Corrupt);
+     }
+diff --git a/crates/kestrike/src/storage/remove.rs b/crates/kestrike/src/storage/remove.rs
+index 68dc176ff..657bb24aa 100644
+--- a/crates/kestrike/src/storage/remove.rs
++++ b/crates/kestrike/src/storage/remove.rs
+@@ -942,7 +942,7 @@ fn clear(
+         ..
+     }) = &joint
+         && let Some(claimed) = Claimed::of(**place)
+-        && place_claim::check(&hold, control, claimed, *owner).is_none()
++        && place_claim::check(&hold, control, claimed, *owner, true).is_none()
+     {
+         return Err(Refusal::Corrupt.into());
+     }

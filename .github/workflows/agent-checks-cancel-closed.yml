@@ -1,0 +1,19 @@
+name: agent-checks-cancel-closed
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions: {}
+
+# Match the build workflow's PR group without creating another Rust gate.
+concurrency:
+  group: agent-checks-pull_request-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  agent-checks-close-signal:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - run: ":"

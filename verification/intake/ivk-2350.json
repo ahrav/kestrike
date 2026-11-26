@@ -1,0 +1,51 @@
+{
+  "id": "ivk-2350",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/recovery/persisted.rs",
+    "function": "Area::unit_range and Area::range"
+  },
+  "defect": "Checkpoint-unit writes land inside the root slots, so on a device whose persistence unit is above 4096 bytes two checkpoints can leave no decodable root. A relaunch under a session below the tenure's then ends `Unformatted`, the answer to two invalid slots (`decide` in storage/recovery/root.rs); with the tenure's root kept whole it would end `StaleSession`.",
+  "property": {
+    "text": "The prefix `[0, M * IO_UNIT)` splits into blocks of the persistence profile's unit `U`, block 0 root slot A and block 1 root slot B, and each metadata block reaches the device as one write of its whole range.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/storage/recovery/mod.rs, module documentation, invariant ONE-QUALIFIED-WRITE-PER-BLOCK"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "note": "Cause and evidence set by M1-2 (#318); catch and property_action set by M1b-2 (#333); bug issue #329. The invariant NO-REISSUE of crates/kestrike/src/storage/recovery/mod.rs states the guarantee the layout breaks: the bootstrap refuses `StaleSession` when a valid root holds a generation at or above the session. ONE-QUALIFIED-WRITE-PER-BLOCK also stands in the module documentation of storage/recovery/persisted.rs. disagreement-root-slot-layout records the layout text of failover/records.rs, which places the checkpoint slots from unit 1 in 4096-byte units; it stays open, and neither this property nor the catch settles which text holds. The new rule text states the clause \"every relaunch writes its tenure session above every generation the slots held\" of the obligation record reset-roots-leave-no-older-root-selectable. The history attaches its probe on a storage of its own over the closed tenure's media and relaunches no owner: a scene cannot start over a volume whose bootstrap refused, and the sibling's attach must refuse.",
+  "cause": "environment",
+  "evidence": {
+    "gap": "Before #333 every world, profile and history of the campaign attached its simulated device through `facts_for` of `crates/kestrike/src/storage/volume_fixture.rs`, which set `awupf: 7` and `nawupf: 0` over the identify fixture `EBS`, a 4096-byte persistence unit, and the defect needs a larger one; `git show 9a7be1245:crates/kestrike/src/storage/volume_fixture.rs | grep -n 'awupf: 7\\|BUFFER), 4096)'` prints the unit and the maintenance buffer length at the base; `rg -ln 'AttachFacts|facts_for\\(|facts_sized' crates/kestrike/src/sim crates/kestrike/src/worker.rs crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests` lists no file, so those trees build no other device facts. The simulated disk takes its unit from the attach facts its caller gives (`attach_refuses_each_metadata_input_before_its_claim_with_no_device_command` in storage/volume/bootstrap_tests.rs attaches one with an 8192-byte unit, and the row `atomic-unit` of the differences table in storage/device/fidelity_tests.rs records that an EBS volume's facts derive a 16,384-byte unit), but every arena of a scene held one 4096-byte maintenance buffer, which a wider unit's attach refuses (`MaintenanceShort`), and no history passed wider facts. Each relaunch also took a higher fixture session, and no rule text of narrate/rules.rs named a storage session or a root generation; its session rules name client and wire sessions. #333 adds a thread-local device unit to that fixture, held at 16384 bytes for the run of a history under `Geometry::WideUnit`, a probe attach under a named storage session that records its own device's root writes, and the rule text.",
+    "standing_check": "The scripted history rs1-wide-unit-roots-lost (crates/kestrike/src/net/world_tests/histories/root_slots.rs): on a 16384-byte unit a tenure attaches cold, its root slots both decode to its session, it publishes two capture passes in two slots with its suffix opened between them and closes, and a probe under the session one attempt below finds neither root block decoding, attaches the media, reads `Unformatted`, formats and ends `Open`, its device having written roots below the held generation; the history fails the rule, and both observations are its declared premise. Its sibling rs1-wide-unit-without-pass, with no pass, ends `StaleSession` with no root write and passes; the control rs1-without-pass-reissued fails the rule through the standing plant Plant::GenerationReuse. The seeded tests every_root_slot_control_fails_through_its_named_check and every_root_slot_history_ends_as_declared_under_pinned_roots run them."
+  },
+  "catch": {
+    "history": "rs1-wide-unit-roots-lost",
+    "rule": "an attach wrote a root generation at or below one the root slots held",
+    "tally": {
+      "build": "609d3182319b0ca69e548b265feecfef53f02cbc2a66e0390f5f1023b5f4c8d1",
+      "campaign": "bsw-ct1-2151-rs9",
+      "commit": "a4151646d",
+      "runs": 227464,
+      "run_range": "0..227463",
+      "ended": {
+        "violation": 227464,
+        "pass": 0,
+        "uncredited": 0
+      },
+      "missed": 0,
+      "suspects": 0,
+      "replays": 28,
+      "workers": 28,
+      "seconds": 121
+    }
+  },
+  "property_action": {
+    "action": "added",
+    "place": "rule",
+    "reference": "an attach wrote a root generation at or below one the root slots held",
+    "reason": "The rule text, in array MIXED of crates/kestrike/src/net/world_tests/narrate/rules.rs under the restart obligation, states the clause \"every relaunch writes its tenure session above every generation the slots held\" of the obligation record reset-roots-leave-no-older-root-selectable, and the history of this row fails it."
+  }
+}

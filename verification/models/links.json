@@ -1,0 +1,749 @@
+{
+  "models": [
+    {"path": "tla/Lifecycle.tla", "kinds": ["action"]},
+    {"path": "tla/Identity.tla", "kinds": ["action"]},
+    {"path": "tla/Recovery.tla", "kinds": ["action"]}
+  ],
+  "rows": [
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CBegin",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn put(", "digest": "60a088ded9bc3f4d46ec4a79ec48040aae93f1f7425e576744f789f14003ff64"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn send_marked(", "digest": "fd15aa2f66c7773501f0e625dcb97cd024a90daf01be8c5082d84c1c8be3c122"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub(super) fn handed(", "digest": "7b7460e39ae9970c82ffa371c5b3de092b95040baf96dc788d28d925bed55355"}
+      ],
+      "note": "`UploadCore::put` admits the upload in `Begin` with its PUT BEGIN due, and `send_marked` stages the frame `Upload::frame` builds. `handed` sets `handed` once a transport send call reached the frame, whether or not the transport took it, the model's `c.handed`, and marks a frame the transport did not take due again."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CAuthority",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "(Kind::PutAuthority, Phase::Begin) =>", "digest": "1a9b585a67e0799f31aa33e6fbedebd0f9e5f993d0fb8a30579846b18335a86e"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn receive(", "digest": "1ff0e10d4360050829e607a1d0be2b2eeaa1ff685fa7beb044d14f7840809105"}
+      ],
+      "note": "The arm of `UploadCore::receive` for PUT AUTHORITY in `Begin` records the fill serial and moves the upload to `Authority`. It also sets `handed`, since an answer shows a send reached the owner. `receive` drops AUTHORITY for an upload already decided; the model's `CAuthority` has no such guard."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CPrepare",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn prepare(", "digest": "5bbd28b6fd7707c33e2b3459450ca8736f4fc2c83a424e5df8cfe5226774de32"}
+      ],
+      "note": "`prepare` fixes the shape, moves an undecided upload from `Authority` to `Prepared` and makes PUT PREPARE due, which `send_marked` stages for the transport. The model's guard admits PREPARE after a cancel; the code refuses it."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CReady",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "(Kind::PutReady, Phase::Prepared) if upload.fits(header) =>", "digest": "c5af3b51836fb3781964d978e698035b4cfabdd2e76a857a136b08439efb352b"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn receipt(&mut self, index: u32, now_us: u64, retry_us: u64)", "digest": "ac312aa9d4ff4904827592e9e669395d2e11ff6a050649958237f97c3362fcb2"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn receive(", "digest": "1ff0e10d4360050829e607a1d0be2b2eeaa1ff685fa7beb044d14f7840809105"}
+      ],
+      "note": "The arm for PUT READY in `Prepared` moves the upload to `Ready` with the READY's grant and applies `receipt` with the READY's index, so an upload of no fragment moves on to `Received` in the same step, where the model's `CReady` leaves it ready. `receive` drops READY for an upload already decided, which the model's `CReady` does not guard. The arm for `Ready`, which raises the grant on a later READY, lies outside the model, whose every READY carries `Grant(0)`."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CSupply",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn supply(", "digest": "9005251bbc9277b3b7dcb1aae47239a5543f0312c0d6dcccf4c027b4983c31a7"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn fill(", "digest": "772e7b25d7fe8af63c3a10e5993eb5c3d6ae299a397f0a458b3e44f23f2162ab"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn takes_data(&self) -> bool", "digest": "6ca7055f03d1a6a1bcbf77342841cf33c7f774ae372fca505fbec1713a325ff3"}
+      ],
+      "note": "`supply` admits a fragment only to an upload that `takes_data` (undecided, not cancelled, in `Ready`), the model's guard, and `fill` copies it into a free source slot, the model's `c.src[i] = \"held\"`. The code admits any index from the receipt base below the fragment count that the upload holds no slot for, and applies the grant when DATA is staged (`next_data`), where the model supplies only within the grant. The supply rule the code holds keeps the last free source slot for the upload's lowest fragment at or above its receipt base that it holds no slot for and refuses another with `SupplyRefused::Prefix`; in the model each fragment has its own slot, so no slot is ever the last, and it supplies any fragment within the grant in any order, which over-approximates that order. Aligning the supply abstraction with that rule refreshes this row."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CSend",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn data(", "digest": "45719b8f3da29d8193dcb1a1db21335f81224e504d3b7c3d39122322a45e1cbf"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn stage(", "digest": "d33438cf797b78a2707ec97dbcb75aef957ef3df3f464f1edd16a1d174d639aa"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn next_data(&mut self, upload: &mut Upload)", "digest": "4f2d7480690fc8b00f34ec3bf5f50982ab15d207d7140d1c59d637f56bc21b7f"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn takes_data(&self) -> bool", "digest": "6ca7055f03d1a6a1bcbf77342841cf33c7f774ae372fca505fbec1713a325ff3"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn send_staged<'a, D: Datagrams<'a>>(", "digest": "ef4786bb466b1bfae2c24728e21a2cedda0e58f24387c7af5f73ff6ff26d3492"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn send_batch(&mut self, now_us: u64, report: &mut PollReport) -> Option<u64>", "digest": "c6d96346214aeab20080d0048e3236350903f7742223f931551bf8c24797ee15"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn send_one<'a, D: Datagrams<'a>>(", "digest": "b2d05fef6b7bca82a65f27e0d901391d56b42da2ec12aec697e25c1fa47e29e4"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn unsent(&mut self, requests: &mut ClientRequests<'_>, slot: u16)", "digest": "4515f4d39e97fe41d77bf13197a39fa70da319e82adb68e8b5dd4809dcc327cc"}
+      ],
+      "note": "`data` stages PUT DATA for due fragments of an upload that `takes_data`, `next_data` picks the lowest one below the grant, and `stage` encodes one frame from its source slot through the client's staging callback and marks the fragment no longer due. `send_staged` hands the sealed frames to the transport in order as datagrams, where a PUT DATA frame always leaves in a datagram of its own, with packed GETs only in the GET block its caller `send_batch` passes, which lies within the fetch frames ahead of every PUT frame; each PUT DATA datagram it takes carries the slot's retained buffer, which the NIC then reads, the model's `c.nic`. It runs until every frame went out or a call returns `Ok(0)`: a failed call loses its leading datagram, which counts as sent and lost and is not put back, and the next call offers the datagrams after it. It returns two frame counts: `done`, the frames the transport took or lost, and `reached`, the frames some call carried, from which `send_batch` sets the `handed` flag that the `CBegin` row pairs with `c.handed`: a PUT control frame that some call carried is handed whether or not the transport took it, one at or past `done` is marked due again, and one that led a failed call counts as lost and waits for its retry timer. `send_batch` builds the GET block from the GET frames it stages among the fetch frames and clips it to the sealed prefix; its anchor flags an edit to that range or to the `handed` comparisons for review. `send_batch` makes the transport call itself, through `send_one`, only for a poll whose frames are one datagram of fetch frames, so every poll with a PUT frame goes through `send_staged`, which passes a call's lone datagram to `send_one` with the frame's payload piece. `unsent` marks due again each staged PUT DATA frame at or past `done`, the first frame neither taken nor counted lost. The model sends a fragment only while the NIC holds none of it, where the code may send a fragment the NIC still reads again and holds one device reference per taken datagram; the model's `c.nic` is one membership bit per fragment. `CSupply`'s grant guard bounds which fragments the model sends."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CNicReturn",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/device/pool.rs", "quote": "pub(crate) unsafe fn nic_return(&self, index: u32, incarnation: u64) -> bool", "digest": "9464137fbeb0f8ccc43ab1196828ee71c515df771adcea779af068ef42a73c2c"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn release(slots: &mut [SourceSlot<'_>], free: &mut Option<u32>, upload: &mut Upload) -> bool", "digest": "5d644a506ab9dab076b188f7c53bde5d9fe955c5a40149f6d560f3a65cddf5ef"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn reclaim(&mut self, requests: &mut ClientRequests<'_>)", "digest": "5e1c49d595aaeaf26494fe2554641cdbcd041e080336a55e2b2ff8248be99460"},
+        {"path": "crates/kestrike/src/storage/device/custody.rs", "quote": "pub(crate) fn source_frees(", "digest": "b53ac62bf2722c6b492780d8c4adddd0f0c20b65c2a72756c2908ea4db313118"},
+        {"path": "crates/kestrike/src/storage/device/pool.rs", "quote": "fn end_reference(&self, record: &Record, index: usize, word: u32)", "digest": "e65cb3ebce00bd04dde0959ea24130b8b10b76d0b1716da3a2372a66c150eeb4"}
+      ],
+      "note": "The pool's `nic_return` ends one device reference to a slot's buffer through `end_reference`; the last reference ends the NIC's hold, the model's `c.nic \\ {i}`, and an earlier return of a fragment sent more than once changes no modeled state. The `Release` that follows is `release`, which walks the upload's slots in index order: it frees a slot when `source_frees` holds (retention ended and no device reads the buffer), marks a slot whose retention ended while a device still reads it for retry, and stops at the first slot still retained. `reclaim` retries the marked slots. The model frees the slot in the same step as the return; the code frees it at the next client call that releases or reclaims."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CAck",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "(Kind::PutAck, Phase::Ready | Phase::Received) if upload.fits(header) =>", "digest": "739475c6670941b065bf35ab2130f61a3fbfa1e3682d9d7d1e606574de47a37e"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn receipt(&mut self, index: u32, now_us: u64, retry_us: u64)", "digest": "ac312aa9d4ff4904827592e9e669395d2e11ff6a050649958237f97c3362fcb2"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn receive(", "digest": "1ff0e10d4360050829e607a1d0be2b2eeaa1ff685fa7beb044d14f7840809105"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn release(slots: &mut [SourceSlot<'_>], free: &mut Option<u32>, upload: &mut Upload) -> bool", "digest": "5d644a506ab9dab076b188f7c53bde5d9fe955c5a40149f6d560f3a65cddf5ef"}
+      ],
+      "note": "The arm for PUT ACK raises the grant, `receipt` raises the base and moves the upload to `Received` once the base covers every fragment, and `receive` then releases the passed slots. The arm also marks the holes its mask names for resend, which the model's message redelivery covers."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CResult",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "(Kind::PutResult, Phase::Prepared | Phase::Ready | Phase::Received)", "digest": "aca82be89691f20fd616c4327d942276da98c171ab6edd14ebc2574696f45a2b"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn receive(", "digest": "1ff0e10d4360050829e607a1d0be2b2eeaa1ff685fa7beb044d14f7840809105"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn decide(&mut self, outcome: UploadOutcome)", "digest": "07a1aac3990ea1227ff12b03b13ce589486b347744df0d26c8f1df58efa2b81c"}
+      ],
+      "note": "The arm for PUT RESULT decides `Published`. `receive` routes a reply only to an undecided or `Unknown` upload and `decide` replaces only an absent or `Unknown` outcome, the model's `c.outcome \\in {\"none\", \"Unknown\"}`. `close` removes the upload from the request table, so a later RESULT finds no upload to route to, the model's `~c.closed`."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CError",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "(Kind::PutError, phase) => match Status::from_wire(header.status)", "digest": "336e4dda196649774c6b3f57089c82e5007aecce331f33a12289b9cfebb58bfd"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn receive(", "digest": "1ff0e10d4360050829e607a1d0be2b2eeaa1ff685fa7beb044d14f7840809105"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn decide(&mut self, outcome: UploadOutcome)", "digest": "07a1aac3990ea1227ff12b03b13ce589486b347744df0d26c8f1df58efa2b81c"}
+      ],
+      "note": "`receive` routes a reply only to an undecided or `Unknown` upload, and the arm for PUT ERROR decides `Unknown` on `UnknownOutcome` and `Failed` on another status, through `decide`, which keeps a known outcome. The code also drops an ERROR other than `UnknownOutcome` without a fill serial after `Begin`, a field the model's messages do not carry."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CCancel",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn cancel(", "digest": "3a7d6bc9ec66dc8399a75ddd6e1a47a458e5215118d319795be3b9b24613a2d1"}
+      ],
+      "note": "A handed upload is marked cancelled, queues PUT CANCEL and releases its slots; an unhanded one ends `NotStarted` at once. These are the model's two branches."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CExpire",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn scan(", "digest": "e99a42e8428aadc19974e88b0372931f84ec66937c2d103b56d0168629e587c9"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn stage(", "digest": "d33438cf797b78a2707ec97dbcb75aef957ef3df3f464f1edd16a1d174d639aa"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn end(&mut self, slot: u16, upload: &mut Upload)", "digest": "4c7f621cd06c6bd6ac18f0c32dbe3b8f5cc1cf5ce507151d0bf7547275496e28"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn uncertain(&self) -> UploadOutcome", "digest": "84c5b25410fcc1717e4294292c0f50af1495fae3cb85b0bf9f5a30a8f96337ab"}
+      ],
+      "note": "`scan` decides an upload whose deadline passed or whose resends ran out; `end` decides one whose control frame the staging callback refused in `send_marked`, because its session ended or its send sequence ran out, or whose session ended (`end_session`) or whose client closed (`close_all`), and `stage` decides inline when the staging callback refuses a DATA frame for the same causes. `uncertain` names `Unknown` once a send reached the transport and `NotStarted` before, the model's outcome."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CAbandon",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn abandon(", "digest": "ab965bffc35a9e75a90dfbdfb21f0395843fa66a4e9fb5e0ce0413a604c25425"}
+      ],
+      "note": "`abandon` marks an `Unknown` upload abandoned, which lets `close` release it."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "CClose",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn close(&mut self, requests: &mut ClientRequests<'_>, id: RequestId) -> bool", "digest": "1be19a277d12eba9b6e3e5404ce338d731ed3972a90316537a1540a88c35c106"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn known(&self) -> bool", "digest": "3d098ef536437123a6f84fa1871c3a823feaee0953fa861f09d2b2cbf881f16b"}
+      ],
+      "note": "`close` releases the upload only once `known` holds and no slot stays held (`first` is `None`), the model's `Known`, `c.nic = {}` and every source slot free."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "NConflict",
+      "abstraction": "a holder of the session's keys, such as a client that breaks source custody, sends a copy of a credited fragment whose bytes differ from the credited copy; no production code sends one",
+      "note": "An authenticated DATA frame comes only from the uploading session, and source custody keeps a fragment's bytes fixed while retained. A differing copy that arrives first is credited as the fragment and is indistinguishable from the client's own, so it lies outside what the owner can detect, and the model lets a differing copy arrive only after the credited one. The owner's comparison is `OData`'s row: for a consumed fragment, `Retag::compare` tags the original frame's authenticated header, rebuilt with its stored send sequence, over the duplicate's body and compares that tag with the stored one, and for a ring-held fragment `data` compares the bytes; a difference ends the upload `ConflictingData`. The model abstracts the tag comparison to version inequality, which stands for tag inequality under the collision resistance of HMAC-SHA256 truncated to 128 bits. Aligning the conflict abstraction with that comparison refreshes this row. The Quint restatement `put.qnt` keeps this action as `differ`; no equivalence between the two was checked."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OBegin",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Fresh if header.kind == Kind::PutBegin =>", "digest": "f9c8724f703914d3d5c8b0794929c2b595eff2c3b5d7de3ec82b448d6aa0e057"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn begin<'s, 'a, C, P: Platform, D: Disk>(", "digest": "2a7bc2c0d63609d9164f0186286e72de9dd82b55577dd280594f01f922a15acb"}
+      ],
+      "note": "`PutCore::take` routes a fresh BEGIN to `begin`, which takes the fill attempt through `begin_fill` and admits the PUT in `Authority`, and the arm answers PUT AUTHORITY. A refused BEGIN answers ERROR, which the model omits."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OPrepare",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn prepare<'s, 'a, C, P: Platform, D: Disk>(", "digest": "d39a54da9d11371a221acbf70c801a8bb065c78c591da7d4ecdd0353d4847f99"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn prime<'s, 'a, C, P: Platform, D: Disk>(", "digest": "d28ce20a93a3b40c4467e2405853c5fcac6978e5d74f5d94044497044c770a0d"}
+      ],
+      "note": "`prepare` reserves the record's storage and sets the grant to the fragment count or the window, whichever is smaller, the model's `Grant(0)`; `prime` stages the fill and answers PUT READY."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OData",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "pub(super) fn data<C, P: Platform>(", "digest": "1b47ae9a08af2cc6b690bc36db3ded33351211c49f12ce00742af1c9a3f918ed"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn acknowledge<C, P: Platform>(", "digest": "ad683629091495e597b372b915089c03a27b8defb7f69a519ec1536b59a1a702"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn takes(&self, session: Admitted, header: &Header) -> bool", "digest": "db3c9ba761db92d01abb62ef3825be5f059a76015cd54e5642303839986fe21b"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn compare<const N: usize>(&self, resends: [Option<Resend<'_>>; N]) -> [Option<Verdict>; N]", "digest": "18141cb72c47441cf3b76ce661b532639ec36a8db935d2ec868eac5d4fa29506"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "pub(super) fn flush_acks<C, P: Platform>(", "digest": "7fe7fd9071731cf1d4fd064de589dbc1315e991f5ecd6c88b4ecd5e485ea25fb"}
+      ],
+      "note": "`takes` admits DATA only to a ready PUT below its grant, the model's `o.stage = \"ready\"` and `m.i <= Grant(...)`; `data` holds a new fragment once, advances the base and records that the PUT owes an ACK. `flush_acks` then sends one ACK per turn to each PUT that still owes one and is still ready, through `acknowledge`, with the base and the grant as they stand: the larger of the previous grant and the smaller of the fragment count and `base + window - held`, which the model's `Grant` over-approximates. Several model `OData` steps in one owner turn therefore project to one ACK carrying the latest base, and a PUT that ended in the turn sends no ACK; the model keeps every ACK in `net` and lets the client act on the latest one and skip the earlier ones, which then no longer advance its base, so it covers the code's one ACK per turn, and it also lets the client act on intermediate ACKs the code may never send. A repeat of a consumed fragment is compared by `Retag::compare`, which tags the original frame's authenticated header, rebuilt with its stored send sequence, over the duplicate's body and compares the tag with the stored one, so the comparison holds under the collision resistance of the tag; a repeat of a held fragment is compared by bytes. A difference fails the upload `ConflictingData` at once, where the model sets `o.conflict` and lets `OFail` report it."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OSubmit",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn consume<'s, 'a, C, P: Platform, D: Disk>(", "digest": "84e5ce04ce40a3b8354af445ce87cc1c3778a29ac4fe7b46b6695fd02f5ff0bd"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "fn receive_piece<D: Disk>(", "digest": "470f0972b3ccdb579699d0ec055daa39c3261e4e7c3bf998079cf7f2492e7292"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "fn flush<'s, 'a, P: Platform, D: Disk>(", "digest": "9e5ece3d12c3c4f7a2511e95ebbb91ac0156f298df3aa3032202fb25a90c8f77"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "fn submit_segment<'s, 'a, P: Platform, D: Disk>(", "digest": "68a928890e9be5c121ee00f9cea05e201356249fd3b7159f8c450253a934c4e7"}
+      ],
+      "note": "`consume` hands each held fragment below the base, in order, to the fill: to `WritableFill::receive_verified` with the frame's verified body crc when the copy budget takes the fragment whole, and to `WritableFill::receive` otherwise. Both enter `receive_piece`, which copies the bytes to their segment, and `flush` submits, through `submit_segment`, which maps the segment index to its device offset, each full later segment and, once the extent's payload arrived and no later segment waits, the extent's first segment with its header sealed. The model's range 0 stands for one extent's header segment, so for a record of several extents the model's one header-last order is per extent in the code; its payload ranges submit in any order once their fragments arrived, which over-approximates the code's contiguous prefix. The chunk checksums a record stores, which `receive_piece` folds from the bytes or derives from the verified crc, are outside the model."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OPublish",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn publish<'s, 'a, C, P: Platform, D: Disk>(", "digest": "614b047361b30a6fed40da379bd1293833ecb476a692a7d6b5d49834cff1c605"},
+        {"path": "crates/kestrike/src/storage/publication.rs", "quote": "pub fn publish<D: Disk>(", "digest": "3693674b3ace913c27f906bbfc0608cc6ace431edb3b3ac3838d900cf0dd7e32"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "pub(super) fn check<P: Platform>(", "digest": "5020943f270596eab6abdda9cfea424ac22be308b19d4d10aaeab9746a7ee1dc"},
+        {"path": "crates/kestrike/src/storage/publication.rs", "quote": "fn install<'s, P: Platform>(", "digest": "c926b18861267629f6a9d80cff60cdebb26e3ae46dab8fb8bdb934828262a02c"}
+      ],
+      "note": "The progress pass calls `PutCore::publish` once the fill `is_ready`; it rechecks the coverage. `WritableFill::publish` refuses a volume other than the fill's (`ForeignVolume`), a lost volume (`Lost`), stale authority (`Closed`) and an incomplete record (`Incomplete`), and `install` takes the shard gate, where `check` refuses a closed storage (`Closed`) and an attempt whose record was revoked, departed or taken by another serial or key (`Superseded`), applies the closure, authority and expiry cutoffs inside the visibility bracket, and stores and commits the mapping that replaces the incumbent. Some other refusals of the path, such as a torn-down storage or a missing index, also return `Superseded`; the rest keep their own errors, such as `Contended`, `BudgetExhausted`, `IndexFull`, `Expired` and `History`. On success the owner answers PUT RESULT and ends the PUT."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OFail",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn refuse_with<C, P: Platform>(", "digest": "0a1252df2eff2995ff7e3fce57a5260b5ebcd28d2caa89a22c6d4488a40946ab"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn end<C, P: Platform>(", "digest": "5086fbb17dcd0b893f0e7185873bdcac0284a764df146ffe0d6ade561e2f7627"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn live_frame<'s, 'a, C, P: Platform, D: Disk>(", "digest": "9476a53cee25aa1c76883b8c90589303d96601290f89714e9116e6f731fddcc4"}
+      ],
+      "note": "`refuse_with` sends PUT ERROR and `end` retains the terminal row and moves a priming or ready fill to `Draining`, the model's `Fail`. The causes reach it from PUT CANCEL (`live_frame`), a differing copy (`data`), a failed write (`progress`), a revocation (`ReceiveError::Revoked` or `Contended` from `publish`) and a lost volume (`receive_status`). The code fails in the step that observes the cause; the model lets `OFail` wait."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OTimeout",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "pub(super) fn tick<C, P: Platform>(", "digest": "5c6c171f9e63368202b6e78b3afd5106a868515a607172730658c00b382b74f9"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn ending(&self, status: Status) -> Status", "digest": "2d234f207a822f3f1883998b6a0b7a292aff4456f8fa035b75d3c6c5778944f9"}
+      ],
+      "note": "`tick` fails each PUT whose deadline passed and that is not draining, `TimedOut` unless a placement wait names its own status. `Put::ending` answers `UnknownOutcome` instead when the PUT holds no stage, as after an unwind of its stage; Lifecycle has no unwind, and its `OTimeout` always fails `TimedOut`."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "ODrain",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Some(Stage::Draining(..)) if put.commands == 0 =>", "digest": "fe4f49e3a8ee19393ebde9cb326bc9b5c7a87208a465b647132b7753318def30"}
+      ],
+      "note": "The progress pass ends a draining fill once its write commands reached zero and releases the PUT, the model's `Writing(1) = {}`."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OExpire",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Same { active, cached } =>", "digest": "dfd3882ac8aebd321b675fadfefc1239dba389413a3feae4b6b35c671c081ea1"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub(super) fn current(self, epoch: u64, now_us: u64) -> Option<T>", "digest": "e8a51d6158f87c56b961ecb84afd403ca051fcbad46ba38483e9ce731805d34b"}
+      ],
+      "note": "`Cached::current` returns no row once `expires_us` passed, and the arm of `take` for a retransmission then answers `UnknownOutcome`, the model's replacement of the retained RESULT and ERROR. The code's expiry changes only the answer to a later retransmission: a RESULT or ERROR already sent can still reach the client and settle an `Unknown` upload. The model's removal of the RESULT and ERROR messages already in `net` is an abstraction of the model alone, which leaves out that late reply."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OInvalidate",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/remove.rs", "quote": "pub fn invalidate(", "digest": "4c8c0ae1808cec20144b072195f4a1702c3852a14d9f27e91a79a7760bd84d27"},
+        {"path": "crates/kestrike/src/storage/fill.rs", "quote": "pub(crate) fn revoke<W: FillWord>(state: &W)", "digest": "27c054eb19ca79820975f254b85ee76a8ea3e7045d0a5e44ce0ed87167159618"}
+      ],
+      "note": "`Storage::invalidate` ends the key's mapping and revokes its current attempt through `revoke`; the owner learns it when a receive returns `ReceiveError::Revoked` or publication refuses `Superseded`."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "SBegin",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/attempt.rs", "quote": "pub fn begin_fill(", "digest": "0092ecfbef3b3f3a9772fcd530c74db5394990efea40d0191794ffe0d5d21aeb"},
+        {"path": "crates/kestrike/src/storage/volume/write.rs", "quote": "pub(crate) fn begin_fill(", "digest": "4d5fd90d2fe8f5be254e5d8470a373e6061282cad9226aaefbceedc64ceb1e45"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "fn flush<'s, 'a, P: Platform, D: Disk>(", "digest": "9e5ece3d12c3c4f7a2511e95ebbb91ac0156f298df3aa3032202fb25a90c8f77"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "fn submit_segment<'s, 'a, P: Platform, D: Disk>(", "digest": "68a928890e9be5c121ee00f9cea05e201356249fd3b7159f8c450253a934c4e7"}
+      ],
+      "note": "A successor is a later PUT of the key, run by the same owner code. Once the revocation cleared the key's association, `Storage::begin_fill` grants it an attempt with a new serial, and its receive opens its own write set through `Volume::begin_fill`. Granting the attempt and opening the write set prepare the write; the model's write of range 0, its `ws[2][0]` and `dev` entry, corresponds to the successor's `flush` submitting its header segment through `submit_segment`, and a refused header submission leaves the header staged with no command outstanding. The model folds the successor's upload into that one write."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "SFail",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Some(Stage::Ready(fill)) if put.consumed == put.fingerprint.manifest().count() =>", "digest": "f486c7977aa0bb36ca1cec36ccf799fa1967e75a865c13663c2407d2f766ab9f"},
+        {"path": "crates/kestrike/src/storage/volume/write.rs", "quote": "pub(super) fn apply_write(", "digest": "900e90aae09db9499eaa38f62d7bbe35462ec10f039b4350b8c1504e70d28471"}
+      ],
+      "note": "The successor is a PUT like any other: `apply_write` marks its write set failed at a failed terminal, and the progress pass's arm for a fully submitted fill fails it `DeviceError`."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "SPublish",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Some(Stage::Ready(fill)) if put.consumed == put.fingerprint.manifest().count() =>", "digest": "f486c7977aa0bb36ca1cec36ccf799fa1967e75a865c13663c2407d2f766ab9f"},
+        {"path": "crates/kestrike/src/storage/publication.rs", "quote": "pub fn publish<D: Disk>(", "digest": "3693674b3ace913c27f906bbfc0608cc6ace431edb3b3ac3838d900cf0dd7e32"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "pub(super) fn check<P: Platform>(", "digest": "5020943f270596eab6abdda9cfea424ac22be308b19d4d10aaeab9746a7ee1dc"},
+        {"path": "crates/kestrike/src/storage/publication.rs", "quote": "fn install<'s, P: Platform>(", "digest": "c926b18861267629f6a9d80cff60cdebb26e3ae46dab8fb8bdb934828262a02c"}
+      ],
+      "note": "The progress pass's arm publishes the successor once its fill is ready, and `WritableFill::publish` replaces the incumbent object of the key through `install`, once `check` under the shard gate finds the successor's attempt current."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "OLose",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn receive_status(&mut self, error: ReceiveError) -> Status", "digest": "0085c105ca654f398287f6e8ef789689a191d31b8e33dcc206fccb476d2f2ac5"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn receive_status(error: ReceiveError) -> Status", "digest": "8e4a05fa1e6881be711540895e1db5e3b6853693842a2c5746db50772982d15d"},
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "fn lose(&mut self)", "digest": "71c1674b13232953e705139ba43214e0d64f2218e387cd546debdb803d50276b"},
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "pub fn is_lost(&self) -> bool", "digest": "14e643b851182a06cbbc385bed6237545f0f6ccd8d1944e5adb6a35b4f03a79a"}
+      ],
+      "note": "`Volume::is_lost` reports the volume lost once the command table's admission is `Lost`, which the table sets when the device is gone or a submit unwinds, or once a tick or a `close` unwound; `lose` latches the same state when a read submit is refused for the device's loss. A later receive returns `ReceiveError::Lost`, which `receive_status` records as a loss and maps to `OwnerUnavailable`, and publication refuses `Lost`. The model loses the volume only while a write of the fill is outstanding."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "DTerminal",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "pub(super) fn apply(&mut self, terminal: Terminal<'a>, now: u64)", "digest": "5332cde2d297b7636e0c7a4c1341625f1a68c0e79bae972c1e251b3bf7d3158e"},
+        {"path": "crates/kestrike/src/storage/volume/write.rs", "quote": "pub(super) fn apply_write(", "digest": "900e90aae09db9499eaa38f62d7bbe35462ec10f039b4350b8c1504e70d28471"}
+      ],
+      "note": "`apply` takes the token-map entry whose full command token equals the terminal's and routes the terminal to the owner the entry bound at submit: for a write, a write-set slot and a unit count. `apply_write` applies it to that set by slot, counting a written terminal under fill authority that no longer admits as failed, and failing the set on a failed write. A write set keeps its slot while any of its commands is outstanding, so a late terminal reaches no reused slot. The model's key, serial and range is one accepted command, whose serial is the code's write set; the code counts units, not ranges."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "DStop",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/device/table.rs", "quote": "pub fn quiesce(&mut self, out: &mut Vec<Terminal<'a>>) -> QuiesceProgress", "digest": "ba6ee91cce73980d35ac9de3bc4759729f84828d7c06acaad8e23c7d78f1ae90"},
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "pub fn close(&mut self) -> QuiesceProgress", "digest": "40c7e70a0c17e0e2c3874df983763a69d4cc52fa67a754f440421cc434b9ac9a"}
+      ],
+      "note": "`Volume::close` drives `CommandTable::quiesce`, which the caller repeats until it reports `Quiesced`. Once the driver's quiesce reports `Stopped`, `quiesce` delivers one terminal for each outstanding command: `Abandoned` for a cancelled data command, whose quarantined buffer the table frees, `Reservation` with no status for a reservation command and `Quiesced` with its buffer for every other command. It delivers them in batches bounded by the output's spare room, reporting `Delivering` until none remain, and later `poll_storage` ticks apply them, failing each write set and ending each read; the model's proven stop folds the proof, the delivery and the application into one step. A driver quiesce that reports `Failed` returns `Unproven` and keeps every buffer owned, and a later `close` may still prove the stop; the model's unproven stop stands for a stop that stays unproven."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "RAdmit",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "pub fn read(", "digest": "d3ccda018d206034242bc7e442751719ed3757a7627997a56ccb320dc6f745d5"},
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "fn read_right(", "digest": "99f94760d46589bdf62a917ed8c59ca24752c898d743c2eed5820aada5227490"},
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "fn begin(", "digest": "c0a90ca86a05f67ca4ace93f5e31704626efe0b1adac3877b83202431cab3212"}
+      ],
+      "note": "A lookup of a published object admits its read through `read_right`, which the owner's GET paths `read_key_prepared`, `read_or_join_prepared` and `read_joined` call, or through `Volume::read` with the object's extent lease. Both check admission and call `begin`, which records the read and submits its first command, or, when the submit finds no room, keeps the grant and leaves the first command waiting. The model admits without a command and issues it in `RIssue`. The Quint restatement `read.qnt` keeps this action as `admit`; no equivalence between the two was checked."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "RIssue",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "pub fn grant_read(&mut self, op: ReadOp) -> Result<Grant, ControlRefusal>", "digest": "3fd738e9503ceeb97baaf2959645661bb4ba81f85aa647d0880be4d7c77cdc87"},
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "pub(super) fn submit_next_ahead(&mut self, slot: u32) -> Submission", "digest": "cbf786d25234b70f53887ce15e0653512a8425deb5e0de84471884f2b200bb4e"},
+        {"path": "crates/kestrike/src/storage/volume/attach.rs", "quote": "pub(super) fn can_read_ahead(&self, slot: u32) -> bool", "digest": "80dfd2366ec3e0f51c45910b4e78c10ebdaea173a72056a880bde000274aab5d"},
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "pub(super) fn submit_next(&mut self, slot: u32) -> Submission", "digest": "8b75fad695c22f2a464b915a7e4e201cdc82a529b1934510b709423fbbc713a4"}
+      ],
+      "note": "`grant_read` on a read with more to read submits the next command at once when the read waits for one (`Stage::Next`), or a command ahead through `submit_next_ahead` when `can_read_ahead` allows it. It keeps the grant when the submit finds no room (`Busy` or `Deferred`) and when the current command is outstanding or verifying while `can_read_ahead` refuses, which every such grant at `read_ahead` 0 does; a later tick spends a kept grant through `submit_next` when the read waits for its next command (`Stage::Next`), and through `submit_next_ahead` while its current command is outstanding or verifying and `can_read_ahead` allows a command ahead. A read holds its current command and up to `read_ahead` commands ahead, with `read_ahead` from 0 to `MAX_READ_AHEAD` (3). The model issues while fewer than two commands are outstanding; the volume at `read_ahead` 1, as `read.qnt` states, issues while fewer than two are issued and not handed off, which counts an arrived command ahead until its handoff. At `read_ahead` 2 or 3 the volume holds more outstanding commands than `RIssue` admits, and those settings lie outside the model."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "RTerminal",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "fn apply_read(&mut self, slot: u32, terminal: Terminal<'a>, now: u64)", "digest": "1f9c9cf26edd08d2d4e283346b86271910258050b315a1137fefda0ebc89fb88"}
+      ],
+      "note": "`apply_read` takes a read command's terminal: the current command's bytes move to verification and a command ahead's wait as `arrived`. The model's terminal has no failure; the code's failed, short and quiesced terminals end the read."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "RChunk",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "fn verify<'a>(", "digest": "e82da471deba3769fb627c4873962c88d15c2a29b2795371e189c9c2b7798ea4"},
+        {"path": "crates/kestrike/src/storage/volume/read.rs", "quote": "pub(super) fn hand_off(", "digest": "3099f826ddf00ebc68b3c3477d7dd96a794d28307651e10793dc5164688830e4"}
+      ],
+      "note": "`verify` checks the header and then the chunks in order within the tick's byte budget, and `hand_off` exposes a buffer's verified chunks, the model's chunk after its terminal in payload order. `verify` also ends the read on a header or chunk mismatch, which the model's `RChunk` does not."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "RDone",
+      "anchors": [
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "Stage::Ending(status) =>", "digest": "9d1e4cb4a8a8fea752dd54f800cc0ad8581c3cc9fae6c14865421807d62debea"}
+      ],
+      "note": "The scan delivers `ReadEvent::Done` once for an ending read and keeps the record until its last command's terminal, so no chunk follows. A complete read is the model's `r.chunks = Chunks`, a cancel or a deadline its `Deadlines`, and a read quiesced by `Volume::close` or a device stop its `stop # \"running\"`. A read that ends `Quiesced` on an open volume because serving authority refused it or its submit, a lost volume, a device error, a short read and a header or chunk mismatch also reach `Ending` in the code and have no model disjunct. A record of no payload completes in the code with no chunk, where the model's read always takes `Chunks` chunks."
+    },
+    {
+      "model": "tla/Lifecycle.tla", "kind": "action", "name": "Done",
+      "abstraction": "the step taken in the named terminal stutters: `Finished`, everything ended, or `Held`, an unproven stop holding commands",
+      "note": "`Done` changes no variable and stands for no step of the code; it keeps a finished or held state from reading as a deadlock."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Admit",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn admit(", "digest": "ace60644a0f91c35ecc1152c7411cbae438cb1b3fb3162367759db0413c0fccc"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn binding(&self, at: usize, wire: RequestId) -> Result<(), Refusal>", "digest": "ea7688fb9c83835d7e710c857d523ecb78d97924103e31fcc41b94742a39aed0"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn settled(&self, at: usize, generation: u64) -> bool", "digest": "7627d2da6b222ebc63b5ce0fa51f6ecdeb5f86c2718e7bfa2e5fc7ad8227fdfb"},
+        {"path": "crates/kestrike/src/net/requests.rs", "quote": "pub fn room(&self, peer: PeerId) -> Result<(), RequestPressure>", "digest": "62e7243e38b65604140077cb3355da55d9ec2d02faeb13aab74f9eeccddf4def"},
+        {"path": "crates/kestrike/src/net/requests.rs", "quote": "pub fn admit(&mut self, peer: PeerId, state: T) -> Result<RequestId, (RequestPressure, T)>", "digest": "1d4099bcc2aac4dd222a3b39ce48c21e2e2b989f416245c87a8460c1b223c406"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn begin<'s, 'a, C, P: Platform, D: Disk>(", "digest": "2a7bc2c0d63609d9164f0186286e72de9dd82b55577dd280594f01f922a15acb"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn get_backlogged<T>(&self, table: &RequestTable<T>, peer: PeerId) -> bool", "digest": "facd832844fc5d48182d2f3ac2555537b78dea78a6edcb7081b7ddeee471ea4c"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub fn get<C: Chunk, F>(", "digest": "ceaf7e7e55776ff3e2cb4d75a3b5a2315316103b96db3511a031385b9ba5e54a"}
+      ],
+      "note": "`Namespace::admit` checks the binding (`binding`: free, above the watermark through `settled`, below the generation limit) and the table's room for the peer's share and the table (`RequestTable::room`), the model's `Fresh` and `Room`; then `RequestTable::admit` takes a table record and charges the peer's share, and the namespace binds the handle, raises the watermark and clears the row. `PutCore::begin` refuses a PUT past the global cap `puts` or the peer's `peer_puts` before it admits, the model's PUT caps, and refuses one under the GET backlog (`get_backlogged`: live GETs reach `get_backlog` and the requesting peer's live GETs reach half its equal share of that limit), a refusal the model lacks; `ServeCore::get` admits a fresh GET through the same `Namespace::admit` and checks no PUT cap."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Refuse",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn binding(&self, at: usize, wire: RequestId) -> Result<(), Refusal>", "digest": "ea7688fb9c83835d7e710c857d523ecb78d97924103e31fcc41b94742a39aed0"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn settled(&self, at: usize, generation: u64) -> bool", "digest": "7627d2da6b222ebc63b5ce0fa51f6ecdeb5f86c2718e7bfa2e5fc7ad8227fdfb"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn admissible(&self, peer: PeerId, wire: RequestId) -> Result<(), Refusal>", "digest": "f046c7f151ef06d6be2450b9660cd913c0c269359bd733bdc59edd6be23f7864"},
+        {"path": "crates/kestrike/src/net/requests.rs", "quote": "pub fn room(&self, peer: PeerId) -> Result<(), RequestPressure>", "digest": "62e7243e38b65604140077cb3355da55d9ec2d02faeb13aab74f9eeccddf4def"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Fresh if header.kind == Kind::PutBegin =>", "digest": "f9c8724f703914d3d5c8b0794929c2b595eff2c3b5d7de3ec82b448d6aa0e057"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn settle(&mut self, peer: PeerId, wire: RequestId, cached: Option<Cached<T>>)", "digest": "0bf44952b128997648632abb910cf9f3927e96800c16bf03998f16adb819e818"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn settle_begin<C, P: Platform>(", "digest": "dfed897503db059551e1b013c164971132c37b1cbaebd3d009da3640a81b57d8"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn begin<'s, 'a, C, P: Platform, D: Disk>(", "digest": "2a7bc2c0d63609d9164f0186286e72de9dd82b55577dd280594f01f922a15acb"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub fn get<C: Chunk, F>(", "digest": "ceaf7e7e55776ff3e2cb4d75a3b5a2315316103b96db3511a031385b9ba5e54a"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn duplicate<C: Chunk, F>(", "digest": "b88b11ab9e01b58ddc29e7a03433547b137a6f0728b24c8ad4d348e3c08da803"}
+      ],
+      "note": "`binding` refuses a busy identity, a stale one at or below the watermark or a refused generation (`settled`) and an exhausted one, and `admissible` adds the share and table room (`RequestTable::room`). For a PUT, the arm of `PutCore::take` for a fresh BEGIN counts each refusal by cause and answers it. The model's refusal changes no identity; the owner then settles the refused identity through `Namespace::settle`, which acts only on a generation above every one the slot settled and below the limit: on a free binding it raises the watermark and retains the refusal row `settle_begin` builds, and under a held one it records the refused generation, a step `Identity.tla` leaves out and `settle.qnt` states. `PutCore::begin` checks the PUT caps before `admissible`, so it counts a cap refusal for a BEGIN that routes `Fresh` whatever `binding` and the room would decide, where the model's cap counters need `Fresh` and `Room(p)`, and it has refusals the model lacks (admission gate, permits, the GET backlog, lane guard, fencing, fill). For a GET, `ServeCore::get` refuses a grant above the session's window `InvalidRequest` before routing and settles that identity with an `InvalidRequest` row, a refusal the model lacks. After routing, it drops an older generation without a count; at the watermark `route` counts a wrong operation and `duplicate` counts every duplicate: one of a live request that has not ended is refused on a session or fingerprint mismatch and otherwise restarts that request's sends, one that meets a current retained row is refused `ConflictingRequest` when the row's fingerprint (key, metadata cap, body cap and grant) differs from the frame's and otherwise replays the row unless the request's pending ERROR answers it, and any other, such as one past its row's expiry, is dropped without a reply. Of the fresh identities `Namespace::admit` refuses, a stale one is dropped without a count, an exhausted one is answered `CounterExhausted` without a settle, and a busy or pressure refusal is counted and settled with a `RequestPressure` row, which a free binding retains and a held one records as its refused generation alone. `get` checks no PUT cap. The model's counters saturate at one; the code's report counters do not."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "End",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn end<C, P: Platform>(", "digest": "5086fbb17dcd0b893f0e7185873bdcac0284a764df146ffe0d6ade561e2f7627"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn retain(", "digest": "2f323488602bcaacd1fac4d13c59840a13844b5d254c1a81e42b5601d23e7fc6"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn finish<C: Chunk, F>(", "digest": "28c4e1ab57db596a09106d5dd61255fdac9a8028215ff1b283d7fd523b89a7de"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn end_silently<C: Chunk, F>(", "digest": "8d25c9736f8365655f381a1c6bd10c72aff4af9a083edf46e24dcbe4519a7c82"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub fn cancel<C: Chunk, F>(", "digest": "73c53c2228a95982b06f0942a0c680406083a538778284f7f10787762200dd4f"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn settle<C: Chunk, F>(&mut self, requests: &mut Requests<C, F>, taken: usize, now_us: u64)", "digest": "fe01d80993bb97b7cf080faae56bc5a1349c1f2a7e2280a10d93ad38e03099bf"}
+      ],
+      "note": "`PutCore::end` for a PUT and `ServeCore::finish` for a GET retain the terminal row under the request's epoch with its expiry, through `Namespace::retain`. A GET's ERROR row is retained when the request ends, before the ERROR is sent; a successful GET's row is retained only once its COMPLETE falls in the prefix of staged frames the owner's send consumed, in `ServeCore::settle`, through `end_silently`, and the same arm unbinds it. That prefix also holds frames the send charged to a failed or closed transport call (`Sender::send`, `Lose`'s row), so a COMPLETE that never reached the link ends its GET the same way. A CANCEL whose session epoch and key match ends a live GET through `end_silently` with the CANCEL's status as its row and no terminal frame, where the model's `End` sends a RESULT. The model ends a request in one step that both retains the row and sends a RESULT. Its replaced-session branch, after `Replace`, ends a request with no row and no reply; the owner's `retire_peer` ends a peer's requests before `Namespace::retire` clears the peer's rows. There `PutCore::retire_peer` ends a PUT with no terminal, which retains no row, and `ServeCore::retire_peer` clears each GET's pending ERROR through `end_silently`, which ends a live GET with a `SessionMismatch` row and sends no frame (a GET that ended earlier keeps its terminal row), and drops the peer's queued replies. Both `retire_peer` items are cited on `Replace`'s row."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Unbind",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub(super) fn unbind(", "digest": "f9cc290bb1bf1ae44d8fc319031a9fc073bf2e1183a7bf10064b6f533073ba03"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn binds(self, id: RequestId) -> bool", "digest": "105d8b9cef07eb119f36f2866e2f3374e4df78fbcf94bf263ad31c9e48294640"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn free(&mut self, at: usize)", "digest": "fc3a578c006e69bc380f2590ebf685fbc4e459189c433350db5d27be04d8f7ab"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn settle<C: Chunk, F>(&mut self, requests: &mut Requests<C, F>, taken: usize, now_us: u64)", "digest": "fe01d80993bb97b7cf080faae56bc5a1349c1f2a7e2280a10d93ad38e03099bf"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn unbind_sent<C, F>(", "digest": "105d07f8ccb422149569c27828438401c8c55acb740880cd18d6c4b4e3262acd"}
+      ],
+      "note": "Once a request's terminal falls in the prefix of staged frames the owner's send consumed, which also holds frames charged to a failed or closed transport call (`End`'s row), `ServeCore::settle` frees its wire binding through `Namespace::unbind`, which marks the record unbound; `unbind_sent` does this for a GET's sent terminal. `unbind` clears the binding through `free`; where a generation was refused while the binding was held, `free` raises the watermark to it and drops the retained row, which the model's `Unbind` keeps, since the model leaves out the settle that records the refusal (`Refuse`'s row). A published PUT's record is released as its RESULT is queued, so the model's `Unbind`, which applies to an ended PUT of either terminal, unbinds more PUT terminals than the owner does. The model's guard `table[h].ended` stands as `unbind`'s debug assertion that the record drains, which `end` begins; its callers supply it, since a sent terminal belongs to an ended request."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Release",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn release(&mut self, id: RequestId, peer: PeerId, slot: u16) -> bool", "digest": "6133296d93a74298152430d2b026ad6090c3bdf79d8dcdd9e486499dbe47d805"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn binds(self, id: RequestId) -> bool", "digest": "105d8b9cef07eb119f36f2866e2f3374e4df78fbcf94bf263ad31c9e48294640"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "fn free(&mut self, at: usize)", "digest": "fc3a578c006e69bc380f2590ebf685fbc4e459189c433350db5d27be04d8f7ab"},
+        {"path": "crates/kestrike/src/net/requests.rs", "quote": "pub fn peer(&self, id: RequestId) -> Option<PeerId>", "digest": "0c7c54dc956d736890db394970f4ebb6fcd8b5fbbcb2e48f17efe9560aebf591"},
+        {"path": "crates/kestrike/src/net/requests.rs", "quote": "pub fn discard_with<R>(", "digest": "2aec713e360b218ba3bf9d16abcbd0dcfa7edaae6bd9623d1461cdc9a4901ec0"},
+        {"path": "crates/kestrike/src/records.rs", "quote": "pub(crate) fn drop_with<R>(", "digest": "7d60f6c7f500c91615fe7b7532bf64d9bc37cb4a4ebb95f4489c50673e615942"},
+        {"path": "crates/kestrike/src/records.rs", "quote": "fn vacate(&mut self, slot: u32)", "digest": "b547eee3c56bef0b7a2ab7c19a3cb61e943105e09ee5cc4ee7d52af960f273b0"},
+        {"path": "crates/kestrike/src/records.rs", "quote": "pub(crate) fn get(&self, slot: u32, generation: u64) -> Option<&T>", "digest": "ca45860046fc0bee119fc1c68026879aac629ca987580e008f539d00fe06472f"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn release<C, P: Platform>(", "digest": "fa1cbc0b1defb697afa5d38430329c132cac8cc0244225abf6bcfd68d6f3afd2"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub fn release_drained<C: Chunk, F>(", "digest": "3ea71831e678720d4aa625c07b9b0b4ce70e94a8ba65eaa9ffb7abd4d76b667f"}
+      ],
+      "note": "`Namespace::release` acts only on the handle the wire slot binds (`Mark::binds`) or the peer's handle marked unbound, and only on a record live for the peer (`RequestTable::peer`, through `Records::get`); `discard`, through `discard_with`, drops the record only under the generation the handle names (`Records::drop_with`) and advances it (`vacate`), the model's table generation `tg`, and `free` clears the binding and, for a generation refused while it was held, raises the watermark to it and drops the retained row, where the model's `Release` keeps the watermark and row. A stale handle frees nothing. `PutCore::release` and `ServeCore::release_drained` call it once a PUT's or a GET's custody drained."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "WrongOp",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn route(&mut self, peer: PeerId, wire: RequestId, operation: Operation) -> Route<T>", "digest": "aa00f39a6909ef63daab93785414cdd97e18c81cc2ecbb224d74e2d140ffe1fb"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn lookup(&self, peer: PeerId, wire: RequestId, operation: Operation) -> Route<T>", "digest": "7220a41584024aaba427e8b88fad9eb12a7ed80a80842a01244c89bc76eb395d"}
+      ],
+      "note": "`lookup` returns `WrongOperation` for a frame at the watermark whose live request or retained row has the other operation, and `route` counts it and changes nothing else. The model restricts the frame to the peer's current epoch; the code routes only frames of an admitted session, the session admission `Sessions::admit` that Recovery's `Observe` row cites."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Replay",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Same { active, cached } =>", "digest": "dfd3882ac8aebd321b675fadfefc1239dba389413a3feae4b6b35c671c081ea1"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn replay(", "digest": "aee1789362d877d2ffd9dd7fb52bcf352435febd7847b2f22474e49891f406b4"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub(super) fn current(self, epoch: u64, now_us: u64) -> Option<T>", "digest": "e8a51d6158f87c56b961ecb84afd403ca051fcbad46ba38483e9ce731805d34b"}
+      ],
+      "note": "For a PUT frame at the watermark with no live request of its own, the arm of `PutCore::take` reads the retained row through `Cached::current`, which requires the row's epoch and an unexpired row, and `replay` resends its RESULT or ERROR when the frame's fingerprint matches."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Conflict",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Same { active, cached } =>", "digest": "dfd3882ac8aebd321b675fadfefc1239dba389413a3feae4b6b35c671c081ea1"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn matches(&self, header: &Header) -> bool", "digest": "ae87901f45f11ffc8ecfa7bac8cd14b2c2bf8b8dcfb45fbd196a60fff1d97795"}
+      ],
+      "note": "The same arm answers `ConflictingRequest` when a current row's fingerprint differs from the frame's (`Fingerprint::matches`: the key and, by frame kind, a PREPARE's serial and shape, a CANCEL's serial or a BEGIN's cache version), the model's retry with another shape. The model counts the conflict; the code also sends the answer."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "UnknownAnswer",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Same { active, cached } =>", "digest": "dfd3882ac8aebd321b675fadfefc1239dba389413a3feae4b6b35c671c081ea1"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "fn answer(", "digest": "259392d0fa6ab728b8aefc0abf1b13ddbc3e2371fd40a4fdea62a6ae387b930c"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Fresh =>", "digest": "11b5b3df89d46b99f1853b7c159352bca88f63567eba5349d16ec3b57245a474"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "Route::Older => refuse(serve, session, header, Status::UnknownOutcome),"}
+      ],
+      "note": "The arm answers `UnknownOutcome` through `answer` when no current row exists (`Cached::current`, cited on `Replay`'s row), and `take` answers it for an older generation (`Route::Older`, an arm without a body of its own, so its anchor carries no digest) and for a fresh identity that is no BEGIN (`Route::Fresh`), the model's expired, absent, older and fresh cases. For that fresh identity the owner first settles it through `Namespace::settle`, cited on `Refuse`'s row, which the model's `UnknownAnswer` leaves out."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Stale",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "pub(super) fn data<C, P: Platform>(", "digest": "1b47ae9a08af2cc6b690bc36db3ded33351211c49f12ce00742af1c9a3f918ed"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn lookup(&self, peer: PeerId, wire: RequestId, operation: Operation) -> Route<T>", "digest": "7220a41584024aaba427e8b88fad9eb12a7ed80a80842a01244c89bc76eb395d"}
+      ],
+      "note": "`PutCore::data` acts only on `Route::Same` with a live request; DATA of an older generation routes `Older` and is dropped. The model counts the drop; the code returns `false` and counts nothing here."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Tick",
+      "abstraction": "the owner's clock advances; time reaches the owner as the `now_us` each call receives",
+      "note": "No production step advances a clock: the owner reads the time it is given, and the rows of `Replay`, `Conflict` and `UnknownAnswer` compare it with a row's expiry."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Replace",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/session.rs", "quote": "fn activate(&mut self, peer: PeerId, handshake: Handshake) -> Option<Replaced>", "digest": "38a314448e7d7584ecce1ce76e3052e7ac0847438b68e93d13cf8f57a1c8663b"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "Kind::Confirm =>", "digest": "56360b36ed28a950557093353d07350f400900c99f7cb360ea12608c2e05ee74"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "fn retire_peer(&mut self, peer: PeerId, now_us: u64, cause: Option<FillFailure>)", "digest": "d5e808930538b95f68fbc8e8d5337e605ddf70dc143988ff4570815956de3014"},
+        {"path": "crates/kestrike/src/net/namespace.rs", "quote": "pub fn retire(&mut self, peer: PeerId)", "digest": "12b4a7e77bf93a7d69044b2a4d8773361dda362a754ba7224e08a086b6975122"},
+        {"path": "crates/kestrike/src/net/put.rs", "quote": "pub(super) fn retire_peer<C, P: Platform>(", "digest": "d873599933b35af09640e236458cc6c00b4eef1d5a2e3a782350f13b9224c0f1"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub(super) fn retire_peer<C: Chunk, F>(", "digest": "bb2349fd31228f218114e07d806d3e43727256eab0b504e7595bb7652e52753e"}
+      ],
+      "note": "A replacement CONFIRM installs the new session's epoch through `Sessions::activate`, and the owner's `Kind::Confirm` arm then calls `retire_peer` for the replaced session; a repeated CONFIRM replaces nothing, and close and sequence exhaustion call `retire_peer` with no new session. `retire_peer` ends the peer's requests, its GETs through `ServeCore::retire_peer` and its PUTs through `PutCore::retire_peer`, and then `Namespace::retire` clears its watermarks and rows while live bindings stay until each request drains and releases. `PutCore::retire_peer` releases a PUT that holds no fill in the same call, so one owner call performs the model's `Replace`, `End` and `Release` for it; a PUT holding a fill drains and releases later."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "UBegin",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn put(", "digest": "60a088ded9bc3f4d46ec4a79ec48040aae93f1f7425e576744f789f14003ff64"},
+        {"path": "crates/kestrike/src/net/client_namespace.rs", "quote": "pub fn admit(", "digest": "a3db364d8c9b68c89877a0eb38cbc2b452019c42f495e58473334a3a906f0e57"}
+      ],
+      "note": "`UploadCore::put` admits the upload under the client namespace's next wire generation on a free wire slot (`ClientNamespace::admit`). The model's upload takes an identity the owner admitted; in the code the owner admits it at the upload's BEGIN."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "URetry",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn scan(", "digest": "e99a42e8428aadc19974e88b0372931f84ec66937c2d103b56d0168629e587c9"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn send_marked(", "digest": "fd15aa2f66c7773501f0e625dcb97cd024a90daf01be8c5082d84c1c8be3c122"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn frame(&self, now_us: u64) -> Header", "digest": "84ac638b4ff04bae38a2aed2114e34db1b1f7061c31c7ee17c66bc26e96e8f34"}
+      ],
+      "note": "`scan` makes a frame due again at its retry timer and `send_marked` resends the frame `frame` builds, the model's `RETRY`. The code's `prepare` refuses a changed shape, so the model's `RETRY2` (another shape, under `Mismatch`) stands for a frame no correct client sends, and its `DATA` of an ended upload (under `StaleData`) for a fragment the transport delivers late. The model also retries an upload whose outcome is `Unknown`, where `scan` resends only an undecided upload; a frame sent before the upload decided can still reach the owner after it."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "UReply",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn receive(", "digest": "1ff0e10d4360050829e607a1d0be2b2eeaa1ff685fa7beb044d14f7840809105"},
+        {"path": "crates/kestrike/src/net/client_namespace.rs", "quote": "pub(super) fn route_upload_mut(", "digest": "1515616209aed25010724ee35eb9af33c00f87bf644a1647a824974fe3b1c373"}
+      ],
+      "note": "`route_upload_mut` finds the upload of the reply's peer and wire identity, and `UploadCore::receive` acts only under the upload's epoch and key and while it is undecided or `Unknown`; PUT RESULT decides `Published` and an `UnknownOutcome` ERROR `Unknown`, the model's RESULT and UNKNOWN. The model's RESULT also stands for a PUT ERROR and always decides `Published`; the code decides `Failed` on an ERROR of another known status, and ignores an ERROR whose status it cannot read and, past the BEGIN phase, one that names serial zero. `Upload::decide`, which keeps a known outcome, is cited on Lifecycle's `CResult`."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Stray",
+      "abstraction": "a PUT retry this upload did not send reaches the owner, naming any wire identity of the peer's current session other than the upload's own when it is sent; the network and other clients send it",
+      "note": "The model keeps at most one such `RETRY` in flight under an identity other than the upload's, so the owner's routing rows (`WrongOp`, `Replay`, `UnknownAnswer`) meet frames that are not the upload's own. A stray sent before `UBegin` may name the identity the upload then takes, after which another stray can follow. A stray is never a `RETRY2`, so `Conflict` acts only on the upload's own frames."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "UExpire",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn scan(", "digest": "e99a42e8428aadc19974e88b0372931f84ec66937c2d103b56d0168629e587c9"},
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "fn uncertain(&self) -> UploadOutcome", "digest": "84c5b25410fcc1717e4294292c0f50af1495fae3cb85b0bf9f5a30a8f96337ab"}
+      ],
+      "note": "`scan` decides an upload whose deadline passed or whose resends ran out, `Unknown` once a send reached the transport (`uncertain`). The model's upload is always handed, so it expires only to `Unknown`."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "UAbandon",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/upload.rs", "quote": "pub fn abandon(", "digest": "ab965bffc35a9e75a90dfbdfb21f0395843fa66a4e9fb5e0ce0413a604c25425"}
+      ],
+      "note": "`abandon` marks an `Unknown` upload abandoned; a later matching RESULT still decides it, the model's `Unknown` outcome that `UReply` may overwrite."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "CAdmit",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/client_namespace.rs", "quote": "pub fn admit(", "digest": "a3db364d8c9b68c89877a0eb38cbc2b452019c42f495e58473334a3a906f0e57"},
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "pub(super) fn issue(&self, generation: u64, id: RequestId)", "digest": "cad8767ed412cbcf4c04046a70bec95827cdc95a75d2be2aa28d62786060358e"},
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "pub(super) fn next_generation(&self) -> Option<u64>", "digest": "d9bf140bf3f749da397252f12c220816f142a71e19cdbdc4d276cae2a4efe569"},
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "fn reset(&self, id: RequestId)", "digest": "dfd757e6394b9b32dc022ca542fdf12f838d73334773355dd2e636447d982eae"}
+      ],
+      "note": "`ClientNamespace::admit` takes the board's next wire generation (`next_generation`, which refuses once the last is issued), and `Releases::issue` records the handle's live generation with no release counted (`reset`), the model's open request under the current core."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "CHand",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "pub fn take(", "digest": "fcc618cf20b33932caf0f0a3aa1db7793497a7c4c9d9db7142a7ac147eee2f1f"}
+      ],
+      "note": "`FetchCore::take` hands the application the next received fragment as a `FragmentLease` stamped with the board core and the request's handle and counts it in `handed`."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "CReturn",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "fn release(&self, core: u64, id: RequestId)", "digest": "3de347137d6d59e064097ace139ba78e88795cfb28173e6ee229920a6f61d396"},
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "impl Drop for FragmentLease<'_>", "digest": "4dab2a3b72507dfd1ff6e4d3d6d70585c54fb3ac82c7701035e6df9303501c4c"}
+      ],
+      "note": "Dropping a lease calls `Releases::release`, which credits the live request when the lease's core and handle generation equal the board's, the model's return of the open request's own lease."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "CReturnStale",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "fn release(&self, core: u64, id: RequestId)", "digest": "3de347137d6d59e064097ace139ba78e88795cfb28173e6ee229920a6f61d396"},
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "impl Drop for FragmentLease<'_>", "digest": "4dab2a3b72507dfd1ff6e4d3d6d70585c54fb3ac82c7701035e6df9303501c4c"}
+      ],
+      "note": "The same `Releases::release` frees one orphan when the lease's core or generation differs from the slot's live one. The model's `Credits` branch credits a stale lease whose core and generation match the open request's, which `board.qnt` reaches only under its mutations. The Quint restatement `board.qnt` keeps this action; no equivalence between the two was checked."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "CClose",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "pub(super) fn close(&self, id: RequestId, handed: u32)", "digest": "5807e1b5cfd5d5b53752cb3ae3ea02958399c0ce1e863e025233e8328dcfe9ce"},
+        {"path": "crates/kestrike/src/net/client_namespace.rs", "quote": "pub(super) fn release(&mut self, id: RequestId) -> bool", "digest": "73dde660a57e0d731178c3b1eccb5bcd3d45dcba7a46a99abdab610da3ea157d"},
+        {"path": "crates/kestrike/src/records.rs", "quote": "fn vacate(&mut self, slot: u32)", "digest": "b547eee3c56bef0b7a2ab7c19a3cb61e943105e09ee5cc4ee7d52af960f273b0"}
+      ],
+      "note": "`ClientNamespace::release` frees the request's wire slot and table record, which advances the handle's generation (`Records::vacate`), and `Releases::close` turns the leases it still holds into orphans and closes the board slot."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "CAttach",
+      "anchors": [
+        {"path": "crates/kestrike/src/net/client_namespace.rs", "quote": "impl<R: ClientRecord> Drop for ClientNamespace<'_, R>", "digest": "f1d5594e6272a0b16227edb7d44e57de2d52718ed87427722364f8e8aed6e26f"},
+        {"path": "crates/kestrike/src/net/fetch.rs", "quote": "pub(super) fn attach(&self)", "digest": "094f213e274f1e7f245cfef1098670a19cc872dfc45853254f7a6b3b502aea69"}
+      ],
+      "note": "Dropping the client namespace closes every live request on the board through `Releases::close`, cited on `CClose`'s row, which turns each request's handed leases not yet credited into orphans, and detaches it; the successor namespace's `attach` raises the board core, and its table restarts handle generations."
+    },
+    {
+      "model": "tla/Identity.tla", "kind": "action", "name": "Done",
+      "abstraction": "the terminal stutter: every binding released, every lease returned, every row past its expiry and the upload decided",
+      "note": "`Done` changes no variable and stands for no step of the code; it keeps the final state from reading as a deadlock."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Fill",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Submission => \"accepted-submission\","},
+        {"path": "crates/kestrike/src/storage/attempt.rs", "quote": "pub fn begin_fill(", "digest": "0092ecfbef3b3f3a9772fcd530c74db5394990efea40d0191794ffe0d5d21aeb"},
+        {"path": "crates/kestrike/src/storage/attempt.rs", "quote": "fn grant<'v, P: Platform>(", "digest": "7b5c5b0261bb1eec9d66ff8a15cd2648773213cf8011dbf58da08f9ed11e9506"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "fn receive_piece<D: Disk>(", "digest": "470f0972b3ccdb579699d0ec055daa39c3261e4e7c3bf998079cf7f2492e7292"},
+        {"path": "crates/kestrike/src/storage/volume/write.rs", "quote": "pub(crate) fn write_at(", "digest": "daf6ac0b56cdbae2dab190e00b5f547e6fb198e01ff9b756c7546c6c3b4a147e"}
+      ],
+      "note": "Abstraction: the issuer's durable write is atomic with issue. `Storage::begin_fill` grants the attempt its serial under the gate (`grant`, which refuses past the last serial and advances the next one), `WritableFill::receive_piece`, which `receive` and `receive_verified` enter, submits the record's segments and `Volume::write_at` submits each write under the tenure's session, the model's queued write of a new generation. The code's serial is volatile and restarts with each storage; uniqueness across a death comes from the session, persisted once per tenure by the restart, so a record's identity is its allocation, session and version, which the model's persisted last generation stands for."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Exhaust",
+      "abstraction": "the typed exhaustion outcome",
+      "note": "The model ends `Exhausted` once every generation is issued; its bound on generations stands for the issuer's limit."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Land",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::MediaEffect => \"permitted-media-effect\","},
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Completion => \"completion-posting-and-delivery\","},
+        {"path": "crates/kestrike/src/storage/device/table.rs", "quote": "pub fn submit_write(", "digest": "ffd45daa5bc1f36eba428a915d877fdcce40a9737f3e734426fd733880cdf88e"},
+        {"path": "crates/kestrike/src/storage/device/table.rs", "quote": "fn submit_command(", "digest": "47e78d2055be9f890fa30323219dc19b778bb2f6330dc53795defca6d4eb1bdb"},
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "quote": "pub(super) fn apply(&mut self, terminal: Terminal<'a>, now: u64)", "digest": "5332cde2d297b7636e0c7a4c1341625f1a68c0e79bae972c1e251b3bf7d3158e"},
+        {"path": "crates/kestrike/src/storage/volume/write.rs", "quote": "pub(super) fn apply_write(", "digest": "900e90aae09db9499eaa38f62d7bbe35462ec10f039b4350b8c1504e70d28471"}
+      ],
+      "note": "`CommandTable::submit_write` hands the write through `submit_command` to the device, which performs the media effect, and `Volume::apply` routes its terminal to `apply_write`, which posts the completed units to the write set. The model lands a record as one whole unit with no failure; the code writes a record as several commands, counts units, fails a set on a failed terminal and counts a write only while its serving token admits fills."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "PersistFence",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Persistence => \"qualified-persistence\","},
+        {"path": "crates/kestrike/src/storage/volume/metadata.rs", "quote": "pub(super) fn apply_metadata(&mut self, cell: u32, terminal: Terminal<'a>)", "digest": "31fee315a295bfbc03d79f9e618f19a85f022448401f06170cb251728ab10349"},
+        {"path": "crates/kestrike/src/storage/device/profile.rs", "quote": "pub fn completion_is_durable(", "digest": "dd391de01715c51688123422f0157a31b5d3ce9f224ff7114b3db5ed899c1238"},
+        {"path": "crates/kestrike/src/storage/recovery/persisted.rs", "quote": "pub(crate) fn of(terminal: &Terminal<'_>, recorded: &Recorded, area: &Area) -> Option<Self>", "digest": "728f0fe232599403585b8baae15efd0198d1802f58dac4b43f6a8464d8182af2"}
+      ],
+      "note": "The code has no fence: under the qualified persistence profile a write's completion is its persistence. `completion_is_durable` decides from Identify evidence whether a device qualifies for that profile, `Persisted::of` turns a root write's `Written` terminal into persistence evidence, which `apply_metadata` records, the step the simulator's persistence point cuts at, and a record write persists at its completion in `apply_write`, cited on `Land`'s row. The device layer has no flush or FUA command. The model's fence, which makes every queued write durable at once, runs only under `Fence`, which the catalog does not credit."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Publish",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Publication => \"root-or-admission-publication\","},
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Successor => \"first-successor-visibility\","},
+        {"path": "crates/kestrike/src/storage/publication.rs", "quote": "pub fn publish<D: Disk>(", "digest": "3693674b3ace913c27f906bbfc0608cc6ace431edb3b3ac3838d900cf0dd7e32"},
+        {"path": "crates/kestrike/src/storage/writable.rs", "quote": "pub fn is_ready<D: Disk>(&self, volume: &Volume<'s, 'a, P, D>) -> bool", "digest": "dff279c10ce6c4189b1fe9b8e7b690b596167d628dffd32356ecb4163c958b9a"},
+        {"path": "crates/kestrike/src/storage/volume/write.rs", "quote": "pub fn is_ready(&self) -> bool", "digest": "9ee46ac73eab0e14b04ceb418128774793beaeb28a1f72e1035c89507ca941db"},
+        {"path": "crates/kestrike/src/storage/publication.rs", "quote": "fn install<'s, P: Platform>(", "digest": "c926b18861267629f6a9d80cff60cdebb26e3ae46dab8fb8bdb934828262a02c"}
+      ],
+      "note": "`WritableFill::publish` publishes only a ready record (`is_ready`: every unit completed and none failed). Readiness is device completion; it stands for the model's `Durable(r)` only under the qualified persistence profile, where a write's completion is its persistence, as `PersistFence`'s row states. `install` makes the mapping visible under the shard gate and, once the tenure's suffix is required, records it in the suffix; when a visible object of the key exists, the same `install` replaces it, recorded as one REPLACE record whose removal excludes the incumbent. The model publishes a successor only after its predecessors are excluded, under `Replacement`; the code excludes and installs in one step. Visibility is the live process's; the suffix record persists it later. The suffix is required once a capture proof is published (`cut_intact`) or a warm attach restores a membership; before then `install` records nothing, and such a publication is recoverable only once a later checkpoint captures it."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "RequestExclude",
+      "abstraction": "the client's recovery-safe request",
+      "note": "A client's INVALIDATE is the request; the owner's step that answers it is `Exclude`'s row."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Exclude",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Exclusion => \"protected-exclusion\","},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "fn hold_invalidation(", "digest": "c2ebf23106344f0cbe231b2af979ac66347915099580ed80497a35cd4ca7fc1b"},
+        {"path": "crates/kestrike/src/storage/remove.rs", "quote": "pub fn invalidate(", "digest": "4c8c0ae1808cec20144b072195f4a1702c3852a14d9f27e91a79a7760bd84d27"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn hold(&mut self, (key, interval): Entry)", "digest": "1d453efc290405c12580730692db1ba72de16959c5e416f43c9e6c9ec5c0a926"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn admits(&self, key: &[u8; 32], version: CacheVersion) -> bool", "digest": "b112583d9284e5db0eb136a114918aba2263f955bf4230b9adc32614c20e7044"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn cover_begin(&mut self, entries: &[Entry]) -> Result<Option<PageRequest>, Withdraw>", "digest": "978aa4ac7cfb35eb310a48ef4db1e7fc8bf02a8b349104264fc76a7b2a68ec9a"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn run<S: Store, L: WatermarkLog>(self, client: &mut Client<S, L>) -> PageReply", "digest": "c29f4f4da74874de6c106ebdea6584979b91b1096c489fa0c944b6a575ff61f1"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "fn issue(&mut self, page: u16, op: Op) -> PageRequest", "digest": "4953d512c89af0bf10c43a0cdfd28ece497e88830dae3e6c68accab69a261209"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "fn settle(", "digest": "a75e796cb686e8aca9134ca4f3dba701fdaacb70adf5b1001555c70d1eca8403"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "fn reread(\n        &mut self,", "digest": "01ec88d7c73d62417c58cceb591067705b4766d67a674bcc9fe988cf21fc1fb5"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn cover_end(&mut self, reply: PageReply) -> Result<Cover, Withdraw>", "digest": "6acf3c06dd1cfce85ab031d23e4181711311b818cf78643d4da83d9fcdbcf5a3"}
+      ],
+      "note": "`hold_invalidation` removes the key's object through `Storage::invalidate`, which ends its binding, and adds the entry to the tenure's coverage through `Fencing::hold`; `Fencing::admits` then refuses fills of the versions the coverage excludes. `Fencing::cover_begin` drafts the page's compare-and-swap, the edits each entry's merge makes to the page's known value, after the entry, its hull and any saturation entered the coverage, and `Fencing::issue` names it as the one request the fencing awaits. `PageRequest::run` builds the value from the known value and those edits and issues it on the store client, on the store lane or inside `Owner::cover_pending` or `cover_page`, and its commit is the step that makes the held entry durable for the next tenure to carry forward, whether or not a reply is adopted. `Fencing::cover_end` applies only the reply to the awaited request: `Fencing::settle` adopts an acknowledged commit, and `Fencing::reread` takes the re-read after a failed condition or a size rejection, whose saturated retry covers the page. The authority gate is checked when a write or a saved follow-up starts, so a write already on the lane can commit after the authority ended or the process died, acknowledged by no one; the successor's fence read carries it forward. The model's exclusion is one durable step over one record; the code holds a key and version interval in memory first and makes it durable at the commit."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Ack",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Response => \"external-response-observation\","},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "pub fn cover_begin(", "digest": "287c35928498d195ec7e5af3d9e77f88fac93ec7c71532d4a5b8a2cc70114d9c"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "pub fn cover_open(&mut self) -> bool", "digest": "72d57617b734a4cf28d9582f43620cdf8c9f79cd992b7739dfedf4a0e0f6b1f3"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "pub fn cover_end(", "digest": "d3899dc965f32ff8f4698c165a50171ce8857b58f051e2ef2f545f82bfb6fa55"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "fn withdraw_coverage(", "digest": "4c3f7091690009dd4ed0c71d416adec5f1ba00e968f07f4fc3f834e22b206ad7"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn cover_end(&mut self, reply: PageReply) -> Result<Cover, Withdraw>", "digest": "6acf3c06dd1cfce85ab031d23e4181711311b818cf78643d4da83d9fcdbcf5a3"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "fn settle(", "digest": "a75e796cb686e8aca9134ca4f3dba701fdaacb70adf5b1001555c70d1eca8403"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub(super) fn queue_invalidated(", "digest": "0b9bcae13f88101cf14d70bb859f73f60942704723737e6327fa29364c0faa43"}
+      ],
+      "note": "`Owner::cover_end` queues INVALIDATED through `queue_invalidated` for each wire asker once `Fencing::cover_end` adopted the acknowledged commit of the entry's page, after the exclusion holds durably, which the model's `r \\in excl` guard stands for. `Owner::cover_begin` starts one page's write over the entries held on that page, under `Owner::cover_open`'s authority gate. Its commit acknowledges each entry the write carried, and a later asker of a carried entry with it; an entry held on the page after `cover_begin` waits for the next write. `Fencing::settle` decides the commit: only an acknowledged success is `Done`. When `Owner::cover_open` is false as the reply is applied (the owner closed, lost its volume, unwound a turn or drains at `DrainStage::Mutations`, or the serving authority is Withdrawn or Closed), the fencing still adopts the commit and the held entries are discarded unacknowledged; a coverage withdrawal (`withdraw_coverage`) discards them as well."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Observe",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Response => \"external-response-observation\","},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "Kind::Invalidated => match self.admit_response(frame)", "digest": "883580fb22d07533cba39d55562d4a6a8e61ab08a589e717ffa4b50bace9150e"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn admit_response(&mut self, frame: &Authenticated<'_, '_>) -> Option<Admitted>", "digest": "07b0c67e3d593e35a4f2f5ae925923bc7370808f1c616dd4d83ed6745ab276fd"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn routed(&mut self) -> bool", "digest": "ef558b6f9e8955d462b5dc8a2cf409e2656349db2f0939168c8805b0a5d5f028"},
+        {"path": "crates/kestrike/src/net/session.rs", "quote": "pub fn admit(&mut self, frame: &Authenticated<'_, '_>) -> Result<Admitted, SessionReject>", "digest": "a4091cf43de4b04b1eec0f918acf48d200516702cf14bc82847f522fff84aac5"},
+        {"path": "crates/kestrike/src/net/session.rs", "quote": "fn record(&mut self, peer: PeerId, sequence: u64) -> Result<Admitted, SessionReject>", "digest": "bd03a125cdf8c3b9e4a7ff78157e7c92612bd1adcda2d958d1cbad92c76b85c7"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn received_invalidated(invalidated: &mut VecDeque<Invalidated>, header: &Header) -> Taken", "digest": "7887a01bf1b5b50bcfa4e69d7f764ec04f3d6374dffd9e0086afa8aaefca62e0"},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "pub fn take_invalidated(&mut self) -> Option<Invalidated>", "digest": "828895b592880c5c9ea3a9d2cf2483ccbebb206ca7a7a2afeb03f1a5b5fd6774"}
+      ],
+      "note": "The client admits INVALIDATED only through `admit_response`: `Sessions::admit` takes it only under the client's active session and only when its sequence passes the replay window (`record`), the nearest guard to the model's `Live`, which the guide declares as an abstraction, and the shard route must hold (`routed`). A response a dead incarnation sent before its death is still admitted, if its sequence passes the window, until the client changes sessions. `received_invalidated` puts it in the inbox and the caller consumes it with `take_invalidated`. The model's `observed` state is the model's: production keeps no record that a reply was consumed."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Lose",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Response => \"external-response-observation\","},
+        {"path": "crates/kestrike/src/net/client.rs", "quote": "fn received_invalidated(invalidated: &mut VecDeque<Invalidated>, header: &Header) -> Taken", "digest": "7887a01bf1b5b50bcfa4e69d7f764ec04f3d6374dffd9e0086afa8aaefca62e0"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "fn queue_reply(&mut self, reply: Reply)", "digest": "5077bad155795cfc03210ffc9af1363ed4f40347b97086a05c33a818cc4e84dd"},
+        {"path": "crates/kestrike/src/net/serve.rs", "quote": "pub(super) fn retire_peer<C: Chunk, F>(", "digest": "bb2349fd31228f218114e07d806d3e43727256eab0b504e7595bb7652e52753e"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "fn round<const N: usize>(", "digest": "4ff954c978110cfe78efb25b5393bfeed6c634d869633dfd5ab05326b3a73f2f"},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "fn under_session(", "digest": "6affdb73d62366a87bbc284bc60b63a14ec5c0d95a4dfe5edcd424c90bf2144b"}
+      ],
+      "note": "The owner's `queue_reply` drops a reply when its reply ring is full or the peer lies outside the core, and `ServeCore::retire_peer` drops a retired peer's queued replies before they are sent. The owner's send round (`Sender::round`) consumes a staged reply it does not send: one whose peer's session is not bound to the serving tenure, one whose epoch is not its peer's active session's or whose send sequence is spent (`under_session`), one whose encoding or tag fails, every frame it pulled when the serving authority refuses the send, and, when the transport fails, the leading datagram, or every remaining one once it is closed; the serve core settles each as taken. A reply outside the prefix a send returns stays queued and is offered again. The client drops a delivered INVALIDATED that `admit_response` refuses, outside its active session or shard route or behind the replay window (cited on `Observe`'s row), and `received_invalidated` drops one when its inbox is full; a refused duplicate of a reply already admitted loses nothing. Loss on the link and a client that dies with the reply unread are also the model's `Lose` and are no code step."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Unprotect",
+      "abstraction": "an observed exclusion releases its extent",
+      "note": "In the code the extent's protection ends when no right holds it and its removal lies in the durable prefix, followed by grace; the model releases it only at the observation."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "LiveInvalidate",
+      "abstraction": "the live invalidation, in memory and on the feed",
+      "note": "The code records the applied feed position in `Storage::advance_coverage` on the caller's promise that every event at or below it reached `invalidate`, and the advance acknowledges nothing; the feed's order, and its retention of acknowledged events for replay, belong to the external feed authority. The model's cursor and ghost record stand for both."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "FreshAck",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Response => \"external-response-observation\","},
+        {"path": "crates/kestrike/src/net/owner.rs", "quote": "pub fn cover_end(", "digest": "d3899dc965f32ff8f4698c165a50171ce8857b58f051e2ef2f545f82bfb6fa55"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "pub fn cover_end(&mut self, reply: PageReply) -> Result<Cover, Withdraw>", "digest": "6acf3c06dd1cfce85ab031d23e4181711311b818cf78643d4da83d9fcdbcf5a3"},
+        {"path": "crates/kestrike/src/storage/cache/coverage.rs", "quote": "fn settle(", "digest": "a75e796cb686e8aca9134ca4f3dba701fdaacb70adf5b1001555c70d1eca8403"},
+        {"path": "crates/kestrike/src/storage/volume/readiness.rs", "quote": "pub fn begin_replay(&mut self, feed: FeedContract, from: u64) -> Result<State, ReadinessError>", "digest": "7f246b9e9c82b37e31b754083b610cf28846b84f09d0dfc7444787abbe0f95d1"},
+        {"path": "crates/kestrike/src/storage/volume/readiness.rs", "quote": "pub fn complete_replay(&mut self) -> Result<State, ReadinessError>", "digest": "bfc03f272da131930c1cc4b0171b142507c884bac67215bb89bddf4bf18cef47"},
+        {"path": "crates/kestrike/src/storage/readiness.rs", "quote": "pub(crate) fn next(state: State, event: Event) -> Result<State, ReadinessError>", "digest": "d480980607af89371e42d2a07efb95bd37f97a309b0b580362abdfdf7722de6c"}
+      ],
+      "note": "An invalidation's acknowledgment is its coverage page write: once `Fencing::cover_end` adopts the acknowledged commit of a page write that carried the entry, `Owner::cover_end` appends the entry to the caller's `acknowledged` list while `Owner::cover_open` holds (the owner's mutation admission is open and the authority is Serving), and for a wire INVALIDATE it also queues INVALIDATED, which `Observe`'s row follows to the client; queueing is not the client's observation. This is the commit `Exclude`'s row calls the durable exclusion, so in the code an acknowledged invalidation is a coverage entry that `convert` omits at warm attach without replay; an invalidation applied through `invalidate` and `advance_coverage` alone acknowledges nothing, and production has no acknowledgment of a feed cursor. The model's floor, the highest observed acknowledged cursor, is the model's: no production item keeps or compares it. Replay covers any floor on three premises: `begin_replay` withholds unless the subscription the caller passes names the volume's feed and resumes at position zero, the caller calls `complete_replay` only once it applied the feed's events through the tip, which the volume takes on the caller's word, and the external feed authority keeps acknowledged events, in order, for replay, as `LiveInvalidate`'s row states. A matching subscription with no restored binding reaches `Live` at `begin_replay`; `readiness::next` is the table of these moves."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Crash",
+      "abstraction": "the process-death cut, once, while the incarnation runs",
+      "note": "Process death is a failure class of the cut code, not a site; the model takes it once."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "OldLand",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::MediaEffect => \"permitted-media-effect\","},
+        {"path": "crates/kestrike/src/storage/device/table.rs", "quote": "pub fn submit_write(", "digest": "ffd45daa5bc1f36eba428a915d877fdcce40a9737f3e734426fd733880cdf88e"},
+        {"path": "crates/kestrike/src/storage/record/header.rs", "quote": "pub(crate) fn admits(found: &RecordIdentity, named: &RecordIdentity, reader: u64) -> bool", "digest": "83db2b0e7e3c3180caa7b54ef39b823f784ac9a54a655264bdc9a0df47dbd763"},
+        {"path": "crates/kestrike/src/storage/record/predicate.rs", "quote": "pub(crate) fn accepts(", "digest": "6da4ebd6e7c9932dda64d072c051182b70a8d113448a26610773ef94a7048340"}
+      ],
+      "note": "The old process's write is one `submit_write` made before the death, and the device lands it. `header::admits`, through `predicate::accepts`, keeps a late landing to its own identity: a header whose identity differs from the entry the index names fails the check. The model lands a late write as one whole unit. In every recovery profile of the simulator a process-death cut, the model's `Crash`, lands each outstanding write whole (`whole` in `sim/cut/enumerate.rs`); only the torn profile's controller-reset cut lands a sector prefix of one, which the model's late landing does not take."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "OldDrop",
+      "abstraction": "an old write that never lands, or ends quiesced at the stop proof",
+      "note": "The stop proof the restart takes before the fencing boundary is what makes a dropped write final."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Replay",
+      "abstraction": "invalidation-feed replay during recovery",
+      "note": "The model replays one cursor per step, and the cursor advances whether or not a feed entry sits at that position; `Recover` binds an eligible root only once the cursor reached the floor. In the code `Volume::begin_replay` withholds unless the subscription the caller passes names the volume's feed and resumes at position zero, the caller redelivers the feed's events through `invalidate`, and the caller reports through `complete_replay` that replay reached the feed's tip; the volume moves readiness without checking a cursor. A matching subscription with no restored binding reaches `Live` at `begin_replay`. `begin_replay` and `complete_replay` are cited on `Recover`'s row, `Storage::invalidate` on `Exclude`'s."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Recover",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::RecoveryMutation => \"recovery-mutation\","},
+        {"path": "crates/kestrike/src/storage/recovery/delta_replay.rs", "quote": "pub fn patch(", "digest": "2810560cbe41dd4cf5b41b6c2eb77ec8e1efee67678927607f8cd3599dfa75ac"},
+        {"path": "crates/kestrike/src/storage/volume/warm.rs", "quote": "pub(super) fn convert(job: Convert) -> Converted", "digest": "d128127dd60ce8c438cc67db325dc51981f1f4802f8c3f71b2f20cf4c72104f6"},
+        {"path": "crates/kestrike/src/storage/portable/recovery.rs", "quote": "pub(crate) fn retained(&self, pair: (u64, u32)) -> Result<u32, Withheld>", "digest": "bc3a0360395f22627b8f884d866483315c4ba64d9dc97b50c13cd9b17923fd71"},
+        {"path": "crates/kestrike/src/storage/publish.rs", "quote": "fn publish_from<P: Platform, B: Binding>(", "digest": "5a77ab942b8647810c43961f8d59c50fdee3dc032e10f1eade284a31fdb95585"},
+        {"path": "crates/kestrike/src/storage/volume/warm.rs", "quote": "fn publish(&mut self)", "digest": "5ebb8b9bc1a6af8946f7b7e461ba0e7c57c54171add464c9abae4893f8c6a300"},
+        {"path": "crates/kestrike/src/storage/volume/warm.rs", "quote": "pub(super) fn admits(state: State) -> bool", "digest": "7dcf8a0991087ddc02692b2d04f7d541a02bc2b5b2d85048f89b22a5e6fb4e72"},
+        {"path": "crates/kestrike/src/storage/tables/lanes.rs", "quote": "pub(crate) fn install(", "digest": "de32da0b5d013b47aa8fb47df018e4ae61b9115838db28d20b32132f5e5e3ed6"},
+        {"path": "crates/kestrike/src/storage/volume/readiness.rs", "quote": "pub fn begin_replay(&mut self, feed: FeedContract, from: u64) -> Result<State, ReadinessError>", "digest": "7f246b9e9c82b37e31b754083b610cf28846b84f09d0dfc7444787abbe0f95d1"},
+        {"path": "crates/kestrike/src/storage/volume/readiness.rs", "quote": "pub fn complete_replay(&mut self) -> Result<State, ReadinessError>", "digest": "bfc03f272da131930c1cc4b0171b142507c884bac67215bb89bddf4bf18cef47"},
+        {"path": "crates/kestrike/src/storage/readiness.rs", "quote": "pub(crate) fn next(state: State, event: Event) -> Result<State, ReadinessError>", "digest": "d480980607af89371e42d2a07efb95bd37f97a309b0b580362abdfdf7722de6c"},
+        {"path": "crates/kestrike/src/storage/acquire.rs", "quote": "pub(super) fn reserve(", "digest": "1422579e3312a3fa5f33134f49e7cc8d66ecffcd9324f270c8b6f3ea2e12e28f"}
+      ],
+      "note": "`patch` replays the suffixes, where each removal or replacement excludes its identity, `convert` omits the entries the fenced coverage excludes, the entries whose pair `Recovery::retained` judges `Expired` (a pair that only this load's reading or sample judges expired restores as a member that reads expired, with its units held), and the entries whose pair is `PortableExpiry::ABSENT`, a binding published live-only. The model has no expiry and binds both kinds of entry; their omission rests on the claim that every later load over the same checkpoint, or over a certified suffix holding the entry's INSERT, omits the entry again, so no load binds a root whose units `convert` freed, and `ReuseTwoProofs` holds for these entries by that claim, not by a checked statement (`host::duties::capture_tests::units_an_omitted_live_only_entry_freed_carry_a_later_fill_across_a_second_restart` and `host::duties::capture_tests::units_an_omitted_live_only_entry_freed_stay_free_when_a_crash_loses_the_later_fill_s_insert` test it for the absent pair). The claim binds every later loader: no later loader may restore an entry whose pair is `PortableExpiry::ABSENT`, for example by giving it a new lifetime, because checkpoints whose units were reused stay on the device and a later load can read them. The absent pair's omission is a pure function of the entry's stored bytes, and `convert` decides it before it asks the load's reading for any verdict on the entry (`storage::volume::warm::tests::an_absent_pair_is_omitted_at_either_of_two_clock_readings`). The warm publication worker (`publish`) stores each restored binding in the index through `publish_restored` and `publish_from`, reading the readiness word before each run of pairs and stopping once it reads other than `Loading` (`admits`). The code stores the restored bindings before `begin_replay`, where the model binds after replay reached the floor: `Lane::install` marks each restored slot with the recovered-origin marker, and `reserve` grants no new lease on a marked slot until readiness reads `Live`. `begin_replay` withholds a subscription of another feed or one resuming past zero, moves a matching one to `Live` when no binding was restored and otherwise to `Replaying`, and `complete_replay` moves `Replaying` to `Live` on the caller's report that replay reached the feed's tip, without checking a cursor; `readiness::next` is the table of these moves. Each of these stages is its own code step, where the model's `Recover` is one. The code's withheld state means fill admission withdrew; the model's `Withheld` means no label was bound. Where the model binds a label only to its one eligible root, the code supersedes by level, withholds conflicting entries or refuses the attempt."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Reuse",
+      "anchors": [
+        {"path": "crates/kestrike/src/sim/cut/identity.rs", "quote": "Self::Reuse => \"reuse\","},
+        {"path": "crates/kestrike/src/storage/volume/warm.rs", "quote": "fn hold(&mut self)", "digest": "b27464b30a6a973b5cc2979c0c995d2f968555423f366805aa72cc882abde8c4"},
+        {"path": "crates/kestrike/src/storage/reserve.rs", "quote": "fn claim(", "digest": "f6e0613851e98251b08ca4fc97820fd0454eb1c616fb318a066eb3c5b483c7e8"}
+      ],
+      "note": "`hold` rebuilds the allocator with exactly the restored extents held, so every other unit is free, and a later fill's `claim` reserves an extent. The model's `Free` reads the old process's queue; the code rests on the stop proof the restart takes before the fencing boundary."
+    },
+    {
+      "model": "tla/Recovery.tla", "kind": "action", "name": "Finished",
+      "abstraction": "the terminal stutter",
+      "note": "`Finished` changes no variable and stands for no step of the code."
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+capabilities: 4
+summary: 1
+manifest: 2
+key: version version=2
+key: profile text
+key: root count min=1 max=18446744073709551615
+key: executable sha256
+key: toolchain text
+key: build sha256
+key: platform text
+key: cpu text
+key: scenario text
+key: turns count min=1 max=18446744073709551615
+key: same_time count min=1 max=18446744073709551615
+key: no_progress count min=1 max=18446744073709551615
+key: actors count min=1 max=18446744073709551615
+key: disk_depth count min=1 max=18446744073709551615
+key: scripted count min=1 max=18446744073709551615
+key: link_copy_bytes count min=1 max=18446744073709551615
+key: tx_slots count min=1 max=18446744073709551615
+key: rules count min=1 max=18446744073709551615
+key: taps count min=1 max=18446744073709551615
+key: captures count min=1 max=18446744073709551615
+key: audit_records count min=1 max=18446744073709551615
+key: registry count min=1 max=18446744073709551615
+key: upload_attempts count min=1 max=18446744073709551615
+key: source_bytes count min=1 max=18446744073709551615
+key: slots count min=1 max=18446744073709551615
+key: restarts count min=1 max=18446744073709551615
+key: bundles count min=1 max=18446744073709551615
+key: suffix_depth count min=1 max=18446744073709551615
+key: suffix_children count min=1 max=18446744073709551615
+key: suffix_faults count min=1 max=18446744073709551615
+key: suffix_advances count min=1 max=18446744073709551615
+key: pending count min=1 max=192153584101141162
+key: ring count min=1 max=192153584101141162
+key: records count min=1 max=18446744073709551615
+key: bytes count min=1 max=18446744073709551615
+key: every count min=1 max=4294967295
+key: watchdog count min=1 max=4294967295
+constraint: min(records, bytes/48) >= ring+6 (+1 when every=1)
+constraint: min(records, bytes/48) >= c + c/every + ring+5, c = ceil(canonical bytes/43) <= 65536
+held: actors,disk_depth,scripted,rules,taps,captures,audit_records,registry,upload_attempts,source_bytes,slots,restarts,bundles
+profile: cluster-broad class=live support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=108,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-pressure class=live support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=98,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm class=live support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-wrong-owner class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-stale-read class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-late-stale class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-leak class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-corrupt class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-misread class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-swarm-unremoved class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=3456,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-wrong-owner class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=33,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-stale-read class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=33,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-long class=live support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=18275,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-late-stale class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=432,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-late-leak class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=432,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-late-corrupt class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=432,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-version-end class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=36,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-order-1 class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=108,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-order-2 class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=108,source_bytes=32768,slots=1,restarts=1,bundles=1
+profile: cluster-order-3 class=control support=implemented campaign=unqualified held=actors=26,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=108,source_bytes=32768,slots=1,restarts=1,bundles=1
+family: settled-WORDS words=batched,scaled,cramped,twice,hasty,eager,faulted,planted,invalidating each=at-most-once applied=left-to-right class=live,control-when-planted support=implemented campaign=unqualified held=actors=7,disk_depth=8,scripted=1,rules=32,taps=8,captures=4096,audit_records=65536,registry=4096,upload_attempts=1,source_bytes=24476,slots=1,restarts=1,bundles=1
+milestone: pending-put
+milestone: recovery-reached
+milestone: turn-N
+milestone: script-N
+branch: suffixes=1..16 siblings=1..4
+topology: owners=1 clients=2 configurable=no; cluster profiles draw theirs
+cluster: cluster-broad generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=3 phase_ops=24 gap_us=0 window=1 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:4,hits:1,cross:0,faults:1,healthy:3,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-pressure generator=3 owners=2..3 keys=6..8 clients=2 sizes=16384,24476 hot_slots=2 concurrency=1 phases=2 phase_ops=40 gap_us=0 window=1 compact=true faults=loss:5,duplicate:5,reorder:5,delay:1,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=false invalidate=false versioned=false cancel=false minima=published:10,hits:4,cross:1,faults:1,healthy:2,reused:1 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-wrong-owner generator=3 owners=2..3 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=1 phase_ops=24 gap_us=0 window=1 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=false minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-stale-read generator=3 owners=2..3 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=1 phase_ops=24 gap_us=0 window=1 compact=false faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=false versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-long generator=3 owners=2..3 keys=4..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=731 phase_ops=16 gap_us=86400000000 window=30 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:1000,hits:100,cross:1,faults:500,healthy:731,reused:1 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-late-stale generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=12 phase_ops=24 gap_us=86400000000 window=2 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-late-leak generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=12 phase_ops=24 gap_us=86400000000 window=2 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-late-corrupt generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=12 phase_ops=24 gap_us=86400000000 window=2 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-version-end generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=1 phase_ops=24 gap_us=0 window=1 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-wrong-owner generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-stale-read generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-late-stale generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-leak generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-corrupt generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-misread generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-swarm-unremoved generator=3 owners=1..4 keys=1..8 clients=2 sizes=4096,8191,8192,8193,16384,24476 hot_slots=4 concurrency=2 phases=32 phase_ops=96 gap_us=86400000000 window=32 compact=true faults=loss:30,duplicate:30,reorder:30,delay:4,stale:10,truncate:10,would_block:10,error:10 device=write_error:10,read_error:10 sustained=true delayed_returns=true invalidate=true versioned=true cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-order-1 generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=3 phase_ops=24 gap_us=0 window=1 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-order-2 generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=3 phase_ops=24 gap_us=0 window=1 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement
+cluster: cluster-order-3 generator=3 owners=2..4 keys=3..6 clients=2 sizes=4096,16384,24476 hot_slots=3 concurrency=2 phases=3 phase_ops=24 gap_us=0 window=1 compact=true faults=loss:10,duplicate:10,reorder:10,delay:2,stale:0,truncate:0,would_block:0,error:0 device=write_error:0,read_error:0 sustained=false delayed_returns=true invalidate=true versioned=false cancel=true minima=published:0,hits:0,cross:0,faults:0,healthy:0,reused:0 unavailable=node-lifecycle,session-lifecycle,membership,placement

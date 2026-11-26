@@ -1,0 +1,387 @@
+{
+  "surfaces": [
+    {
+      "surface": "bind/wc job dispenser",
+      "path": "crates/kestrike/src/bind/wc.rs",
+      "operations": ["jobs.get(next.fetch_add(1, Ordering::Relaxed))", "next.store(jobs.len(), Ordering::Relaxed);"],
+      "writers": [
+        {"fn": "check_wc::work", "actor": "each spawned helper and the calling thread, concurrently", "evidence": "let _ = std::thread::Builder::new().spawn_scoped(scope, work);"},
+        {"fn": "check_wc", "actor": "the calling thread, after a kernel or loaded-state refusal", "evidence": "if checked.is_err() { // A refusal empties the queue, so each helper stops after its current file. next.store(jobs.len(), Ordering::Relaxed); }"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["bind::wc_tests::errors_keep_their_order_across_threads"],
+      "witness": {"check": "bind::wc_tests::errors_keep_their_order_across_threads", "test": "bind::wc_tests::errors_keep_their_order_across_threads", "kind": "state", "observes": "bad.modules[2].sha256 = \"00\".repeat(32); bad.modules[1].sha256 = \"00\".repeat(32); assert_eq!( fixture.host.check_wc(&bad), Err(WcError::Module(\"vfio\".into())) );"},
+      "argument": "The fetch_add hands each index to one taker; each result goes through its own OnceLock and is read after thread::scope joins, so two modules failing on helper threads still report in manifest order. A refusal stores jobs.len(), so later takes find no job, and a helper that fails to spawn takes nothing while the calling thread's own work() drains every job left. Those two rest on this argument: the witness observes the result order, and no test counts the files hashed after a refusal or fails a spawn."
+    },
+    {
+      "surface": "native/containment exchange",
+      "path": "crates/kestrike/src/native/containment.rs",
+      "operations": [
+        ".try_update(Ordering::AcqRel, Ordering::Acquire, |calls| { calls.checked_add(1) })",
+        "self.requested.store(true, Ordering::Release);",
+        "self.acknowledged.store(true, Ordering::Release);"
+      ],
+      "writers": [
+        {"fn": "contain", "actor": "every caller of Supervisor::contain, under the channel mutex", "evidence": "let mut channel = self.channel.lock().unwrap_or_else(PoisonError::into_inner);"},
+        {"fn": "exchange", "actor": "the first caller of contain, under the channel mutex", "evidence": "if first && self.exchange(&mut channel) {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["native::containment_tests::every_caller_returns_only_after_the_one_request_is_acknowledged"],
+      "witness": {"check": "native::containment_tests::every_caller_returns_only_after_the_one_request_is_acknowledged", "test": "native::containment_tests::every_caller_returns_only_after_the_one_request_is_acknowledged", "kind": "state", "observes": "assert_eq!(returned.load(std::sync::atomic::Ordering::Acquire), 0); assert!( !supervisor.verified(), \"an unacknowledged request verifies no containment\" );"},
+      "argument": "Concurrent callers of contain take the channel mutex before they touch the three words, so the mutex orders every write; the flags publish no payload beyond their own value, and the acknowledgement verifies containment only for this supervisor. External fencing keeps its own authority."
+    },
+    {
+      "surface": "native/ena callback flag",
+      "path": "crates/kestrike/src/native/ena.rs",
+      "operations": [
+        "unsafe { &*flag.cast::<AtomicBool>() }.store(true, Ordering::Release);",
+        "self.reset.load(Ordering::Acquire) && self.reset.swap(false, Ordering::AcqRel);"
+      ],
+      "writers": [
+        {"fn": "on_reset", "actor": "the driver's watchdog timer, which the module documentation places inside rte_timer_manage on the service lcore", "evidence": "reset only from inside that timer run, on this thread, so the flag is"},
+        {"fn": "check", "actor": "the port's service lcore, through &mut self", "evidence": "fn check(&mut self) -> Health {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "native::ena_tests::the_reset_callback_raises_its_flag",
+        "native::ena_tests::every_reset_cause_counter_makes_a_reset_due"
+      ],
+      "witness": {"check": "native::ena_tests::the_reset_callback_raises_its_flag", "test": "native::ena_tests::the_reset_callback_raises_its_flag", "kind": "state", "observes": "assert_eq!(rc, 0); assert!(flag.load(Ordering::Acquire));"},
+      "argument": "The flag is one word, leaked at port open, so it outlives every callback delivery, including one after unregister. The documented delivery runs the callback inside check's rte_timer_manage on the service lcore, so the raise is sequenced before the consuming swap; the census keeps many writers because no test witnesses a delivery on another thread. The flag carries no payload: the service lcore reads the reset-cause counters itself. The reset protocol and hardware scheduling stay with their own owners. A test-only request_reset raises the flag the same way for the host-pair recovery test."
+    },
+    {
+      "surface": "native/env once-election",
+      "path": "crates/kestrike/src/native/env.rs",
+      "operations": ["if steps.latch().swap(true, Ordering::AcqRel) { return Err(EnvError::AlreadyInitialized); }"],
+      "writers": [
+        {"fn": "initialize_with", "actor": "every caller of Environment::initialize, on any thread", "evidence": "pub fn initialize(config: &EnvConfig<'_>) -> Result<Self, EnvError> { Self::initialize_with(config, &mut Native) }"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "native::env::init_tests::concurrent_entrants_elect_one_native_initializer",
+        "native::env::init_tests::every_initialization_branch_latches_once_and_finalizes_in_reverse"
+      ],
+      "witness": {"check": "native::env::init_tests::concurrent_entrants_elect_one_native_initializer", "test": "native::env::init_tests::concurrent_entrants_elect_one_native_initializer", "kind": "state", "observes": "assert_eq!(winners.len(), 1, \"one entrant wins the latch\");"},
+      "argument": "One AcqRel swap elects the native initializer; every later or racing entrant refuses before any native step, and a failed initialization keeps the latch set. The concurrent test is a scheduling witness: eight entrants released by one barrier, so the swap's atomicity, not the schedule, carries the election claim. The latch records the election and publishes no completed initialization. Log capture is a separate surface."
+    },
+    {
+      "surface": "native/registration issuance counter",
+      "path": "crates/kestrike/src/native/registration.rs",
+      "operations": ["Self(NEXT_REGISTRATION.fetch_add(1, Ordering::Relaxed))"],
+      "writers": [
+        {"fn": "RegistrationId::next", "actor": "every arena registration, on any thread that holds the environment", "evidence": "id: RegistrationId::next(),"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "needs-kernel",
+      "obligation": {"observation": "the registration issued at NEXT_REGISTRATION's last value, u64::MAX, and the fetch_add after it, which wraps to 0 and would reissue the first registration's identity", "actor": "concurrent RegistrationId::next callers from arena registration", "fault": "issuance-domain exhaustion after 2^64 registrations in one process; the terminal-identities record has no probe for this counter"},
+      "argument": "The relaxed fetch_add issues distinct values until the counter wraps. No source or test bounds registrations per process, so the never-reissued claim waits for an exhaustion probe or a stated bound."
+    },
+    {
+      "surface": "net/serving signal word",
+      "path": "crates/kestrike/src/net/serving.rs",
+      "operations": [
+        "REQUESTED.store(true, Ordering::Relaxed);",
+        "!ACTIVE.swap(true, Ordering::Relaxed),",
+        "REQUESTED.store(false, Ordering::Relaxed);",
+        "ACTIVE.store(false, Ordering::Relaxed);"
+      ],
+      "writers": [
+        {"fn": "request_close", "actor": "the SIGTERM handler, on whichever thread the signal interrupts", "evidence": "action.sa_sigaction = request_close as extern \"C\" fn(libc::c_int) as libc::sighandler_t;"},
+        {"fn": "start", "actor": "the thread that starts a serving loop", "evidence": "pub(crate) fn start(limit: Duration) -> Self {"},
+        {"fn": "drop", "actor": "the thread that drops the serving loop", "evidence": "impl Drop for Serving {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "net::composed_tests::a_serving_owner_stops_serving_on_sigterm_and_closes_once_its_work_in_flight_drains"
+      ],
+      "witness": {"check": "net::composed_tests::a_serving_owner_stops_serving_on_sigterm_and_closes_once_its_work_in_flight_drains", "test": "net::composed_tests::a_serving_owner_stops_serving_on_sigterm_and_closes_once_its_work_in_flight_drains", "kind": "fault", "observes": "assert_eq!( served, 8, \"the loop stops at the first check after the signal\" );"},
+      "argument": "REQUESTED is one word the handler raises with an async-signal-safe store and the loop polls; it publishes no payload. ACTIVE's Relaxed swap elects the one serving loop that owns the SIGTERM disposition and orders only ACTIVE itself: a handoff from one loop's restore in drop to the next loop's install across threads rests on sigaction being a kernel-serialized system call, a platform assumption outside the language model. An earlier loop's handler still running when drop restores the action can store REQUESTED after the next start clears it, so the next loop may see that earlier SIGTERM; that epoch residual stays with the signal lifecycle owner."
+    },
+    {
+      "surface": "net/client shard route binding",
+      "path": "crates/kestrike/src/net/client/route.rs",
+      "operations": [
+        "self.session.store(0, Ordering::Relaxed);",
+        "self.host[0].store(low, Ordering::Relaxed);",
+        "self.host[1].store(high, Ordering::Relaxed);",
+        "self.session.store(session | mark, Ordering::Release);",
+        "slot.shard.store(shard.get(), Ordering::Relaxed);"
+      ],
+      "writers": [
+        {"fn": "ShardRoutes::update", "actor": "any client thread of the application, holding the table's lock", "evidence": "let mut table = self.lock();"},
+        {"fn": "Binding::publish", "actor": "ShardRoutes::update, under the table's lock", "evidence": "slot.binding.publish(route);"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "client-route-slot-binding"
+      ],
+      "witness": {"check": "client-route-slot-binding", "test": "net::client::route::route_model::a_read_racing_a_rebind_takes_one_binding_whole", "kind": "state", "observes": "assert!( taken == recorded(first) || taken == recorded(second), \"torn binding {taken:x?}\" );"},
+      "argument": "Every write sits in ShardRoutes::update after it takes the table's lock, which also covers the poisoned case, so one client thread at a time fills a slot's shard and publishes its binding; readers in find, published and route load the words without the lock, and admit and reply decide a frame the published tenure keeps from those loads. A slot's shard goes from 0 to its shard once and the table keeps a vacant slot, so a lock-free probe ends; the probe's relaxed loads order nothing a reader relies on, since the binding orders its own words. The slot records the tenure a Bound or Candidate route holds, with bit 0 of the session word set for a Candidate. The (g, a) a slot records never decreases, and every publish of one (g, a) records the same host words, because a route holds a (g, a) it left again only under the same host, as the other of Candidate and Bound, and otherwise holds only a higher (g, a); publish clears the session, fences, writes the host words and stores the session word with release, and read rechecks the session word after acquiring the host words, so a read that pairs two publishes of one (g, a) still returns that tenure's host. A change between Candidate and Bound at one tenure stores the session word alone, after the lock holder read back the tenure of its last publish, so a read sees the old word, the new word, or a recheck that refuses it. The loom record checks one read against one rebind with both orderings and its two controls, and one read against a Candidate publish followed by the binding of that tenure; seeded frame mixes check that each publish has a higher (g, a) or the same tenure whole, and a thread race checks concurrent readers against a writer that rebinds, withdraws and binds the same tenure again."
+    },
+    {
+      "surface": "storage/gate word",
+      "path": "crates/kestrike/src/storage/gate.rs",
+      "operations": [
+        ".compare_exchange(OPEN, HELD, Ordering::Acquire, Ordering::Relaxed)",
+        "self.gate.0.store(OPEN, Ordering::Release);",
+        "self.gate.0.store(POISONED, Ordering::Release);"
+      ],
+      "writers": [
+        {"fn": "attempt", "actor": "every taker of a gate, concurrently, through try_lock or lock", "evidence": "fn attempt(&self, refuse: impl FnOnce() -> bool) -> Result<GateGuard<'_, W>, GateError> {"},
+        {"fn": "try_lock", "actor": "every nonblocking taker of a gate, concurrently, through attempt", "evidence": "self.attempt(|| crate::sim::chaos::chaos!(GateBusy))"},
+        {"fn": "lock", "actor": "every waiting taker of a gate, concurrently, through attempt", "evidence": "match self.attempt(|| false) {"},
+        {"fn": "GateGuard release, poison and drop", "actor": "the one holder of the guard", "evidence": "self.gate.0.store(state, Ordering::Release);"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["mc-gate-contention", "mc-certificate-handoff"],
+      "witness": {"check": "mc-gate-contention", "test": "storage::gate::tests::contending_takers_and_waiters_never_overlap_and_see_each_other", "kind": "state", "observes": "assert_eq!(counted, holds);"},
+      "argument": "The take's Acquire compare-exchange and the holder's Release store order one holder's gate-held writes before the next holder's reads. The registered contention and certificate records check that ordering."
+    },
+    {
+      "surface": "storage/cache one-shot cutoff",
+      "path": "crates/kestrike/src/storage/cache.rs",
+      "operations": [
+        ".compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)",
+        "self.storage.closed().store(true, Ordering::SeqCst);",
+        "self.is_live() && self.issued().load(Ordering::Relaxed)"
+      ],
+      "writers": [
+        {"fn": "issue_cache", "actor": "every caller of Storage::issue_cache, concurrently", "evidence": "pub fn issue_cache(&self) -> Result<Cache<'_, P>, CacheError> {"},
+        {"fn": "Cache::drop", "actor": "the thread that drops the one facade", "evidence": "impl<P: Platform> Drop for Cache<'_, P> {"},
+        {"fn": "Storage::close", "actor": "the storage's owner or finalize, on any thread holding the storage", "evidence": "pub fn close(&self) { if self.is_live() { self.closed() .store(true, std::sync::atomic::Ordering::SeqCst); } }", "path": "crates/kestrike/src/storage/reserve.rs"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "storage::cache::tests::issuance_is_one_shot_and_allocation_free",
+        "storage::cache::tests::a_close_racing_issuance_refuses_and_keeps_the_bit"
+      ],
+      "witness": {"check": "storage::cache::tests::a_close_racing_issuance_refuses_and_keeps_the_bit", "test": "storage::cache::tests::a_close_racing_issuance_refuses_and_keeps_the_bit", "kind": "state", "observes": "assert_eq!(storage.issue_cache().err(), Some(CacheError::Closed)); assert!(INTERPOSE_AFTER_ISSUE.with(|hook| hook.get().is_none())); assert!(storage.is_issued());"},
+      "argument": "The compare-exchange claims the issuance bit once; the bit publishes no payload. Storage::close is the closer that can race an issuance, and Cache::drop closes only after a successful claim. Both cutoff reads and both closing stores are SeqCst, so a close earlier in the total order than the read after the claim refuses the issuance and leaves the bit set."
+    },
+    {
+      "surface": "storage/closing cursor",
+      "path": "crates/kestrike/src/storage/closing.rs",
+      "operations": [
+        "self.close.stage.store(next.encode(), Ordering::Relaxed);",
+        "self.examined.store(examined, Ordering::Relaxed);"
+      ],
+      "writers": [
+        {"fn": "advance", "actor": "close_service, after its close-gate try_lock", "evidence": "fn advance(&self, budget: &mut WorkBudget, report: &mut ClosingReport) -> Result<bool, Budget> {"},
+        {"fn": "sweep_index", "actor": "advance", "evidence": "fn sweep_index("},
+        {"fn": "sweep_fills", "actor": "advance", "evidence": "fn sweep_fills("},
+        {"fn": "sweep_volume", "actor": "advance", "evidence": "fn sweep_volume("},
+        {"fn": "status", "actor": "advance", "evidence": "fn status("},
+        {"fn": "credit", "actor": "the fills and volume stages, through their PassCount", "evidence": "fn credit(&self, first: usize, covered: usize, total: usize) -> bool {"},
+        {"fn": "reset", "actor": "the fills and volume stages, through their PassCount", "evidence": "fn reset(&self)"}
+      ],
+      "writers_at_once": "one",
+      "exclusion": {"fn": "close_service", "text": "let guard = self .close .gate .try_lock()"},
+      "disposition": "serialized",
+      "checks": ["storage::closing_tests::a_concurrent_close_service_call_is_refused"],
+      "argument": "Every cursor word is a private field of CloseCursor or of its PassCount passes, so only closing.rs can write it, and the census scans that file. Each write sits in advance, a stage it runs, or PassCount's credit and reset, which only the fills and volume stages call through the cursor's passes; advance runs only from close_service after the close gate's try_lock, and the guard is released at the call's end, so a second call refuses Contended before it reads a cursor.",
+      "words": [
+        {"struct": "CloseCursor", "path": "crates/kestrike/src/storage/closing.rs"},
+        {"struct": "PassCount", "path": "crates/kestrike/src/storage/closing.rs"}
+      ]
+    },
+    {
+      "surface": "storage/maintain cursor",
+      "path": "crates/kestrike/src/storage/maintain.rs",
+      "operations": [
+        "cursor.stage.store(stage as usize, Ordering::Relaxed);",
+        "saturating_add(&cursor.evicted, report.evicted);"
+      ],
+      "writers": [
+        {"fn": "fill_stage", "actor": "maintain_open, after its root-gate try_lock", "evidence": "fn fill_stage("},
+        {"fn": "certify_stage", "actor": "maintain_open, after its root-gate try_lock", "evidence": "fn certify_stage("},
+        {"fn": "headroom_stage", "actor": "maintain_open, after its root-gate try_lock", "evidence": "fn headroom_stage("}
+      ],
+      "writers_at_once": "one",
+      "exclusion": {"fn": "maintain_open", "text": "let guard = self.maintain.gate.try_lock()"},
+      "disposition": "serialized",
+      "checks": ["storage::maintain_tests::a_second_caller_is_contended_for_one_attempt"],
+      "argument": "The census scans every production file of the storage module, the widest scope the pub(super) fields reach, and finds each write in maintain_open after the root gate's try_lock or in the fill, certify and headroom stages, which only maintain_open calls under that guard. The totals saturate and decide nothing, so they grant no reclaim authority.",
+      "words": [{"struct": "MaintainCursor", "path": "crates/kestrike/src/storage/maintain.rs"}],
+      "foreign": [
+        {"path": "crates/kestrike/src/storage/closing.rs", "fn": "advance", "word": "stage", "receiver": "self.close", "reason": "CloseCursor's own stage word, which the closing cursor surface classifies"},
+        {"path": "crates/kestrike/src/storage/volume/tick.rs", "fn": "apply_read", "word": "stage", "receiver": "&record", "reason": "a borrow of a read record's plain stage field in a match"}
+      ]
+    },
+    {
+      "surface": "storage/expire advisory bound",
+      "path": "crates/kestrike/src/storage/expire.rs",
+      "operations": [
+        "let bound = live.deadline_bound.load(Ordering::Relaxed);",
+        "live.publish_deadline_bound(tables.state.earliest_deadline);"
+      ],
+      "writers": [
+        {"fn": "publish_deadline_bound", "actor": "bind, the expiry sweep and the restored installs", "evidence": "pub(super) fn publish_deadline_bound(&self, bound: u32) {", "path": "crates/kestrike/src/storage/owner.rs"},
+        {"fn": "sweep", "actor": "the expiry step, inside framed_step's pool-gate hold", "evidence": "let framed = self.framed_step(live, refuse_replacing, budget, |tables, budget| {"},
+        {"fn": "bind", "actor": "a completing fill, after the pool gate's try_lock", "evidence": "let mut access = pool .try_lock() .map_err(CompleteError::Gate)? .poison_on_unwind();", "path": "crates/kestrike/src/storage/allocation.rs"},
+        {"fn": "install", "actor": "the warm install, after its lanes fold and before it releases the pool gate", "evidence": "pool.publish_deadline_bound(tables.state.earliest_deadline);", "path": "crates/kestrike/src/storage/volume/warm.rs"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "storage::expire_tests::a_sample_below_every_deadline_visits_nothing_and_the_bound_follows_the_residents"
+      ],
+      "argument": "Every publisher of the bound holds the pool gate's tables: bind after its own try_lock, the sweep inside framed_step's hold, and the restored installs inside their caller's hold before it releases, a guard the closure's &mut Tables carries and the census does not trace. The bound is advisory, so expiry rests on no writer count: the ungated Relaxed load may read a stale bound, which only delays a removal, and the sample and the gate-held victim decide every expiry. When a later call sees the newer bound rests on the memory model's eventual visibility, so the delay has no proven bound in calls.",
+      "witness": {"check": "storage::expire_tests::a_sample_below_every_deadline_visits_nothing_and_the_bound_follows_the_residents", "test": "storage::expire_tests::a_sample_below_every_deadline_visits_nothing_and_the_bound_follows_the_residents", "kind": "state", "observes": "let middle = publish(&storage, 3, 50); assert_eq!(earliest_deadline(&storage), 50); ticks(&storage, &[Some(50)]); assert_eq!(removed(&expire(&storage)), Some(middle));"}
+    },
+    {
+      "surface": "storage/finalize exclusive owner",
+      "path": "crates/kestrike/src/storage/finalize.rs",
+      "operations": [
+        "let claimed = records[next].claimed.load(Ordering::Acquire);",
+        "let taken = self.leases().reserved.load(Ordering::Acquire);"
+      ],
+      "writers": [
+        {"fn": "finalize", "actor": "the storage's owner, through &mut self, after every shared user ended", "evidence": "pub fn finalize(&mut self, budget: &mut WorkBudget) -> Result<Finalization, FinalizeError> {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": [
+        "storage::attempt_tests::finalization_blocks_on_forgotten_attempts_departed_records_custody_and_poison",
+        "storage::closing_tests::each_blocker_alone_is_named_and_the_cursor_resumes"
+      ],
+      "argument": "finalize takes &mut self, so no shared reference reaches the storage while it inspects, and its Acquire loads read the claim and lease words the ended users released. The words' writers are those users, which ran before; a forgotten registration or attempt never ends, so it stays counted as a blocker, as the witness shows.",
+      "witness": {"check": "storage::closing_tests::each_blocker_alone_is_named_and_the_cursor_resumes", "test": "storage::closing_tests::each_blocker_alone_is_named_and_the_cursor_resumes", "kind": "state", "observes": "std::mem::forget(forgotten); let blockers = blocked(&mut storage); assert_eq!(blockers.registrations, 1); assert!(log.calls(Op::Unmap).is_empty());"}
+    },
+    {
+      "surface": "storage/evict serialized writer",
+      "path": "crates/kestrike/src/storage/evict.rs",
+      "operations": [
+        "self.slot.store(slot as u64, Ordering::Release);",
+        "self.slot.store(MARK_NONE, Ordering::Relaxed);"
+      ],
+      "writers": [
+        {"fn": "set", "actor": "commit", "evidence": "pub(crate) fn set(&self, slot: usize, incarnation: u32) {", "via": "pending_mark"},
+        {"fn": "take", "actor": "apply_mark", "evidence": "pub(crate) fn take(&self) -> Option<(usize, u32)> {", "via": "pending_mark"},
+        {"fn": "commit", "actor": "framed_step, after the selection hold", "evidence": "live.pending_mark() .set(victim.slot().0, victim.incarnation());"},
+        {"fn": "apply_mark", "actor": "framed_step, under the pool gate", "evidence": "let Some((slot, incarnation)) = live.pending_mark().take() else {"},
+        {"fn": "framed_step", "actor": "evict_step and expire_step", "evidence": "pub(super) fn framed_step("},
+        {"fn": "evict_step", "actor": "headroom_stage", "evidence": "pub(crate) fn evict_step("},
+        {"fn": "expire_step", "path": "crates/kestrike/src/storage/expire.rs", "actor": "expiry_stage", "evidence": "pub(crate) fn expire_step(&self, budget: &mut WorkBudget) -> Result<ExpiryReport, EvictError> {"},
+        {"fn": "expiry_stage", "path": "crates/kestrike/src/storage/maintain.rs", "actor": "maintain_open, after its root-gate try_lock", "evidence": "fn expiry_stage(&self, budget: &mut WorkBudget, report: &mut MaintainReport) {"},
+        {"fn": "headroom_stage", "path": "crates/kestrike/src/storage/maintain.rs", "actor": "maintain_open, after its root-gate try_lock", "evidence": "fn headroom_stage("}
+      ],
+      "writers_at_once": "one",
+      "exclusion": {"fn": "maintain_open", "path": "crates/kestrike/src/storage/maintain.rs", "text": "let guard = self.maintain.gate.try_lock()"},
+      "disposition": "serialized",
+      "checks": ["storage::evict_tests::a_pending_mark_applies_first_and_a_reused_slot_counts_it_stale"],
+      "argument": "After table initialization, which builds the mark before the mapping is shared, the mark's words are written only in PendingMark's set and take. The census follows every call it can name from there, through the pending_mark accessor: set from commit and take from apply_mark, both inside framed_step; framed_step from evict_step and expire_step; those from the headroom and expiry stages alone across the crate; and the stages from maintain_open after its root-gate try_lock. So the mark has one writer at a time. The Release store publishes the incarnation and the Acquire take consumes it. A new crate caller of either step outside the stages refuses the census.",
+      "words": [{"struct": "PendingMark", "path": "crates/kestrike/src/storage/policy.rs"}],
+      "foreign": [
+        {"path": "crates/kestrike/src/storage/device/pool.rs", "fn": "fmt", "word": "incarnation", "receiver": "&self", "reason": "a buffer handle's plain incarnation field, borrowed for Debug output"}
+      ],
+      "reads": ["is_pending"]
+    },
+    {
+      "surface": "storage/volume/attach election",
+      "path": "crates/kestrike/src/storage/volume/attach.rs",
+      "operations": [
+        "if storage.attached().swap(true, Ordering::Relaxed) { return Err((AttachError::AlreadyAttached, disk)); }"
+      ],
+      "writers": [
+        {"fn": "Volume::attach", "actor": "every attach caller over one storage, concurrently", "evidence": "if storage.attached().swap(true, Ordering::Relaxed) {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["storage::volume::volume_tests::attach_refuses_each_invalid_input_distinctly_and_attaches_once"],
+      "witness": {"check": "storage::volume::volume_tests::attach_refuses_each_invalid_input_distinctly_and_attaches_once", "test": "storage::volume::volume_tests::attach_refuses_each_invalid_input_distinctly_and_attaches_once", "kind": "state", "observes": "assert_eq!(volume.release().map_err(|_| ()), Ok(Quiesced::AllReturned)); assert_eq!( refuse(&storage, DEPTH, TICK), Some(AttachError::AlreadyAttached) );"},
+      "argument": "The swap claims the attached bit once, after every input check passes; the bit publishes no payload, and a release leaves it set, so no second volume attaches over the storage. A CommandTable::new failure after the claim returns its error with the bit still set, so that storage attaches no volume."
+    },
+    {
+      "surface": "storage/journal durable prefix",
+      "path": "crates/kestrike/src/storage/volume/checkpoint.rs",
+      "operations": [
+        "(self.journal_words.prefix).store(log.durable(), Ordering::Release);"
+      ],
+      "writers": [
+        {"fn": "stage_delta", "actor": "the attached volume's tick, on the thread that attached it, after a suffix block's Written terminal", "evidence": "pub(super) fn stage_delta(&mut self) {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["durable-prefix-release-orders-persistence-before-reuse"],
+      "witness": {"check": "durable-prefix-release-orders-persistence-before-reuse", "test": "storage::durable_prefix_model::a_return_on_the_loaded_prefix_follows_the_block_s_persistence", "kind": "state", "observes": "assert!(durable, \"a slot returned before its block persisted\");"},
+      "argument": "Only stage_delta stores the prefix, from the tick of the one volume a storage attaches, which holds the volume by &mut; the census counts writers by locks and does not trace that ownership, so it records many. The store is a release of the frontier the suffix log's advance computed after the block's Written terminal, and service loads it once per call with acquire before any return it judges against it, so a return on a value has the block's persistence ordered before it; the loom model checks that pair, and its controls show a relaxed store or load lets a return race the persistence. The value only grows, so a stale load holds a slot one call longer and never returns one early."
+    },
+    {
+      "surface": "storage/coverage epoch word",
+      "path": "crates/kestrike/src/storage/coverage/epochs.rs",
+      "operations": ["<$word>::compare_exchange(self, current, next, SeqCst, SeqCst)", "<$word>::fetch_sub(self, amount, SeqCst)", "<$word>::fetch_or(self, bits, SeqCst)"],
+      "writers": [
+        {"fn": "register", "actor": "every thread that ends a resident mapping, in its shard hold, concurrently", "evidence": "pub(crate) fn register(word: &impl EpochWord) -> Option<u64> {"},
+        {"fn": "release", "actor": "each pool-gate holder that retires a counted retirement's slot or converts its park", "evidence": "pub(crate) fn release(word: &impl EpochWord, epoch: u64) {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["retirement-registrations-end-at-their-position"],
+      "witness": {"check": "retirement-registrations-end-at-their-position", "test": "storage::volume::coverage_tests::the_epoch_word_counts_each_registration_until_its_release", "kind": "state", "observes": "assert_eq!(word.load(Ordering::SeqCst), 0);"},
+      "argument": "Every access to the word is SeqCst and every write a read-modify-write: a registration is one compare-and-swap over the whole word that retries on the word it failed against, the release is one fetch_sub that asserts its epoch's count was above zero, and the latch is one fetch_or, so no update overwrites another. No lookup, lease or admission decision other than the coverage advance's exhaustion check reads the word."
+    },
+    {
+      "surface": "storage/coverage positions",
+      "path": "crates/kestrike/src/storage/coverage/advance.rs",
+      "operations": ["words.applied.fetch_max(position, Ordering::Release)"],
+      "writers": [
+        {"fn": "advance_coverage", "actor": "the caller's feed thread, one per feed contract, serialized by the caller", "evidence": "pub fn advance_coverage(&self, position: u64) -> Result<Advance, CoverageError> {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["coverage-acknowledgment-is-not-the-live-invalidation"],
+      "witness": {"check": "coverage-acknowledgment-is-not-the-live-invalidation", "test": "net::owner_tests::the_owner_s_coverage_wrappers_forward_to_the_storage", "kind": "state", "observes": "assert_eq!(owner.advance_coverage(1), Ok(Advance::Advanced));"},
+      "argument": "The applied position only grows through one release fetch_max, so concurrent advances never lower it, and no lookup, lease, admission or acknowledgment decision reads it."
+    },
+    {
+      "surface": "storage/journal parked marker",
+      "path": "crates/kestrike/src/storage/allocation.rs",
+      "operations": ["marker.store(PARKED_EPOCH[epoch as usize], Ordering::Relaxed);"],
+      "writers": [
+        {"fn": "abandon", "actor": "a thread whose counted retirement finds the pool gate busy, without the gate", "evidence": "pub(crate) fn abandon("}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["retirement-registrations-end-at-their-position"],
+      "witness": {"check": "retirement-registrations-end-at-their-position", "test": "storage::volume::coverage_tests::a_parked_retirement_keeps_its_registration_until_service_converts_its_park", "kind": "state", "observes": "assert_eq!(counts(&storage), (0, 0), \"every registration ended once\");"},
+      "argument": "The parker stores its slot's marker with Relaxed before the park's AcqRel exchange on the slot word, and service reads the marker in a gate hold only after an Acquire load of a word carrying ANCHORED and ABANDONED, which reads that exchange or a later read-modify-write in its release sequence, so it sees the marker. Each anchored resident retires once, so no other park or gate holder writes the word between the store and the conversion; gate holders read and write every other slot's word with Relaxed under the gate."
+    },
+    {
+      "surface": "storage/record generation column",
+      "path": "crates/kestrike/src/storage/tables.rs",
+      "operations": ["self.generations[slot].store(naming.session, Ordering::Relaxed);", "self.versions[slot].store(naming.version, Ordering::Relaxed);", "self.generations[slot].store(0, Ordering::Relaxed);", "self.versions[slot].store(0, Ordering::Relaxed);"],
+      "writers": [
+        {"fn": "bind_naming", "actor": "bind, under the pool gate", "evidence": "pub(crate) fn bind_naming("},
+        {"fn": "install", "actor": "the restored install's lane workers, each for its own lane's slots, joined inside the holder's pool-gate hold", "evidence": "self.generations[local].store(restored.session, Ordering::Relaxed);", "path": "crates/kestrike/src/storage/tables/lanes.rs"},
+        {"fn": "clear_naming", "actor": "the extent's return, under the pool gate", "evidence": "pub(crate) fn clear_naming(&mut self, slot: usize) {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["record-generation-column-names-every-record-s-writer"],
+      "witness": {"check": "record-generation-column-names-every-record-s-writer", "test": "storage::volume::generation_tests::the_return_clears_the_column_and_leaves_another_slot_s", "kind": "state", "observes": "assert_eq!(column(&storage, id.slot_index()), 0);"},
+      "argument": "The record generation column and the cache version column beside it share one discipline. Every store of a slot's column runs in a pool-gate hold. Bind stores it before the publication's Release install of the anchor, and the restored install's lane worker stores it, for a slot of its own lane, before its own Release exchange of the slot's word, and the holder joins every worker before it releases the gate; the return clears it after proving the count zero. A lookup reader takes its right after Pool::resolve's Acquire load of the slot word, which reads that Release write or a later read-modify-write in its release sequence. A follower takes its right after fill::observe's Acquire load of the departed fill record, which pairs with the Release store depart_held makes after bind. The publisher's own lease follows bind on its thread, and gate-held readers synchronize through the pool gate. So every reader loads the column of the incarnation it holds with Relaxed; the column changes only after the return, which waits for every right to end."
+    },
+    {
+      "surface": "storage/readiness word",
+      "path": "crates/kestrike/src/storage/readiness.rs",
+      "operations": [".compare_exchange(current, moved, Ordering::SeqCst, Ordering::SeqCst)", ".compare_exchange( current, (current & !7) | moved as u64, Ordering::SeqCst, Ordering::SeqCst, )"],
+      "writers": [
+        {"fn": "set_authority", "actor": "the attached volume owner thread", "evidence": "pub(crate) fn set_authority(&self, state: crate::failover::serving::State, lineage: u32) {"},
+        {"fn": "apply", "actor": "the attached volume's owner turn (the gate pass, bootstrap end, replay and close) and Storage::withdraw on any thread", "evidence": "pub(crate) fn apply(&self, event: Event) -> Result<State, ReadinessError> {"}
+      ],
+      "writers_at_once": "many",
+      "disposition": "covered",
+      "checks": ["readiness-machine-opens-fills-only-at-live", "serving-authority-readiness-word-preserves-both-fields"],
+      "witness": {"check": "serving-authority-readiness-word-preserves-both-fields", "test": "storage::readiness::authority_model::withdrawal_and_serving_publication_preserve_both_word_fields", "kind": "state", "observes": "assert_eq!(\n    (word.lineage(), (word.0.load(Ordering::SeqCst) >> 8) & 15),\n    (1, WITHDRAWN),\n    \"readiness and authority fields remain intact\"\n);"},
+      "argument": "The word packs recovery readiness, authority code and lineage. apply judges the closed readiness table and preserves upper fields; set_authority preserves readiness while replacing authority and lineage. Both use SeqCst compare-and-swap and retry from the complete observed word, so either writer preserves the other's fields. Owner authority changes precede new receives and metadata or capture submissions; token and window gates recheck fills, reads and sends on the owner thread. Reservations read lineage and refusal under the pool gate. Storage::withdraw writes Withheld and passes the pool gate, so later holds observe permanent refusal. The readiness Loom witness races the Serving then Withdrawn authority publications, readiness withdrawal and an admission reader; its state-only-store control detects erased fields."
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": "ivk-2376",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/volume/attach.rs",
+    "function": "Volume::submit_command and Volume::grant_read"
+  },
+  "defect": "With a read share of one command, the slot a device terminal frees goes to a GET admitted in the same owner turn, so a read that already waits is never submitted while the demand lasts.",
+  "property": {
+    "text": "Every waiting read submits within read_ops calls with room in slot order from the cursor, stopping at the first submit refused as full.",
+    "place": "obligation",
+    "pointer": "tick-cursor-moves-only-on-a-call-that-serves"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "workload",
+  "evidence": {
+    "steps": "No fault. A volume whose read share is one command: one read holds the command at the device and a second read waits under its kept grant. The held read's terminal and a GET of the same key from the other client reach the owner before one Owner::poll turn, which applies the terminal in poll_terminals and admits the GET in receive_batch, before the volume's tick; the GET's first submit takes the freed command, and while the demand repeats the waiting read gets none until its deadline. The history ss2-peer-read-waits-for-one-command (net/world_tests/histories/saturated_shares.rs) runs these steps over Geometry::OneReadCommand; the record's own trigger used four keys of one client.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. cluster-swarm and cluster-pressure build their storage with storage_shaped_as over the fixture geometry (net/world_tests/cluster.rs), and upload runs UPLOAD_PLAN, which keeps QUIET's Geometry::Fixture, through Geometry::storage (net/world_tests.rs); both storages keep a read share of three commands (sized_config in storage/owner_fixture.rs), so none of the three named profiles forms a one-command read share. This claim covers those three profiles; the sweep's history batches, which list the pins, ran no SS2 or K9 history in this sweep (each at runs 0)."
+  },
+  "catch": {
+    "history": "ss2-peer-read-waits-for-one-command",
+    "rule": "an eligible peer's GET starved behind a saturated share",
+    "tally": {
+      "build": "a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b",
+      "revision": "424e30371",
+      "campaign": "bsw-ct1-2101-probe-histories-424e30371",
+      "root": "bsw-ct1-2101-probe-histories-424e30371",
+      "workers": 28,
+      "seconds": 120,
+      "runs": "0..23208",
+      "endings": {
+        "violation: an eligible peer's GET starved behind a saturated share": 23208,
+        "pass": 0,
+        "unsuccessful or inconclusive": 0
+      },
+      "missed": 0,
+      "suspects": 0,
+      "replays": 4
+    }
+  },
+  "note": "Cause, evidence and catch are set by the unit of #297 that writes this family's history (M1-3). Both run under `Owner::poll` in crates/kestrike/src/net/owner.rs. Rule text for a history: \"an eligible peer's GET starved behind a saturated share\", array MIXED. A history needs a storage whose read share is one command. SS2 judges the peer GET's one deadline and exact bytes under that Progress rule; it counts no calls with room and observes no slot order, so the record's read_ops call bound and cursor order stay with the obligation record. The sibling ss2-peer-read-beside-three-commands passes, and so does ss2-one-command-peer-read-served-untraded, where the one-command volume serves the waiting read once the command frees with the other client idle; the family's controls and premise falsifiers are the histories of WAITING_READS in net/world_tests/histories/saturated_shares.rs. Known-findings row for #299."
+}

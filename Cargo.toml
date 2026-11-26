@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+# The tests hash the whole test executable with SHA-256, which an unoptimized `sha2` makes take tens of seconds.
+[profile.dev.package.sha2]
+opt-level = 3

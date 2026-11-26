@@ -1,0 +1,17 @@
+[package]
+name = "genmc-kernels"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# `genmc-std` is the crate the pinned GenMC build ships, linked here by the
+# GenMC lane; it re-exports the real `std` and replaces its thread spawning
+# and joining with the checker's.
+[dependencies]
+std = { path = "../genmc-std", package = "genmc-std" }
+genmc-boundary-ops = { path = "ops" }
+
+[workspace]
+
+[profile.dev.package.genmc-boundary-ops]
+opt-level = 1

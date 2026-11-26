@@ -1,0 +1,27 @@
+diff --git a/crates/kestrike/src/net/put.rs b/crates/kestrike/src/net/put.rs
+index 3ffb9053b..d6c790fa7 100644
+--- a/crates/kestrike/src/net/put.rs
++++ b/crates/kestrike/src/net/put.rs
+@@ -2491,7 +2491,6 @@ impl<'m> PutCore<'m> {
+             }
+             Err(error) => {
+                 self.report.failed_publish += 1;
+-                self.lost |= error == FillPublishError::Lost;
+                 self.fail(requests, serve, table, publish_status(error), now_us);
+             }
+         }
+diff --git a/crates/kestrike/src/storage/publication.rs b/crates/kestrike/src/storage/publication.rs
+index 40ca14cff..5b17a20cf 100644
+--- a/crates/kestrike/src/storage/publication.rs
++++ b/crates/kestrike/src/storage/publication.rs
+@@ -311,10 +311,6 @@ impl<'s, 'a, P: Platform> WritableFill<'s, 'a, P> {
+         if !volume.serves(self.storage()) {
+             return Err(self.refuse(FillPublishError::ForeignVolume));
+         }
+-        // A lost volume admits no receive, so it publishes no record either: a write that ended in success after the loss leaves the fill ready.
+-        if volume.is_lost() {
+-            return Err(self.refuse(FillPublishError::Lost));
+-        }
+         if !self.authority_current(volume) {
+             return Err(self.refuse(FillPublishError::Closed));
+         }

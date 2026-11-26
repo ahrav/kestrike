@@ -1,0 +1,7 @@
+{
+ "controller-reset": "controller-reset cc 0x460000 csts 0x0 after captured slot 0 session 12884901890 capture 9 units 3 entries 24",
+ "process-kill": "process-kill signal 9 pid 7 after captured slot 0 session 12884901890 capture 9 units 3 entries 24",
+ "retained": "retained S 23/23 bytes 1012 wrong 0 eligible-bytes 1012 unaffected-bytes 1012 affected-bytes 0 damaged-units 0 omitted 1 installed 23 covered-miss true reserved 41 overlapping 0 first-hit-us 1 session 0x300000003 over checkpoint session 0x300000002 authority fixture coverage harness episode e",
+ "residual": "residual filling +0 reserved-bytes +0 pending-marks +0 escrow-units +0 quarantined +0 resident-slots +0 retired-slots +0 retired-bytes 4100 waste 257032",
+ "persisted": "persisted captured slot 0 session 12884901890 capture 9 units 3 entries 24 installed 23 omitted 1"
+}

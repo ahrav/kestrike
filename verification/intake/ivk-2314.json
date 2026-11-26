@@ -1,0 +1,25 @@
+{
+  "id": "ivk-2314",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/recovery/checkpoint.rs",
+    "function": "SlotDecode::bytes and DestGuard::allocate"
+  },
+  "defect": "A checkpoint slot load whose rows all route to one of nine destinations holds more heap at its peak than `SlotReader::estimate` returned and its reader checked against the engine budget.",
+  "property": {
+    "text": "A full slot's decode ... peaks within the reader's charge.",
+    "place": "obligation",
+    "pointer": "checkpoint-streamed-guard-on-helpers"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "note": "Cause and evidence set by M1-2 (#318); excluded by exclusions/slot-load-size.json, open for the owner. Nearest library test: storage/checkpoint_tests.rs a_full_slot_decode_holds_exact_chunks_within_the_charge.",
+  "cause": "workload",
+  "evidence": {
+    "steps": "The excess needs a checkpoint slot load of about 7.7 million rows that all route to one of nine destinations (a slot of about 243,904 units; one recorded run took about 80 seconds and 2.3 GiB). The cluster profiles draw at most 8 keys (`MAX_KEYS` in net/world_tests/cluster.rs) and the mixed world's storages hold at most 512 units (`Geometry::shape` in net/world_tests.rs), so no sweep writes a slot of that size, and no rule text of narrate/rules.rs judges a heap peak.",
+    "sweep": "One sweep at 8b58f1355 of cluster-swarm, cluster-pressure and upload, archive build f86c52457e1cf9a27b5576cc1d5f79004cef8b7b3d48413c21d64c13344047bd, campaign bsw-ct1-2100-profiles, 28 workers, 121 s, counts {}: cluster-swarm 13835 runs (0..13834), 10660 pass, 3175 uncredited, 0 suspects; cluster-pressure 34895 runs (0..34894), 34437 pass, 458 uncredited, 0 suspects; upload 399266 runs (0..399265), 399266 pass, 0 uncredited, 0 suspects; controls 4466 runs, 3299 caught, 0 missed; 79 replays, 0 suspects, none of class replay differs. These runs hold at most 8 keys a cluster world and 256 storage units a mixed world."
+  },
+  "exclusion": "slot-load-size"
+}

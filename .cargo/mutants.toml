@@ -1,0 +1,56 @@
+# The cargo-mutants scope of the kestrike package, read by every
+# `cargo mutants` run in the workspace: the whole-package oracle-strength
+# mutation discovery, which finds the mutants the history oracles reject, and
+# `scripts/mutants-diff.py`, which mutates the lines of one commit range and
+# requires the tool version that the next line pins.
+# Tool pin: cargo-mutants 27.1.0
+# The tool skips `#[cfg(test)]` items and `unsafe fn` bodies; a safe function
+# with an `unsafe` block stays eligible. The tool's skip matches a `cfg` whose
+# top-level predicate is `test`. A module gated by `test` among other
+# predicates compiles only under test, and one gated by `any(test, fuzzing)`
+# compiles only in test and fuzz builds, so these globs exclude their files
+# and `exclude_re` excludes an inline `tests` module's mutants; the tool lists
+# a struct-field deletion there regardless.
+exclude_globs = [
+    "crates/kestrike/src/oracle/**",
+    "crates/kestrike/src/sim/**",
+    "**/*_tests.rs",
+    "**/*_tests/**",
+    "**/*_model.rs",
+    "**/*fixture.rs",
+    "crates/kestrike/src/net/frame_differential.rs",
+    "crates/kestrike/src/net/frame_reference.rs",
+    "crates/kestrike/src/storage/lenses.rs",
+    "crates/kestrike/src/storage/seeded.rs",
+    "crates/kestrike/src/storage/test_platform.rs",
+    # The hardware and host-tool modules. The hardware job's arm64 leg judges
+    # their device and kernel behavior, and the `bind_cli`, `inspect_cli` and
+    # `soak_cli` test targets run the host tools under `src/bin`. The globs
+    # also drop code that library tests reach on any host, so a change there
+    # lists no mutant: in `bind`, the helpers through which the watermark log
+    # persists and the failover report reads; the frame path in
+    # `native/{burst,wire,mempool}.rs`, which the composed network tests
+    # drive over a mock port; and the `spdk` modules beside `native.rs`,
+    # which their unit tests run.
+    "crates/kestrike/src/bind/**",
+    "crates/kestrike/src/native/**",
+    "crates/kestrike/src/soak/**",
+    "crates/kestrike/src/storage/device/spdk/**",
+    "crates/kestrike/src/bin/**",
+    # Files compiled only under a gate: each `*_kani.rs` under `kani`;
+    # `failover/search.rs`, `failover/sim.rs`, `failover/tenure_search.rs`,
+    # `storage/conservation.rs` and `exact_child.rs` under `test` with the
+    # `target_os = "linux"` and `target_pointer_width = "64"` predicates; and
+    # `storage/credit_steps.rs` under `test` with `loom`.
+    "**/*_kani.rs",
+    "crates/kestrike/src/failover/search.rs",
+    "crates/kestrike/src/failover/sim.rs",
+    "crates/kestrike/src/failover/tenure_search.rs",
+    "crates/kestrike/src/storage/conservation.rs",
+    "crates/kestrike/src/exact_child.rs",
+    "crates/kestrike/src/storage/credit_steps.rs",
+]
+exclude_re = ["tests::"]
+# Production debug assertions are off, as in a release build, so a mutant
+# reaches the behavior the history oracle judges; overflow checks stay on.
+additional_cargo_args = ["--config", "profile.dev.debug-assertions=false"]

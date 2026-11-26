@@ -1,0 +1,22 @@
+digest: f524dec13f9c0f31be2de651057fad6650d068a55d69e55f62e58b6df1875dfa
+decisions: 61
+terminal: complete pass fired=03 required=03
+counts: true
+turns: 57
+progress: 10
+virtual_us: 600
+skipped_us: 0
+summary: 1
+profile: upload
+declared_turns: 20000
+declared_same_time: 400
+declared_no_progress: 5000
+stop: goal
+boundaries_checked: 4
+operations: 18
+witnesses: 10
+faults_delivered: 3
+owners: 1
+clients: 2
+incarnations: unavailable
+retained_depth: unavailable

@@ -1,0 +1,32 @@
+{
+  "id": "ivk-1795",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/failover/reconcile.rs",
+    "function": "Reconciler::replacement"
+  },
+  "defect": "A later generation's receipt is written over a receipt whose recorded volume was just un-named and is not yet retired.",
+  "property": {
+    "text": "A receipt of an earlier generation recording a volume the shard names in no role is superseded only after that volume is retired.",
+    "place": "obligation",
+    "pointer": "volume-loss-provisions-only-on-isolated-permanent-loss"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1758,
+    "regression": {
+      "path": "crates/kestrike/src/failover/reconcile_supersession_tests.rs",
+      "tests": [
+        "failover::reconcile::supersession_tests::a_receipt_recording_an_unnamed_volume_is_superseded_only_after_the_volume_is_retired"
+      ]
+    }
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "Both orders of the defect need `Reconciler::replacement` to write a later generation's receipt while a second step un-names the volume the earlier receipt records: `Reconciler::retire_spare` removing it as spare, or `Reconciler::flip` displacing it as active (`Order::Retirement` and `Order::Flip` in `crates/kestrike/src/failover/reconcile_supersession_tests.rs`). At 6240a6fd9, `rg -n '\\.replacement\\(' crates/kestrike/src --glob '!*_tests.rs'` lists the test calls of `failover/zone_loop_tests` and one other call, in `replace_step` of `crates/kestrike/src/net/takeover_history_tests/fleet/volumes.rs`, which also calls `add_spare` and `flip`. A fleet reconciler reaches that step only after `volume_work` in the same file starts a replacement, which it does once a shard's volume reads lost or impaired. The worker's fleet cases (`fleet_pinned` and `fleet_runs_pass_on_roots_1_to_16` in `crates/kestrike/src/worker.rs`) run the `PINNED` configurations `six`, `dense` and `host_loss`, the crash-table cells of `Config::crash`, and `six` and `dense` on roots 1 to 16. `Scenario::repairs` in `crates/kestrike/src/net/takeover_history_tests/fleet/hosts.rs` gives `Restarts` and `HostLoss` no reconciler actor, and the crash cells (`CrashCell` in `crates/kestrike/src/net/takeover_history_tests/fleet/reconcile.rs`) crash hosts and crash reconciler 0 right after an enrollment or repair write, but lose or impair no volume, so none starts a replacement. Only library tests build a configuration that loses, impairs or replaces a volume. At cd886b142, `rg -n 'Scenario::(Impaired|ImpairedBrief|Stall|LostAlone|Correlated|CorrelatedLate|Replace|ZoneImpaired)\\b' crates/kestrike/src --glob '!*_tests.rs'` prints the constructors `Config::zone_impaired`, `impaired`, `impaired_brief`, `stall`, `lost_alone`, `correlated`, `correlated_late` and `replace` in `crates/kestrike/src/net/takeover_history_tests/fleet.rs`, the steps of those scenarios in `fleet/hosts.rs` and the replace step's match in `fleet/volumes.rs`, and `rg -n 'Config::(zone_impaired|impaired|impaired_brief|stall|lost_alone|correlated|correlated_late|replace|az|repair)\\b' crates/kestrike/src --glob '!*_tests.rs'` prints nothing, so no caller outside library tests builds one of those configurations or passes a scenario to `Config::az` or `Config::repair`. For the retirement order, `rg -n 'retire_spare' crates --glob '!*_tests.rs'` finds the method only in `failover/reconcile.rs`, its definition and documentation, and in `failover/retire.rs`, documentation. This gap is read from the code; no run counted the replacement calls of a worker case.",
+    "standing_check": "crates/kestrike/src/failover/reconcile_supersession_tests.rs, failover::reconcile::supersession_tests::a_receipt_recording_an_unnamed_volume_is_superseded_only_after_the_volume_is_retired"
+  },
+  "exclusion": "bind-and-failover",
+  "note": "Holds a second proof (1896): the same clause breaks when a flip displaces the volume. The record leaves open whether blotter pull request 1758 closes that flip order. The blotter pull request 1758 regression explores both orders, `Order::Retirement` (`retire_spare` removes the recorded volume as spare) and `Order::Flip` (a flip displaces it as active), in every order of two reconcilers' requests. For each order it requires a schedule that leaves the recorded volume named in no role and short of retired, and it fails when a schedule commits the later receipt in that state; it passed at 6240a6fd9. It judges those staged schedules, not a worker case."
+}

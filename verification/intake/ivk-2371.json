@@ -1,0 +1,75 @@
+{
+  "id": "ivk-2371",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/net/put.rs",
+    "function": "PutCore::receive and PutCore::receive_wait"
+  },
+  "defect": "The same rule at a second site: a write submit that the device refuses, for an upload of a peer below its share, does not end the lending.",
+  "property": {
+    "text": "From the turn after a peer below its write-command share first finds no command, and while a PUT of such a peer ends each turn with a write to submit and no command for it, every command goes to a peer below its share.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/net/put.rs, module documentation, \"Write commands\"; stated by merged blotter pull request 1522"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "property",
+  "evidence": {
+    "unjudged": "PutCore::receive reports only a Budget refusal and PutCore::receive_wait notes only Budget, so a device submit refused TableFull does not end the lending. The rule is the module documentation of crates/kestrike/src/net/put.rs, \"Write commands\"; no rule text of net/world_tests/narrate/rules.rs, no observer check, no obligation record of verification/obligations.json and no model under tla/ or quint/ judges which peer a freed write command goes to. The texts that name a share judge the request share, and both uploads publish inside their deadlines.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. In cluster-swarm and cluster-pressure only logical client 0 uploads (net/world_tests/cluster.rs), so each owner takes uploads from one peer, and upload runs UPLOAD_PLAN (net/world_tests.rs), whose one PUT client 0 issues; no owner in these three profiles holds two peers' uploads at once, and no file under net/world_tests scripts a device submit refusal (refuse_next) at that turn."
+  },
+  "catch": {
+    "history": "lw1-waiter-submit-refused-twice",
+    "rule": "a write command went to a peer at its share while a peer below its share waited",
+    "site": "PutCore::receive_wait",
+    "tally": {
+      "build": "07fbf7bafa5c1c4bb0be4f7dc81625c21612c1e1c6ae62193af047609ee3b5e0",
+      "revision": "c165d175a",
+      "campaign": "bsw-ct1-2154-lw-c165d175a",
+      "root": "bsw-ct1-2154-lw-c165d175a under the campaign root",
+      "workers": 28,
+      "seconds": 180,
+      "runs": "0..268591",
+      "endings": {
+        "violation: a write command went to a peer at its share while a peer below its share waited": 268591,
+        "pass": 0,
+        "unsuccessful or inconclusive": 0
+      },
+      "missed": 0,
+      "suspects": 0,
+      "replays": 22
+    },
+    "also": [
+      {
+        "history": "lw3-waiter-submit-refused-inside-fragment",
+        "site": "PutCore::receive",
+        "tally": {
+          "build": "07fbf7bafa5c1c4bb0be4f7dc81625c21612c1e1c6ae62193af047609ee3b5e0",
+          "revision": "c165d175a",
+          "campaign": "bsw-ct1-2154-lw-c165d175a",
+          "root": "bsw-ct1-2154-lw-c165d175a under the campaign root",
+          "workers": 28,
+          "seconds": 180,
+          "runs": "0..238898",
+          "endings": {
+            "violation: a write command went to a peer at its share while a peer below its share waited": 238898,
+            "pass": 0,
+            "unsuccessful or inconclusive": 0
+          },
+          "missed": 0,
+          "suspects": 0,
+          "replays": 22
+        }
+      }
+    ]
+  },
+  "property_action": {
+    "action": "added",
+    "place": "rule",
+    "reference": "a write command went to a peer at its share while a peer below its share waited",
+    "reason": "The text enters array MIXED of crates/kestrike/src/net/world_tests/narrate/rules.rs under the progress obligation. It states the sentence of the module documentation of crates/kestrike/src/net/put.rs, \"Write commands\", that the row's property quotes, which no rule text judged before."
+  },
+  "note": "Each site has its pin. lw1-waiter-submit-refused-twice pins the retry site, PutCore::receive_wait: the device refuses the waiter's submit (QueueFull) in each of two turns that lend nothing. The first refusal is absorbed in the receive that takes the waiter's whole fragment and debits the turn's one command; the same pass of PutCore::consume then finds the budget spent with a segment staged and notes the wait, so the next turn lends nothing. The second refusal lands on the retry of the staged segment (TableFull), receive_wait notes no wait, the turn after lends and the borrower takes a fourth command while the waiter holds none. lw3-waiter-submit-refused-inside-fragment (catch.also) pins the one-refusal site, PutCore::receive, over the storage of three fill records with a waiter of four fragments: the waiter's second segment ends inside its last fragment, the device refuses that segment's submit in a turn that lends nothing, the receive returns the bytes it took, receive reports a refused submit for a spent budget alone and consume ends the pass after a partial take, so the next turn lends and the borrower takes a fourth command while the waiter holds none. Its premise reads one device refusal, zero refused receives and copies that end inside a fragment. Runs at roots 0..40 in process on the unfixed owner and three scratch changes (not committed): with receive_wait noting every refused receive the first pin passes and the second still fails; with receive reporting every refused submit the second passes and the first still fails; with both changes both pass. The fix of #334 flips both histories to a pass. Siblings lw1-waiter-submit-accepted and lw2-waiter-fragments-one-turn-later pass; control lw1-accepted-turn-judged-as-bound fails through the rule. Three histories of the family run outside the listing, in process under three pinned roots (the seeded test of lent_commands.rs): lw1-waiter-submit-refused-once, one refusal inside a receive that takes the waiter's whole fragment, where the same pass notes the wait and the waiter takes its command in the following turn, passes; the falsifiers lw1-refusals-unqueued and lw3-refusal-unqueued end unsuccessful under the pins' premises. The sweep at d6cc2e180 (build d5b9f4a2a42c1f8136f26804252a03cef4d112e91b1b1477d3bb08255695810b), the last revision that listed them, ran them 155688, 165581 and 138594 times, every run as declared. Known-findings row for #334, whose pin is the first history. The fix recorded for ivk-2368 leaves this defect."
+}

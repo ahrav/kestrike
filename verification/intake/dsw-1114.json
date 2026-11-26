@@ -1,0 +1,24 @@
+{
+  "id": "dsw-1114",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/volume/attach.rs",
+    "function": "Volume::grant_read"
+  },
+  "defect": "The branch for a command ahead sets the waiting bit when the submit finds no room and has no arm for a submit that succeeds, so a retried grant leaves the read in the waiting set with no kept grant and the next tick with room and nothing to do moves the cursor.",
+  "property": {
+    "text": "A call with room and nothing to do leaves the cursor.",
+    "place": "obligation",
+    "pointer": "tick-cursor-moves-only-on-a-call-that-serves"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "property",
+  "evidence": {
+    "unjudged": "Volume::grant_read's branch for a command ahead sets the waiting bit on a refused submit and has no arm for one that succeeds. The effect is a moved tick cursor: no rule text of net/world_tests/narrate/rules.rs and no observer check reads the tick cursor or the waiting set, which are pub(super) fields of storage/volume/attach.rs outside VolumeReport, and every history and swept world's storage has read_ahead 0, so no read waits for a command ahead.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. A run that formed the state could fail no rule, since none judges the cursor."
+  },
+  "note": "The fix recorded for dsw-239 leaves this defect. The row stays open. By reading, a catch needs a storage with read_ahead 2, an accessor of three values (the tick cursor, the read's waiting bit and its kept grant), a run that shows the owner's regrant of a Merged grant, and a source of room in a turn with no read ready. By reading, one such source is a device submit refused QueueFull once (a scripted SimControl::refuse_next) between the owner's Added and Merged grant_read calls of one grant pass, so the Merged call's command ahead submits and its waiting bit stays; no run has formed it. At read_ahead 1 the owner sends no second grant_read while a read's command ahead is granted: Serve::wants_grant allows 1 + read_ahead commands, and read_started counts the first, so the grant that keeps the command ahead waiting is the read's last until one ends."
+}

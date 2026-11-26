@@ -1,0 +1,10 @@
+{
+  "id": "disagreement-waiting-pass-quota",
+  "kind": "disagreement",
+  "escape": "dsw-122",
+  "sources": [
+    "verification/obligations.json, record tick-cursor-moves-only-on-a-call-that-serves: \"every waiting read submits within read_ops calls with room in slot order from the cursor, stopping at the first submit refused as full\"",
+    "crates/kestrike/src/storage/volume/tick.rs, the documentation of the tick's serve step: \"on an open volume with submit quota left, it submits waiting reads in the same order\""
+  ],
+  "disagrees": "The record bounds a waiting read's wait in calls with room and has no premise on the submit quota. The documentation runs the waiting pass only with quota left, so reads that hand off in every call can spend the quota and a waiting read passes the bound."
+}

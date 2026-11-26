@@ -1,0 +1,14 @@
+[package]
+name = "source-anchors"
+version = "0.1.0"
+edition = "2024"
+description = "Lists the declarations of a Rust source file and whether each exists in a build without `test`."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+[dependencies]
+# Both at the versions the workspace already resolves. `full` parses items;
+# `proc-macro2` names the token trees of an attribute's arguments.
+proc-macro2 = "1.0.107"
+syn = { version = "2.0.119", features = ["full"] }

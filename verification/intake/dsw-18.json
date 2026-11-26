@@ -1,0 +1,32 @@
+{
+  "id": "dsw-18",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/walk.rs",
+    "function": "Queue::list"
+  },
+  "defect": "A process listed without a start tick under an ID an earlier round also listed without one is never walked, so its thread's table is unread.",
+  "property": {
+    "text": "The walk reads every thread's descriptor table whatever the leader's holds, reports each matching node once, tells processes apart by ID and the leader's start tick, and reads the table under a process's ID again when its witness thread is gone or an exec may have replaced the leader.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/bind/walk.rs, module documentation"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1787,
+    "regression": {
+      "path": "crates/kestrike/src/bind/walk/listing_tests.rs",
+      "tests": [
+        "bind::walk::listing_tests::a_listing_fails_on_a_process_without_a_start_tick_under_an_id_listed_without_one"
+      ]
+    }
+  },
+  "pair": "ivk-1649",
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "crates/kestrike/src/bind/walk/listing_tests.rs, bind::walk::listing_tests::a_listing_fails_on_a_process_without_a_start_tick_under_an_id_listed_without_one"
+  },
+  "exclusion": "bind-and-failover"
+}

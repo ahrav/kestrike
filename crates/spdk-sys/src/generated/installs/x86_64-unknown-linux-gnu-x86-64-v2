@@ -1,0 +1,3 @@
+Target: x86_64-unknown-linux-gnu. Flags: -I/opt/spdk-v25.05.1-x86-64-v2/include -include rte_config.h -march=x86-64-v2 -mrtm -Inative
+Header digest: 5db5edc8e4819fdc9f78b843bc6843002137e872626f2b14eb7a786d7fbe1957
+Output: 649a72e0cb52d21e

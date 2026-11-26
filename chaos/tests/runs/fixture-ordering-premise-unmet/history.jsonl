@@ -1,0 +1,3 @@
+{"build": "f3e8bed95fd39fbf161e6fbee9b14753f589067b2e65ba50fc41e60de9f67335", "campaign": "fixture-ordering-premise-unmet", "counts": {}, "profile": "cluster-order-1", "runs": {"first": 0, "next": 82020}}
+{"build": "f3e8bed95fd39fbf161e6fbee9b14753f589067b2e65ba50fc41e60de9f67335", "campaign": "fixture-ordering-premise-unmet", "counts": {}, "profile": "cluster-order-2", "runs": {"first": 0, "next": 81649}}
+{"build": "f3e8bed95fd39fbf161e6fbee9b14753f589067b2e65ba50fc41e60de9f67335", "campaign": "fixture-ordering-premise-unmet", "counts": {}, "profile": "cluster-order-3", "runs": {"first": 0, "next": 81721}}

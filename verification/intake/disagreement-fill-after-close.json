@@ -1,0 +1,10 @@
+{
+  "id": "disagreement-fill-after-close",
+  "kind": "disagreement",
+  "escape": "dsw-190",
+  "sources": [
+    "crates/kestrike/src/storage/writable.rs, module documentation: \"Close refuses new receives, reservations and publications.\"",
+    "crates/kestrike/src/storage/readiness.rs, module documentation, invariant ALLOCATION-READY: \"Fills and builders admitted earlier keep their reservations or escrowed extents in every state.\""
+  ],
+  "disagrees": "After the owner closes, a fill of several extents whose placement was promised before the close still places extents and is granted its shard hold. Source 1 forbids that if the hold is a new reservation. Source 2 can be read to permit it, since the builder was admitted before the close."
+}

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "production_timeout_io_us": 30000000,
+  "bounds": {"latency_min_ms": {"io2": 1, "default": 10}, "latency_max_ms": 60000},
+  "eligible_types": {
+    "aws:ebs:volume-io-latency": ["gp2", "gp3", "io1", "io2", "st1", "sc1", "standard"],
+    "aws:ebs:pause-volume-io": ["gp2", "gp3", "io1", "io2", "st1", "sc1", "standard"]
+  },
+  "profiles": {
+    "fis-read-latency": {"action": "aws:ebs:volume-io-latency", "read": true, "write": false, "latency_ms": 2000, "timeout_io_us": 1000000, "duration_seconds": 120, "attachment": "single", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-read", "role": "owner"}},
+    "fis-write-latency": {"action": "aws:ebs:volume-io-latency", "read": false, "write": true, "latency_ms": 2000, "timeout_io_us": 1000000, "duration_seconds": 120, "attachment": "single", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-write", "role": "owner"}},
+    "fis-pause": {"action": "aws:ebs:pause-volume-io", "timeout_io_us": 1000000, "duration_seconds": 60, "attachment": "single", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-read", "role": "owner"}},
+    "fis-family-stop": {"action": "aws:ebs:pause-volume-io", "timeout_io_us": 1000000, "duration_seconds": 60, "attachment": "single", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-stop", "role": "owner"}},
+    "fis-read-latency-multi-attach": {"action": "aws:ebs:volume-io-latency", "read": true, "write": false, "latency_ms": 2000, "timeout_io_us": 1000000, "duration_seconds": 120, "attachment": "multi-attach-one", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-read", "role": "owner"}},
+    "fis-write-latency-multi-attach": {"action": "aws:ebs:volume-io-latency", "read": false, "write": true, "latency_ms": 2000, "timeout_io_us": 1000000, "duration_seconds": 120, "attachment": "multi-attach-one", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-write", "role": "owner"}},
+    "fis-family-stop-multi-attach": {"action": "aws:ebs:pause-volume-io", "timeout_io_us": 1000000, "duration_seconds": 60, "attachment": "multi-attach-one", "ready_seconds": 300, "case_seconds": 1800, "lane": {"profile": "fis-stop", "role": "owner"}}
+  }
+}

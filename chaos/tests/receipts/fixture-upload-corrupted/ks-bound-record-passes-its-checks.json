@@ -1,0 +1,41 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/core/invariant.py",
+      "ks-bound-record-passes-its-checks"
+    ],
+    "defect": "corrupted",
+    "detail": "the control corrupted was caught 533465 times under the row's rule \"a bound slot's record fails its header or chunk checks\" (obligation 1)",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "db1d4b5986a799af821f4b8a59197e690b9368173132f65be536a1697751eb8a",
+      "run.json": "01362621980023e25709fa080f3021a2eaf83a33ad2bdf8fbd375eaf7c40d1d7",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "3fa299d8bb7f1a429bdb76cb92fb5310c4819a245c179caf3f57c2584f107929"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941"
+    },
+    "mode": "control",
+    "outcome": "broken",
+    "row": "ks-bound-record-passes-its-checks",
+    "rows": {
+      "ks-bound-record-passes-its-checks": "dd1b39203557b07798d2b2ef00e5e94ad8ef8fccc657e0fc4ff163bedd2e4183",
+      "ks-upload-no-fault": "55b2c9cdf9b08a7be0ee2dcecac61ecb817747764a235bc4bfc22fe448d436d5"
+    },
+    "scenario": "ks-upload-no-fault",
+    "system_build": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-24T09:27:28Z",
+    "run_id": "fixture-upload-corrupted",
+    "started": "2026-11-24T09:25:25Z"
+  }
+}

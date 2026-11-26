@@ -1,0 +1,10 @@
+[package]
+name = "spdk-sys"
+version = "0.1.0"
+edition = "2024"
+description = "Raw bindings to SPDK v25.05.1 and its bundled DPDK 25.03.0, linked statically."
+license = "BSD-3-Clause"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+links = "spdk"
+

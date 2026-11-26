@@ -1,0 +1,40 @@
+/target
+**/*.rs.bk
+Cargo.lock
+
+# Private working references are not published.
+/docs/specs/
+/docs/policies/
+/docs/superpowers/
+/docs/lessons/
+
+.audit-work/
+.pi-subagents/
+.pi-lens-probe-home/
+/piolium/
+
+# Retired local artifacts remain private in existing clones.
+.bv/
+.perles/
+
+# Local debug output
+/debug.log
+
+# TLC scratch output
+/tla/states/
+/tla/*_TTrace_*
+
+# Python bytecode caches
+__pycache__/
+
+# The GenMC lane links the shipped genmc-std beside the package and runs each
+# case in its own copy, which holds that case's build state.
+/verification/genmc/packages/genmc-std
+/verification/genmc/packages/run-*
+/verification/genmc/packages/kernels/target/
+/verification/genmc/packages/kernels/ops/target/
+!/verification/genmc/packages/kernels/Cargo.lock
+
+# The reach tool builds in its own workspace and tracks its own lockfile.
+/verification/reach/tool/target/
+!/verification/reach/tool/Cargo.lock

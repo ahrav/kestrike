@@ -1,0 +1,1670 @@
+{
+  "schema": 3,
+  "key": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+  "report_key": "2d7e523074b34e4af4fcb79b6af0b493ed046bc5b3e38a88fe6984bf84470ca6",
+  "report_key_derivation": "HMAC-SHA256 under the host key over the ASCII bytes \"ebs-host-report-key\"; readers hold the report key, and the tag is HMAC-SHA256 under it over \"ebs-host-report1\" and the body",
+  "layout": {
+    "header": 48,
+    "host": 226,
+    "entry": 509,
+    "entry_authority": 189,
+    "entry_recovery": 320,
+    "tag": 32,
+    "max_entries": 128,
+    "max_len": 65458,
+    "bound": "a report is 306 + 509 * n bytes for n entries; at 128 entries it is 65,458 bytes, within 65,536 bytes and one sixth of the store's 409,600-byte item limit"
+  },
+  "wire": {
+    "order": "a report is the header, the host part, one entry per volume and the tag; each part lists its fields in wire order with their widths in bytes, and a field's offset is the sum of the widths before it in its part; a row whose parent field is null holds zero bytes",
+    "encodings": {
+      "magic": "the 4 ASCII bytes HRPT",
+      "u16": "a big-endian unsigned 16-bit integer",
+      "u32": "a big-endian unsigned 32-bit integer",
+      "u64": "a big-endian unsigned 64-bit integer",
+      "hex": "raw bytes, which a view shows as lowercase hex",
+      "count": "the number of entries, one unsigned byte",
+      "zero": "a byte that is 0",
+      "volume": "a length byte n, then the n ASCII bytes of the volume identifier, then zero bytes to the field's width",
+      "label": "one byte of the label table the row names, coded as label_codes states",
+      "flags": "one byte whose bit i, counting from the least significant bit, carries the i-th field of bits; the other bits are 0",
+      "known_flags": "one byte whose bit i carries the value of the i-th field of bits and whose bit i + 4 marks that field known, as unavailable.known_flags states",
+      "presence": "one byte: 1 when the group the row names is present and 0 when it is null",
+      "flagged_u32": "a flag byte then a u32, as unavailable.flagged states",
+      "flagged_u64": "a flag byte then a u64, as unavailable.flagged states",
+      "flagged_hex": "a flag byte then raw bytes, as unavailable.flagged states",
+      "gauge": "a flag byte, used as a u64 and limit as a u64, as unavailable.gauge states",
+      "hmac": "the tag, as report_key_derivation states",
+      "members": "a flag byte, used as a u64 and limit as a u64, as unavailable.members states"
+    },
+    "header": [
+      {
+        "field": "magic",
+        "bytes": 4,
+        "encoding": "magic"
+      },
+      {
+        "field": "schema",
+        "bytes": 2,
+        "encoding": "u16"
+      },
+      {
+        "field": "writer.host",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "writer.boot",
+        "bytes": 16,
+        "encoding": "hex"
+      },
+      {
+        "field": "sequence",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "sealed_at_us",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries",
+        "bytes": 1,
+        "encoding": "count"
+      },
+      {
+        "field": "reserved",
+        "bytes": 1,
+        "encoding": "zero"
+      }
+    ],
+    "host": [
+      {
+        "field": "build.era",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "build.digest",
+        "bytes": 33,
+        "encoding": "flagged_hex"
+      },
+      {
+        "field": "headroom.ram",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "headroom.cpu_load",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "headroom.iops",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "headroom.bandwidth",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "headroom.attachments",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "headroom.workers",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "headroom.recovery",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "health",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "health"
+      },
+      {
+        "field": "detector.peers",
+        "bytes": 17,
+        "encoding": "members"
+      },
+      {
+        "field": "detector.self_suspect_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "detector.nominations",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "producer.missing",
+        "bytes": 17,
+        "encoding": "members"
+      },
+      {
+        "field": "recovery_io",
+        "bytes": 17,
+        "encoding": "gauge"
+      }
+    ],
+    "entry": [
+      {
+        "field": "entries.volume",
+        "bytes": 22,
+        "encoding": "volume"
+      },
+      {
+        "field": "entries.shard",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.role",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "role"
+      },
+      {
+        "field": "entries.tenure.g",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.tenure.a",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.volume_state",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "volume_state"
+      },
+      {
+        "field": "entries.serving",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "serving"
+      },
+      {
+        "field": "entries.flags",
+        "bytes": 1,
+        "encoding": "flags",
+        "bits": [
+          "entries.withheld",
+          "entries.quarantine",
+          "entries.flip"
+        ]
+      },
+      {
+        "field": "entries.withdrawal",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "withdrawal"
+      },
+      {
+        "field": "entries.refusal",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "refusal"
+      },
+      {
+        "field": "entries.enumeration",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "enumeration"
+      },
+      {
+        "field": "entries.watermark",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "watermark"
+      },
+      {
+        "field": "entries.report_age_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.own_records",
+        "bytes": 5,
+        "encoding": "flagged_u32"
+      },
+      {
+        "field": "entries.checkpoint",
+        "bytes": 1,
+        "encoding": "presence"
+      },
+      {
+        "field": "entries.checkpoint.slot",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.checkpoint.session",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.checkpoint.capture",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.checkpoint.units",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.checkpoint_age_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.captures.refused",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.captures.abandoned",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.exit.status",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "exit"
+      },
+      {
+        "field": "entries.exit.operation",
+        "bytes": 16,
+        "encoding": "hex"
+      },
+      {
+        "field": "entries.pressure.frontier",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.pressure.ancestry",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.pressure.quarantine",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.pressure.full",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.registrants",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "registrants"
+      },
+      {
+        "field": "entries.hold",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "hold"
+      },
+      {
+        "field": "entries.readiness",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "readiness"
+      },
+      {
+        "field": "entries.metadata",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "metadata"
+      },
+      {
+        "field": "entries.load_refusal",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "load_refusal"
+      },
+      {
+        "field": "entries.recovery.kind",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "recovery.kind"
+      },
+      {
+        "field": "entries.recovery.outcome",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "recovery.outcome"
+      },
+      {
+        "field": "entries.recovery.check",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "recovery.check"
+      },
+      {
+        "field": "entries.recovery.next",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "recovery.next"
+      },
+      {
+        "field": "entries.recovery.store",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "recovery.store"
+      },
+      {
+        "field": "entries.phase",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "phase"
+      },
+      {
+        "field": "entries.ended",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "ended"
+      },
+      {
+        "field": "entries.recovery_flags",
+        "bytes": 1,
+        "encoding": "known_flags",
+        "bits": [
+          "entries.named",
+          "entries.roll_due",
+          "entries.roll_active",
+          "entries.publication_due"
+        ]
+      },
+      {
+        "field": "entries.recovery.attempts",
+        "bytes": 5,
+        "encoding": "flagged_u32"
+      },
+      {
+        "field": "entries.recovery.age_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.times.loaded_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.times.live_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.times.first_hit_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.times.retained_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.times.fill_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.retention",
+        "bytes": 1,
+        "encoding": "presence"
+      },
+      {
+        "field": "entries.retention.first_damage",
+        "bytes": 1,
+        "encoding": "label",
+        "table": "retention.first_damage"
+      },
+      {
+        "field": "entries.retention.installed",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.retention.omitted",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.retention.held_units",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.retention.failed_units",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.retention.unread_units",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.retention.suffix_damage",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.retention.suffix_tails",
+        "bytes": 4,
+        "encoding": "u32"
+      },
+      {
+        "field": "entries.retention.suffix_dropped",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.retention.suffix_unread",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.retention.slot_superseded",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.retention.slot_withheld",
+        "bytes": 8,
+        "encoding": "u64"
+      },
+      {
+        "field": "entries.suffix.blocks",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.suffix.flush_lag_us",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.recovery_io.peak",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.recovery_io.saturated",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.attaches",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.store.unknown",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.store.unavailable",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.store.refused",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.store.log",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.coverage.saturated",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.coverage.largest",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.invalidations",
+        "bytes": 17,
+        "encoding": "gauge"
+      },
+      {
+        "field": "entries.read_defects",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      },
+      {
+        "field": "entries.served",
+        "bytes": 9,
+        "encoding": "flagged_u64"
+      }
+    ],
+    "tag": [
+      {
+        "field": "tag",
+        "bytes": 32,
+        "encoding": "hmac"
+      }
+    ]
+  },
+  "json_integers": "every integer in a report view is an unsigned 64-bit value; a reader parses it losslessly, beyond 2^53",
+  "label_first_code": {
+    "role": 1,
+    "volume_state": 1,
+    "serving": 1,
+    "withdrawal": 1,
+    "refusal": 1,
+    "enumeration": 0,
+    "watermark": 0,
+    "exit": 1,
+    "registrants": 1,
+    "hold": 1,
+    "readiness": 1,
+    "metadata": 1,
+    "load_refusal": 1,
+    "recovery.kind": 1,
+    "recovery.outcome": 1,
+    "recovery.check": 1,
+    "recovery.next": 1,
+    "recovery.store": 1,
+    "phase": 1,
+    "ended": 1,
+    "retention.first_damage": 1,
+    "health": 1
+  },
+  "label_codes": "a label byte with first code 1 names no value at code 0 and the k-th listed label at code k; a label byte with first code 0 names the (k+1)-th listed label at code k, whose first label is unavailable; any other byte refuses",
+  "unavailable": {
+    "flagged": "a flag byte then the value: 1 carries the value, 0 with zero value bytes reads null; any other flag, or 0 with a nonzero value byte, refuses",
+    "gauge": "a flag byte, used (8) and limit (8): 1 carries a reading whose limit is nonzero and at or above used, 0 with zero bytes reads unavailable; anything else refuses; entries.pressure.full's known limit is 3",
+    "group": "entries.retention is one flag byte then its 73 bytes: 1 carries the account, 0 with zero bytes reads null; a present account's first damage matches its slot unit counts: null with no failed or unread unit, unread with unread units and no failed one, header, chunk and units with a failed unit, and content with any counts; any other account refuses",
+    "recovery": "entries.recovery.kind is present whenever outcome, check, next, store or age_us is, and a body carrying one of them without a kind refuses; attempts, a count since the writer boot, is known without a kind, so a volume with no attempt reads 0; check, next and store describe a refused attempt and appear only beside outcome refused or null, and store only beside a check, so a body carrying one beside outcome running or completed, or a store with no check, refuses",
+    "known_flags": "the second flags byte carries named, roll_due, roll_active and publication_due: bit i holds the value of the i-th and bit i + 4 marks it known; a clear known bit reads null, and a value bit set without its known bit refuses",
+    "members": "detector.peers and producer.missing are a flag byte, used (8) and limit (8): 1 carries a reading whose used is at most limit, 0 of 0 included, and 0 with zero bytes reads unavailable; anything else refuses",
+    "times": "the entries.times values a body carries keep the recorder's order: loaded_us at most the live time, the live time at most first_hit_us and fill_us, and retained_us equal to live_us, where retained_us stands for the live time when live_us is null; a pair with a null side is unchecked, and a body breaking a checked pair refuses",
+    "suffix": "a known entries.suffix.blocks of 0 used reads entries.suffix.flush_lag_us null or 0, and a body carrying a positive lag beside it refuses",
+    "identities": "writer.host, writer.boot, sequence, entries.shard and a present entries.exit.operation are nonzero; entries.volume is vol- followed by 1 to 17 lowercase hexadecimal digits, its length byte giving the identifier's length with vol- included, 5 to 21, and zero bytes padding the field; a body breaking one refuses",
+    "tenure": "entries.tenure is g then a: (0, 0) reads null; g of 0 with a nonzero, an odd a and an a above 4294967292 refuse; g of 1 or more with a of 0 reads a present tenure whose epoch no session activated",
+    "exit": "entries.exit is a status label then a 16-byte operation: code 0 with zero operation bytes reads null, a status with a zero operation refuses, and code 0 with a nonzero operation refuses",
+    "checkpoint": "entries.checkpoint_age_us is null whenever entries.checkpoint is, and a body carrying an age without a checkpoint refuses"
+  },
+  "nullable": [
+    "build.digest",
+    "detector.nominations",
+    "detector.self_suspect_us",
+    "entries.captures.abandoned",
+    "entries.captures.refused",
+    "entries.checkpoint",
+    "entries.checkpoint_age_us",
+    "entries.ended",
+    "entries.exit",
+    "entries.hold",
+    "entries.load_refusal",
+    "entries.metadata",
+    "entries.named",
+    "entries.own_records",
+    "entries.phase",
+    "entries.publication_due",
+    "entries.read_defects",
+    "entries.readiness",
+    "entries.recovery.age_us",
+    "entries.recovery.attempts",
+    "entries.recovery.check",
+    "entries.recovery.kind",
+    "entries.recovery.next",
+    "entries.recovery.outcome",
+    "entries.recovery.store",
+    "entries.recovery_io.saturated",
+    "entries.refusal",
+    "entries.registrants",
+    "entries.report_age_us",
+    "entries.retention",
+    "entries.retention.first_damage",
+    "entries.role",
+    "entries.roll_active",
+    "entries.roll_due",
+    "entries.served",
+    "entries.serving",
+    "entries.store.log",
+    "entries.store.refused",
+    "entries.store.unavailable",
+    "entries.store.unknown",
+    "entries.suffix.flush_lag_us",
+    "entries.tenure",
+    "entries.times.fill_us",
+    "entries.times.first_hit_us",
+    "entries.times.live_us",
+    "entries.times.loaded_us",
+    "entries.times.retained_us",
+    "entries.volume_state",
+    "entries.withdrawal",
+    "health"
+  ],
+  "labels": {
+    "role": [
+      "owner",
+      "standby",
+      "replacement",
+      "unrecorded"
+    ],
+    "volume_state": [
+      "provisioning",
+      "fresh",
+      "active",
+      "retired",
+      "deleted"
+    ],
+    "serving": [
+      "pre-boundary",
+      "recovering",
+      "serving",
+      "withdrawn",
+      "closed"
+    ],
+    "withdrawal": [
+      "report",
+      "recorded-holder",
+      "unheld",
+      "conflict",
+      "preempt-aborted",
+      "force-detach",
+      "attachment",
+      "modification",
+      "restart-check",
+      "activation-record",
+      "exhausted",
+      "planned",
+      "flipped",
+      "newer-fence",
+      "later-tenure",
+      "regression",
+      "unverified"
+    ],
+    "refusal": [
+      "admission",
+      "report-malformed",
+      "report-timeout",
+      "foreign-lower",
+      "foreign-equal",
+      "foreign-higher",
+      "conflict",
+      "preempt-aborted",
+      "own-host-id",
+      "clock",
+      "boundary"
+    ],
+    "enumeration": [
+      "unavailable",
+      "matches",
+      "missing",
+      "foreign",
+      "duplicate",
+      "unlisted"
+    ],
+    "watermark": [
+      "unavailable",
+      "clear",
+      "regression",
+      "log",
+      "checkpoint",
+      "namespace"
+    ],
+    "exit": [
+      "received",
+      "draining",
+      "withdrawn",
+      "waiting",
+      "exited",
+      "resumed-deadline",
+      "resumed-cut",
+      "resumed-standby",
+      "resumed-store",
+      "restarting-deadline",
+      "restarting-refused-target",
+      "restarting-refused-volume",
+      "restarting-planned",
+      "restarting-transfer-refused",
+      "restarting-transfer-unknown"
+    ],
+    "registrants": [
+      "sole",
+      "recorded",
+      "excess",
+      "unreadable",
+      "reservation-type",
+      "duplicate-own-record",
+      "foreign-holder",
+      "foreign-registrant",
+      "not-holder",
+      "ended-registrant"
+    ],
+    "hold": [
+      "clear",
+      "held",
+      "pending",
+      "superseded"
+    ],
+    "readiness": [
+      "detached",
+      "loading",
+      "loaded",
+      "replaying",
+      "live",
+      "withheld",
+      "closed"
+    ],
+    "metadata": [
+      "bootstrapping",
+      "unformatted",
+      "open",
+      "slot-unreadable",
+      "unsupported",
+      "format-mismatch",
+      "tied-roots",
+      "stale-session",
+      "unfenced",
+      "entropy-unavailable",
+      "metadata-failed",
+      "collided",
+      "unloadable"
+    ],
+    "load_refusal": [
+      "limits",
+      "memory",
+      "bounds",
+      "key",
+      "slot",
+      "overlap",
+      "units",
+      "entries",
+      "stale-write",
+      "unreadable",
+      "unrestorable"
+    ],
+    "recovery.kind": [
+      "restart",
+      "takeover",
+      "fresh",
+      "lineage"
+    ],
+    "recovery.outcome": [
+      "running",
+      "completed",
+      "refused"
+    ],
+    "recovery.check": [
+      "records",
+      "deposed",
+      "recorded-holder",
+      "unheld",
+      "fresh",
+      "volume",
+      "exhausted",
+      "suffix-only",
+      "local",
+      "driver",
+      "ready",
+      "host-id",
+      "first-report",
+      "not-holding",
+      "unobserved",
+      "bump",
+      "preempt",
+      "second-report",
+      "not-sole",
+      "coverage",
+      "stale",
+      "restart",
+      "predecessor",
+      "take-over",
+      "unparsed",
+      "holder",
+      "register",
+      "second-unparsed",
+      "superseded",
+      "origin",
+      "persist",
+      "enroll-write",
+      "enroll-refused",
+      "acquire",
+      "report",
+      "hold",
+      "write",
+      "read",
+      "activation",
+      "confirm",
+      "named",
+      "fencing",
+      "fence",
+      "unresolved-page",
+      "release",
+      "retention"
+    ],
+    "recovery.next": [
+      "flip",
+      "hold",
+      "restart",
+      "stop"
+    ],
+    "recovery.store": [
+      "unavailable",
+      "refused",
+      "unknown",
+      "absent",
+      "codec",
+      "successor",
+      "flip",
+      "stale",
+      "attempts-exhausted",
+      "regression",
+      "withdrawn",
+      "namespace",
+      "log"
+    ],
+    "phase": [
+      "starting",
+      "recovering",
+      "held",
+      "standby",
+      "serving",
+      "withdrawn",
+      "closing",
+      "parked"
+    ],
+    "ended": [
+      "stopped",
+      "rerun",
+      "held",
+      "deposed",
+      "retire",
+      "refused",
+      "retired",
+      "fault"
+    ],
+    "retention.first_damage": [
+      "header",
+      "chunk",
+      "content",
+      "units",
+      "unread"
+    ],
+    "health": [
+      "healthy",
+      "unhealthy"
+    ]
+  },
+  "fields": [
+    "build",
+    "build.digest",
+    "build.era",
+    "detector",
+    "detector.nominations",
+    "detector.peers",
+    "detector.peers.limit",
+    "detector.peers.used",
+    "detector.self_suspect_us",
+    "entries",
+    "entries.attaches",
+    "entries.attaches.limit",
+    "entries.attaches.used",
+    "entries.captures",
+    "entries.captures.abandoned",
+    "entries.captures.refused",
+    "entries.checkpoint",
+    "entries.checkpoint.capture",
+    "entries.checkpoint.session",
+    "entries.checkpoint.slot",
+    "entries.checkpoint.units",
+    "entries.checkpoint_age_us",
+    "entries.coverage",
+    "entries.coverage.largest",
+    "entries.coverage.largest.limit",
+    "entries.coverage.largest.used",
+    "entries.coverage.saturated",
+    "entries.coverage.saturated.limit",
+    "entries.coverage.saturated.used",
+    "entries.ended",
+    "entries.enumeration",
+    "entries.exit",
+    "entries.exit.operation",
+    "entries.exit.status",
+    "entries.flip",
+    "entries.hold",
+    "entries.invalidations",
+    "entries.invalidations.limit",
+    "entries.invalidations.used",
+    "entries.load_refusal",
+    "entries.metadata",
+    "entries.named",
+    "entries.own_records",
+    "entries.phase",
+    "entries.pressure",
+    "entries.pressure.ancestry",
+    "entries.pressure.ancestry.limit",
+    "entries.pressure.ancestry.used",
+    "entries.pressure.frontier",
+    "entries.pressure.frontier.limit",
+    "entries.pressure.frontier.used",
+    "entries.pressure.full",
+    "entries.pressure.full.limit",
+    "entries.pressure.full.used",
+    "entries.pressure.quarantine",
+    "entries.pressure.quarantine.limit",
+    "entries.pressure.quarantine.used",
+    "entries.publication_due",
+    "entries.quarantine",
+    "entries.read_defects",
+    "entries.readiness",
+    "entries.recovery",
+    "entries.recovery.age_us",
+    "entries.recovery.attempts",
+    "entries.recovery.check",
+    "entries.recovery.kind",
+    "entries.recovery.next",
+    "entries.recovery.outcome",
+    "entries.recovery.store",
+    "entries.recovery_io",
+    "entries.recovery_io.peak",
+    "entries.recovery_io.peak.limit",
+    "entries.recovery_io.peak.used",
+    "entries.recovery_io.saturated",
+    "entries.refusal",
+    "entries.registrants",
+    "entries.report_age_us",
+    "entries.retention",
+    "entries.retention.failed_units",
+    "entries.retention.first_damage",
+    "entries.retention.held_units",
+    "entries.retention.installed",
+    "entries.retention.omitted",
+    "entries.retention.slot_superseded",
+    "entries.retention.slot_withheld",
+    "entries.retention.suffix_damage",
+    "entries.retention.suffix_dropped",
+    "entries.retention.suffix_tails",
+    "entries.retention.suffix_unread",
+    "entries.retention.unread_units",
+    "entries.role",
+    "entries.roll_active",
+    "entries.roll_due",
+    "entries.served",
+    "entries.serving",
+    "entries.shard",
+    "entries.store",
+    "entries.store.log",
+    "entries.store.refused",
+    "entries.store.unavailable",
+    "entries.store.unknown",
+    "entries.suffix",
+    "entries.suffix.blocks",
+    "entries.suffix.blocks.limit",
+    "entries.suffix.blocks.used",
+    "entries.suffix.flush_lag_us",
+    "entries.tenure",
+    "entries.tenure.a",
+    "entries.tenure.g",
+    "entries.times",
+    "entries.times.fill_us",
+    "entries.times.first_hit_us",
+    "entries.times.live_us",
+    "entries.times.loaded_us",
+    "entries.times.retained_us",
+    "entries.volume",
+    "entries.volume_state",
+    "entries.watermark",
+    "entries.withdrawal",
+    "entries.withheld",
+    "headroom",
+    "headroom.attachments",
+    "headroom.attachments.limit",
+    "headroom.attachments.used",
+    "headroom.bandwidth",
+    "headroom.bandwidth.limit",
+    "headroom.bandwidth.used",
+    "headroom.cpu_load",
+    "headroom.cpu_load.limit",
+    "headroom.cpu_load.used",
+    "headroom.iops",
+    "headroom.iops.limit",
+    "headroom.iops.used",
+    "headroom.ram",
+    "headroom.ram.limit",
+    "headroom.ram.used",
+    "headroom.recovery",
+    "headroom.recovery.limit",
+    "headroom.recovery.used",
+    "headroom.workers",
+    "headroom.workers.limit",
+    "headroom.workers.used",
+    "health",
+    "producer",
+    "producer.missing",
+    "producer.missing.limit",
+    "producer.missing.used",
+    "recovery_io",
+    "recovery_io.limit",
+    "recovery_io.used",
+    "schema",
+    "sealed_at_us",
+    "sequence",
+    "writer",
+    "writer.boot",
+    "writer.host"
+  ],
+  "units": {
+    "schema": "report schema version; schema 3 fixes the layout, the label tables, the unavailable encodings, the decoder's field rules and every unit, rate window and counter reset point below; a production build's first sealed report freezes them, and after that a change to any of them, an appended label included, takes a new version",
+    "writer.host": "fleet host identifier",
+    "writer.boot": "16-byte nonce, hex, drawn when the writer starts; a new value restarts the sequence and every count whose reset identity is writer.boot",
+    "sequence": "reports this writer boot sealed, counting from 1",
+    "sealed_at_us": "the writer's best-effort wall-clock reading in microseconds since the Unix epoch at the seal, or the boot's previous stamp when the clock stepped back below it, so a boot's stamps rise with its sequence; a stepped clock skews it, and when a reader keeps four boots of the host, a new boot's reports drop until its clock passes the lowest kept stamp, so a backward step can delay the next boot; the writer paces its period on a separate elapsed clock",
+    "build.era": "binary era this build records in attachment events",
+    "build.digest": "SHA-256 of the running executable, hex",
+    "headroom.ram": "bytes in use (MemTotal - MemAvailable) of MemTotal, at sampling",
+    "headroom.cpu_load": "one-minute load average in hundredths, of 100 per online CPU, saturating at the limit, so used equal to limit reads a load at or above the online CPU count; counts runnable tasks and tasks in uninterruptible I/O wait",
+    "headroom.iops": "I/O operations per second averaged over the interval since the same writer boot's previous seal, measured on the writer's elapsed clock and summed over the host's owners, of the provisioned rate, saturating at it, so used equal to limit reads a rate at or above the provisioned one; unavailable in a boot's first report, without its own provisioned rate, for an empty or reversed interval, when at either of the two seals an owner's statistics reading is missing, failed or not newer than at the seal before it, when the two seals do not hold the same owners each once, and when an owner's operation or byte count fell; two seals that both hold no owner read 0; the rate rounds down",
+    "headroom.bandwidth": "bytes per second averaged over the interval since the same writer boot's previous seal, measured on the writer's elapsed clock and summed over the host's owners, of the provisioned byte rate, saturating at it, so used equal to limit reads a rate at or above the provisioned one; unavailable in the cases headroom.iops names, its own provisioned rate standing for the operation rate",
+    "headroom.attachments": "attachment slots in use, the owner bind mappings that record a controller plus the attached volumes no mapping records, spares among them, of the instance's slots, saturating at the limit; unavailable when a mappings read, the unbound count or the slot count is missing, or when two mappings record one volume",
+    "headroom.workers": "owner-process roles in use, owned shards plus standby roles, of the configured roles per host, saturating at the limit; unavailable when either count is missing",
+    "headroom.recovery": "volumes whose last recovery attempt runs or refused with a next step of hold or restart, or whose attach has ticked and reached neither Live nor a terminal end, of the configured recovery slots, saturating at the limit; unavailable when a volume's recovery status or attach state, or the slot count, is missing",
+    "entries.volume": "volume identifier",
+    "entries.shard": "shard number",
+    "entries.role": "label: the role the last accepted shard record and the last own-volume read give the host; owner and replacement need only the shard record; standby needs the shard record to name this volume active under another owner and the volume record to list a pair of the host, which a deposed owner's pair also meets until a fence drops it; standby reports enrollment, so the shard record's named standby, which alone holds takeover authority, and any other enrolled host both read as standby; unrecorded when the records give none of these; null without a shard record, or without an own-volume read when the shard record gives neither owner nor replacement",
+    "entries.tenure.g": "shard generation of the tenure's session",
+    "entries.tenure.a": "activated epoch of the tenure's session",
+    "entries.volume_state": "label: the state of the volume's last read record",
+    "entries.serving": "label: serving state when the producer built the entry; when null, the three flags are unavailable and encode false",
+    "entries.withheld": "readiness withheld when the producer built the entry; bit 0 of the flags byte",
+    "entries.quarantine": "recovery readiness holds an integrity fault when the producer built the entry; the owner producer writes false on every entry, since no readiness state records an integrity fault; with serving null it encodes only false; bit 1 of the flags byte",
+    "entries.flip": "the serving machine holds a flip request when the producer built the entry; bit 2 of the flags byte",
+    "entries.withdrawal": "label: withdrawal cause; report aggregates every Report-triggered cause but the recorded-holder hold, the no-holder hold and a lapsed deferral's unverified registrant, which read recorded-holder, unheld and unverified and request no flip; a hold after a deposing status keeps conflict or preempt-aborted with no flip request, and entries.hold tells a pending rejudge and a superseded status withdrawal apart",
+    "entries.refusal": "label: last authority refusal cause, which need not explain the current withdrawal; admission aggregates every admission denial",
+    "entries.enumeration": "label: last attachment enumeration result: matches is the own instance once with each admitted peer at most once and no other record, missing no own record and none outside the admitted set, foreign a record outside the admitted set or an unreadable instance, duplicate the own instance or an admitted peer listed more than once, unlisted no listing; foreign and duplicate retire a volume",
+    "entries.watermark": "label: the store client's watermark alarm, which keeps the first cause that withdrew the client: regression a read returned a version below the mark, a tracked value below the mark or the mark's version with another value, a record whose mark is held was absent or failed to decode at or below the marked version, or a write committed at or below the held version or at a version other than the one it names; a repeated value at a higher version and an identical reread at the mark's version raise none; log the log failed to record a raised mark; checkpoint a shard record named no checkpoint, an older one or another one with the adopted checkpoint's identity at its generation; namespace a record named another store instance",
+    "entries.report_age_us": "the authority's Report age in microseconds on its serving clock, when the producer built the entry",
+    "entries.own_records": "records carrying the own host ID among the rows the authority inspected in the last Report it evaluated, null without a count; a closed serving machine keeps the count it closed with, whatever a Report that ends later holds; the inspected rows stop at the registrant bound, so a count above one is a lower bound, and a count of one also covers one row under a wrong key",
+    "entries.checkpoint": "identity of the checkpoint the shard record names",
+    "entries.checkpoint.slot": "checkpoint slot index",
+    "entries.checkpoint.session": "capturing session (g * 2^32 + a)",
+    "entries.checkpoint.capture": "capture number within the capturing session",
+    "entries.checkpoint.units": "unit count of the checkpoint",
+    "entries.checkpoint_age_us": "microseconds on the owner's turn clock since this owner tenure first read a shard record naming the checkpoint; restarts with each tenure; null when the clock reads before that first read",
+    "entries.captures.refused": "capture refusals in the entry's tenure",
+    "entries.captures.abandoned": "capture abandonments in the entry's tenure",
+    "entries.exit.operation": "16-byte exit operation identity, hex",
+    "entries.exit.status": "label: what the owner did with the exit request",
+    "entries.exit": "the last exit request the producer tracks; null when it tracks none, having received no request or having no exit source",
+    "entries.pressure.frontier": "delta blocks the last accepted shard record's replay still requires, of the own volume's delta region, saturating at the region, when the producer built the entry; unavailable unless that record names the own volume active and its layout is known",
+    "entries.pressure.ancestry": "retained ancestry suffixes of the last accepted shard record, of the chain bound",
+    "entries.pressure.quarantine": "checkpoint slots a tenure's possibly-named set holds quarantined or names for an unsettled Publish, of its layout's slots, when the producer built the entry",
+    "entries.pressure.full": "how many of the ancestry chain, the delta history and the owner's recovery I/O share stand at their bound, of 3, when the producer built the entry; the share stands at its bound while its current share window refused a charge and is younger than one share interval from its opening offer on the owner's turn clock, whether or not the bucket drained since; a known reading has limit 3",
+    "health": "label: the host-wide health bit the host's heartbeat carries when the producer samples it",
+    "detector.peers": "peers that hold a suspicion, no ALIVE veto, no fresh declared reading and no recovery from a declared hold on healthy heartbeats that progress, the count the detector's self-suspicion rule compares with its threshold, of the peers the detector tracks, when the producer samples it; a vetoed peer counts in the limit and not in used; a detector tracking no peer reads 0 of 0; a count below the threshold leaves an active self-suspicion dwell in place, which detector.self_suspect_us reads",
+    "detector.self_suspect_us": "microseconds of self-suspicion dwell left at the detector's last successful tick, from that tick's repair demand, on the detector's elapsed clock; 0 when that tick returned no repair demand, which says nothing of the next tick; null without a tick sample",
+    "detector.nominations": "nominations the detector published since the writer boot",
+    "producer.missing": "volumes assigned to the host with no fresh entry from their owner process, of the assigned volumes; a host assigned no volume reads 0 of 0",
+    "recovery_io": "the sum of entries.recovery_io.peak bytes over the host's owners whose attach built a recovery I/O share, of twice the host recovery I/O share's bytes per interval; an owner with no share, such as a standby or an owner before its attach, adds nothing; the limit saturates at 2^64 - 1 and the sum saturates at the limit, so used equal to limit reads a sum at or above the limit; the owners' peaks come from share windows that need not overlap, so the sum is no measurement of one host interval; unavailable when a share-holding owner's peak is unavailable or its owner has no fresh entry, and when the host share gives an owner no usable part: a zero interval, no owners, more than 128 owners, or bytes per owner below one delta block; 0 of the limit when no owner holds a share under a usable host share",
+    "entries.registrants": "label: the last evaluated Report's registrants against the own pair and the pairs of the volume record the activation or the last owner poll read; the first refusal of the Report gives the label and takes precedence over every success label: a holder other than the own pair reads foreign-holder, and a non-holding registrant outside those pairs that no such read admitted reads foreign-registrant when no earlier check refuses, deferred or not; on an accepted Report, sole the own pair holds alone, ended-registrant a registrant other than the own pair is a recorded pair that pins no live attach, whether its host detached, its entry is marked ended or it attached again, or a non-holding pair the read admitted unrecorded because no recorded pair carries its key and its key derives an entry number below next that no live attach holds, whether or not an entry with that number is retained; ended-registrant takes precedence over recorded, and recorded the own pair holds and every other registrant is a recorded pair; each other label is one refusal; a closed serving machine keeps the label it closed with",
+    "entries.hold": "label: the serving machine's hold on the last evaluated Report: clear no hold, held a recorded holder of another attachment or no holder holds the tenure with no flip request, pending a deposing status awaits its rejudge, superseded a successor observation superseded a status withdrawal",
+    "entries.readiness": "label: the volume's readiness word when the producer built the entry",
+    "entries.metadata": "label: the attach's metadata outcome",
+    "entries.load_refusal": "label: the warm load's refusal",
+    "entries.recovery.kind": "label: the sequence the last recovery attempt ran; lineage is a restart that preempted a recorded holder of another host after its own bump",
+    "entries.recovery.outcome": "label: where the last recovery attempt stands",
+    "entries.recovery.check": "label: the check that refused the last recovery attempt, one label per top-level check of the restart, takeover and fresh sequences, a check name they share reading as one label",
+    "entries.recovery.next": "label: the step after a refused recovery attempt, as the attempt's own sequence names it: flip request, hold with the volume retained, same-host restart or stop; the owner process's exit after the refusal is entries.ended, a separate classification that parks or deposes some refusals whose sequence holds or restarts",
+    "entries.recovery.store": "label: the class of the store error the refusing check carries",
+    "entries.recovery.attempts": "recovery attempts of the entry's volume since the writer boot; a volume with no attempt reads 0 with no kind",
+    "entries.recovery.age_us": "microseconds on the owner's turn clock from the start of the last recovery attempt to the producer's build of the entry",
+    "entries.phase": "label: the owner process's phase",
+    "entries.ended": "label: the kind of the one exit that ended the owner process's last incarnation",
+    "entries.named": "the last accepted shard record names the host its standby on the volume it names active; null without an accepted shard record; bit 0 of the second flags byte, known by bit 4",
+    "entries.roll_due": "the tenure stands at a bound that asks for a planned same-host restart; null without a source; bit 1 of the second flags byte, known by bit 5",
+    "entries.roll_active": "a planned same-host restart runs; null without a source; bit 2 of the second flags byte, known by bit 6",
+    "entries.publication_due": "the tenure's suffix asks for a checkpoint publication; null without a source; bit 3 of the second flags byte, known by bit 7",
+    "entries.times.loaded_us": "microseconds on the owner's turn clock, from the first tick of the tenure's attach; the time is the turn-clock value of the owner's last turn when the recovery recorder recorded the milestone, so an observation between turns, a replay step or a close, carries the last turn's time: the first recorded state other than detached and loading, whether the load completed, withheld or closed",
+    "entries.times.live_us": "microseconds on the owner's turn clock, from the first tick of the tenure's attach; the time is the turn-clock value of the owner's last turn when the recovery recorder recorded the milestone, so an observation between turns, a replay step or a close, carries the last turn's time: the recorded transition to live",
+    "entries.times.first_hit_us": "microseconds on the owner's turn clock, from the first tick of the tenure's attach; the time is the turn-clock value of the owner's last turn when the recovery recorder recorded the milestone, so an observation between turns, a replay step or a close, carries the last turn's time: the observation after the first read that ended complete at live, in the same turn or a later one; a local complete read, which shows no client delivery and no hit on a restored binding",
+    "entries.times.retained_us": "the entries.times.live_us time of an attach that reached live over restored bindings; null when the attach restored no binding or has not reached live",
+    "entries.times.fill_us": "microseconds on the owner's turn clock, from the first tick of the tenure's attach; the time is the turn-clock value of the owner's last turn when the recovery recorder recorded the milestone, so an observation between turns, a replay step or a close, carries the last turn's time: the observation after the first payload write submitted at live, in the same turn or a later one",
+    "entries.retention": "the tenure's warm load account of what the slot and its suffixes kept and lost: null until the load commits or ends unloadable, collided or metadata-failed after its stage recorded the decoded load's account, then the account the deciding result holds, fixed for the tenure; a load refused before its stage, awaiting its commit or stopped there by a withdrawal reads null; a monitor keeps a known account of a series over a later null",
+    "entries.retention.first_damage": "label: the kind of the checkpoint slot's first damage, which outranks the rest; null with no damage",
+    "entries.retention.installed": "entries installed at the warm load's commit",
+    "entries.retention.omitted": "entries the warm load's conversion omitted, counted once its last piece landed; a load that ended before then reads 0",
+    "entries.retention.held_units": "units the warm bootstrap's allocator holds restored",
+    "entries.retention.failed_units": "slot units that failed their identity, crc or content check; the entries with a row on them are lost",
+    "entries.retention.unread_units": "slot units the device could not read",
+    "entries.retention.suffix_damage": "suffixes whose first hole is damage",
+    "entries.retention.suffix_tails": "suffixes whose first hole ends their unflushed tail",
+    "entries.retention.suffix_dropped": "whole suffix inserts behind their suffix's first hole",
+    "entries.retention.suffix_unread": "the suffix replay's unread markers: each LSN whose read failed, the region end of each suffix recorded longer than its region, and the first LSN a replay that refused its limits leaves unread; a marker other than a failed read records no device command",
+    "entries.retention.slot_superseded": "slot entries a suffix entry superseded",
+    "entries.retention.slot_withheld": "slot entries withheld for a session the reader does not admit",
+    "entries.suffix.blocks": "the tenure's suffix blocks not yet durable, the open block included, of the suffix queue's block bound",
+    "entries.suffix.flush_lag_us": "the time since the first record appended to the oldest suffix block not yet durable, the open block included, on the clock the suffix log's appends read, in microseconds rounded down from its nanoseconds; 0 when every block is durable; null without a source",
+    "entries.recovery_io.peak": "the most bytes the owner's recovery I/O share charged in one share window since the tenure's attach built the share, the open window included, of the share's part plus its bucket capacity, which saturates at 2^64 - 1; a recovery read or a checkpoint-unit command is charged as it is submitted and leaves the window's bytes when the device turns that submit away, and a suffix block is charged each time the suffix log hands it out for writing and stays in the window's bytes whether the device accepts, turns away or fails that write, so a block handed out again after a refused or failed write counts once for each hand-out; a share window opens on the owner's turn clock, in microseconds, at the first charge offered at least one share interval after the previous window opened, so it follows the share's interval and the owner's charges, apart from the report period",
+    "entries.recovery_io.saturated": "share windows since the tenure's attach built the owner's recovery I/O share that refused a charge, one the share's bucket could not hold when it was offered, each counted once at its first refusal",
+    "entries.attaches": "live attachments the volume record lists, of the attachments a volume admits",
+    "entries.store.unknown": "store results of the tenure with the error class unknown, a write whose outcome is unknown; each final result after watermark settlement counts once in one of entries.store.unknown, unavailable, refused and log, a batch counting each of its elements and the batch itself nothing, and a failed log write that turns n results into log counting n; a result that returns withdrawn after an earlier withdrawal counts in none",
+    "entries.store.unavailable": "store results of the tenure with the error class unavailable, a read that returned no value; each final result after watermark settlement counts once in one of entries.store.unknown, unavailable, refused and log, a batch counting each of its elements and the batch itself nothing, and a failed log write that turns n results into log counting n; a result that returns withdrawn after an earlier withdrawal counts in none",
+    "entries.store.refused": "store results of the tenure with the error class refused, a write the store reported not committed; each final result after watermark settlement counts once in one of entries.store.unknown, unavailable, refused and log, a batch counting each of its elements and the batch itself nothing, and a failed log write that turns n results into log counting n; a result that returns withdrawn after an earlier withdrawal counts in none",
+    "entries.store.log": "store results of the tenure with the error class log, whose watermark log write failed to record a raised mark; each final result after watermark settlement counts once in one of entries.store.unknown, unavailable, refused and log, a batch counting each of its elements and the batch itself nothing, and a failed log write that turns n results into log counting n; a result that returns withdrawn after an earlier withdrawal counts in none",
+    "entries.coverage.saturated": "the shard's coverage pages whose last known value, which the tenure's acknowledged write or a read set, is saturated, of its coverage pages, once the tenure fenced every page; an in-memory saturation whose write has no known outcome is outside it",
+    "entries.coverage.largest": "bytes of the shard's largest last known coverage page value, of the page capacity, once the tenure fenced every page",
+    "entries.invalidations": "held INVALIDATEs awaiting their coverage write, of the hold bound",
+    "entries.read_defects": "reads of the tenure whose terminal outcome was a header or chunk mismatch, apart from a key mismatch of the first extent, which the owner answers missing",
+    "entries.served": "reads of the tenure that completed"
+  },
+  "reset_identities": {
+    "tenure": {
+      "key": [
+        "entries.shard",
+        "entries.tenure.g",
+        "entries.tenure.a"
+      ],
+      "rule": "the entry's shard and tenure (g, a): NoEpochReuse makes an activated (g, a) unique within one shard, and two shards of one host can hold equal values, so a count's series is one entry (writer host, shard, volume) at one activated tenure; a tenure whose epoch is 0, which no session activated, starts no series; the count starts from zero at the tenure and never falls within it; the first reading a monitor holds for a series is its baseline and enters no delta, and a monitor forms a delta only between two reports of one series that both carry the tenure and the count, never across tenures and never from a null tenure or count; within one writer boot it orders a series' reports by sequence, and across boots of one tenure it keeps each count's high-water, so a reading at or below the high-water, such as a late report of an earlier boot, adds nothing and lowers no baseline; a duplicate report, which the reader drops, counts once; entries.retention is fixed for the tenure once known, so a monitor keeps it per series and forms no delta from it"
+    },
+    "writer.boot": {
+      "key": [
+        "writer.host",
+        "writer.boot"
+      ],
+      "rule": "the writer's host and boot nonce: the count starts from zero under a new boot; the first reading a monitor holds for a boot is its baseline, and a monitor forms a delta only between two reports of one boot, ordered by sequence; entries.recovery.attempts is an entry count, so its series is one entry (writer host, shard, volume) under one boot"
+    }
+  },
+  "resets": {
+    "detector.nominations": "writer.boot",
+    "entries.captures.abandoned": "tenure",
+    "entries.captures.refused": "tenure",
+    "entries.read_defects": "tenure",
+    "entries.recovery.attempts": "writer.boot",
+    "entries.recovery_io.saturated": "tenure",
+    "entries.retention": "tenure",
+    "entries.served": "tenure",
+    "entries.store.log": "tenure",
+    "entries.store.refused": "tenure",
+    "entries.store.unavailable": "tenure",
+    "entries.store.unknown": "tenure",
+    "sequence": "writer.boot"
+  },
+  "omitted": [
+    "a capture-counter budget gauge: schema 3 carries none",
+    "refused-mutation counts: schema 3 carries none",
+    "a directory version",
+    "FILL, INVALIDATE and reclaim counters",
+    "volume-record gauges, reclaim step outcomes and attach Closed causes, which the reconciler status carries",
+    "the suffix log's stall limit: the report carries none, so an alarm on entries.suffix.flush_lag_us uses an assumed threshold at ticket severity; the lag is floored to microseconds and sampled when the producer builds the entry, so it gives no exact stall verdict",
+    "a total of read attempts: entries.served counts completed reads and entries.read_defects the reads its unit defines, so every other read terminal, a device error, a short read, a quiesced or lost read, a timeout, a cancellation and a refusal before admission, counts in neither",
+    "a total of store calls and counts of the store error classes other than unknown, unavailable, refused and log: absent, codec, successor, flip, stale, attempts-exhausted, regression, withdrawn and namespace results count in no entries.store field, though entries.recovery.store can name one"
+  ],
+  "refusals": {
+    "schema-2": {
+      "bytes": "48525054000201020304050607085a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00000000000000050006379da05b6000010000000002013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c01000000018000000000000004000000000100000000000000960000000000000320010000000000002ee0000000000000fa00010000000019000000000000004000000001000000000000000300000000000000800100000000000000020000000000000008010000000000000000000000000000000106766f6c2d3061000000000000000000000000000000000000070100000003000000040303070a0301010100000000000005dc0100000001010000000100000003000000040000000900000028010000000023c34600010000000000000002010000000000000001037777777777777777777777777777777701000000000000000a0000000000000040010000000000000002000000000000000401000000000000000100000000000000200100000000000000010000000000000003c832a19199c023299e15cabdb888064fbc20077a4ca7441a0067077c2a9a0b18",
+      "error": "schema 2"
+    }
+  },
+  "cases": {
+    "owner-serving": {
+      "bytes": "48525054000301020304050607085a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00000000000000050006379da05b6000010000000002013c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c01000000018000000000000004000000000100000000000000960000000000000320010000000000002ee0000000000000fa00010000000019000000000000004000000001000000000000000300000000000000800100000000000000020000000000000008010000000000000001000000000000000202010000000000000001000000000000000c0100000000000000000100000000000000020100000000000000000000000000000001010000000000100000000000000800000006766f6c2d306100000000000000000000000000000000000007010000000300000004030300000301010100000000000005dc0100000001010000000100000003000000040000000900000028010000000023c34600010000000000000002010000000000000001017777777777777777777777777777777701000000000000000a0000000000000040010000000000000002000000000000000401000000000000000100000000000000200100000000000000010000000000000003020105030002020000000502fa0100000003010000000035a4e900010000000000009c40010000000000015f90010000000000017318010000000000015f9001000000000001d4c0010200000000000000250000000000000002000000000000002800000001000000000000000000000004000000000000000300000000000000000000000000000004000000000000000001000000000000000200000000000000080100000000000002ee010000000000100000000000000040000001000000000000000101000000000000000200000000000000030100000000000000010100000000000000040100000000000000030100000000000000020100000000000000010000000000000010010000000000000bb80000000000001000010000000000000005000000000000004001000000000000000101000000000000303958de22c42be405d3b36c03d44f7ddeefad7b580e0bd1508e0dc2df18d6292c41",
+      "report": {
+        "build": {
+          "digest": "3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+          "era": 2
+        },
+        "detector": {
+          "nominations": 2,
+          "peers": {
+            "limit": 12,
+            "used": 1
+          },
+          "self_suspect_us": 0
+        },
+        "entries": [
+          {
+            "attaches": {
+              "limit": 3,
+              "used": 2
+            },
+            "captures": {
+              "abandoned": 1,
+              "refused": 2
+            },
+            "checkpoint": {
+              "capture": 9,
+              "session": 12884901892,
+              "slot": 1,
+              "units": 40
+            },
+            "checkpoint_age_us": 600000000,
+            "coverage": {
+              "largest": {
+                "limit": 4096,
+                "used": 3000
+              },
+              "saturated": {
+                "limit": 16,
+                "used": 1
+              }
+            },
+            "ended": "rerun",
+            "enumeration": "matches",
+            "exit": {
+              "operation": "77777777777777777777777777777777",
+              "status": "received"
+            },
+            "flip": false,
+            "hold": "clear",
+            "invalidations": {
+              "limit": 64,
+              "used": 5
+            },
+            "load_refusal": null,
+            "metadata": "open",
+            "named": false,
+            "own_records": 1,
+            "phase": "serving",
+            "pressure": {
+              "ancestry": {
+                "limit": 4,
+                "used": 2
+              },
+              "frontier": {
+                "limit": 64,
+                "used": 10
+              },
+              "full": {
+                "limit": 3,
+                "used": 1
+              },
+              "quarantine": {
+                "limit": 32,
+                "used": 1
+              }
+            },
+            "publication_due": true,
+            "quarantine": false,
+            "read_defects": 1,
+            "readiness": "live",
+            "recovery": {
+              "age_us": 900000000,
+              "attempts": 3,
+              "check": null,
+              "kind": "takeover",
+              "next": null,
+              "outcome": "completed",
+              "store": null
+            },
+            "recovery_io": {
+              "peak": {
+                "limit": 4194304,
+                "used": 1048576
+              },
+              "saturated": 1
+            },
+            "refusal": "report-timeout",
+            "registrants": "recorded",
+            "report_age_us": 1500,
+            "retention": {
+              "failed_units": 1,
+              "first_damage": "chunk",
+              "held_units": 40,
+              "installed": 37,
+              "omitted": 2,
+              "slot_superseded": 4,
+              "slot_withheld": 0,
+              "suffix_damage": 0,
+              "suffix_dropped": 3,
+              "suffix_tails": 4,
+              "suffix_unread": 0,
+              "unread_units": 0
+            },
+            "role": "owner",
+            "roll_active": false,
+            "roll_due": true,
+            "served": 12345,
+            "serving": "serving",
+            "shard": 7,
+            "store": {
+              "log": 2,
+              "refused": 3,
+              "unavailable": 4,
+              "unknown": 1
+            },
+            "suffix": {
+              "blocks": {
+                "limit": 8,
+                "used": 2
+              },
+              "flush_lag_us": 750
+            },
+            "tenure": {
+              "a": 4,
+              "g": 3
+            },
+            "times": {
+              "fill_us": 120000,
+              "first_hit_us": 95000,
+              "live_us": 90000,
+              "loaded_us": 40000,
+              "retained_us": 90000
+            },
+            "volume": "vol-0a",
+            "volume_state": "active",
+            "watermark": "clear",
+            "withdrawal": null,
+            "withheld": false
+          }
+        ],
+        "headroom": {
+          "attachments": {
+            "limit": 128,
+            "used": 3
+          },
+          "bandwidth": {
+            "limit": 1073741824,
+            "used": 419430400
+          },
+          "cpu_load": {
+            "limit": 800,
+            "used": 150
+          },
+          "iops": {
+            "limit": 64000,
+            "used": 12000
+          },
+          "ram": {
+            "limit": 17179869184,
+            "used": 6442450944
+          },
+          "recovery": {
+            "limit": 2,
+            "used": 1
+          },
+          "workers": {
+            "limit": 8,
+            "used": 2
+          }
+        },
+        "health": "unhealthy",
+        "producer": {
+          "missing": {
+            "limit": 1,
+            "used": 0
+          }
+        },
+        "recovery_io": {
+          "limit": 134217728,
+          "used": 1048576
+        },
+        "schema": 3,
+        "sealed_at_us": 1750000000000000,
+        "sequence": 5,
+        "writer": {
+          "boot": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+          "host": 72623859790382856
+        }
+      }
+    },
+    "replacement-restarting": {
+      "bytes": "48525054000301020304050607085a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00000000000000090006379da05b600001000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006766f6c2d3163000000000000000000000000000000000000070300000000000000000004000d00040200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000c42424242424242424242424242424242000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000103040200080510010000000101000000000000000a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b9758a3ae1866796cc08f52e3b28a1626bccc13cf1cca9434569db6701b45fed",
+      "report": {
+        "build": {
+          "digest": null,
+          "era": 2
+        },
+        "detector": {
+          "nominations": null,
+          "peers": "unavailable",
+          "self_suspect_us": null
+        },
+        "entries": [
+          {
+            "attaches": "unavailable",
+            "captures": {
+              "abandoned": null,
+              "refused": null
+            },
+            "checkpoint": null,
+            "checkpoint_age_us": null,
+            "coverage": {
+              "largest": "unavailable",
+              "saturated": "unavailable"
+            },
+            "ended": "retire",
+            "enumeration": "duplicate",
+            "exit": {
+              "operation": "42424242424242424242424242424242",
+              "status": "restarting-refused-volume"
+            },
+            "flip": false,
+            "hold": null,
+            "invalidations": "unavailable",
+            "load_refusal": null,
+            "metadata": null,
+            "named": false,
+            "own_records": null,
+            "phase": "parked",
+            "pressure": {
+              "ancestry": "unavailable",
+              "frontier": "unavailable",
+              "full": "unavailable",
+              "quarantine": "unavailable"
+            },
+            "publication_due": null,
+            "quarantine": false,
+            "read_defects": null,
+            "readiness": null,
+            "recovery": {
+              "age_us": 10,
+              "attempts": 1,
+              "check": "unheld",
+              "kind": "restart",
+              "next": "hold",
+              "outcome": "refused",
+              "store": null
+            },
+            "recovery_io": {
+              "peak": "unavailable",
+              "saturated": null
+            },
+            "refusal": null,
+            "registrants": null,
+            "report_age_us": null,
+            "retention": null,
+            "role": "replacement",
+            "roll_active": null,
+            "roll_due": null,
+            "served": null,
+            "serving": "withdrawn",
+            "shard": 7,
+            "store": {
+              "log": null,
+              "refused": null,
+              "unavailable": null,
+              "unknown": null
+            },
+            "suffix": {
+              "blocks": "unavailable",
+              "flush_lag_us": null
+            },
+            "tenure": null,
+            "times": {
+              "fill_us": null,
+              "first_hit_us": null,
+              "live_us": null,
+              "loaded_us": null,
+              "retained_us": null
+            },
+            "volume": "vol-1c",
+            "volume_state": null,
+            "watermark": "regression",
+            "withdrawal": "flipped",
+            "withheld": false
+          }
+        ],
+        "headroom": {
+          "attachments": "unavailable",
+          "bandwidth": "unavailable",
+          "cpu_load": "unavailable",
+          "iops": "unavailable",
+          "ram": "unavailable",
+          "recovery": "unavailable",
+          "workers": "unavailable"
+        },
+        "health": null,
+        "producer": {
+          "missing": "unavailable"
+        },
+        "recovery_io": "unavailable",
+        "schema": 3,
+        "sealed_at_us": 1750000000000000,
+        "sequence": 9,
+        "writer": {
+          "boot": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+          "host": 72623859790382856
+        }
+      }
+    },
+    "standby-unavailable": {
+      "bytes": "48525054000301020304050607085a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a00000000000000010006379da05b600001000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006766f6c2d3062000000000000000000000000000000000000070200000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000007746b9c27c78811106562a5abc6f891dd69ab00ac50ae79a4bb4553e1f2d42ec",
+      "report": {
+        "build": {
+          "digest": null,
+          "era": 2
+        },
+        "detector": {
+          "nominations": null,
+          "peers": "unavailable",
+          "self_suspect_us": null
+        },
+        "entries": [
+          {
+            "attaches": "unavailable",
+            "captures": {
+              "abandoned": null,
+              "refused": null
+            },
+            "checkpoint": null,
+            "checkpoint_age_us": null,
+            "coverage": {
+              "largest": "unavailable",
+              "saturated": "unavailable"
+            },
+            "ended": null,
+            "enumeration": "matches",
+            "exit": null,
+            "flip": false,
+            "hold": null,
+            "invalidations": "unavailable",
+            "load_refusal": null,
+            "metadata": null,
+            "named": false,
+            "own_records": null,
+            "phase": null,
+            "pressure": {
+              "ancestry": "unavailable",
+              "frontier": "unavailable",
+              "full": "unavailable",
+              "quarantine": "unavailable"
+            },
+            "publication_due": null,
+            "quarantine": false,
+            "read_defects": null,
+            "readiness": null,
+            "recovery": {
+              "age_us": null,
+              "attempts": null,
+              "check": null,
+              "kind": null,
+              "next": null,
+              "outcome": null,
+              "store": null
+            },
+            "recovery_io": {
+              "peak": "unavailable",
+              "saturated": null
+            },
+            "refusal": null,
+            "registrants": null,
+            "report_age_us": null,
+            "retention": null,
+            "role": "standby",
+            "roll_active": null,
+            "roll_due": null,
+            "served": null,
+            "serving": null,
+            "shard": 7,
+            "store": {
+              "log": null,
+              "refused": null,
+              "unavailable": null,
+              "unknown": null
+            },
+            "suffix": {
+              "blocks": "unavailable",
+              "flush_lag_us": null
+            },
+            "tenure": null,
+            "times": {
+              "fill_us": null,
+              "first_hit_us": null,
+              "live_us": null,
+              "loaded_us": null,
+              "retained_us": null
+            },
+            "volume": "vol-0b",
+            "volume_state": null,
+            "watermark": "unavailable",
+            "withdrawal": null,
+            "withheld": false
+          }
+        ],
+        "headroom": {
+          "attachments": "unavailable",
+          "bandwidth": "unavailable",
+          "cpu_load": "unavailable",
+          "iops": "unavailable",
+          "ram": "unavailable",
+          "recovery": "unavailable",
+          "workers": "unavailable"
+        },
+        "health": null,
+        "producer": {
+          "missing": "unavailable"
+        },
+        "recovery_io": "unavailable",
+        "schema": 3,
+        "sealed_at_us": 1750000000000000,
+        "sequence": 1,
+        "writer": {
+          "boot": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+          "host": 72623859790382856
+        }
+      }
+    }
+  }
+}

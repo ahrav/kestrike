@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2197",
+  "kind": "contract-change",
+  "pull_request": 2197,
+  "changed": "The transitions, invariants, limits and references of the obligation records fleet-zone-loss-retains-every-volume-and-each-returning-owner-fences-before-its-first-admission and fleet-world-restarts-every-owner-warm-and-judges-six-fleet-checks. Each restart and fresh activation of the fleet outside a standby's takeover is an incarnation of the production owner process: the role read of host::survey, then host::recover through a host::Fencer over the host's device double, and the bring-up through the steps of host::serve::start_up and one turn_up a round, where the fleet called Restart::run behind fleet::actors and attached through its own fixture. A returning host whose role read finds its shard record naming another owner reads Unnamed and waits, where its restart refused Deposed. A refused restart's blocker names the class of its refusal, NotHolding where it printed NotHolding(ForeignHolder). The fleet's identity tag is fleet-v16-recover, where the base's head carried fleet-v16.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-zone-loss-retains-every-volume-and-each-returning-owner-fences-before-its-first-admission",
+    "reason": "Its invariant states the new contract of a returning host: a host whose role read finds its shard record naming another owner reads Unnamed and waits, so it runs no restart and activates no tenure, and a tenure acquired by such a host's incarnation fails by its own rule. Before this change the invariant said that host's restart refuses Deposed. The test a_returning_host_whose_record_names_another_owner_waits_unnamed_and_serves_nothing reads the Unnamed wait from the run's zone log, and the record's transition and reference name the incarnation's steps. The record fleet-world-restarts-every-owner-warm-and-judges-six-fleet-checks states the same recovery for the restart runs: every owner starts as an incarnation of the production owner process."
+  }
+}

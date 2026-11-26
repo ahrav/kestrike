@@ -1,0 +1,14 @@
+self-hosted-runner:
+  labels:
+    - kestrike-native
+    - kestrike-ci
+    - kestrike-ci-fast
+    - kestrike-ci-build
+    - kestrike-vm-build
+    - kestrike-ci-heavy
+    - kestrike-review
+    - kestrike-aarch64-native
+    - kestrike-isa-x86-64
+    - kestrike-isa-aarch64
+    - kestrike-hardware
+    - kestrike-fis

@@ -1,0 +1,109 @@
+
+tcx.so:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000136430 <tag_compare_early_return>:
+  136430:      	push	rax
+  136431:      	movzx	eax, byte ptr [rdi]
+  136434:      	mov	byte ptr [rsp + 7], al
+  136438:      	lea	rax, [rsp + 7]
+  13643d:      	movzx	eax, byte ptr [rsp + 7]
+  136442:      	cmp	al, byte ptr [rsi]
+  136444:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  13644a:      	movzx	eax, byte ptr [rdi + 1]
+  13644e:      	mov	byte ptr [rsp + 7], al
+  136452:      	lea	rax, [rsp + 7]
+  136457:      	movzx	eax, byte ptr [rsp + 7]
+  13645c:      	cmp	al, byte ptr [rsi + 1]
+  13645f:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136465:      	movzx	eax, byte ptr [rdi + 2]
+  136469:      	mov	byte ptr [rsp + 7], al
+  13646d:      	lea	rax, [rsp + 7]
+  136472:      	movzx	eax, byte ptr [rsp + 7]
+  136477:      	cmp	al, byte ptr [rsi + 2]
+  13647a:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136480:      	movzx	eax, byte ptr [rdi + 3]
+  136484:      	mov	byte ptr [rsp + 7], al
+  136488:      	lea	rax, [rsp + 7]
+  13648d:      	movzx	eax, byte ptr [rsp + 7]
+  136492:      	cmp	al, byte ptr [rsi + 3]
+  136495:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  13649b:      	movzx	eax, byte ptr [rdi + 4]
+  13649f:      	mov	byte ptr [rsp + 7], al
+  1364a3:      	lea	rax, [rsp + 7]
+  1364a8:      	movzx	eax, byte ptr [rsp + 7]
+  1364ad:      	cmp	al, byte ptr [rsi + 4]
+  1364b0:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  1364b6:      	movzx	eax, byte ptr [rdi + 5]
+  1364ba:      	mov	byte ptr [rsp + 7], al
+  1364be:      	lea	rax, [rsp + 7]
+  1364c3:      	movzx	eax, byte ptr [rsp + 7]
+  1364c8:      	cmp	al, byte ptr [rsi + 5]
+  1364cb:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  1364d1:      	movzx	eax, byte ptr [rdi + 6]
+  1364d5:      	mov	byte ptr [rsp + 7], al
+  1364d9:      	lea	rax, [rsp + 7]
+  1364de:      	movzx	eax, byte ptr [rsp + 7]
+  1364e3:      	cmp	al, byte ptr [rsi + 6]
+  1364e6:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  1364ec:      	movzx	eax, byte ptr [rdi + 7]
+  1364f0:      	mov	byte ptr [rsp + 7], al
+  1364f4:      	lea	rax, [rsp + 7]
+  1364f9:      	movzx	eax, byte ptr [rsp + 7]
+  1364fe:      	cmp	al, byte ptr [rsi + 7]
+  136501:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136507:      	movzx	eax, byte ptr [rdi + 8]
+  13650b:      	mov	byte ptr [rsp + 7], al
+  13650f:      	lea	rax, [rsp + 7]
+  136514:      	movzx	eax, byte ptr [rsp + 7]
+  136519:      	cmp	al, byte ptr [rsi + 8]
+  13651c:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136522:      	movzx	eax, byte ptr [rdi + 9]
+  136526:      	mov	byte ptr [rsp + 7], al
+  13652a:      	lea	rax, [rsp + 7]
+  13652f:      	movzx	eax, byte ptr [rsp + 7]
+  136534:      	cmp	al, byte ptr [rsi + 9]
+  136537:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  13653d:      	movzx	eax, byte ptr [rdi + 10]
+  136541:      	mov	byte ptr [rsp + 7], al
+  136545:      	lea	rax, [rsp + 7]
+  13654a:      	movzx	eax, byte ptr [rsp + 7]
+  13654f:      	cmp	al, byte ptr [rsi + 10]
+  136552:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136554:      	movzx	eax, byte ptr [rdi + 11]
+  136558:      	mov	byte ptr [rsp + 7], al
+  13655c:      	lea	rax, [rsp + 7]
+  136561:      	movzx	eax, byte ptr [rsp + 7]
+  136566:      	cmp	al, byte ptr [rsi + 11]
+  136569:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  13656b:      	movzx	eax, byte ptr [rdi + 12]
+  13656f:      	mov	byte ptr [rsp + 7], al
+  136573:      	lea	rax, [rsp + 7]
+  136578:      	movzx	eax, byte ptr [rsp + 7]
+  13657d:      	cmp	al, byte ptr [rsi + 12]
+  136580:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136582:      	movzx	eax, byte ptr [rdi + 13]
+  136586:      	mov	byte ptr [rsp + 7], al
+  13658a:      	lea	rax, [rsp + 7]
+  13658f:      	movzx	eax, byte ptr [rsp + 7]
+  136594:      	cmp	al, byte ptr [rsi + 13]
+  136597:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  136599:      	movzx	eax, byte ptr [rdi + 14]
+  13659d:      	mov	byte ptr [rsp + 7], al
+  1365a1:      	lea	rax, [rsp + 7]
+  1365a6:      	movzx	eax, byte ptr [rsp + 7]
+  1365ab:      	cmp	al, byte ptr [rsi + 14]
+  1365ae:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  1365b0:      	movzx	eax, byte ptr [rdi + 15]
+  1365b4:      	mov	byte ptr [rsp + 7], al
+  1365b8:      	lea	rax, [rsp + 7]
+  1365bd:      	movzx	eax, byte ptr [rsp + 7]
+  1365c2:      	cmp	al, byte ptr [rsi + 15]
+  1365c5:      	jne	0x1365ce <tag_compare_early_return+0x19e>
+  1365c7:      	call	0x1363c0 <tcx::accepted>
+  1365cc:      	pop	rcx
+  1365cd:      	ret
+  1365ce:      	call	0x1363d0 <tcx::rejected>
+  1365d3:      	pop	rcx
+  1365d4:      	ret

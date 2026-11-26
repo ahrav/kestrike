@@ -1,0 +1,4 @@
+{"host": "h1", "activations": [{"shard": "s1", "generation": 7, "attempt": 2, "time": 10}, {"shard": "s2", "generation": 4, "attempt": 4, "time": 11}, {"shard": "s3", "generation": 9, "attempt": 2, "time": 12}]}
+{"host": "h2", "activations": [{"shard": "s4", "generation": 3, "attempt": 2, "time": 5}, {"shard": "s1", "generation": 7, "attempt": 4, "time": 125}, {"shard": "s3", "generation": 9, "attempt": 4, "time": 128}]}
+{"host": "h3", "activations": [{"shard": "s5", "generation": 5, "attempt": 2, "time": 6}, {"shard": "s2", "generation": 4, "attempt": 6, "time": 130}]}
+{"host": "h4", "activations": []}

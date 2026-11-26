@@ -1,0 +1,136 @@
+{
+  "archive": "/data/tsw/campaigns/2082t/archive",
+  "archive_build_after": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe",
+  "batch_s": 30,
+  "campaign": "record-cluster-2-1125b",
+  "campaign_binary": {
+    "path": "/data/tsw/campaigns/2082t/campaign",
+    "sha256": "c47c899a6747f1c318980ca2ba8da8cb182a5454b5ffe698a1f9028d267dc4f1",
+    "sha256_after": "c47c899a6747f1c318980ca2ba8da8cb182a5454b5ffe698a1f9028d267dc4f1",
+    "source_sha256_after": "c47c899a6747f1c318980ca2ba8da8cb182a5454b5ffe698a1f9028d267dc4f1",
+    "staged": "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/campaign"
+  },
+  "cgroup_root": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/chaos-record-cluster-2-1125b.scope/campaign",
+  "commands": {
+    "confirm": [
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/campaign",
+      "confirm",
+      "--root",
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b",
+      "--archive",
+      "/data/tsw/campaigns/2082t/archive"
+    ],
+    "findings": [
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/campaign",
+      "findings",
+      "--state",
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b/confirm/state"
+    ],
+    "listing": [
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/campaign",
+      "sim",
+      "capabilities",
+      "--archive",
+      "/data/tsw/campaigns/2082t/archive",
+      "--artifacts",
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/listing"
+    ],
+    "sweep": [
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/campaign",
+      "sweep",
+      "--root",
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b",
+      "--archive",
+      "/data/tsw/campaigns/2082t/archive",
+      "--campaign",
+      "record-cluster-2-1125b",
+      "--profiles",
+      "cluster-broad",
+      "--workers",
+      "28",
+      "--batch",
+      "30",
+      "--for",
+      "120"
+    ],
+    "sweep-status": [
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b.harness/campaign",
+      "sweep-status",
+      "--root",
+      "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b"
+    ]
+  },
+  "complete": true,
+  "confirm_dispatch": "queue_empty",
+  "confirm_exit": 0,
+  "constants": {
+    "checkpoint_bytes": 16777216,
+    "judge_wait_s": 600,
+    "ledger_bytes": 16777216,
+    "line_bytes": 16777216,
+    "output_bytes": 268435456,
+    "poll_s": 0.5,
+    "receipt_bytes": 16777216,
+    "stop_wait_s": 120
+  },
+  "counts": {},
+  "deadline_fired": false,
+  "deadline_s": 3600,
+  "defect": "",
+  "environment": [
+    "CAMPAIGN_CGROUP_ROOT",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "TMPDIR",
+    "USER",
+    "XDG_RUNTIME_DIR"
+  ],
+  "error": null,
+  "findings_exit": 0,
+  "for_s": 120,
+  "harness": {
+    "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+    "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+  },
+  "interpreter": "3.9.25",
+  "listing": {
+    "cluster-broad": {
+      "class": "live",
+      "cluster": true,
+      "fails": null
+    }
+  },
+  "listing_exit": 0,
+  "mode": "live",
+  "profiles": [
+    "cluster-broad"
+  ],
+  "restored": {
+    "archive_verified": true,
+    "cause": null,
+    "left_a_process": 0
+  },
+  "root": "/data/tsw/campaigns/2082t/roots/record-cluster-2-1125b",
+  "root_build": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe",
+  "run_id": "record-cluster-2-1125b",
+  "runs": {
+    "cluster-broad": {
+      "first": 0,
+      "next": 239754
+    }
+  },
+  "scenario": "ks-cluster-link-faults",
+  "scenario_row": "c85eaabd9ff2c2bf0b8353bf0b8ca88d5f2d85546202b23a16c6050d6b766ae7",
+  "schema": 1,
+  "seconds": 123.254,
+  "signal": null,
+  "started": "2026-11-25T07:03:34Z",
+  "status_exit": 0,
+  "status_refusal": null,
+  "sweep_elapsed_s": 120.67,
+  "sweep_exit": 0,
+  "system_build": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe",
+  "workers": 28
+}

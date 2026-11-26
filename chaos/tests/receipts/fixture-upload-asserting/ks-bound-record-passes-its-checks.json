@@ -1,0 +1,41 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/core/invariant.py",
+      "ks-bound-record-passes-its-checks"
+    ],
+    "defect": "asserting",
+    "detail": "the totals carry {\"alarm\": \"427967 control runs were missed\"}",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "e9fe4c3d118481940ceb5150a87388be552709797a6157b0fdd233e9a01e01ca",
+      "run.json": "53c3177c41482f9f8154283cb4c05c8512523d97a4fc3fb72832c6eebff8ad4c",
+      "suspects.jsonl": "a2d383fa0c76e77e62a3156fc1e92d4d919a16804ab6ad12d92d61cb7c138a05",
+      "sweep-status.json": "77f74cbb04bb0e6ca2520843e4a58af2ebe3d183b4a8ec8d39b16f5528041648"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941"
+    },
+    "mode": "control",
+    "outcome": "invalid",
+    "row": "ks-bound-record-passes-its-checks",
+    "rows": {
+      "ks-bound-record-passes-its-checks": "dd1b39203557b07798d2b2ef00e5e94ad8ef8fccc657e0fc4ff163bedd2e4183",
+      "ks-upload-no-fault": "55b2c9cdf9b08a7be0ee2dcecac61ecb817747764a235bc4bfc22fe448d436d5"
+    },
+    "scenario": "ks-upload-no-fault",
+    "system_build": "386c0fe6d1339d2edb272af302d5b3d866c35c5f9cfb9e3eecbd05797f1ace50"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-24T09:31:35Z",
+    "run_id": "fixture-upload-asserting",
+    "started": "2026-11-24T09:29:32Z"
+  }
+}

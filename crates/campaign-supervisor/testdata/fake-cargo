@@ -1,0 +1,70 @@
+#!/bin/sh
+# Answers the Cargo calls of the archive build tests from files in the
+# working directory, a test checkout. Each build appends its arguments to
+# .git/calls and the RUSTC it ran with to .git/rustc, and reports another
+# package's build script before the native one. Flag files in .git select
+# a failure: fail, a failed build; relock, a lockfile rewritten during the
+# build; lockdir, a lockfile replaced by a directory; edit and edit-notes,
+# Cargo.toml or notes edited during the build; no-native, no native build
+# identity; partial-native, a native build message naming no install;
+# no-out-dir, one naming no output directory; two-natives, two native
+# build messages; two-installs, one message exporting the install twice;
+# contract, a build that compiles the supervisor; no-worker and
+# two-workers, a build reporting no or two worker executables; no-exe, a
+# reported worker that is missing; malformed, a truncated message; and
+# binary, output that is not UTF-8.
+flag() { [ -e ".git/$1" ]; }
+case "$1" in
+-V) echo "cargo 1.0.0 (fake)" ;;
+locate-project) echo "$PWD/Cargo.toml" ;;
+generate-lockfile)
+  echo generate-lockfile >> .git/calls
+  printf '%s\n' "$CARGO_RESOLVER_LOCKFILE_PATH" >> .git/lockfile
+  printf 'version = 4\n' > "${CARGO_RESOLVER_LOCKFILE_PATH:-Cargo.lock}"
+  ;;
+test)
+  echo "$*" >> .git/calls
+  echo "RUSTC=$RUSTC" >> .git/rustc
+  echo "$CARGO_BUILD_TARGET" >> .git/target
+  echo "$CARGO_RESOLVER_LOCKFILE_PATH" >> .git/lockfile
+  if flag unrevise; then printf 'ref: refs/heads/unborn\n' > .git/HEAD; fi
+  if flag no-install; then rm install/native; fi
+  if flag no-plan; then rm out/link-plan.txt; fi
+  if flag fail; then exit 101; fi
+  if flag relock; then printf 'version = 5\n' > Cargo.lock; fi
+  if flag lockdir; then rm Cargo.lock && mkdir Cargo.lock; fi
+  if flag edit; then printf '[workspace]\nmembers = []\n' > Cargo.toml; fi
+  if flag edit-notes; then printf 'edited\n' > notes; fi
+  if flag no-exe; then rm worker; fi
+  printf '{"reason":"build-script-executed","package_id":"path+file://%s/other#0.1.0","env":[["OTHER","1"]],"out_dir":"%s/other"}\n' "$PWD" "$PWD"
+  if flag contract; then
+    printf '{"reason":"compiler-artifact","target":{"name":"campaign_supervisor","kind":["lib"]},"profile":{"test":false},"executable":null}\n'
+  fi
+  native='{"reason":"build-script-executed","package_id":"path+file://%s/native-owner#0.1.0","env":[["SPDK_SYS_INSTALL","%s/install/native"]],"out_dir":"%s/out"}\n'
+  if flag partial-native; then
+    printf '{"reason":"build-script-executed","package_id":"path+file://%s/native-owner#0.1.0","env":[],"out_dir":"%s/out"}\n' "$PWD" "$PWD"
+  elif flag no-package; then
+    printf '{"reason":"build-script-executed","env":[["SPDK_SYS_INSTALL","%s/install/native"]],"out_dir":"%s/out"}\n' "$PWD" "$PWD"
+  elif flag nameless-install; then
+    printf '{"reason":"build-script-executed","package_id":"native-owner","env":[["SPDK_SYS_INSTALL","/"]],"out_dir":"%s/out"}\n' "$PWD"
+  elif flag no-out-dir; then
+    printf '{"reason":"build-script-executed","package_id":"path+file://%s/native-owner#0.1.0","env":[["SPDK_SYS_INSTALL","%s/install/native"]]}\n' "$PWD" "$PWD"
+  elif flag two-installs; then
+    printf '{"reason":"build-script-executed","package_id":"path+file://%s/native-owner#0.1.0","env":[["SPDK_SYS_INSTALL","%s/install/native"],["SPDK_SYS_INSTALL","%s/install/native"]],"out_dir":"%s/out"}\n' "$PWD" "$PWD" "$PWD" "$PWD"
+  elif ! flag no-native; then
+    printf "$native" "$PWD" "$PWD" "$PWD"
+  fi
+  if flag two-natives; then printf "$native" "$PWD" "$PWD" "$PWD"; fi
+  worker='{"reason":"compiler-artifact","target":{"name":"sim_worker","kind":["test"]},"profile":{"test":true},"executable":"%s/worker"}\n'
+  if ! flag no-worker; then printf "$worker" "$PWD"; fi
+  if flag two-workers; then printf "$worker" "$PWD"; fi
+  if flag bad-env; then printf '{"reason":"build-script-executed","package_id":"other","env":null,"out_dir":"other"}\n'; fi
+  if flag bad-target; then printf '{"reason":"compiler-artifact","target":{"name":null,"kind":["lib"]},"profile":{"test":false},"executable":null}\n'; fi
+  if flag bad-profile; then printf '{"reason":"compiler-artifact","target":{"name":"sim_worker","kind":["test"]},"profile":{"test":"true"},"executable":"worker"}\n'; fi
+  if flag bad-kind; then printf '{"reason":"compiler-artifact","target":{"name":"sim_worker","kind":null},"profile":{"test":true},"executable":"worker"}\n'; fi
+  if flag repeated-name; then printf '{"reason":"compiler-artifact","target":{"name":"sim_worker","name":"other","kind":["test"]},"profile":{"test":true},"executable":"worker"}\n'; fi
+  if flag malformed; then printf '{"reason":"compiler-artifact","target":{"name":"campaign_sup\n'; fi
+  if flag binary; then printf '\377\n'; fi
+  ;;
+*) exit 2 ;;
+esac

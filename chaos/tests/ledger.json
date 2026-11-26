@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "system": "kestrike-simulated",
+  "fences": [],
+  "invariants": [
+    {
+      "id": "ks-qualified-get-reads-visible-bytes",
+      "property": {
+        "text": "A qualified GET reads the visible version's exact bytes: no run of a scenario that lists this row ends in the scripted history's violation \"a qualified GET missed the visible version's exact bytes\", of the obligation History.",
+        "agreed": "owner",
+        "source": {
+          "kind": "owner",
+          "ref": "crates/kestrike/src/net/world_tests/histories.rs, the history h1-get-stale, which declares Expect::Violation(Obligation::History, \"a qualified GET missed the visible version's exact bytes\")"
+        }
+      },
+      "kind": "history",
+      "judge": "chaos/judges/core/invariant.py ks-qualified-get-reads-visible-bytes",
+      "oracle": "The scripted history's own check of the simulation harness, which judges the bytes of the GET its step collects against the visible version, apart from the cache's own code.",
+      "witness": {
+        "check": "a run of a scenario whose history declares this violation",
+        "obligation": 2,
+        "expect": "no violation under the row's rule"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "defect": "h1-get-stale",
+        "how": "the history h1-get-stale plants the stale read itself: it swaps the replacement's fill step for fill_stale, which writes the old version's bytes, and declares its violation",
+        "scenario": "ks-h1-get-stale-declared",
+        "expect": "a qualified GET missed the visible version's exact bytes"
+      }
+    },
+    {
+      "id": "ks-ordering-controls-caught",
+      "property": {
+        "text": "One sweep catches each planted ordering control of depth 1 to 3 beside cluster-broad at least once in at least 1,000 of its runs that ended caught, missed or with no effect, and misses none of its runs: each caught run ends in the cluster checker's violation \"a GET returned bytes no upload of its key wrote\", of the obligation Bytes, and the receipt reports for each control the caught runs over its runs with a one-sided 95% lower bound.",
+        "agreed": "owner",
+        "source": {
+          "kind": "owner",
+          "ref": "#297, Problem (\"No figure says how reliably a sweep finds an ordering defect\"), R18 and KTD15: the owner's request of 2026-11-23 for an ordering figure, as #297 states it; crates/campaign-supervisor/src/campaign/calibration/controls.rs, ORDERING, the three controls with their depth, n and k, and FOREIGN, the rule text (#307); crates/kestrike/src/net/world_tests/narrate/rules.rs, array CLUSTER, the rule text the cluster checker raises (docs/agents/simulation.md, An agreed property, place 2); chaos/interview.md, A6, answer 3"
+        }
+      },
+      "kind": "threshold",
+      "judge": "chaos/judges/ordering/figure.py ks-ordering-controls-caught",
+      "threshold": {
+        "measured": "the status document of one sweep of ks-ordering-figure: for each of cluster-order-1, cluster-order-2 and cluster-order-3, its runs, caught, missed, the runs counted under uncredited \"unsuccessful: the control's plant took no effect\" and the runs counted under its other uncredited endings, such as \"inconclusive: limit same_time\"",
+        "min_runs_per_control": 1000,
+        "confidence": 0.95,
+        "cluster-order-1.depth": 1,
+        "cluster-order-1.n": 26,
+        "cluster-order-1.k": 20000,
+        "cluster-order-2.depth": 2,
+        "cluster-order-2.n": 26,
+        "cluster-order-2.k": 20000,
+        "cluster-order-3.depth": 3,
+        "cluster-order-3.n": 26,
+        "cluster-order-3.k": 20000
+      },
+      "oracle": "The cluster checker of the simulation harness (crates/kestrike/src/net/world_tests/cluster.rs, a cfg(test) tree), which judges each complete read's bytes against the uploads of its key apart from the cache's own code. Each ordering plant changes the last byte of one read of the hot key's version 0 only when its premise of d session-event orders holds (crates/kestrike/src/net/world_tests/cluster/order.rs), and the sweep counts the run under caught when the checker raises the rule, under missed when the plant acted and no check failed, under the no-effect ending when the premise never formed, and under an inconclusive ending when the run stopped at a limit of the simulator or the recorder.",
+      "witness": {
+        "check": "a valid run of ks-ordering-figure in which each of the three controls has at least 1,000 runs that ended caught, missed or with no effect, a replay, no suspect and a catch under the row's rule at every depth",
+        "expect": "each planted ordering control caught"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "defect": "cluster-order-1-premise-unmet",
+        "how": "the same sweep on a scratch archive built from a tree whose crates/kestrike/src/net/world_tests/cluster/order.rs has the one line `Plant::Depth1 => true,` of Order::decided changed to `Plant::Depth1 => false,`, so the depth-1 plant selects no read whatever order the session events take, and cluster-order-1 is caught in no run: each of its runs ends with no effect or at a limit; the change is never pushed, the run's label begins with the name of the control the build leaves uncaught, and the figure judge reports cluster-order-1 not found in its runs",
+        "scenario": "ks-ordering-figure",
+        "expect": "a GET returned bytes no upload of its key wrote"
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "ks-h1-get-stale-declared",
+      "text": "One sweep of the scripted history h1-get-stale, which declares its violation, at default counts, runs 28 workers in batches of 30 s for 120 s on a new root.",
+      "source": {
+        "kind": "survey",
+        "ref": "crates/kestrike/src/net/world_tests/histories.rs, the history h1-get-stale"
+      },
+      "load": {
+        "reference": "h1-get-stale; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 120
+      },
+      "fault": {
+        "kind": "none"
+      },
+      "load_delivery": {
+        "min_caught_per_profile": 64
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given. The harness records in run.json left_a_process 0 and archive_verified true, and the validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/core/validity.py ks-h1-get-stale-declared",
+      "invariants": [
+        "ks-qualified-get-reads-visible-bytes"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    },
+    {
+      "id": "ks-ordering-figure-short",
+      "text": "One sweep of the three planted ordering controls cluster-order-1, cluster-order-2 and cluster-order-3, each of which runs cluster-broad's scenario, whose links lose, duplicate, reorder and delay datagrams, with a plant of depth 1, 2 or 3, at default counts, runs 28 workers in batches of 30 s for 120 s on a new root.",
+      "source": {
+        "kind": "owner",
+        "ref": "#297, M6-2 and KTD15: the figure scenario of the owner's request for an ordering figure, with the three controls named in --profiles; crates/campaign-supervisor/README.md, Controls in a sweep, the ordering controls of cluster-broad (#307); chaos/interview.md, A8, answer 3"
+      },
+      "load": {
+        "reference": "cluster-order-1,cluster-order-2,cluster-order-3; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 120
+      },
+      "fault": {
+        "kind": "link-faults",
+        "target": "the simulated datagram links between the clients and owners of cluster-broad's scenario, which each ordering control runs"
+      },
+      "injection_oracle": "The status document's faults_delivered for each of the three controls is positive: the simulated links of its runs wrote link fault records as they lost, duplicated, reordered or delayed datagrams, apart from the plant.",
+      "reach": {
+        "text": "Each control's runs deliver link faults, which with the chooser's selections decide the session-event orders of the plant's premise."
+      },
+      "load_delivery": {
+        "min_runs_per_profile": 1
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, no process found in the sweep's worker cgroups at its end, and archive_verified true, the sweep's own verification of the archive after its last run, and the validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/ordering/validity.py ks-ordering-figure-short",
+      "invariants": [
+        "ks-ordering-controls-caught"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    },
+    {
+      "id": "ks-ordering-figure-few",
+      "text": "One sweep of the three planted ordering controls cluster-order-1, cluster-order-2 and cluster-order-3, each of which runs cluster-broad's scenario, whose links lose, duplicate, reorder and delay datagrams, with a plant of depth 1, 2 or 3, at default counts, runs 1 worker in batches of 1 s for 2 s on a new root.",
+      "source": {
+        "kind": "owner",
+        "ref": "#297, M6-2 and KTD15: the figure scenario of the owner's request for an ordering figure, with the three controls named in --profiles; crates/campaign-supervisor/README.md, Controls in a sweep, the ordering controls of cluster-broad (#307); chaos/interview.md, A8, answer 3"
+      },
+      "load": {
+        "reference": "cluster-order-1,cluster-order-2,cluster-order-3; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 1,
+        "batch_s": 1,
+        "for_s": 2
+      },
+      "fault": {
+        "kind": "link-faults",
+        "target": "the simulated datagram links between the clients and owners of cluster-broad's scenario, which each ordering control runs"
+      },
+      "injection_oracle": "The status document's faults_delivered for each of the three controls is positive: the simulated links of its runs wrote link fault records as they lost, duplicated, reordered or delayed datagrams, apart from the plant.",
+      "reach": {
+        "text": "Each control's runs deliver link faults, which with the chooser's selections decide the session-event orders of the plant's premise."
+      },
+      "load_delivery": {
+        "min_runs_per_profile": 1
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, no process found in the sweep's worker cgroups at its end, and archive_verified true, the sweep's own verification of the archive after its last run, and the validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/ordering/validity.py ks-ordering-figure-few",
+      "invariants": [
+        "ks-ordering-controls-caught"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    }
+  ],
+  "excluded": []
+}

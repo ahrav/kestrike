@@ -1,0 +1,53 @@
+{
+ "package_sha256": "30759c81708af91aa8ad1e953f902fb6001cb6465e84e2231726463af9292056",
+ "time": 105,
+ "shards": {
+  "s1": {
+   "owner": "h1",
+   "standby": "h2",
+   "generation": 7,
+   "volume": "vol-s1",
+   "attempts": 1
+  },
+  "s2": {
+   "owner": "h1",
+   "standby": "h3",
+   "generation": 4,
+   "volume": "vol-s2",
+   "attempts": 2
+  },
+  "s3": {
+   "owner": "h1",
+   "standby": "h2",
+   "generation": 9,
+   "volume": "vol-s3",
+   "attempts": 1
+  },
+  "s4": {
+   "owner": "h2",
+   "standby": "h1",
+   "generation": 3,
+   "volume": "vol-s4",
+   "attempts": 1
+  },
+  "s5": {
+   "owner": "h3",
+   "standby": "h4",
+   "generation": 5,
+   "volume": "vol-s5",
+   "attempts": 1
+  }
+ },
+ "standbys": {
+  "h2": {
+   "instance": "i-h2",
+   "instance_state": "running",
+   "host_report": "healthy"
+  },
+  "h3": {
+   "instance": "i-h3",
+   "instance_state": "running",
+   "host_report": "healthy"
+  }
+ }
+}

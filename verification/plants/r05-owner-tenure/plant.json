@@ -1,0 +1,18 @@
+{
+  "id": "r05-owner-tenure",
+  "row": 5,
+  "fix": {
+    "pull_request": 1588,
+    "commit": "544bcee94e7a1449d2b4bc4155a87d182a865424"
+  },
+  "files": [
+    "crates/kestrike/src/net/owner_view.rs"
+  ],
+  "restores": "The owner view keeps `fresh` as a bare flag and grants a live validity from it without comparing the shard record's generation, attempts and owner.",
+  "proof": "net::owner::tests::a_shard_read_alone_naming_the_next_activation_grants_no_bit_to_the_new_tenure",
+  "expected": [],
+  "miss_cause": {
+    "cause": "workload",
+    "evidence": "Every owner builds an `OwnerView`, and `net/owner.rs` calls the planted file's `tenure_of` on each authority change and on each frame its send round pulls while the owner serves, so the profiles run the file, but scratch traces at the planted `OwnerView::body` and `OwnerView::observe` fired in none of 1,527,506 and none of 1,516,611 runs of all 21 live profiles with their controls and histories on the code of commit c6a14e9f1, since `body` runs only when the owner sends an ownership reply and `observe` only through `Owner::observe_shard_view`, whose one non-test caller is `host/duties.rs`."
+  }
+}

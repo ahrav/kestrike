@@ -1,0 +1,25 @@
+C C2-cutoff-admitted-reachable
+(* The production entry, as in C0: some execution admits the entry while
+   a scan runs after the close and finds the live pin. Admitted and
+   scanned: 0:r0=0 (the entry read the cutoff open), 2:r0=1 (the scan ran
+   after the close) and 2:r1=1 (the scan saw the pin).
+   Events: P0 is the entrant, its pin store then its cutoff load; P1 is
+   the closer's cutoff store; P2 is the scanner after the close, its
+   cutoff load then its visit's pin load. *)
+{ pin = 0; closed = 0; }
+
+P0 (atomic_int* pin, atomic_int* closed) {
+  atomic_store_explicit(pin, 1, memory_order_seq_cst);
+  int r0 = atomic_load_explicit(closed, memory_order_seq_cst);
+}
+
+P1 (atomic_int* closed) {
+  atomic_store_explicit(closed, 1, memory_order_seq_cst);
+}
+
+P2 (atomic_int* closed, atomic_int* pin) {
+  int r0 = atomic_load_explicit(closed, memory_order_seq_cst);
+  int r1 = atomic_load_explicit(pin, memory_order_seq_cst);
+}
+
+exists (0:r0=0 /\ 2:r0=1 /\ 2:r1=1)

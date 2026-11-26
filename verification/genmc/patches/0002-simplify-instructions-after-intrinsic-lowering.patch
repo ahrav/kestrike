@@ -1,0 +1,25 @@
+diff --git a/passes/passes/LLVMModule.cpp b/passes/passes/LLVMModule.cpp
+index 696dec0..5f49e48 100644
+--- a/passes/passes/LLVMModule.cpp
++++ b/passes/passes/LLVMModule.cpp
+@@ -68,6 +68,7 @@
+ #include <llvm/Transforms/Scalar/JumpThreading.h>
+ #include <llvm/Transforms/Scalar/LoopPassManager.h>
+ #include <llvm/Transforms/Scalar/SROA.h>
++#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
+ #include <llvm/Transforms/Utils/Mem2Reg.h>
+ 
+ #include <cassert>
+@@ -246,6 +247,12 @@ auto transformLLVMModule(llvm::Module &mod, ModuleInfo &MI, const LLIConfig *con
+ 		/* Run after the inliner because it might generate new memcpys */
+ 		fpm.addPass(PromoteMemIntrinsicPass());
+ 		fpm.addPass(IntrinsicLoweringPass());
++		/* Fold the extractvalue of constant aggregates that rustc emits in
++		 * drop glue: the interpreter cannot evaluate a ConstantStruct. The
++		 * pass also folds other simplifiable instructions and deletes
++		 * trivially dead ones, an unused non-atomic load among them, so a
++		 * race on such a load goes unreported. */
++		fpm.addPass(llvm::InstSimplifyPass());
+ 		if (conf->castElimination)
+ 			fpm.addPass(EliminateCastsPass());
+ 		fpm.addPass(SROAPass(SROAOptions::PreserveCFG));

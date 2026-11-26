@@ -1,0 +1,27 @@
+C G5-grace-certify-fence-dropped
+(* The stand-in without the maintainer's certify fence.
+   Events: P0 is the reader, its pin store to pin then its observation
+   load of bucket; P1 is the writer, its removal store to bucket then its
+   era bump; P2 is the maintainer, its start_era load then its pin load.
+   Pinned reader missed: 0:r0=1 (the reader saw the entry), 2:r0=2 (the
+   pass started after the bump) and 2:r1=0 (the pass saw no pin). *)
+{ pin = 0; bucket = 1; era = 1; }
+
+P0 (atomic_int* pin, atomic_int* bucket) {
+  atomic_store_explicit(pin, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r0 = atomic_load_explicit(bucket, memory_order_acquire);
+}
+
+P1 (atomic_int* bucket, atomic_int* era) {
+  atomic_store_explicit(bucket, 0, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r0 = atomic_fetch_add_explicit(era, 1, memory_order_acq_rel);
+}
+
+P2 (atomic_int* era, atomic_int* pin) {
+  int r0 = atomic_load_explicit(era, memory_order_acquire);
+  int r1 = atomic_load_explicit(pin, memory_order_acquire);
+}
+
+exists (0:r0=1 /\ 2:r0=2 /\ 2:r1=0)

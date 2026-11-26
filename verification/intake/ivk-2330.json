@@ -1,0 +1,73 @@
+{
+  "id": "ivk-2330",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/portable/recovery.rs",
+    "function": "Recovery::retained"
+  },
+  "defect": "A warm load restored an entry that an earlier load of the same record had omitted as expired, after that tenure rewrote its units; the restored entry's read ended `HeaderMismatch(Key)`.",
+  "property": {
+    "text": "Restored entries grant nothing below Live and serve their exact bytes at Live.",
+    "place": "obligation",
+    "pointer": "warm-activation-commits-allocation-before-fills"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1894,
+    "regression": {
+      "path": "crates/kestrike/src/storage/volume/warm_sim_tests.rs",
+      "tests": [
+        "storage::volume::warm::sim_tests::an_entry_an_earlier_load_reads_expired_serves_its_exact_bytes_when_a_later_load_restores_it"
+      ]
+    }
+  },
+  "note": "Cause, evidence and catch set by M1b-1 (#332). The load's conversion is `convert` in crates/kestrike/src/storage/volume/warm.rs. The history judges the obligation through the rule text \"a retained entry outside every damage set was never served after host loss\", array ORACLE of crates/kestrike/src/net/world_tests/narrate/rules.rs. With `Recovery::retained` reverted locally to `deadline`'s verdict, the history wl4-expired-then-alive-served ended in that rule under roots 1, 2 and 4302617955180736441. The control wl4-clock-stepped-back-unserved plants the defect's state from the test tree, an entry restored over a unit another fill rewrote, with an attach clock that steps back between the two loads. The tenure between the two loads runs with no owner inside the world's one relaunch, since a run's manifest admits one relaunch.",
+  "cause": "workload",
+  "evidence": {
+    "steps": "The trigger needs two warm loads of one record placed inside one second of an entry's life (the first 0.6 s before its portable deadline at a monotonic sample 0.1 s into a second, the second 0.5 s before it at 0.8 s into a second), with a fill written and left unrecorded by the tenure between them. Before this unit no world placed a warm load's clocks or loaded one record warm twice: `rg -ln 'ScriptedClock|PhysicalClock|LoadClock' crates/kestrike/src/net/world_tests crates/kestrike/src/sim` lists only `net/world_tests/relaunch.rs` and `histories/warm_loads.rs`, the files this unit changes; before it the search listed none, and every warm attach of the world read the fixture's fixed reading. The history wl4-expired-then-alive-served runs those steps.",
+    "sweep": "One sweep at 628788031 of cluster-swarm, cluster-pressure and upload, archive build de9f5a81b9f2842e24b746246d280b07aaf9610a887ea2b188a1d915a4cfc2be, campaign bsw-ct1-2100-profiles, 28 workers, 121 s, counts {}: cluster-swarm 13891 runs (0..13890), 10755 pass, 3136 uncredited, 0 suspects; cluster-pressure 34765 runs (0..34764), 34320 pass, 445 uncredited, 0 suspects; upload 392404 runs (0..392403), 392404 pass, 0 uncredited, 0 suspects; controls 4509 runs, 3372 caught, 0 missed; 79 replays, 0 suspects, none of class replay differs. The trigger's code is unchanged since that commit: `git log 628788031..c4c5813fe` lists no commit that touches crates/kestrike/src/storage/portable/recovery.rs or crates/kestrike/src/storage/volume/warm.rs. Every run of the three profiles reaches the steps above at most in part: no profile of the set attaches a successor warm."
+  },
+  "catch": {
+    "history": "wl4-expired-then-alive-served",
+    "control": "wl4-clock-stepped-back-unserved",
+    "rule": "a retained entry outside every damage set was never served after host loss",
+    "tally": {
+      "build": "49e8efed3bf6b6bc97e3ad5cc9be9ca77141893d40084e676f632d608e718151",
+      "campaign": "bsw-ct1-2150-take-2154",
+      "commit": "73110fcbd",
+      "counts": {},
+      "workers": 28,
+      "seconds": 121,
+      "history": {
+        "name": "wl4-expired-then-alive-served",
+        "runs": 82908,
+        "run_range": "0..82907",
+        "ended": {
+          "pass": 82908,
+          "violation": 0,
+          "uncredited": 0
+        },
+        "missed": 0,
+        "suspects": 0,
+        "replays": 13
+      },
+      "controls": [
+        {
+          "name": "wl4-clock-stepped-back-unserved",
+          "runs": 88199,
+          "run_range": "0..88198",
+          "ended": {
+            "pass": 0,
+            "violation": 88199,
+            "uncredited": 0
+          },
+          "missed": 0,
+          "suspects": 0,
+          "replays": 14,
+          "rule": "a retained entry outside every damage set was never served after host loss"
+        }
+      ]
+    }
+  }
+}

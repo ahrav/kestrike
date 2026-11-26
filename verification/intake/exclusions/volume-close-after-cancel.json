@@ -1,0 +1,7 @@
+{
+  "id": "volume-close-after-cancel",
+  "reason": "The escape's state, a read that keeps its waiting bit across Volume::close, forms in no profile or history: they drive a volume only through net::Owner, and Owner::close cancels every bound read that is not done, through Volume::cancel_read, which clears the read's waiting bit, before it calls Volume::close. The crate's other non-test closers keep that order or stop ticking: Soak::close cancels every read before it closes the volume, and Dead::dispose makes one stop attempt on a dead volume and polls it no more. The storage library's own tests do close volumes over live reads and keep polling them; a catch through that path needs a direct caller that holds a read's current command, has its command ahead refused, and closes the volume before any cancel.",
+  "covers": [
+    "dsw-239"
+  ]
+}

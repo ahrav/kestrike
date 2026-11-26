@@ -1,0 +1,1583 @@
+{
+  "baseline": "c28658297028573b1523d2a334c548bac6eeade9",
+  "loom": {
+    "authority_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::readiness::authority_model::withdrawal_and_serving_publication_preserve_both_word_fields",
+        "storage::readiness::authority_model::negative_control_a_state_only_store_loses_the_serving_lineage"
+      ]
+    },
+    "credit_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::credit_model::a_drain_racing_a_give_back_and_a_take_creates_no_credit",
+        "storage::credit_model::a_refusal_over_a_credit_a_sweep_holds_under_a_clear_bit_is_contended",
+        "storage::credit_model::credits_are_conserved_and_never_hidden_from_a_pool_of_one",
+        "storage::credit_model::credits_are_conserved_and_never_hidden_from_a_stale_flag",
+        "storage::credit_model::credits_are_conserved_and_never_hidden_from_an_empty_pool",
+        "storage::credit_model::dropping_both_fences_hides_a_credit",
+        "storage::credit_model::dropping_the_return_fence_hides_a_credit",
+        "storage::credit_model::dropping_the_scan_fence_hides_a_credit",
+        "storage::credit_model::negative_control_a_plain_store_credit_word_loses_or_duplicates_a_credit",
+        "storage::credit_model::negative_control_a_refusal_that_always_sees_a_sweep_reports_contention_at_the_limit",
+        "storage::credit_model::negative_control_a_refusal_without_sweep_evidence_reports_the_limit",
+        "storage::credit_model::two_records_two_scanners_and_a_return_conserve_credits_and_flag_them",
+        "storage::credit_model::two_returns_are_conserved_and_never_hidden"
+      ]
+    },
+    "durable_prefix_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::durable_prefix_model::a_return_on_the_loaded_prefix_follows_the_block_s_persistence",
+        "storage::durable_prefix_model::negative_control_a_relaxed_prefix_load_lets_a_return_race_the_persistence",
+        "storage::durable_prefix_model::negative_control_a_relaxed_prefix_store_lets_a_return_race_the_persistence"
+      ]
+    },
+    "escrow_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::escrow_model::a_released_refund_keeps_the_gate_free_sample_in_range",
+        "storage::escrow_model::negative_control_a_load_store_refund_loses_a_refund",
+        "storage::escrow_model::negative_control_a_relaxed_refund_lets_the_sample_wrap",
+        "storage::escrow_model::promises_placements_and_refunds_conserve_the_escrow"
+      ]
+    },
+    "fill_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::fill_model::a_follower_of_a_publication_keeps_its_record_until_it_detaches",
+        "storage::fill_model::a_follower_sees_a_failed_producers_terminal_at_its_departure",
+        "storage::fill_model::negative_control_a_release_that_ignores_followers_frees_a_joined_record",
+        "storage::fill_model::negative_control_a_relaxed_departure_escapes_the_runs_fence",
+        "storage::fill_model::negative_control_a_relaxed_departure_loses_the_owners_last_write",
+        "storage::fill_model::negative_control_a_terminal_recorded_after_the_departure_is_missed",
+        "storage::fill_model::negative_control_an_unchecked_release_frees_a_live_owner",
+        "storage::fill_model::three_participants_over_two_keys_observing_the_run",
+        "storage::fill_model::three_participants_over_two_keys_reach_the_serial_maximum",
+        "storage::fill_model::two_owners_on_one_key_and_a_servicer",
+        "storage::fill_model::two_owners_on_one_key_and_a_servicer_observing_the_run"
+      ]
+    },
+    "grace_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::grace_model::a_certificate_handed_from_certifier_to_reclaimers_releases_once",
+        "storage::grace_model::a_reused_record_with_a_delayed_announcement_stays_protected",
+        "storage::grace_model::negative_control_a_band_retirement_that_never_closes_fails",
+        "storage::grace_model::negative_control_a_relaxed_certificate_acquisition_loses_the_report",
+        "storage::grace_model::negative_control_a_relaxed_certificate_publication_loses_the_report",
+        "storage::grace_model::negative_control_a_relaxed_gate_release_races_the_next_holder",
+        "storage::grace_model::negative_control_a_relaxed_gate_take_races_the_previous_holder",
+        "storage::grace_model::negative_control_a_relaxed_right_release_races_the_reader_last_reuse",
+        "storage::grace_model::negative_control_a_relaxed_right_release_reuses_under_a_read",
+        "storage::grace_model::negative_control_a_relaxed_service_sighting_reuses_under_a_read",
+        "storage::grace_model::negative_control_an_anchor_exchange_without_acquire_reuses_under_a_read",
+        "storage::grace_model::negative_control_an_uncharged_busy_attempt_fails",
+        "storage::grace_model::negative_control_certifying_from_an_incomplete_pass_fails",
+        "storage::grace_model::negative_control_closing_only_on_the_crossing_bump_fails",
+        "storage::grace_model::negative_control_fencing_only_the_reader_fails",
+        "storage::grace_model::negative_control_loading_the_claimed_bound_before_the_start_era_fails",
+        "storage::grace_model::negative_control_releasing_the_anchor_at_unlink_fails",
+        "storage::grace_model::negative_control_releasing_the_anchor_twice_fails",
+        "storage::grace_model::negative_control_weakening_the_pin_point_fails",
+        "storage::grace_model::pinned_readers_never_observe_a_released_anchor_or_a_reused_slot",
+        "storage::grace_model::terminal_band_retirements_close_before_any_recycled_admission",
+        "storage::grace_model::two_collectors_hand_the_cursor_off_and_publish_only_a_complete_pass"
+      ]
+    },
+    "helpers_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::volume::helpers_model::a_cancelled_attempt_adopts_no_terminal_and_releases_its_charge",
+        "storage::volume::helpers_model::the_current_attempt_adopts_its_terminal_once"
+      ]
+    },
+    "lookup_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::lookup_model::a_hit_is_retained_under_protection_and_witnessed_on_a_visible_mapping",
+        "storage::lookup_model::an_era_equal_to_the_probed_fingerprint_is_never_a_hit",
+        "storage::lookup_model::negative_control_a_relaxed_fingerprint_load_lets_an_era_count_as_identity",
+        "storage::lookup_model::negative_control_a_relaxed_fingerprint_load_lets_an_era_mismatch_report_missing",
+        "storage::lookup_model::negative_control_a_relaxed_fingerprint_load_lets_the_old_era_pass_as_absence",
+        "storage::lookup_model::negative_control_an_anchor_exchange_without_acquire_reuses_under_a_lease",
+        "storage::lookup_model::negative_control_omitting_the_final_sequence_load_lets_an_era_count_as_identity",
+        "storage::lookup_model::negative_control_omitting_the_final_sequence_validation_fails",
+        "storage::lookup_model::negative_control_releasing_the_anchor_at_removal_fails",
+        "storage::lookup_model::negative_control_retrying_a_lost_compare_exchange_unpaid_fails",
+        "storage::lookup_model::negative_control_skipping_the_final_sequence_load_fails",
+        "storage::lookup_model::negative_control_splitting_the_anchor_release_into_a_store_and_a_decrement_fails",
+        "storage::lookup_model::negative_control_trusting_an_era_mismatch_without_the_absence_bracket_fails",
+        "storage::lookup_model::two_readers_retain_the_replacement_charged_and_never_expire_a_replaced_mapping"
+      ]
+    },
+    "parked_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::parked_model::a_stale_clear_loses_no_concurrent_park",
+        "storage::parked_model::a_stale_summary_repair_loses_no_concurrent_park",
+        "storage::parked_model::an_absorbed_park_leaves_no_bit_and_takes_no_other_slots_bit",
+        "storage::parked_model::negative_control_a_clear_without_its_second_look_loses_a_park",
+        "storage::parked_model::negative_control_a_load_and_store_clear_overwrites_another_write",
+        "storage::parked_model::negative_control_a_relaxed_park_bit_loses_a_park",
+        "storage::parked_model::negative_control_a_relaxed_stale_bit_clear_loses_a_park",
+        "storage::parked_model::negative_control_a_relaxed_summary_clear_loses_a_park",
+        "storage::parked_model::negative_control_a_relaxed_summary_set_loses_a_park",
+        "storage::parked_model::negative_control_a_summary_repair_without_a_second_look_loses_a_park"
+      ]
+    },
+    "policy_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::policy_model::a_linked_members_mark_keeps_every_lock_free_writers_bits",
+        "storage::policy_model::a_retain_racing_the_hand_clear_keeps_its_right",
+        "storage::policy_model::a_retirement_carrying_the_mark_keeps_every_lock_free_writers_bits",
+        "storage::policy_model::a_reused_slot_reads_a_clear_visited_bit",
+        "storage::policy_model::an_exhausted_incarnation_never_links",
+        "storage::policy_model::eviction_versus_invalidation_retires_once",
+        "storage::policy_model::negative_control_a_park_without_the_incarnation_compare_unlinks_the_reused_slot",
+        "storage::policy_model::negative_control_a_plain_store_clearing_the_mark_loses_a_lock_free_write",
+        "storage::policy_model::negative_control_a_plain_store_moving_the_mark_loses_a_lock_free_write",
+        "storage::policy_model::negative_control_a_plain_store_setting_the_mark_loses_a_lock_free_write",
+        "storage::policy_model::negative_control_a_retain_whose_expected_word_omits_the_incarnation_fails",
+        "storage::policy_model::parks_of_one_incarnation_set_the_flag_once",
+        "storage::policy_model::policy_writes_keep_every_lock_free_writers_bits",
+        "storage::policy_model::unlink_versus_relink_after_reuse"
+      ]
+    },
+    "publication_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::publication_model::a_reader_finishing_before_the_odd_store_samples_no_later_than_the_publisher",
+        "storage::publication_model::an_unwind_after_the_odd_store_keeps_inhibition_custody_and_the_credit",
+        "storage::publication_model::negative_control_a_fingerprint_stored_after_the_pair_is_read_unwritten",
+        "storage::publication_model::negative_control_a_reader_sample_unordered_before_its_loads_can_follow_the_publishers",
+        "storage::publication_model::negative_control_a_sample_unordered_after_the_odd_store_can_precede_a_finished_readers_sample",
+        "storage::publication_model::negative_control_an_early_sample_can_precede_a_finished_readers_sample"
+      ]
+    },
+    "route_model": {
+      "target": "kestrike",
+      "tests": [
+        "net::client::route::route_model::a_read_racing_a_candidate_and_its_binding_takes_one_tenure_whole",
+        "net::client::route::route_model::a_read_racing_a_rebind_takes_one_binding_whole",
+        "net::client::route::route_model::negative_control_a_publish_without_its_fence_lets_a_read_tear",
+        "net::client::route::route_model::negative_control_a_read_without_its_recheck_tears"
+      ]
+    },
+    "scan_model": {
+      "target": "kestrike",
+      "tests": [
+        "index::scan_model::a_reader_delayed_across_a_commit_returns_no_copy",
+        "index::scan_model::negative_control_a_next_holders_reservation_without_its_fence_fails",
+        "index::scan_model::negative_control_wrapping_a_replacement_fails",
+        "index::scan_model::negative_control_wrapping_an_activation_fails",
+        "index::scan_model::negative_control_wrapping_the_sequence_fails",
+        "index::scan_model::readers_never_copy_a_pair_a_next_holder_reserved_after_a_removal_freed_it",
+        "index::scan_model::readers_never_copy_a_pair_reserved_after_a_removal_freed_it",
+        "index::scan_model::readers_never_copy_a_pending_pair_across_its_cancel",
+        "index::scan_model::readers_never_copy_a_pending_pair_and_copy_its_activation_once",
+        "index::scan_model::readers_return_no_copy_or_a_copy_of_one_stable_state_across_a_recycle",
+        "index::scan_model::readers_return_no_copy_or_a_copy_of_one_stable_state_across_a_removal",
+        "index::scan_model::readers_return_no_copy_or_a_copy_of_one_stable_state_across_a_replacement",
+        "index::scan_model::readers_return_no_copy_or_a_copy_of_one_stable_state_across_an_insert",
+        "index::scan_model::readers_return_no_copy_or_a_copy_of_one_stable_state_across_two_recycling_brackets"
+      ]
+    },
+    "statistics_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::device::spdk::statistics::statistics_model::a_consumption_that_keeps_the_flag_strands_it",
+        "storage::device::spdk::statistics::statistics_model::a_stop_decision_outside_the_mutex_strands_a_request",
+        "storage::device::spdk::statistics::statistics_model::requests_and_the_stop_strand_no_flag_and_answer_every_request"
+      ]
+    },
+    "walk_model": {
+      "target": "kestrike",
+      "tests": [
+        "bind::walk::walk_model::a_duplicate_finish_finishes_an_uncounted_item",
+        "bind::walk::walk_model::a_failure_that_finishes_its_share_uncounts_its_work",
+        "bind::walk::walk_model::a_last_share_read_ahead_queues_the_next_step_uncounted",
+        "bind::walk::walk_model::a_missing_finish_never_drains",
+        "bind::walk::walk_model::a_private_thread_table_is_read_before_the_process_finishes",
+        "bind::walk::walk_model::a_share_read_ahead_by_another_walker_queues_the_next_step_uncounted",
+        "bind::walk::walk_model::a_split_table_drains_once_every_counted_item_finished",
+        "bind::walk::walk_model::a_walker_panic_fails_the_walk_with_its_work_unfinished",
+        "bind::walk::walk_model::an_early_drain_returns_before_its_work_finished",
+        "bind::walk::walk_model::two_split_tables_drain_once_every_counted_item_finished"
+      ]
+    },
+    "warm_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::volume::warm_model::a_reservation_or_install_racing_a_withdrawal_completes_before_it_returns_or_refuses",
+        "storage::volume::warm_model::negative_control_an_admission_read_before_the_gate_writes_after_the_withdrawal",
+        "storage::volume::warm_model::negative_control_a_withdrawal_without_its_gate_pass_returns_before_a_write",
+        "storage::volume::warm_model::negative_control_a_stored_load_complete_reopens_the_withdrawn_attempt",
+        "storage::volume::warm_model::negative_control_a_commit_before_the_hold_lets_a_fill_take_a_restored_unit",
+        "storage::volume::warm_model::negative_control_an_ended_attempt_that_returns_its_units_frees_a_referenced_unit",
+        "storage::volume::warm_model::range_split_workers_racing_a_withdrawal_write_disjoint_lanes_inside_the_hold",
+        "storage::volume::warm_model::negative_control_two_workers_sharing_a_lane_race_on_its_slots",
+        "storage::volume::warm_model::negative_control_a_hold_released_before_its_workers_join_lets_a_write_follow_the_withdrawal"
+      ]
+    },
+    "writable_model": {
+      "target": "kestrike",
+      "tests": [
+        "storage::writable_model::an_unwound_disposal_keeps_its_record_and_slot_charged",
+        "storage::writable_model::negative_control_a_relaxed_departure_hides_the_disposal",
+        "storage::writable_model::two_owners_close_revocation_and_service"
+      ]
+    }
+  },
+  "miri": {
+    "crate": "kestrike",
+    "target": "kestrike",
+    "tests": [
+      "storage::device::arena_tests::a_failure_at_every_phase_releases_the_mapping_once",
+      "storage::device::nic_tests::a_held_buffer_refuses_a_mutable_view",
+      "storage::device::pool_tests::a_forgotten_handle_blocks_release_without_an_unmap",
+      "storage::device::pool_tests::bytes_written_through_one_buffer_never_appear_in_another",
+      "storage::device::spdk::staging_tests::a_record_goes_from_accept_to_free_through_its_callback_pointers",
+      "storage::gate::tests::contending_takers_and_waiters_never_overlap_and_see_each_other",
+      "storage::lease::tests::final_drop_on_another_thread_releases_right_then_credit_then_root",
+      "storage::lookup_tests::a_held_lease_outlives_its_interval_and_reclamation_waits_for_it",
+      "storage::lookup_tests::a_lease_and_a_registration_outlive_the_facade",
+      "storage::publication_tests::every_unwind_cut_leaves_a_known_owner_or_fixed_custody",
+      "storage::volume::lifecycle_tests::a_deadline_cancels_the_command_and_holds_its_record_and_buffer_until_the_real_terminal",
+      "storage::writable_tests::an_abandoned_fill_with_a_write_in_flight_is_held_until_its_last_terminal"
+    ],
+    "controls": [
+      {"test": "storage::gate::tests::negative_control_a_relaxed_take_races_the_guarded_counter", "diagnostic": "Data race detected"},
+      {"test": "storage::device::spdk::staging_tests::negative_control_a_callback_after_the_free_reads_freed_memory", "diagnostic": "use-after-free"},
+      {"test": "storage::device::spdk::staging_tests::negative_control_a_retained_staging_reference_outlives_a_callback", "diagnostic": "does not exist in the borrow stack"}
+    ]
+  },
+  "miri_sweep": {
+    "seeds": 64,
+    "tests": [
+      "storage::weak_memory_tests::miri_weak_memory_credit_return_and_scan_keep_credit_visible",
+      "storage::weak_memory_tests::miri_weak_memory_publication_keeps_visible_candidate_initialized",
+      "storage::weak_memory_tests::miri_weak_memory_seqlock_accepts_only_coherent_copies"
+    ]
+  },
+  "ordinary": {
+    "campaign-monitor": {
+      "targets": [
+        "campaign_monitor",
+        "doc:campaign_monitor",
+        "pty"
+      ]
+    },
+    "campaign-supervisor": {
+      "targets": [
+        "campaign",
+        "campaign_supervisor",
+        "doc:campaign_supervisor",
+        "custody",
+        "sim_launch",
+        "findings",
+        "hardware"
+      ]
+    },
+    "sim-host": {
+      "targets": [
+        "sim_host",
+        "doc:sim_host",
+        "host"
+      ]
+    },
+    "kestrike": {
+      "required": {
+        "kestrike": {
+          "catalog": "workspace",
+          "modules": [
+            "bind::authority_tests",
+            "bind::replay_tests",
+            "failover",
+            "net::oracle_endpoint_tests",
+            "net::put_tests",
+            "net::upload_tests",
+            "net::world_tests::histories::keyops",
+            "oracle",
+            "sim::cut_guard_tests",
+            "sim::cut_tests",
+            "sim::ledger_tests",
+            "storage::keyops_replay_tests",
+            "storage::oracle_custody_tests"
+          ],
+          "tests": [
+            "bind::eni_tests::a_listing_past_32_interfaces_resolves_with_bounded_requests_in_flight",
+            "bind::eni_tests::a_resolution_past_its_deadline_refuses",
+            "bind::eni_tests::every_request_batch_checks_the_discovery_deadline",
+            "bind::eni_tests::every_request_round_checks_the_discovery_deadline",
+            "bind::eni_tests::ib_cidr_admission_every_prefix_resolves_under_the_shared_rule",
+            "bind::eni_tests::ib_cidr_admission_malformed_text_refuses",
+            "bind::eni_tests::ib_cidr_admission_membership_boundaries_hold_for_every_prefix",
+            "bind::eni_tests::ib_metadata_envelope_failed_thread_start",
+            "bind::eni_tests::ib_metadata_envelope_oversized_listing_refuses_before_any_request_for_it",
+            "bind::eni_tests::ib_metadata_envelope_stale_prefetched_sighting",
+            "bind::mappings_tests::ib_cidr_admission_every_mapping_prefix_reads_under_the_shared_rule",
+            "bind::metadata_tests::a_silent_server_refuses_after_one_wait",
+            "bind::metadata_tests::ib_http_framing_admits_only_complete_supported_responses",
+            "bind::metadata_tests::ib_http_framing_agrees_with_the_byte_grammar_over_generated_responses",
+            "bind::metadata_tests::ib_http_framing_invalid_text_refuses",
+            "bind::metadata_tests::ib_metadata_envelope_drip_below_the_inactivity_timeout_ends_at_the_deadline",
+            "bind::metadata_tests::ib_metadata_envelope_oversized_body_refuses_at_the_first_byte_past_the_bound",
+            "bind::metadata_tests::ib_metadata_envelope_oversized_headers_refuse",
+            "bind::metadata_tests::ib_metadata_envelope_small_valid_response_succeeds",
+            "bind::metadata_tests::ib_metadata_envelope_slowly_drained_request_ends_at_the_deadline",
+            "bind::metadata_tests::the_metadata_envelope_is_two_second_waits_six_second_requests_and_64_kib",
+            "bind::tool_tests::the_tool_envelope_is_one_mib_streams_thirty_seconds_and_a_five_second_reap",
+            "bind::uptime_tests::boot_ticks_read_the_procfs_uptime",
+            "bind::uptime_tests::ib_uptime_arithmetic_converts_ordinary_hundredths",
+            "bind::uptime_tests::ib_uptime_arithmetic_matches_the_widened_floor_at_every_edge",
+            "bind::uptime_tests::malformed_uptime_text_and_tick_rates_refuse",
+            "net::auth_tests::a_bootstrap_frame_at_sequence_zero_is_stale",
+            "net::auth_tests::a_stale_older_boot_hello_delays_activation_by_the_bounded_confirm_repeats",
+            "net::auth_tests::alternating_stale_boot_hellos_each_cost_one_bounded_round",
+            "net::auth_tests::ib_replay_window_maximum_terminal_history_matches_the_set_model",
+            "net::auth_tests::the_last_confirm_repeat_still_activates_its_handshake",
+            "net::client_tests::a_stale_older_boot_hello_cannot_wedge_the_opening",
+            "net::fetch_tests::every_error_status_maps_to_its_outcome",
+            "net::fetch_tests::the_oracle_credits_completion_only_on_client_delivery",
+            "net::fetch_tests::the_oracle_rejects_every_violation_it_checks",
+            "net::geometry_tests::ib_buffer_index_boundaries_match_the_wide_model_to_the_top_of_u64",
+            "net::link_tests::the_delivery_log_follows_the_receiving_end",
+            "net::memory_tests::released_handles_go_stale_and_an_exhausted_slot_retires",
+            "net::pace_model_tests::ib_pacer_wide_model_backward_time_adds_no_credit",
+            "net::pace_model_tests::ib_pacer_wide_model_every_operation_matches_the_u128_model",
+            "net::pace_model_tests::ib_pacer_wide_model_saturated_deadline_is_no_credit",
+            "net::receipt_mask_tests::ib_receipt_mask_bounds_edges",
+            "net::receipt_mask_tests::ib_receipt_mask_bounds_get_ack_matrix",
+            "net::receipt_mask_tests::ib_receipt_mask_bounds_put_ack_matrix",
+            "net::serve_clone_tests::a_greater_allowance_re_expands_a_pruned_state",
+            "net::serve_clone_tests::colliding_digests_never_merge_distinct_states",
+            "net::serve_search_tests::a_duplicate_before_the_drain_reaches_the_post_release_replay_state",
+            "net::serve_search_tests::a_duplicate_terminal_after_its_get_released_fails_the_terminal_monitor",
+            "net::serve_search_tests::a_duplicated_get_under_reply_pressure_stages_its_due_fragment_at_the_bound",
+            "net::serve_search_tests::a_fragment_sent_ahead_of_the_first_unsent_fails_the_staging_monitor",
+            "net::serve_search_tests::a_kept_replay_after_dropped_refusals_is_owed",
+            "net::serve_search_tests::a_live_request_released_before_its_end_fails_the_staging_monitor",
+            "net::serve_search_tests::a_partial_drain_reaches_a_state_ordered_drains_reach",
+            "net::serve_search_tests::a_premature_complete_a_duplicate_terminal_a_held_release_a_wrong_kind_and_a_wrong_manifest_fail_the_terminal_monitor",
+            "net::serve_search_tests::a_request_that_never_stages_fails_the_staging_monitor",
+            "net::serve_search_tests::a_resend_in_place_of_the_due_fragment_fails_the_staging_monitor",
+            "net::serve_search_tests::a_seeded_search_without_its_witnesses_earns_no_credit",
+            "net::serve_search_tests::a_selective_receipt_names_a_hole_and_spends_a_fault",
+            "net::serve_search_tests::a_watchdog_stop_or_a_missing_report_earns_no_credit",
+            "net::serve_search_tests::a_wrong_byte_fails_the_byte_monitor",
+            "net::serve_search_tests::an_early_release_fails_the_custody_monitor",
+            "net::serve_search_tests::an_unended_terminal_and_an_unterminated_release_fail_the_terminal_monitor",
+            "net::serve_search_tests::colliding_buckets_reach_the_same_states",
+            "net::serve_search_tests::data_after_a_terminal_settled_by_an_earlier_poll_fails_the_terminal_monitor",
+            "net::serve_search_tests::each_held_chunk_offers_its_own_return",
+            "net::serve_search_tests::every_sendable_prefix_is_enabled",
+            "net::serve_search_tests::the_seeded_roots_stand_in_their_named_states",
+            "net::serve_search_tests::the_shallow_search_exhausts_its_bound",
+            "net::serve_search_tests::the_staging_monitor_fires_only_under_its_premises",
+            "net::serve_search_tests::valid_acks_vary_receipt_and_grant_independently",
+            "net::status_literal_tests::ib_wire_status_literals_every_status_has_an_admissible_seed",
+            "net::status_literal_tests::ib_wire_status_literals_name_their_specified_statuses",
+            "net::status_literal_tests::ib_wire_status_literals_parse_in_their_carriers",
+            "net::witness_tests::an_unknown_resolved_by_a_delayed_publication_applies_its_effect_once_across_a_crash",
+            "net::world_tests::boundary::tests::a_decision_on_the_last_resend_fails_the_resend_witness",
+            "net::world_tests::boundary::tests::a_fill_after_an_expiry_lands_in_the_freed_extent",
+            "net::world_tests::boundary::tests::a_fill_before_the_expiry_lands_past_the_upload",
+            "net::world_tests::boundary::tests::a_lone_fill_in_the_hole_fails_the_fragmentation_witness",
+            "net::world_tests::boundary::tests::a_one_command_turn_quota_holds_received_data_until_the_next_turn",
+            "net::world_tests::boundary::tests::the_uploaders_get_is_admitted_inside_its_reserve_and_a_full_share_refuses_the_next",
+            "net::world_tests::boundary::tests::a_shared_fingerprint_is_counted_once_and_answers_missing",
+            "net::world_tests::boundary::tests::a_six_fragment_upload_crosses_its_source_slots_and_window",
+            "net::world_tests::boundary::tests::begin_resends_count_to_their_limit_and_the_upload_ends_unknown",
+            "net::world_tests::boundary::tests::boundary_frames_and_records_keep_reserved_fields_zero",
+            "net::world_tests::boundary::tests::custody_requires_every_slot_returned_at_the_attempts_last_state",
+            "net::world_tests::boundary::tests::the_long_mixed_run_replays_with_its_witnesses",
+            "net::world_tests::boundary::tests::the_planted_long_run_reduces_to_its_regression",
+            "net::world_tests::boundary::tests::the_reduced_long_run_keeps_its_violation",
+            "net::world_tests::boundary::tests::withheld_transmits_return_on_their_nic_events",
+            "net::world_tests::bundle::tests::an_old_planted_bundle_decodes_its_action_codes",
+            "net::world_tests::campaign_fuzz::tests::a_checkpoint_counts_only_a_pass_whose_run_differs_from_every_seed_s",
+            "net::world_tests::campaign_fuzz::tests::ib_campaign_episode_coverage_an_uninjected_fault_earns_no_pass",
+            "net::world_tests::campaign_fuzz::tests::ib_campaign_episode_coverage_each_appended_seed_passes_with_its_witness",
+            "net::world_tests::campaign_fuzz::tests::ib_campaign_recovery_a_crash_pass_without_ledger_credit_is_unsuccessful",
+            "net::world_tests::campaign_fuzz::tests::ib_campaign_recovery_a_stalled_episode_fails_while_others_finish",
+            "net::world_tests::campaign_fuzz::tests::ib_campaign_recovery_an_episode_settles_only_by_its_own_later_read",
+            "net::world_tests::campaign_fuzz::tests::ib_entropy_exhaustion_a_cut_after_a_violation_stays_a_failure",
+            "net::world_tests::campaign_fuzz::tests::ib_entropy_exhaustion_a_non_short_refusal_is_a_failure_naming_it",
+            "net::world_tests::campaign_fuzz::tests::ib_entropy_exhaustion_a_rekey_cut_is_incomplete_with_its_draw",
+            "net::world_tests::campaign_fuzz::tests::ib_entropy_exhaustion_a_setup_cut_is_incomplete_with_its_draw",
+            "net::world_tests::recovery::measure::tests::a_torn_prefix_measures_as_its_sectors",
+            "net::world_tests::recovery::measure::tests::delivered_and_read_commands_are_not_held",
+            "net::world_tests::recovery::measure::tests::equal_bytes_foreign_bytes_and_later_overwrites_are_ambiguous",
+            "net::world_tests::recovery::tests::a_crash_without_its_effect_choice_never_kills_the_owner",
+            "net::world_tests::recovery::tests::a_cut_past_the_restart_bound_leaves_the_campaign_inconclusive",
+            "net::world_tests::recovery::tests::a_wrong_landing_class_or_drain_or_ambiguous_evidence_withholds_credit",
+            "net::world_tests::recovery::tests::a_recovery_run_holds_its_links_to_the_manifest_bounds",
+            "net::world_tests::recovery::tests::ib_campaign_recovery_each_relaunch_is_followed_by_its_lookup",
+            "net::world_tests::recovery::tests::omitted_out_of_order_and_truncated_ledgers_earn_no_credit",
+            "net::world_tests::recovery::tests::the_effect_choice_falls_between_reach_and_activation",
+            "net::world_tests::recovery::tests::the_torn_table_plans_none_whole_and_sector_prefix_landings",
+            "net::world_tests::replay::tests::a_panic_under_a_violation_is_never_kept",
+            "net::world_tests::replay::tests::a_truncated_bundle_whose_rerun_completes_is_unreducible",
+            "oracle::custody_tests::remote_put_sources::a_receipt_counts_only_the_fragments_the_history_validated",
+            "oracle::delivery_tests::an_undefined_geometry_is_inconclusive_before_its_window_arithmetic",
+            "records_tests::ib_record_generation_exhaustion_each_removal_path_retires_the_terminal_slot",
+            "records_tests::ib_record_generation_exhaustion_slot_only_remove_takes_the_replacement",
+            "sim::action::tests::the_codes_match_their_golden_table",
+            "sim::choice_tests::a_large_registry_finds_every_site_and_refuses_the_rest",
+            "sim::cut_guard_tests::the_guard_flags_protocol_imports_and_policy_hooks",
+            "sim::cut_tests::plan_admits_exactly_the_enumerated_cuts",
+            "sim::cut_tests::the_library_process_enumerates_the_pinned_cut_tables",
+            "sim::cut_tests::two_outstanding_children_enumerate_every_pair_of_whole_unit_masks",
+            "sim::entropy_tests::ib_entropy_exhaustion_a_refused_nonce_draw_returns_its_typed_refusal",
+            "sim::ledger_tests::a_campaign_credits_only_every_required_cut_checked_pass_with_restart",
+            "sim::ledger_tests::a_measurement_other_than_the_plan_withholds_credit",
+            "sim::round_tests::a_generated_body_whose_rounds_force_their_order_is_refused",
+            "sim::round_tests::a_generated_schedule_runs_each_action_once_in_orders_its_root_repeats",
+            "sim::round_tests::a_schedule_ends_with_its_body_even_when_it_unwinds",
+            "sim::round_tests::an_empty_round_runs_nothing",
+            "sim::round_tests::the_legacy_schedule_keeps_the_listed_order",
+            "sim::trace_tests::a_panic_writes_the_pending_records",
+            "sim::unwind::tests::a_panic_handled_during_the_unwind_keeps_the_escaping_identity",
+            "storage::attempt_tests::the_root_layout_places_every_field_where_the_hand_placement_does",
+            "storage::device::identify_bytes_tests::each_identify_refusal_is_reached_in_its_order",
+            "storage::device::identify_bytes_tests::every_format_selection_decodes_or_refuses_as_the_literal_table_says",
+            "storage::device::identify_bytes_tests::raw_identify_pages_decode_to_their_literal_fields",
+            "storage::device::spdk::statistics_tests::raw_statistics_pages_decode_each_histogram_at_its_own_offset",
+            "storage::device::status::tests::every_nvme_status_word_classifies_by_its_code_and_type_alone",
+            "storage::extent::partition_tests::ib_partition_checked_transitions_aggregate_invalid_domain",
+            "storage::extent::partition_tests::ib_partition_checked_transitions_conserved_domain",
+            "storage::extent::partition_tests::ib_partition_checked_transitions_total_at_the_limit",
+            "storage::record::claim_fuzz_tests::tests::a_claim_run_ends_at_the_header_the_claim_judges",
+            "storage::record::claim_fuzz_tests::tests::a_maximal_claim_refuses_at_its_lengths",
+            "storage::record::claim_fuzz_tests::tests::ib_record_claims_reach_each_rejection_rung",
+            "storage::record::crc_reference_tests::ib_crc_bitwise_reference_block_runs_combine",
+            "storage::record::crc_reference_tests::ib_crc_bitwise_reference_copying_update_keeps_target_and_canaries",
+            "storage::record::crc_reference_tests::ib_crc_bitwise_reference_one_shot_incremental_and_zero_run_paths",
+            "storage::record::crc_reference_tests::ib_crc_bitwise_reference_reports_executed_and_unavailable_mechanisms",
+            "storage::record::crc_reference_tests::ib_crc_bitwise_reference_word_and_masked_word_updates",
+            "storage::record::crc_reference_tests::ib_crc_bitwise_reference_written_words",
+            "storage::record::geometry_fuzz_tests::tests::a_published_geometry_reads_back_what_the_literal_parser_exposes",
+            "storage::record::geometry_fuzz_tests::tests::every_geometry_byte_selects_an_admitted_geometry",
+            "storage::record::geometry_fuzz_tests::tests::ib_record_claims_valid_header_at_nonzero_position",
+            "storage::record::scan_fuzz_tests::tests::every_placement_of_a_valid_record_passes",
+            "storage::record::scan_fuzz_tests::tests::ib_scan_envelope_damaged_record_then_valid_record",
+            "storage::record::scan_fuzz_tests::tests::ib_scan_envelope_maximal_claim_in_short_window",
+            "storage::record::scan_fuzz_tests::tests::ib_scan_envelope_offset_near_u64_max",
+            "storage::record::scan_fuzz_tests::tests::ib_scan_envelope_read_failure",
+            "storage::record::scan_fuzz_tests::tests::ib_scan_envelope_sink_failure",
+            "storage::strength_tests::a_damaged_later_chunk_passes_and_its_failed_bytes_fail_o_contain",
+            "storage::strength_tests::a_failed_owner_beside_a_healthy_one_passes_and_a_blocked_peer_fails_o_isolation",
+            "storage::strength_tests::a_funded_interval_without_a_reclaim_lacks_the_progress_premise",
+            "storage::strength_tests::a_funded_reclaim_passes_and_an_over_budget_interval_fails_o_progress",
+            "storage::strength_tests::a_reclaimed_extent_reuse_passes_and_an_overlapping_extent_fails_o_custody",
+            "storage::strength_tests::a_released_read_passes_and_a_lost_credit_fails_o_resources",
+            "storage::strength_tests::a_repeated_invalidation_records_no_second_retirement",
+            "storage::strength_tests::an_acknowledged_invalidation_passes_and_a_stale_hit_fails_o_history",
+            "storage::strength_tests::an_exact_read_passes_and_a_wrong_byte_fails_o_bytes",
+            "storage::strength_tests::every_live_obligation_has_one_strength_episode_and_restart_has_none",
+            "storage::volume::grant_tests::every_chunk_length_hands_off_chunks_inside_their_command_buffers",
+            "storage::volume::grant_tests::the_handoff_oracle_matches_a_hand_worked_record",
+            "storage::volume::read_ahead_tests::a_failed_command_ahead_ends_the_read_and_drains_after_later_terminals",
+            "storage::volume::read_ahead_tests::a_header_failure_with_three_commands_ahead_drains_after_their_terminals"
+          ]
+        },
+        "kernel_tools": {
+          "modules": [
+            "envelope"
+          ],
+          "tests": [
+            "envelope::a_grandchild_holding_the_pipes_delays_no_refusal",
+            "envelope::a_tool_that_exits_inside_its_deadline_succeeds",
+            "envelope::a_tool_whose_background_child_holds_its_output_runs_to_the_deadline",
+            "envelope::ib_tool_envelope_bounded_successful_child",
+            "envelope::ib_tool_envelope_nonzero_exit",
+            "envelope::ib_tool_envelope_stalled_child",
+            "envelope::ib_tool_envelope_stderr_flood",
+            "envelope::ib_tool_envelope_stdin_blockage",
+            "envelope::ib_tool_envelope_stdout_flood"
+          ]
+        },
+        "sim_worker": {
+          "modules": [
+            "branch",
+            "bundle",
+            "choice",
+            "cluster",
+            "cut",
+            "entropy",
+            "fleet",
+            "fork",
+            "fuzz",
+            "histories",
+            "narrate",
+            "replay",
+            "schedule",
+            "session",
+            "suffix",
+            "worker"
+          ],
+          "tests": [
+            "branch::forked_suffixes_keep_the_pending_put_prefix",
+            "branch::fresh_processes_branch_a_bundle_alike",
+            "branch::fresh_processes_fork_at_turn_and_script_milestones",
+            "bundle::two_fresh_processes_record_one_bundle",
+            "choice::derivation_vectors_match_in_a_fresh_process",
+            "choice::the_pinned_sequence_draws_in_a_fresh_process",
+            "cluster::two_fresh_processes_record_and_replay_one_bundle",
+            "cut::two_fresh_processes_enumerate_one_cut_table",
+            "entropy::two_fresh_processes_report_one_identity",
+            "fleet::two_fresh_processes_report_one_digest_for_every_pinned_run",
+            "fork::a_fork_is_refused_off_its_boundary",
+            "fork::children_are_credited_only_on_framed_success_at_exit_zero",
+            "fork::inherited_descriptors_close_in_the_child",
+            "fork::the_watchdog_classifies_a_hung_child",
+            "fuzz::a_panicking_input_tears_down_before_the_driver_aborts",
+            "fuzz::a_parser_failure_replays_and_minimizes",
+            "fuzz::a_wrong_byte_input_audits_tears_down_then_aborts",
+            "fuzz::the_appended_seeds_replay_alike_in_fresh_processes",
+            "fuzz::the_campaign_driver_loads_seeds_and_executes_positively",
+            "fuzz::the_parser_targets_load_seeds_and_execute_positively",
+            "histories::each_history_replays_in_a_fresh_process",
+            "narrate::a_fresh_process_narrates_into_its_file",
+            "replay::fresh_processes_replay_and_reduce_a_bundle",
+            "schedule::fresh_processes_reduce_a_schedule",
+            "session::fresh_processes_commit_and_replay_one_session",
+            "suffix::composed_bounded_tree_accounts_every_leaf_and_frontier",
+            "suffix::fresh_processes_explore_a_composed_bounded_tree_alike",
+            "worker::cases_run_on_one_thread",
+            "worker::the_counting_allocator_is_live"
+          ]
+        },
+        "soak_cli": {
+          "modules": [
+            "chaos"
+          ],
+          "tests": [
+            "chaos::no_binary_holds_a_chaos_point"
+          ]
+        }
+      },
+      "targets": [
+        "bind_cli",
+        "doc:kestrike",
+        "kestrike",
+        "kestrike_bind",
+        "kestrike_inspect",
+        "kestrike_soak",
+        "inspect_cli",
+        "kernel_tools",
+        "sim_worker",
+        "soak_cli",
+        "store_history"
+      ]
+    },
+    "kestrike-aws": {
+      "targets": [
+        "doc:kestrike_aws",
+        "kestrike_aws"
+      ],
+      "required": {
+        "kestrike_aws": {
+          "modules": [
+            "client::tests",
+            "credentials::tests",
+            "ec2::actions::tests",
+            "ec2::instances::tests",
+            "ec2::volumes::tests",
+            "sign::tests",
+            "wire::tests"
+          ],
+          "tests": [
+            "client::tests::every_coded_reply_returns_without_a_pause_or_a_second_request",
+            "client::tests::every_scripted_fault_through_the_client_writes_at_most_one_request",
+            "credentials::tests::the_environment_is_no_credential_source",
+            "ec2::actions::tests::a_wire_that_sends_again_fails_the_one_attempt_check",
+            "ec2::volumes::tests::a_wire_that_sends_again_fails_the_one_attempt_check",
+            "ec2::volumes::tests::a_wire_that_sends_again_fails_the_one_attempt_check_under_a_zone_listing",
+            "sign::tests::the_signing_suite_cases_sign_to_their_published_answers",
+            "wire::tests::a_certificate_from_no_trusted_root_is_refused_before_the_request",
+            "wire::tests::a_send_lost_on_a_reused_connection_is_not_sent_again",
+            "wire::tests::a_wire_that_sends_again_after_a_reset_fails_the_one_attempt_check"
+          ]
+        }
+      }
+    },
+    "kestrike-reconciler": {
+      "targets": [
+        "doc:kestrike_reconciler",
+        "kestrike_reconciler",
+        "service"
+      ],
+      "required": {
+        "kestrike_reconciler": {
+          "modules": [
+            "config::tests",
+            "file::tests",
+            "state::tests",
+            "status::tests"
+          ],
+          "tests": [
+            "state::tests::a_second_open_is_refused_while_the_first_holds_the_lock"
+          ]
+        },
+        "service": {
+          "modules": [
+            "init",
+            "runs"
+          ],
+          "tests": [
+            "runs::a_fixed_run_writes_nothing_and_exits_0_after_the_tick_a_stop_signal_interrupts",
+            "runs::each_tick_rereads_the_directory_and_reports_a_refused_one_unobserved",
+            "runs::a_store_regression_withdraws_the_client_and_exits_3",
+            "runs::run_on_an_uninitialized_state_directory_exits_4"
+          ]
+        }
+      }
+    },
+    "source-anchors": {
+      "targets": [
+        "source_anchors"
+      ]
+    },
+    "spdk-sys": {
+      "targets": [
+        "doc:spdk_sys",
+        "spdk_sys"
+      ],
+      "required": {
+        "spdk_sys": {
+          "modules": [
+            "select_tests",
+            "generated_tests",
+            "layout_tests",
+            "metadata_tests"
+          ],
+          "tests": [
+            "metadata_tests::the_installed_metadata_links_every_spdk_and_dpdk_archive_whole_in_reported_order",
+            "metadata_tests::only_a_sanitized_plan_drops_the_installs_asan_library",
+            "metadata_tests::a_dpdk_library_outside_the_whole_archive_scope_is_refused",
+            "metadata_tests::a_whole_archive_scope_other_than_static_archives_or_none_is_refused",
+            "metadata_tests::an_unrecognized_metadata_token_is_refused_by_name",
+            "metadata_tests::a_missing_static_archive_is_refused_by_path",
+            "metadata_tests::an_spdk_or_dpdk_archive_named_by_path_links_whole_or_is_refused",
+            "metadata_tests::an_spdk_release_other_than_the_pinned_one_is_refused",
+            "metadata_tests::a_scope_archive_name_that_leaves_the_libdir_is_refused",
+            "metadata_tests::a_fixture_directory_that_already_exists_is_refused_unwritten",
+            "metadata_tests::a_library_name_with_digits_and_uppercase_letters_plans_in_every_spelling",
+            "metadata_tests::a_taken_fixture_name_is_passed_over_and_left_as_it_was",
+            "select_tests::a_changed_archive_under_unchanged_headers_fails_its_lineage",
+            "select_tests::a_lineage_needs_every_line_once_and_a_digest_per_archive",
+            "generated_tests::every_output_exposes_register_report_acquire_and_their_types",
+            "generated_tests::reservation_constants_keep_the_pinned_encodings",
+            "generated_tests::extended_controller_status_accessors_preserve_the_packed_byte",
+            "generated_tests::extended_report_header_defaults_to_zero",
+            "generated_tests::reservation_commands_link_with_the_pinned_signatures",
+            "generated_tests::get_feature_links_with_the_pinned_signature",
+            "generated_tests::the_macro_closure_keeps_reached_definitions_every_undef_and_pragma_operands_in_place",
+            "generated_tests::the_macro_closure_refuses_a_pasted_name_it_drops_and_keeps_one_it_reaches",
+            "generated_tests::the_macro_closure_fails_closed_on_a_failed_preprocessor_an_empty_allowlist_and_a_counter",
+            "layout_tests::every_named_structure_matches_the_c_compiler_layout",
+            "layout_tests::reservation_layouts_and_controller_exhid_match_the_pinned_abi"
+          ]
+        }
+      }
+    }
+  },
+  "qemu": {
+    "namespace_cases": [
+      {"id": "bind::network_tests::a_namespace_converges_after_a_partial_batch_and_a_retry", "deadline_seconds": 30},
+      {"id": "bind::network_tests::a_namespace_custom_label_refuses_the_capture", "deadline_seconds": 30},
+      {"id": "bind::network_tests::a_namespace_refuses_each_unrepresented_attribute", "deadline_seconds": 30},
+      {"id": "bind::network_tests::a_namespace_round_trips_a_down_link_at_the_minimum_ipv4_mtu", "deadline_seconds": 30},
+      {"id": "bind::network_tests::a_namespace_round_trips_addresses_and_routes_on_an_up_link", "deadline_seconds": 30},
+      {"id": "bind::network_tests::a_namespace_round_trips_onto_a_renamed_device", "deadline_seconds": 30},
+      {"id": "bind::network_tests::a_namespace_round_trips_the_maximum_mtu", "deadline_seconds": 30},
+      {"id": "bind::network_tests::every_namespace_replay_case_is_witnessed", "deadline_seconds": 310}
+    ],
+    "member_drain_seconds": 10,
+    "crate": "kestrike",
+    "target": "kestrike",
+    "tests": [
+      "bind::guest_tests::the_binder_binds_and_releases_the_guest_s_controller"
+    ]
+  },
+  "qualified": {
+    "campaigns": {
+      "crate": "kestrike",
+      "target": "sim_worker",
+      "ignored": false,
+      "tier": "pr",
+      "rows": [
+        {
+          "id": "worker-campaigns",
+          "kind": "campaign",
+          "tests": [
+            "choice::derivation_vectors_match_in_a_fresh_process",
+            "choice::the_pinned_sequence_draws_in_a_fresh_process",
+            "choice::a_recorded_sequence_replays_in_this_process",
+            "worker::the_counting_allocator_is_live",
+            "worker::a_sweep_prints_each_roots_manifest_run",
+            "worker::the_allocator_probe_fails_without_counts",
+            "worker::cases_run_on_one_thread",
+            "worker::the_protocol_reports_failures_and_refusals",
+            "worker::outcome_lines_flush_as_cases_return",
+            "worker::ignored_names_the_cases_with_an_ignore_attribute",
+            "entropy::fixed_inputs_report_the_pinned_identity",
+            "entropy::two_fresh_processes_report_one_identity",
+            "cut::fixed_descriptors_report_the_pinned_cut_tables",
+            "cut::two_fresh_processes_enumerate_one_cut_table",
+            "bundle::two_fresh_processes_record_one_bundle",
+            "bundle::an_old_bundle_decodes_its_action_codes",
+            "cluster::two_fresh_processes_record_and_replay_one_bundle",
+            "session::fresh_processes_commit_and_replay_one_session",
+            "replay::fresh_processes_replay_and_reduce_a_bundle",
+            "fork::children_are_credited_only_on_framed_success_at_exit_zero",
+            "fork::inherited_descriptors_close_in_the_child",
+            "fork::the_watchdog_classifies_a_hung_child",
+            "fork::a_fork_is_refused_off_its_boundary",
+            "branch::forked_suffixes_keep_the_pending_put_prefix",
+            "branch::fresh_processes_branch_a_bundle_alike",
+            "suffix::composed_bounded_tree_accounts_every_leaf_and_frontier",
+            "suffix::fresh_processes_explore_a_composed_bounded_tree_alike",
+            "fuzz::the_campaign_driver_loads_seeds_and_executes_positively",
+            "fuzz::a_merge_enters_the_driver_in_its_inner_process",
+            "fuzz::a_wrong_byte_input_audits_tears_down_then_aborts",
+            "fuzz::a_panicking_input_tears_down_before_the_driver_aborts",
+            "fuzz::the_appended_seeds_replay_alike_in_fresh_processes",
+            "fuzz::the_parser_targets_load_seeds_and_execute_positively",
+            "fuzz::a_parser_failure_replays_and_minimizes"
+          ],
+          "witnesses": [
+            "^bundle: [0-9a-f]{64} recorded alike by two fresh processes, complete pass with every obligation fired$",
+            "^bundle: contended digest [0-9a-f]{64} recorded alike by two fresh processes and replayed in a third, reaching every chaos point$",
+            "^replay: the planted bundle reproduced in fresh processes; its regression of [1-9][0-9]* kept steps reproduced Bytes in another$",
+            "^replay: the acked bundle reproduced in fresh processes; its regression of [1-9][0-9]* kept steps reproduced History in another$",
+            "^replay: the corrupted bundle reproduced in fresh processes; its regression of [1-9][0-9]* kept steps reproduced Bytes in another$",
+            "^replay: the panicking bundle reduced under its panic in fresh processes; its regression of [1-9][0-9]* kept steps reruns to the run panicked at crates/kestrike/src/net/world_tests\\.rs:[0-9]+:[0-9]+: a planted panic once the upload published$",
+            "^explore: the composed-bounded tree of [1-9][0-9]* leaves explored alike in two fresh processes$",
+            "^cluster: cluster-broad digest [0-9a-f]{64} recorded alike in two fresh processes and replayed in a third$",
+            "^session: [1-9][0-9]* windows committed and replayed alike by fresh processes, chain [0-9a-f]{64}$",
+            "^vocabulary: the old planted bundle decodes [1-9][0-9]* declared and [1-9][0-9]* carried action codes to their kinds, a complete violation of Bytes$"
+          ]
+        },
+        {
+          "id": "history-cohorts",
+          "kind": "cohort",
+          "tests": [
+            "histories::each_history_replays_in_a_fresh_process"
+          ],
+          "member": "^cohort: (\\S+) digest [0-9a-f]{64} ended as declared and replayed in a fresh process$",
+          "members": [
+            "c1",
+            "c1-mixed",
+            "c1-reincarnated",
+            "c1-other-token",
+            "c1-out-of-order",
+            "c1-unrecorded",
+            "c1-duplicate",
+            "c2",
+            "c3",
+            "c4",
+            "c4-close-dropping",
+            "c6",
+            "s3-d-19",
+            "s3-d-19-mutated",
+            "s3-d-19-retained-live",
+            "s3-d-19-displaced",
+            "c1-old-cancelled",
+            "c1-effect-after-release",
+            "s3-d-19-displaced-dropped"
+          ]
+        },
+        {
+          "id": "fleet-replay",
+          "kind": "campaign",
+          "tests": [
+            "fleet::pinned_runs_report_their_digests",
+            "fleet::two_fresh_processes_report_one_digest_for_every_pinned_run"
+          ],
+          "member": "^fleet: pinned (\\S+ root [0-9]+): credit pass; digest [0-9a-f]{64}$",
+          "members": [
+            "six root 1",
+            "six root 2",
+            "dense root 1",
+            "dense root 2",
+            "host-loss root 1",
+            "host-loss root 2",
+            "crash-table root 1"
+          ],
+          "witnesses": [
+            "^fleet: 7 pinned digests reported alike by two fresh processes$"
+          ]
+        }
+      ]
+    },
+    "search": {
+      "crate": "kestrike",
+      "target": "kestrike",
+      "ignored": false,
+      "tier": "pr",
+      "rows": [
+        {
+          "id": "serve-search-shallow",
+          "kind": "search",
+          "tests": [
+            "net::serve_search_tests::the_shallow_search_exhausts_its_bound"
+          ],
+          "bound": "^serve-search-shallow: Exhaustive Totals \\{ .*, depth: 5 \\}$",
+          "witnesses": [
+            "^serve-search-shallow: \\w+ Totals \\{ alphabet: 12, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\}$"
+          ]
+        }
+      ]
+    },
+    "search-nightly": {
+      "crate": "kestrike",
+      "target": "kestrike",
+      "ignored": true,
+      "tier": "nightly",
+      "rows": [
+        {
+          "id": "serve-search-nightly",
+          "kind": "search",
+          "tests": [
+            "net::serve_search_tests::the_nightly_search_exhausts_its_bound"
+          ],
+          "bound": "^serve-search-nightly: Exhaustive Totals \\{ .*, depth: 6 \\}$",
+          "witnesses": [
+            "^serve-search-nightly: \\w+ Totals \\{ alphabet: 12, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\}$"
+          ]
+        },
+        {
+          "id": "serve-search-prefinal-ack",
+          "kind": "search",
+          "tests": [
+            "net::serve_search_tests::the_prefinal_ack_search_exhausts_its_bound"
+          ],
+          "bound": "^serve-search-prefinal-ack: Exhaustive Totals \\{ .*, depth: 5 \\} witnesses: ",
+          "witnesses": [
+            "^serve-search-prefinal-ack: Exhaustive Totals \\{ alphabet: 12, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\} witnesses: (.* )?ef-09-prefinal-ack-complete( |$)",
+            "^serve-search-prefinal-ack: Exhaustive Totals \\{ alphabet: 12, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\} witnesses: (.* )?ef-09-completed-held-release( |$)"
+          ]
+        },
+        {
+          "id": "serve-search-completed-held",
+          "kind": "search",
+          "tests": [
+            "net::serve_search_tests::the_completed_held_search_exhausts_its_bound"
+          ],
+          "bound": "^serve-search-completed-held: Exhaustive Totals \\{ .*, depth: 5 \\} witnesses: ",
+          "witnesses": [
+            "^serve-search-completed-held: Exhaustive Totals \\{ alphabet: 12, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\} witnesses: (.* )?ef-09-prefinal-ack-complete( |$)",
+            "^serve-search-completed-held: Exhaustive Totals \\{ alphabet: 12, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\} witnesses: (.* )?ef-09-completed-held-release( |$)"
+          ]
+        },
+        {
+          "id": "serve-search-pressed",
+          "kind": "search",
+          "tests": [
+            "net::serve_search_tests::negative_control_replies_first_after_a_poll_replies_fill_starves_a_due_get",
+            "net::serve_search_tests::the_pressed_search_exhausts_its_bound"
+          ],
+          "bound": "^serve-search-pressed: Exhaustive Totals \\{ .*, depth: 7 \\} activations: ",
+          "witnesses": [
+            "^serve-search-pressed: Exhaustive Totals \\{ alphabet: 9, states: [1-9][0-9]*, transitions: [0-9]+, high_water: [0-9]+, memory: [0-9]+, depth: [0-9]+ \\} activations: [1-9][0-9]*$"
+          ]
+        },
+        {
+          "id": "fleet-scheduled-roots",
+          "kind": "campaign",
+          "tests": [
+            "net::takeover_history_tests::fleet::volume_tests::the_volume_scenarios_pass_on_their_scheduled_roots_and_every_crash_cell",
+            "net::takeover_history_tests::fleet::zone_tests::the_zone_scenarios_pass_on_their_scheduled_roots",
+            "net::takeover_history_tests::fleet::repair_tests::the_repair_and_host_scenarios_pass_on_their_scheduled_roots"
+          ],
+          "member": "^fleet: scheduled (\\S.* root [0-9]+): pass$",
+          "members": [
+            "volume no-fault root 2",
+            "volume impaired root 2",
+            "volume impaired-brief root 2",
+            "volume stall root 2",
+            "volume control enroll-back root 2",
+            "volume lost-alone root 2",
+            "volume correlated root 2",
+            "volume correlated-late root 2",
+            "volume control loss-evidence root 2",
+            "volume correlated-replay root 1",
+            "volume replace-replacement-acknowledged root 1",
+            "volume replace-replacement-committed root 1",
+            "volume replace-replacement-lost root 1",
+            "volume replace-createopen-acknowledged root 1",
+            "volume replace-createopen-committed root 1",
+            "volume replace-createopen-lost root 1",
+            "volume replace-createissued-acknowledged root 1",
+            "volume replace-createissued-committed root 1",
+            "volume replace-createissued-lost root 1",
+            "volume replace-createcreated-acknowledged root 1",
+            "volume replace-createcreated-committed root 1",
+            "volume replace-createcreated-lost root 1",
+            "volume replace-recordattach-acknowledged root 1",
+            "volume replace-recordattach-committed root 1",
+            "volume replace-recordattach-lost root 1",
+            "volume replace-addspare-acknowledged root 1",
+            "volume replace-addspare-committed root 1",
+            "volume replace-addspare-lost root 1",
+            "volume replace-flip-acknowledged root 1",
+            "volume replace-flip-committed root 1",
+            "volume replace-flip-lost root 1",
+            "zone loss root 2",
+            "zone loss-replay root 1",
+            "zone settle root 2",
+            "repair-and-host settle root 2",
+            "repair-and-host reenroll root 2",
+            "repair-and-host standby-loss root 2",
+            "repair-and-host double-loss root 2",
+            "repair-and-host partition-repair root 2",
+            "repair-and-host census-full root 2",
+            "repair-and-host attach-cap root 2",
+            "repair-and-host foreign root 2",
+            "repair-and-host racing root 2",
+            "repair-and-host partition-loss root 2",
+            "repair-and-host false-suspicion root 2",
+            "repair-and-host deposed-owner root 2",
+            "repair-and-host dense root 2",
+            "repair-and-host census-and-settle-controls root 2",
+          "repair-and-host census-and-settle-siblings root 1",
+          "repair-and-host census-and-settle-siblings root 2",
+          "repair-and-host standby-need-dropped root 2",
+          "repair-and-host pinned root 2",
+          "repair-and-host unknown-confirm-committed root 2",
+          "repair-and-host unknown-confirm-lost root 2",
+          "repair-and-host unknown-reserve-committed root 2",
+          "repair-and-host unknown-reserve-lost root 2",
+          "repair-and-host unknown-page-committed root 2",
+          "repair-and-host unknown-page-lost root 2",
+          "repair-and-host regressed-reads root 2",
+          "repair-and-host unknown-confirm-committed root 1",
+          "repair-and-host unknown-reserve-committed root 1",
+          "repair-and-host unknown-reserve-lost root 1",
+          "repair-and-host unknown-page-lost root 1",
+            "repair-and-host enroll-reserve-committed root 1",
+            "repair-and-host enroll-reserve-lost root 1",
+            "repair-and-host enroll-record-acknowledged root 1",
+            "repair-and-host enroll-record-committed root 1",
+            "repair-and-host enroll-record-lost root 1",
+            "repair-and-host enroll-attach-acknowledged root 1",
+            "repair-and-host enroll-attach-committed root 1",
+            "repair-and-host enroll-enroll-acknowledged root 1",
+            "repair-and-host enroll-enroll-committed root 1",
+            "repair-and-host enroll-enroll-lost root 1",
+            "repair-and-host enroll-designate-acknowledged root 1",
+            "repair-and-host enroll-designate-lost root 1",
+            "repair-and-host fresh-reserve-acknowledged root 1",
+            "repair-and-host fresh-reserve-committed root 1",
+            "repair-and-host fresh-reserve-lost root 1",
+            "repair-and-host fresh-record-acknowledged root 1",
+            "repair-and-host fresh-record-lost root 1",
+            "repair-and-host fresh-attach-acknowledged root 1",
+            "repair-and-host fresh-attach-committed root 1",
+            "repair-and-host fresh-attach-lost root 1",
+            "repair-and-host fresh-enroll-committed root 1",
+            "repair-and-host fresh-enroll-lost root 1",
+            "repair-and-host fresh-designate-acknowledged root 1",
+            "repair-and-host fresh-designate-committed root 1",
+            "repair-and-host fresh-designate-lost root 1"
+          ],
+          "witnesses": [
+            "^fleet: scheduled volume: 10 checks and 21 crash cells passed$",
+            "^fleet: scheduled zone: 3 checks passed$",
+            "^fleet: scheduled repair-and-host: 29 checks and 25 crash cells passed$"
+          ]
+        }
+      ]
+    },
+    "long-run": {
+      "crate": "kestrike",
+      "target": "sim_worker",
+      "ignored": true,
+      "tier": "nightly",
+      "rows": [
+        {
+          "id": "long-run-gate",
+          "kind": "campaign",
+          "tests": [
+            "long_run::the_long_run_gate_passes"
+          ],
+          "bound": "^long-run: marks: \\w+ \\d+/\\d+(?:, \\w+ \\d+/\\d+)*$",
+          "witnesses": [
+            "^long-run: churn: seed 10 collide true actions 409600; [0-9]+ of [0-9]+ checks at the fixture occupancy; [0-9]+ units published, [0-9]+ turnovers$",
+            "^long-run: churn witnesses: [1-9][0-9]* situations fired [1-9][0-9]* times, [0-9]+ fault members injected [0-9]+ and affected [0-9]+ times$",
+            "^long-run: mixed witnesses: all [1-9][0-9]* fired$"
+          ]
+        },
+        {
+          "id": "scaled-seeds",
+          "kind": "campaign",
+          "tests": [
+            "scaled::every_seed_passes_on_one_engine_each"
+          ],
+          "member": "^scaled: (units=64 slots=16 chunk=8192 reserve=2 seed [0-9]+) collide (?:true|false) actions 409600: complete; ",
+          "members": [
+            "units=64 slots=16 chunk=8192 reserve=2"
+          ],
+          "seeds": 12,
+          "witnesses": [
+            "^scaled: seed witnesses: .*; lifecycle and poisoned-gate phases ran$"
+          ]
+        },
+        {
+          "id": "scaled-geometries",
+          "kind": "campaign",
+          "tests": [
+            "scaled::every_larger_geometry_passes_on_one_engine_each"
+          ],
+          "member": "^scaled: (units=(?:65 slots=33 chunk=4096 reserve=2|129 slots=33 chunk=16384 reserve=32) seed [0-9]+) collide (?:true|false) actions 409600: complete; ",
+          "members": [
+            "units=65 slots=33 chunk=4096 reserve=2",
+            "units=129 slots=33 chunk=16384 reserve=32"
+          ],
+          "seeds": 12,
+          "witnesses": [
+            "^scaled: geometry units=65 slots=33 chunk=4096 reserve=2 witnesses: reserve and fragmentation fired; [0-9]+ of [0-9]+ checks at the fixture occupancy$",
+            "^scaled: geometry units=129 slots=33 chunk=16384 reserve=32 witnesses: reserve and fragmentation fired; [0-9]+ of [0-9]+ checks at the fixture occupancy$"
+          ]
+        },
+        {
+          "id": "warm-cycles",
+          "kind": "campaign",
+          "tests": [
+            "cycles::seeded_warm_cycles_pass_on_seeds_1_to_16"
+          ],
+          "member": "^cycles: (seed [0-9]+) cycles 32: safety pass; containment pass; retention pass; progress pass; quiescent conservation pass; publish-aligned conservation inconclusive \\[no checkpoint or frontier publication follows a quiescent boundary\\]; plateau inconclusive \\[no accepted plateau band\\]; identity [0-9a-f]{16}$",
+          "members": [
+            "seed 1",
+            "seed 2",
+            "seed 3",
+            "seed 4",
+            "seed 5",
+            "seed 6",
+            "seed 7",
+            "seed 8",
+            "seed 9",
+            "seed 10",
+            "seed 11",
+            "seed 12",
+            "seed 13",
+            "seed 14",
+            "seed 15",
+            "seed 16"
+          ],
+          "witnesses": [
+            "^cycles: census: covered 4 gap 4 undecided 8 not-required 24; gaps \\[ProcessDeath/qualified-persistence, ProcessDeath/root-or-admission-publication, HostOrDevice/qualified-persistence, HostOrDevice/root-or-admission-publication\\]$",
+            "^cycles: composed: restarts [1-9][0-9]* takeovers [1-9][0-9]* designated [1-9][0-9]* interrupted [1-9][0-9]* unknown [1-9][0-9]* after-preempt [1-9][0-9]* stale [1-9][0-9]* fresh-hosts 16 unauthorized [1-9][0-9]* damaged [1-9][0-9]* repaired [1-9][0-9]* landings [0-9]+ chain-full [1-9][0-9]* fills [1-9][0-9]* invalidations [1-9][0-9]* captures 512$",
+            "^cycles: unscored: successor checkpoint publication and consolidation; duplicate extents; both roots affected; log-full and quarantine-full; missing REMOVE and REPLACE dependencies, covered by the directed suffix histories; a delayed old-tenure write after its successor's fence; a second fresh host; a GET racing a mutation, excluded by the drain before each mutation; every row unit of the checkpoint damaged, which the warm load refuses as a whole slot; an INVALIDATE or a flip of a FILL the cycles published$",
+            "^cycles: discovery: 16 seeds of 32 cycles, unpowered; every run passed its four verdicts and its quiescent conservation, and no run is a confirmation$"
+          ]
+        },
+        {
+          "id": "fleet-roots",
+          "kind": "campaign",
+          "tests": [
+            "fleet::fleet_runs_pass_on_roots_1_to_16"
+          ],
+          "member": "^fleet: (root [0-9]+ hosts [0-9]+ shards [0-9]+): one owner per tenure pass; volume kept pass; retained set pass; settle or blocker pass; host share pass; untouched shards pass; credit pass; identity [0-9a-f]{16}$",
+          "members": [
+            "root 1 hosts 6 shards 6",
+            "root 2 hosts 6 shards 6",
+            "root 3 hosts 6 shards 6",
+            "root 4 hosts 6 shards 6",
+            "root 5 hosts 6 shards 6",
+            "root 6 hosts 6 shards 6",
+            "root 7 hosts 6 shards 6",
+            "root 8 hosts 6 shards 6",
+            "root 9 hosts 6 shards 6",
+            "root 10 hosts 6 shards 6",
+            "root 11 hosts 6 shards 6",
+            "root 12 hosts 6 shards 6",
+            "root 13 hosts 6 shards 6",
+            "root 14 hosts 6 shards 6",
+            "root 15 hosts 6 shards 6",
+            "root 16 hosts 6 shards 6",
+            "root 1 hosts 4 shards 8",
+            "root 2 hosts 4 shards 8",
+            "root 3 hosts 4 shards 8",
+            "root 4 hosts 4 shards 8",
+            "root 5 hosts 4 shards 8",
+            "root 6 hosts 4 shards 8",
+            "root 7 hosts 4 shards 8",
+            "root 8 hosts 4 shards 8",
+            "root 9 hosts 4 shards 8",
+            "root 10 hosts 4 shards 8",
+            "root 11 hosts 4 shards 8",
+            "root 12 hosts 4 shards 8",
+            "root 13 hosts 4 shards 8",
+            "root 14 hosts 4 shards 8",
+            "root 15 hosts 4 shards 8",
+            "root 16 hosts 4 shards 8"
+          ],
+          "bound": "^fleet: roots: ",
+          "witnesses": [
+            "^fleet: roots: 32 runs passed, 0 takeovers, settle at most (?:[4-9]|[1-5][0-9]|6[0-4]) of 64 rounds$"
+          ]
+        },
+        {
+          "id": "publishing-cycles",
+          "kind": "campaign",
+          "tests": [
+            "publishing::seeded_restart_cycles_load_the_published_cut_plus_the_suffix"
+          ],
+          "member": "^publishing: (seed [0-9]+) cycles 8: every warm load held the published cut plus the suffix; publications [1-9][0-9]*; fills [1-9][0-9]*; removals [1-9][0-9]*; checks 96; suffix loads [1-9][0-9]*; identity [0-9a-f]{16}$",
+          "members": [
+            "seed 1",
+            "seed 2",
+            "seed 3",
+            "seed 4",
+            "seed 5",
+            "seed 6",
+            "seed 7",
+            "seed 8",
+            "seed 9",
+            "seed 10",
+            "seed 11",
+            "seed 12",
+            "seed 13",
+            "seed 14",
+            "seed 15",
+            "seed 16"
+          ],
+          "witnesses": [
+            "^publishing: 16 seeds of 8 restarts; publications [1-9][0-9]*; fills [1-9][0-9]*; removals [1-9][0-9]*; checks 1536$"
+          ]
+        },
+        {
+          "id": "rolling-cycles",
+          "kind": "campaign",
+          "tests": [
+            "rolling::seeded_roll_cycles_restart_at_e_plus_one_with_every_acknowledged_mutation"
+          ],
+          "member": "^rolling: (seed [0-9]+) cycles 8: every tenure after a roll held every acknowledged mutation; handoff [0-9]+; slot [0-9]+; placement [0-9]+; early [0-9]+; fills [1-9][0-9]*; removals [1-9][0-9]*; checks 108; identity [0-9a-f]{16}$",
+          "members": [
+            "seed 1",
+            "seed 2",
+            "seed 3",
+            "seed 4",
+            "seed 5",
+            "seed 6",
+            "seed 7",
+            "seed 8",
+            "seed 9",
+            "seed 10",
+            "seed 11",
+            "seed 12",
+            "seed 13",
+            "seed 14",
+            "seed 15",
+            "seed 16"
+          ],
+          "witnesses": [
+            "^rolling: 16 seeds of 8 rolls; handoff [1-9][0-9]*; slot [1-9][0-9]*; placement [1-9][0-9]*; early [1-9][0-9]*; fills [1-9][0-9]*; removals [1-9][0-9]*; checks 1728$"
+          ]
+        },
+        {
+          "id": "slot-reuse-cycles",
+          "kind": "campaign",
+          "tests": [
+            "cycles::slot_reuse_cycles_replace_a_host_every_cycle_on_seeds_1_to_16"
+          ],
+          "member": "^cycles: (seed [0-9]+) cycles 24: safety pass; containment pass; retention pass; progress pass; quiescent conservation pass; publish-aligned conservation inconclusive \\[no checkpoint or frontier publication follows a quiescent boundary\\]; plateau inconclusive \\[no accepted plateau band\\]; identity [0-9a-f]{16}$",
+          "members": [
+            "seed 1",
+            "seed 2",
+            "seed 3",
+            "seed 4",
+            "seed 5",
+            "seed 6",
+            "seed 7",
+            "seed 8",
+            "seed 9",
+            "seed 10",
+            "seed 11",
+            "seed 12",
+            "seed 13",
+            "seed 14",
+            "seed 15",
+            "seed 16"
+          ],
+          "witnesses": [
+            "^cycles: slot-reuse: 16 seeds of 24 cycles; replacements 384 drops 384 preempts [1-9][0-9]* live-max 3; every run passed its four verdicts and its quiescent conservation, and no replaced host returned$"
+          ]
+        },
+        {
+          "id": "handoff-cycles",
+          "kind": "campaign",
+          "tests": [
+            "handoff::seeded_handoff_cycles_hold_every_acknowledged_mutation_across_both_hosts"
+          ],
+          "member": "^handoff: (seed [0-9]+) cycles 8: every tenure after a planned exit held every acknowledged mutation; transfers [0-9]+; restarts [0-9]+; fills [1-9][0-9]*; removals [1-9][0-9]*; checks 108; identity [0-9a-f]{16}$",
+          "members": [
+            "seed 1",
+            "seed 2",
+            "seed 3",
+            "seed 4",
+            "seed 5",
+            "seed 6",
+            "seed 7",
+            "seed 8",
+            "seed 9",
+            "seed 10",
+            "seed 11",
+            "seed 12",
+            "seed 13",
+            "seed 14",
+            "seed 15",
+            "seed 16"
+          ],
+          "witnesses": [
+            "^handoff: 16 seeds of 8 planned exits; transfers [1-9][0-9]*; restarts [1-9][0-9]*; fills [1-9][0-9]*; removals [1-9][0-9]*; checks 1728$"
+          ]
+        },
+        {
+          "id": "deeper-suffix-trees",
+          "kind": "campaign",
+          "tests": [
+            "suffix::deeper_composed_bounded_trees_account_every_leaf_and_frontier"
+          ],
+          "bound": "^deeper-suffix: 2 trees complete within their bounds, every leaf passing$",
+          "witnesses": [
+            "^deeper-suffix: depth=4 children=3 faults=12 advances=16: [1-9][0-9]* nodes credited, [1-9][0-9]* leaves walked alike, [0-9]+ unexplored, deepest leaf 4, 0 problems$",
+            "^deeper-suffix: depth=7 children=2 faults=12 advances=16: [1-9][0-9]* nodes credited, [1-9][0-9]* leaves walked alike, [0-9]+ unexplored, deepest leaf 7, 0 problems$"
+          ]
+        }
+      ]
+    },
+    "fuzz-smoke": {
+      "tier": "pr",
+      "rows": [
+        {
+          "id": "frame-fuzz-smoke",
+          "target": "frame",
+          "seconds": 10,
+          "executions": 1
+        },
+        {
+          "id": "campaign-fuzz-smoke",
+          "target": "campaign",
+          "seconds": 20,
+          "executions": 1
+        },
+        {
+          "id": "record-fuzz-smoke",
+          "target": "record",
+          "seconds": 10,
+          "executions": 1
+        },
+        {
+          "id": "wire-fuzz-smoke",
+          "target": "wire",
+          "seconds": 10,
+          "executions": 1
+        }
+      ]
+    },
+    "fuzz": {
+      "tier": "nightly",
+      "rows": [
+        {
+          "id": "frame-fuzz",
+          "target": "frame",
+          "seconds": 60,
+          "executions": 1
+        },
+        {
+          "id": "campaign-fuzz",
+          "target": "campaign",
+          "seconds": 120,
+          "executions": 1
+        },
+        {
+          "id": "record-fuzz",
+          "target": "record",
+          "seconds": 60,
+          "executions": 1
+        },
+        {
+          "id": "wire-fuzz",
+          "target": "wire",
+          "seconds": 60,
+          "executions": 1
+        }
+      ]
+    },
+    "isa-x86-64": {
+      "crate": "kestrike",
+      "target": "kestrike",
+      "ignored": false,
+      "tier": "nightly",
+      "arch": "x86_64",
+      "features": [
+        "sse4_2",
+        "pclmulqdq",
+        "avx512f",
+        "avx512bw",
+        "vpclmulqdq"
+      ],
+      "rows": [
+        {
+          "id": "x86-crc-chains",
+          "kind": "isa",
+          "tests": [
+            "net::frame_tests::the_chain_join_encodes_and_parses_every_golden_header_as_the_bitwise_crc"
+          ],
+          "witnesses": [
+            "^isa: crc-chains ran [1-9][0-9]* times; x86_64 sse4\\.2=true pclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-crc-narrow",
+          "kind": "isa",
+          "tests": [
+            "storage::record::crc32c_tests::the_narrow_x86_kernels_run_and_match_the_table"
+          ],
+          "witnesses": [
+            "^isa: crc-narrow ran [1-9][0-9]* times; x86_64 sse4\\.2=true pclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-crc-wide",
+          "kind": "isa",
+          "tests": [
+            "storage::record::crc32c_tests::the_wide_x86_fold_runs_and_matches_the_table"
+          ],
+          "witnesses": [
+            "^isa: crc-wide ran [1-9][0-9]* times; x86_64 sse4\\.2=true pclmulqdq=true avx512f=true vpclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-hmac-9",
+          "kind": "isa",
+          "tests": [
+            "net::auth_tests::nine_inputs_tag_through_the_group_path_and_in_one_wide_pass_with_seven_repeated_lanes"
+          ],
+          "witnesses": [
+            "^isa: hmac-wide-9 ran 2 times; x86_64 avx512f=true avx512bw=true vpclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-hmac-15",
+          "kind": "isa",
+          "tests": [
+            "net::auth_tests::fifteen_inputs_tag_in_one_wide_pass"
+          ],
+          "witnesses": [
+            "^isa: hmac-wide-15 ran 2 times; x86_64 avx512f=true avx512bw=true vpclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-hmac-16",
+          "kind": "isa",
+          "tests": [
+            "net::auth_tests::sixteen_inputs_tag_in_one_wide_pass"
+          ],
+          "witnesses": [
+            "^isa: hmac-wide-16 ran 2 times; x86_64 avx512f=true avx512bw=true vpclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-hmac-17",
+          "kind": "isa",
+          "tests": [
+            "net::auth_tests::seventeen_inputs_tag_in_one_wide_pass_and_one_alone"
+          ],
+          "witnesses": [
+            "^isa: hmac-wide-17 ran 2 times; x86_64 avx512f=true avx512bw=true vpclmulqdq=true$"
+          ]
+        },
+        {
+          "id": "x86-index-full-groups",
+          "kind": "isa",
+          "tests": [
+            "index::lanes::tests::only_a_full_group_runs_the_vector_pass"
+          ],
+          "witnesses": [
+            "^isa: index-vector ran [1-9][0-9]* times; x86_64 avx512f=true vpclmulqdq=true$"
+          ]
+        }
+      ]
+    },
+    "isa-aarch64": {
+      "crate": "kestrike",
+      "target": "kestrike",
+      "ignored": false,
+      "tier": "nightly",
+      "arch": "aarch64",
+      "features": [
+        "asimd",
+        "crc32",
+        "aes",
+        "pmull",
+        "sha1",
+        "sha2",
+        "sha3",
+        "atomics"
+      ],
+      "rows": [
+        {
+          "id": "aarch64-sha2-chains",
+          "kind": "isa",
+          "tests": [
+            "net::sha_lanes_tests::the_sha2_kernels_run_every_chain_count_and_match_the_reference"
+          ],
+          "witnesses": [
+            "^isa: sha2-two ran [1-9][0-9]* times; aarch64 sha2=true$",
+            "^isa: sha2-three ran [1-9][0-9]* times; aarch64 sha2=true$",
+            "^isa: sha2-four ran [1-9][0-9]* times; aarch64 sha2=true$"
+          ]
+        },
+        {
+          "id": "aarch64-sha2-one",
+          "kind": "isa",
+          "tests": [
+            "failover::report::sha256_tests::the_tag_equals_the_reference_hmac_at_every_length"
+          ],
+          "witnesses": [
+            "^isa: sha2-one ran 1694 times; aarch64 sha2=true sha3=true$"
+          ]
+        },
+        {
+          "id": "aarch64-sha2-one-request",
+          "kind": "isa",
+          "tests": [
+            "failover::planned::request::tests::a_tag_equals_hmac_sha256_under_the_derived_key_bytes"
+          ],
+          "witnesses": [
+            "^isa: sha2-one-request ran 1536 times; aarch64 sha2=true sha3=true$"
+          ]
+        },
+        {
+          "id": "aarch64-sha2-lone",
+          "kind": "isa",
+          "tests": [
+            "net::sha_lanes_tests::the_lone_chain_runs_the_one_chain_kernel_and_matches_the_reference",
+            "net::auth_tests::a_frame_tagged_and_authenticated_alone_runs_the_one_chain_kernel",
+            "net::auth_tests::a_group_of_one_frame_runs_the_one_chain_kernel"
+          ],
+          "witnesses": [
+            "^isa: sha2-lone ran 82 times; aarch64 sha2=true sha3=true$",
+            "^isa: hmac-lone ran 8 times; aarch64 sha2=true sha3=true$",
+            "^isa: group-lone ran 4 times; aarch64 sha2=true sha3=true$"
+          ]
+        },
+        {
+          "id": "aarch64-crc-lanes",
+          "kind": "isa",
+          "tests": [
+            "net::frame_tests::the_lane_fold_encodes_and_parses_every_golden_header_as_the_bitwise_crc"
+          ],
+          "witnesses": [
+            "^isa: crc-lanes ran [1-9][0-9]* times; aarch64 crc=true aes=true$"
+          ]
+        },
+        {
+          "id": "aarch64-crc-instruction",
+          "kind": "isa",
+          "tests": [
+            "storage::record::crc32c_tests::the_crc_instruction_kernel_runs_and_matches_the_table"
+          ],
+          "witnesses": [
+            "^isa: crc-instruction ran [1-9][0-9]* times; aarch64 crc=true$"
+          ]
+        },
+        {
+          "id": "aarch64-crc-pmull",
+          "kind": "isa",
+          "tests": [
+            "storage::record::crc32c_tests::the_pmull_fold_runs_and_matches_the_table"
+          ],
+          "witnesses": [
+            "^isa: crc-pmull ran [1-9][0-9]* times; aarch64 crc=true aes=true$"
+          ]
+        },
+        {
+          "id": "aarch64-polyval-pmull",
+          "kind": "isa",
+          "tests": [
+            "net::data_hash_tests::the_pmull_engine_runs_and_matches_the_reference"
+          ],
+          "witnesses": [
+            "^isa: polyval-pmull ran [1-9][0-9]* times; aarch64 neon=true aes=true sha3=true$"
+          ]
+        },
+        {
+          "id": "aarch64-hmac-quad",
+          "kind": "isa",
+          "tests": [
+            "net::auth_tests::sixteen_full_fragments_tag_in_four_groups_of_four_chains"
+          ],
+          "witnesses": [
+            "^isa: hmac-quad-16 ran 528 times; aarch64 sha2=true$"
+          ]
+        },
+        {
+          "id": "aarch64-sha2-tail",
+          "kind": "isa",
+          "tests": [
+            "net::sha_lanes_tests::the_tail_kernel_runs_one_pass_per_group_and_matches_its_three_compressions",
+            "net::sha_lanes_tests::the_tail_computes_the_rfc_4231_vectors_in_every_chain_position",
+            "net::sha_lanes_tests::compile_time_round_words_equal_the_schedule_expanded_at_run_time",
+            "net::sha_lanes_tests::a_tail_outside_two_to_four_equal_chains_changes_nothing",
+            "net::tag_group_tests::header_only_groups_run_one_tail_pass_each"
+          ],
+          "witnesses": [
+            "^isa: sha2-tail ran 12 times; aarch64 sha2=true$",
+            "^isa: hmac-tail ran 12 times; aarch64 sha2=true$"
+          ]
+        },
+        {
+          "id": "aarch64-entropy-svc",
+          "kind": "isa",
+          "tests": [
+            "entropy::tests::an_entropy_draw_writes_exactly_its_sixteen_bytes"
+          ],
+          "witnesses": [
+            "^isa: entropy-svc ran [1-9][0-9]* times; aarch64 svc=true$"
+          ]
+        }
+      ]
+    }
+  },
+  "asan": {
+    "targets": [
+      "spdk_sys",
+      "kestrike"
+    ],
+    "required": {
+      "spdk_sys": {
+        "modules": [
+          "shim_tests"
+        ],
+        "tests": [
+          "shim_tests::a_one_byte_header_read_is_reported_at_the_shim_frame",
+          "shim_tests::the_golden_header_checksums_to_its_published_value"
+        ]
+      },
+      "kestrike": {
+        "modules": [
+          "bind",
+          "native",
+          "index"
+        ],
+        "tests": [
+          "native::chain_tests::real::the_real_case_inventory_is_frozen",
+          "native::chain_tests::real::the_native_judge_accepts_exact_boundaries_and_rejects_changed_custody",
+          "native::chain_tests::real::the_native_judge_refuses_aggregate_completion_missing_boundaries_and_duplicates",
+          "native::chain_tests::the_invalid_contract_judge_requires_a_fatal_asan_report_and_the_free_shim_frame",
+          "native::env_tests::a_released_capture_cell_is_reported_as_a_use_after_free",
+          "native::env_tests::a_saved_capture_stream_outlives_restore_and_later_captures"
+        ]
+      }
+    }
+  }
+}

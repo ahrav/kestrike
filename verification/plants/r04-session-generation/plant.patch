@@ -1,0 +1,15 @@
+diff --git a/crates/kestrike/src/net/client.rs b/crates/kestrike/src/net/client.rs
+index 544b64642..f9976d431 100644
+--- a/crates/kestrike/src/net/client.rs
++++ b/crates/kestrike/src/net/client.rs
+@@ -1432,9 +1432,7 @@ fn of_session(
+     sessions
+         .active(OWNER)
+         .zip(sessions.nonces(OWNER))
+-        .filter(|(active, _)| {
+-            active.epoch == epoch && RequestId::from_wire(wire).generation() >= session_wires
+-        })
++        .filter(|(active, _)| active.epoch == epoch)
+         .map(|(_, nonces)| nonces)
+ }
+ 

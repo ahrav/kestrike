@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Response><Errors><Error><Code>IdempotentParameterMismatch</Code><Message>The client token you have provided is associated with a resource that is already deleted. Please use a different client token.</Message></Error></Errors><RequestID>4d3c2b1a-0f9e-4d8c-b7a6-958473625140</RequestID></Response>

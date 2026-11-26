@@ -1,0 +1,27 @@
+{
+  "id": "r07-joined-hit",
+  "row": 7,
+  "fix": {
+    "pull_request": 1586,
+    "commit": "490a505d834db2ee555577368956bbd084a38695"
+  },
+  "files": [
+    "crates/kestrike/src/storage/acquire.rs",
+    "crates/kestrike/src/storage/join.rs",
+    "crates/kestrike/src/storage/lookup.rs",
+    "crates/kestrike/src/storage/word.rs"
+  ],
+  "restores": "The follower's retain sets the visited bit with its right, so a joined acquisition refused `Closed` during its reservation earns a policy hit.",
+  "proof": "storage::join_tests::a_joined_acquisition_refused_closed_during_its_reservation_earns_no_hit",
+  "expected": [
+    "upload",
+    "faulted",
+    "cluster-broad",
+    "cluster-pressure",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "ordering",
+    "evidence": "The plant's refused joined read earns a hit only when a storage close lands between the follower's two cutoff reads inside one synchronous joined acquisition, and every order in which the plant's visited bit differs from the head's needs a second thread, which the one-thread, turn-level sweep worker cannot schedule; at commit 6240a6fd9 scratch traces fired at the planted `retain_right` in all 116,874 upload, 92,257 faulted, 41,304 cluster-broad and 47,866 cluster-pressure runs and in 44,419 of 44,421 cluster-swarm runs, at the joined reservation in 3,304 of 33,768 cluster-broad, 46,071 of 49,319 cluster-pressure, 6,117 of 11,215 cluster-swarm and 7,440 of 7,812 cluster-long runs and in no upload or faulted run, at the follower's two `Closed` refusals in none of 270,729 upload, 203,600 faulted, 57,693 cluster-broad, 22,918 cluster-pressure and 9,206 cluster-swarm runs, and at the refusal after the reservation in none of 2,266 cluster-long runs, where the refusal before it was not traced; `cluster-long` stays out of `expected` because the profile has no passing run at the default counts."
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "id": "ivk-2261",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/eni.rs",
+    "function": "Reach::of and Reach::reaches_gateway"
+  },
+  "defect": "The capture admits a gateway the kernel refuses at release: a broadcast address of the device, a gateway under a multicast route, or a network in 0.0.0.0/8.",
+  "property": {
+    "text": "A bind admits the device's network state only inside the restoration domain release replays: the MTU, the administrative link state, IPv4 addresses and main-table IPv4 routes, with each gateway reached by an address or route that release replays first. The capture refuses any other state.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/bind/eni.rs, module documentation"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1754,
+    "regression": {
+      "path": "crates/kestrike/src/bind/eni_tests.rs",
+      "tests": [
+        "bind::eni_tests::the_capture_refuses_a_gateway_whose_lookup_returns_a_multicast_route",
+        "bind::eni_tests::the_capture_refuses_a_gateway_at_a_broadcast_address_of_the_device"
+      ]
+    }
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "crates/kestrike/src/bind/eni_tests.rs, bind::eni_tests::the_capture_refuses_a_gateway_whose_lookup_returns_a_multicast_route; crates/kestrike/src/bind/eni_tests.rs, bind::eni_tests::the_capture_refuses_a_gateway_at_a_broadcast_address_of_the_device; crates/kestrike/src/bind/round_trip_tests.rs, bind::round_trip_tests::an_address_of_a_zero_network_brings_no_prefix_route_to_a_gateway"
+  },
+  "exclusion": "bind-and-failover",
+  "note": "blotter pull request 1754 fixed the broadcast and multicast cases, and its two regressions judge them. blotter pull request 1608 (a44d793e3) fixed the 0.0.0.0/8 case before it: an address whose network lies in 0.0.0.0/8 brings no prefix route, so it reaches a gateway only as the gateway itself (`Reach::of`). That case's regression is `bind::round_trip_tests::an_address_of_a_zero_network_brings_no_prefix_route_to_a_gateway` in crates/kestrike/src/bind/round_trip_tests.rs."
+}

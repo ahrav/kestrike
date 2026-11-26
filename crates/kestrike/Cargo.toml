@@ -1,0 +1,55 @@
+[package]
+name = "kestrike"
+version = "0.1.0"
+edition = "2024"
+description = "A hardware-oriented image cache whose objects live on a block device."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)", "cfg(kani)", "cfg(loom)", "cfg(protocol_contract)", "cfg(verus_keep_ghost)"] }
+
+[target.'cfg(all(target_os = "linux", target_pointer_width = "64"))'.dependencies]
+libc = "0.2.189"
+memchr = "2.8.3"
+polyval = "0.7.3"
+sha2 = "0.11.0"
+spdk-sys = { path = "../spdk-sys" }
+subtle = "2.6.1"
+
+# The simulation worker's fuzz driver: libFuzzer's runtime, entered once per
+# process from the worker's own entry.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libfuzzer-sys = "=0.4.13"
+
+# Model-based replay of the Q1 session model's traces against `Sessions`:
+# Quint Connect's driver contract and trace runner, the ITF values its traces
+# decode to, and the JSON the committed fixtures are read from.
+[dev-dependencies]
+itf = "0.4"
+quint-connect = "=0.1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# The protocol model kernels. Run one with, for example,
+# `RUSTFLAGS="--cfg loom" cargo test -p kestrike --lib --release grace_model`
+# (or `policy_model` for policy membership).
+[target.'cfg(loom)'.dev-dependencies]
+loom = "=0.7.2"
+
+# The supervisor's worker-protocol parser, for the simulation worker's
+# protocol contract case. Run it as the workspace lane does, with
+# `env -u CARGO_ENCODED_RUSTFLAGS RUSTFLAGS="--cfg protocol_contract" CARGO_TARGET_DIR=<target>-contract cargo test -p kestrike --test sim_worker -- --exact contract::the_supervisor_parses_every_worker_form`.
+# A build without the cfg neither builds nor links the parser, and
+# `campaign sim archive` fails a build that compiles it, so an archived
+# worker never links it.
+[target.'cfg(protocol_contract)'.dev-dependencies]
+campaign-supervisor = { path = "../campaign-supervisor" }
+
+# The simulation worker: the crate's module tree under `cfg(test)` without the
+# test harness, so it runs on one thread and speaks libtest itself.
+[[test]]
+name = "sim_worker"
+path = "src/worker.rs"
+harness = false

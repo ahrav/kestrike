@@ -1,0 +1,19 @@
+C L2b-scan-fence-dropped
+(* The credit shape with only the scan's fence dropped, credit_model's
+   Model<true, false> and the control dropping_the_scan_fence_hides_a_credit.
+   P0 is the fenced credit::park; P1 is the scan without fence_clear. Hidden
+   credit: 0:r0=1 (stale bit) and 1:r0=0 (stale word). *)
+{ x = 0; y = 1; }
+
+P0 (atomic_int* x, atomic_int* y) {
+  atomic_fetch_add_explicit(x, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r0 = atomic_load_explicit(y, memory_order_acquire);
+}
+
+P1 (atomic_int* x, atomic_int* y) {
+  atomic_fetch_and_explicit(y, 0, memory_order_acq_rel);
+  int r0 = atomic_load_explicit(x, memory_order_acquire);
+}
+
+exists (0:r0=1 /\ 1:r0=0)

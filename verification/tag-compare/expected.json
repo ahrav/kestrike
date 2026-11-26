@@ -1,0 +1,15 @@
+{
+  "sites": [
+    {"site": "tag-decision", "symbol": "tag_compare_decision", "expect": "pass"},
+    {"site": "early-return-control", "symbol": "tag_compare_early_return", "expect": "control",
+     "flags": "a branch on a partial comparison"}
+  ],
+  "callees": {
+    "subtle::black_box": 1,
+    "kestrike::net::tag_compare_tests::accepted": 0,
+    "kestrike::net::tag_compare_tests::rejected": 0,
+    "core::panicking::panic_cannot_unwind": 0
+  },
+  "tests": ["tag-decision", "early-return-control"],
+  "callers": ["net::tag_compare_tests::the_tag_callers_decide_equal_tags_and_every_mismatch_position"]
+}

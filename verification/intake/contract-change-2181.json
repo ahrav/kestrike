@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2181",
+  "kind": "contract-change",
+  "pull_request": 2181,
+  "changed": "The invariants of the obligation records fleet-world-restarts-every-owner-warm-and-judges-six-fleet-checks, fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure and fleet-zone-repair-and-host-scenarios-pass-on-their-second-root, and the new record fleet-serving-duties-retry-an-unknown-store-result-in-place-and-withdraw-on-a-regressed-read. Every Live fleet tenure runs the production serving duties, one Duties::turn after each owner poll, where the harness opened the suffix and wrote the coverage itself. The untouched-shard rule, which allowed no store request on an untouched shard's records, allows that shard's own duties' record views and nothing else: as many volume-record reads as shard-record reads, at least one view each whole view period of the interval and at most one each period begun in it, no read of another record and no write. An INVALIDATE is acknowledged through the duties' coverage write, on its acknowledged commit. A tenure whose duties named an exit is not counted as served, and an exit its scenario does not script fails the run's credit. The scheduled repair and host case counts 29 checks and 57 lines, where it counted 18 and 46.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-serving-duties-retry-an-unknown-store-result-in-place-and-withdraw-on-a-regressed-read",
+    "reason": "The new record states the contract of the serving duties' store results in the fleet: a timeout on the tenure open's Confirm, its suffix reservation or a coverage write licenses nothing, the duties retry in place with no exit and no second incarnation, the INVALIDATE is acknowledged only after an acknowledged coverage commit, a regressed read withdraws the tenure, and an unscripted duty exit fails the credit. The changed untouched-shard rule is stated in the invariant of fleet-world-restarts-every-owner-warm-and-judges-six-fleet-checks, with its controls for one extra read, one duty write and a view period with no view."
+  }
+}

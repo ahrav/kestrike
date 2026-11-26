@@ -1,0 +1,7 @@
+{
+  "id": "slot-load-size",
+  "reason": "The escape's excess appears only in a checkpoint slot load of about 7.7 million rows routed to one destination, outside the counts any sweep runs (a cluster world draws at most 8 keys and a mixed world's storage holds at most 512 units), and no agreed property bounds a heap peak as a rule text a simulation run judges. A rule text for the reader's charge and a world of that size lie outside #297.",
+  "covers": [
+    "ivk-2314"
+  ]
+}

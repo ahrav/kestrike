@@ -1,0 +1,23 @@
+C F3-fill-terminal-acquire-fence
+(* The observer's side as the service pass's run observation makes it: a
+   relaxed load of the state word, then an acquire fence, then the relaxed
+   terminal load. Departure observed with the upload-granted terminal:
+   1:r0=1 and 1:r1=1.
+   Events: P0 is the producer, its relaxed terminal store and its release
+   read-modify-write of the state word; P1 is the service pass, its relaxed
+   load of the state word, the acquire fence and its relaxed load of the
+   terminal. *)
+{ terminal = 1; state = 0; }
+
+P0 (atomic_int* terminal, atomic_int* state) {
+  atomic_store_explicit(terminal, 2, memory_order_relaxed);
+  int r0 = atomic_fetch_add_explicit(state, 1, memory_order_release);
+}
+
+P1 (atomic_int* terminal, atomic_int* state) {
+  int r0 = atomic_load_explicit(state, memory_order_relaxed);
+  atomic_thread_fence(memory_order_acquire);
+  int r1 = atomic_load_explicit(terminal, memory_order_relaxed);
+}
+
+exists (1:r0=1 /\ 1:r1=1)

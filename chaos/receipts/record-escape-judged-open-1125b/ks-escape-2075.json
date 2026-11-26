@@ -1,0 +1,40 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/core/validity.py",
+      "ks-escape-2075"
+    ],
+    "defect": "k9-placement-judged-open",
+    "detail": "valid: k9-placement-across-close 437887 caught of 500 required, 26 replays; k9-placement-across-storage-close 437177 pass of 500 required, 26 replays; control k9-placement-judged-open 438068 runs, 27 replays, none missed",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "de373d2b7fcf9495c98c4575e7aa796d8d5f6cb730aec67c9fa1e123279d91d7",
+      "run.json": "ecf35d94b02934e66cd185961e8e1b47989b14a3f5e1f0a0262e1cd6fbd981ab",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "5534971f27b38900689bf4196059860ad6accfdec83c728f6f7119ffe71741d7"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941"
+    },
+    "mode": "control",
+    "outcome": "held",
+    "row": "ks-escape-2075",
+    "rows": {
+      "ks-escape-2075": "613b071a0f4f3888847a1b48e1a29029c0b91ca2090a8b16da8c5ecda3df0101"
+    },
+    "scenario": "ks-escape-2075",
+    "system_build": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-25T06:55:17Z",
+    "run_id": "record-escape-judged-open-1125b",
+    "started": "2026-11-25T06:53:14Z"
+  }
+}

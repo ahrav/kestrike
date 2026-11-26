@@ -1,0 +1,16 @@
+[Unit]
+Description=Simulation host set watch
+Wants=network-online.target
+After=network-online.target local-fs.target time-sync.target
+
+[Service]
+Type=simple
+User=sim
+Group=sim
+ExecStart=/usr/local/bin/sim-host watch --bucket SIM_BUCKET --state /data/sim-watch --interval 300
+Restart=always
+RestartSec=30
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target

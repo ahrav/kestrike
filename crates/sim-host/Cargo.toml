@@ -1,0 +1,28 @@
+[package]
+name = "sim-host"
+version = "0.1.0"
+edition = "2024"
+description = "The simulation host runner and build publisher: keeps each host sweeping with `campaign` across restarts and new builds, and stores each build of main once."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+[dependencies]
+libc = "0.2.189"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["raw_value"] }
+sha2 = "0.11.0"
+
+# The binary and the library would both get a unit-test target named
+# `sim_host`; the library's holds the unit tests.
+[[bin]]
+name = "sim-host"
+test = false
+
+# `sim-host` against fake `campaign` binaries: this target is the fake
+# when it runs under a fake's name, so it runs its own cases and prints
+# libtest's lines.
+[[test]]
+name = "host"
+path = "tests/host/main.rs"
+harness = false

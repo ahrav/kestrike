@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "version": 1,
+  "zone": 1,
+  "zone_hold": false,
+  "host_roles_max": 10,
+  "hosts": [
+    { "host": 11, "instance": "i-0000000000000000b", "zone": 1, "partition": 1, "color": 0, "state": "active" },
+    { "host": 12, "instance": "i-0000000000000000c", "zone": 1, "partition": 2, "color": 1, "state": "active" }
+  ],
+  "shards": [
+    { "shard": 1, "layout": { "units": 64, "slots": 3, "slot_units": 3, "entries": 64 } },
+    { "shard": 2, "layout": { "units": 64, "slots": 3, "slot_units": 3, "entries": 64 } }
+  ],
+  "report_keys": [
+    { "host": 11, "key": "1111111111111111111111111111111111111111111111111111111111111111" },
+    { "host": 12, "key": "1212121212121212121212121212121212121212121212121212121212121212" }
+  ]
+}

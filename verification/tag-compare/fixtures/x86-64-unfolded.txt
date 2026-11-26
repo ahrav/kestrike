@@ -1,0 +1,21 @@
+
+tcx.so:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+00000000001365e0 <tag_compare_unfolded>:
+  1365e0:      	push	rax
+  1365e1:      	movdqu	xmm0, xmmword ptr [rdi]
+  1365e5:      	movdqu	xmm1, xmmword ptr [rsi]
+  1365e9:      	pcmpeqb	xmm1, xmm0
+  1365ed:      	pmovmskb	eax, xmm1
+  1365f1:      	xor	edi, edi
+  1365f3:      	cmp	eax, 65535
+  1365f8:      	sete	dil
+  1365fc:      	call	0x1363b0 <subtle::black_box::<u8>>
+  136601:      	test	al, al
+  136603:      	je	0x13660b <tag_compare_unfolded+0x2b>
+  136605:      	pop	rax
+  136606:      	jmp	0x1363c0 <tcx::accepted>
+  13660b:      	pop	rax
+  13660c:      	jmp	0x1363d0 <tcx::rejected>

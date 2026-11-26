@@ -1,0 +1,21 @@
+[package]
+name = "kestrike-reconciler"
+version = "0.1.0"
+edition = "2024"
+description = "Kestrike's zone reconciler service: reads one zone through the store and EC2 read clients, plans with the zone loop's survey and publishes its status, and writes no store record."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+[dependencies]
+kestrike = { path = "../kestrike" }
+kestrike-aws = { path = "../kestrike-aws" }
+libc = "0.2.189"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+
+# The binary and the library would both get a unit-test target named
+# `kestrike_reconciler`; the library's holds the unit tests.
+[[bin]]
+name = "kestrike-reconciler"
+test = false

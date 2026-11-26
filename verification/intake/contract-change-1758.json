@@ -1,0 +1,11 @@
+{
+  "id": "contract-change-1758",
+  "kind": "contract-change",
+  "pull_request": 1758,
+  "escape": "ivk-1795",
+  "changed": "The tests and reference of the obligation record volume-loss-provisions-only-on-isolated-permanent-loss.",
+  "property_action": {
+    "action": "none",
+    "reason": "The diff of verification/obligations.json changes the record's tests and reference and leaves its invariant as it was: the clause the fix restores, \"a receipt of an earlier generation recording a volume the shard names in no role is superseded only after that volume is retired\", stood in the invariant before blotter pull request 1758."
+  }
+}

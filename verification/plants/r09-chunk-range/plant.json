@@ -1,0 +1,24 @@
+{
+  "id": "r09-chunk-range",
+  "row": 9,
+  "fix": {
+    "pull_request": 1586,
+    "commit": "edddbf4445196536f3c28ecb4d5ac6a6b745a809"
+  },
+  "files": [
+    "crates/kestrike/src/storage/volume/read.rs"
+  ],
+  "restores": "`ValidatedChunk::crc` asserts only that the range ends inside the chunk, so it accepts a wrapping or backward range.",
+  "proof": "storage::sequence_read_tests::a_chunk_s_checksum_of_a_wrapping_or_backward_range_panics",
+  "expected": [
+    "upload",
+    "faulted",
+    "cluster-broad",
+    "cluster-pressure",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "workload",
+    "evidence": "At commit 6240a6fd9 a scratch trace in `ValidatedChunk::crc` fired in all 138,869 upload, 120,817 faulted, 53,409 cluster-broad, 56,711 cluster-pressure and 59,951 cluster-long runs and in 52,547 of 52,552 cluster-swarm runs, and the head's assertion of a forward range inside the chunk, which the plant removes, failed in none of 643,945 runs of the six traced profiles in two other scratch sweeps of that commit, so no run hands the check a wrapping or backward range; the plant matches the head on every range the head accepts, and a run that reached such a range would panic on the head too, so its seed check would leave the plant with no verdict rather than a catch; `cluster-long` stays out of `expected`, although each of its 59,951 traced runs reaches the planted `crc`, because the profile has no passing run at the default counts."
+  }
+}

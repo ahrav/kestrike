@@ -1,0 +1,44 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/reach/reach.py",
+      "ks-required-events-reached"
+    ],
+    "defect": "requires-invalidated-of-cluster-pressure",
+    "detail": "unreached cluster-pressure: invalidated; the row's property: \"In one sweep root, each cluster profile with at least 64 covered passes has, for each event the required-event table requires of it, a covered pass that reached the event, and no profile of the scenario is listed under no_pass. The passes of a profile are evidence for an event only when a passing run reached it.\"; excused pairs reached: none; A reach count is evidence about the simulated environment only: it shows that a passing run of the named profile reached the event on this build at these counts, and it shows neither that a check judged the event nor that production reaches it.",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "e4d02669709163c6a4d2b6afce89092f10f1d1ae308594841e9cccfd0d0bb1c0",
+      "run.json": "1e2554ff825b5c779d54029417c2d9c359e28dcc0cb6b8848ebf32e5d8b9e365",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "563a959f0e5d490770e30ec2185f802ebdd62c6e923c4d4d7cd0bb92136ec5e8"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941",
+      "chaos/judges/reach/reach.py": "0cf9b7f5fa9ffa4db9b5d8774f47f4fa7080a15dd31582bb75e4de7dff348265",
+      "chaos/judges/reach/shared.py": "96d2c29d6c02637d175d8971447059100e583108ec696616653afbf4353f0620",
+      "chaos/judges/reach/validity.py": "1798b39f03f15f930060b8488b020db568917a1f7e350c3b70c9abb77be4629d"
+    },
+    "mode": "control",
+    "outcome": "broken",
+    "row": "ks-required-events-reached",
+    "rows": {
+      "ks-reach-required-events": "f1bdae6ce19005784b897692b92595a1fbf41bfb385f00764f536fde867349c9",
+      "ks-required-events-reached": "a3f6d1609b06786534033732d20c4347f722fec4aa7e009c4426b2df9dd972f2"
+    },
+    "scenario": "ks-reach-required-events",
+    "system_build": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-25T07:09:45Z",
+    "run_id": "reach-control-1125b",
+    "started": "2026-11-25T07:07:42Z"
+  }
+}

@@ -1,0 +1,30 @@
+
+kestrike:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+000000000111a314 <tag_compare_decision>:
+ 111a314:      	sub	sp, sp, #32
+ 111a318:      	stp	x29, x30, [sp, #16]
+ 111a31c:      	add	x29, sp, #16
+ 111a320:      	ldp	x10, x9, [x0]
+ 111a324:      	add	x8, sp, #8
+ 111a328:      	ldp	x12, x11, [x1]
+ 111a32c:      	eor	x10, x12, x10
+ 111a330:      	eor	x9, x11, x9
+ 111a334:      	orr	x9, x9, x10
+ 111a338:      	str	x9, [sp, #8]
+ 111a33c:      	ldr	x8, [sp, #8]
+ 111a340:      	cmp	x8, #0
+ 111a344:      	cset	w0, eq
+ 111a348:      	bl	0xfca454 <subtle::black_box::<u8>>
+ 111a34c:      	tst	w0, #0xff
+ 111a350:      	b.eq	0x111a364 <tag_compare_decision+0x50>
+ 111a354:      	bl	0x10c7b38 <kestrike::net::tag_compare_tests::accepted>
+ 111a358:      	ldp	x29, x30, [sp, #16]
+ 111a35c:      	add	sp, sp, #32
+ 111a360:      	ret
+ 111a364:      	bl	0x10c7b54 <kestrike::net::tag_compare_tests::rejected>
+ 111a368:      	ldp	x29, x30, [sp, #16]
+ 111a36c:      	add	sp, sp, #32
+ 111a370:      	ret

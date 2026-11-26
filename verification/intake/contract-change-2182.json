@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2182",
+  "kind": "contract-change",
+  "pull_request": 2182,
+  "changed": "The invariant of the obligation record fleet-replacement-converges-on-one-volume-per-receipt-after-a-reconciler-crash-at-every-write. A crash after the flip's shard-record write landed, acknowledged or with its reply unknown, strands the displaced volume: its record reads Active to the end of the run and no shard record names it active or spare, and every other crash cell strands none. Each hosted fleet run's expected outcomes judge the list of such volumes that the fleet reads from the store: a listed volume other than the one a landed flip's crash displaced fails the rule text \"a volume no shard record names stayed active with no crash after its flip\" of crates/kestrike/src/net/takeover_history_tests/fleet/hosts.rs, and a cell whose flip landed and whose list lacks the displaced volume reads the witness \"witness displaced-volume-stranded missing\". The record names the operator's two acts that clear the state, Reconciler::retire for the stranded volume and then Reconciler::release_hold for the receipt the next loss in the zone latches.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-replacement-converges-on-one-volume-per-receipt-after-a-reconciler-crash-at-every-write",
+    "reason": "Its invariant states the new contract and its controls name the two tests that fail the stranded rule: a seeded lone-loss store whose shard record is rewritten to another active volume while the displaced volume's record reads Active, judged through the fleet's report, and the altered-report cases of the volume scenarios' control test. Before this change the record stated one volume per receipt and one flip and said nothing of the displaced volume's record after a crash between the flip and the retirement. The record's LIMITS state that the control alters a seeded store, so no run plants the state, that no crash cell cuts the retirement write, and that a restart run's credit reads no scenario outcome."
+  }
+}

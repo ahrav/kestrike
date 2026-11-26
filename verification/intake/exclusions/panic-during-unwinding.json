@@ -1,0 +1,10 @@
+{
+  "id": "panic-during-unwinding",
+  "reason": "The 4 escapes need a panic under a storage gate in a call that a destructor makes on a thread already unwinding. The worker reports the panic that escapes a run (`caught` in `crates/kestrike/src/sim/unwind.rs`); a panic caught and handled during the unwind does not end the run, and history i10 in `crates/kestrike/src/net/world_tests/histories/incidents.rs` catches a scripted driver unwind and goes on judging. The simulation raises panics of two kinds, and neither is raised under a storage gate inside such a destructor call. The driver unwinds (`Unwind::Submit`, `Unwind::Pick` and the misdirection unwind of `crates/kestrike/src/storage/device/sim.rs`) are each raised in one driver call: at 6240a6fd9, `rg -n 'unwind_next' crates/kestrike/src --glob '!*_tests.rs'` lists, beside their definitions in `storage/device/sim.rs`, the arming of `Unwind::Submit` and `Unwind::Pick` in `incidents.rs` and in the test fixture `storage/volume_fixture.rs`, each disarmed after the one call or turn, and only `storage/device/fault_tests.rs` arms the misdirection unwind. None of the four sites takes a `Disk`: `rg -c '\\bDisk\\b' crates/kestrike/src/storage/attempt.rs crates/kestrike/src/storage/publish.rs crates/kestrike/src/storage/remove.rs` prints no count, and `revalidate` in `crates/kestrike/src/storage/writable.rs` is generic over `Platform` alone, so no driver unwind arises under their gates. The `panicking` and `asserting` control plants of `crates/kestrike/src/net/world_tests/catalog.rs` (`Plant::Panic` and `Plant::DebugAssertion`) panic in `World::apply` for `Mixed` in `crates/kestrike/src/net/world_tests.rs` once the upload published, outside any storage gate and in no destructor call. The library regressions arm the panic only through `#[cfg(test)]` hooks (`INTERPOSE_BEFORE_GRANT_CUTOFF` in `storage/attempt.rs`, `INTERPOSE_BEFORE_REVALIDATION` in `storage/writable.rs`) from test `Drop` types such as `BeginOnDrop` in `storage/begin_fill_gate_tests.rs`, and they stand where the repository holds them.",
+  "covers": [
+    "dsw-5",
+    "dsw-7",
+    "dsw-25",
+    "dsw-55"
+  ]
+}

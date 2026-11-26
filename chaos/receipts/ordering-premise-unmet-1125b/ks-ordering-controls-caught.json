@@ -1,0 +1,132 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/ordering/figure.py",
+      "ks-ordering-controls-caught"
+    ],
+    "defect": "cluster-order-1-premise-unmet",
+    "detail": "cluster-order-1 (depth 1, n 26, k 20000): not found in 426208 runs; rate below 3/426208 at 95%; runs 426208, caught 0, no effect 409999, missed 0, other 16209; no run was caught under the row's rule \"a GET returned bytes no upload of its key wrote\", and the row requires a catch in 1000 runs that ended caught, missed or with no effect",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "5b0bcbdd86694cb476b2f1f9faf3cc5a6340b4de6180570c55fcdc19f0cf38ad",
+      "run.json": "7cf97d567aa99efc52334ef644357fef15fc6df7510473d030dda95898ca1858",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "ecbc7b20a82f012520cafcaf9e67f4951b0893b63369b1e2615564931eaf4e3b"
+    },
+    "figure": [
+      {
+        "caught": 0,
+        "confidence": 0.95,
+        "control": "cluster-order-1",
+        "depth": 1,
+        "eligible": 409999,
+        "k": 20000,
+        "lower_bound": 0.0,
+        "missed": 0,
+        "n": 26,
+        "no_effect": 409999,
+        "not_found": "not found in 426208 runs; rate below 3/426208 at 95%",
+        "other": 16209,
+        "other_endings": {
+          "inconclusive: limit same_time": 16209
+        },
+        "rate": 0.0,
+        "runs": 426208,
+        "suspects": 0,
+        "unaccounted": 0,
+        "yardstick": 0.038461538,
+        "yardstick_comparison": "not applicable: the bound 1/(n*k^(d-1)) holds for a scheduler that draws priorities and d-1 change points, so that it picks the d orders; this chooser draws uniformly at each turn, and link draws and the clock rule decide when the events of each premise become ready, so it picks no d orders; n, k and d are given for information"
+      },
+      {
+        "caught": 8930,
+        "confidence": 0.95,
+        "control": "cluster-order-2",
+        "depth": 2,
+        "eligible": 409510,
+        "k": 20000,
+        "lower_bound": 0.020632775,
+        "missed": 0,
+        "n": 26,
+        "no_effect": 400580,
+        "not_found": null,
+        "other": 15868,
+        "other_endings": {
+          "inconclusive: limit same_time": 15868
+        },
+        "rate": 0.020993093,
+        "runs": 425378,
+        "suspects": 0,
+        "unaccounted": 0,
+        "yardstick": 1.92307692e-06,
+        "yardstick_comparison": "not applicable: the bound 1/(n*k^(d-1)) holds for a scheduler that draws priorities and d-1 change points, so that it picks the d orders; this chooser draws uniformly at each turn, and link draws and the clock rule decide when the events of each premise become ready, so it picks no d orders; n, k and d are given for information"
+      },
+      {
+        "caught": 5251,
+        "confidence": 0.95,
+        "control": "cluster-order-3",
+        "depth": 3,
+        "eligible": 409215,
+        "k": 20000,
+        "lower_bound": 0.012073371,
+        "missed": 0,
+        "n": 26,
+        "no_effect": 403964,
+        "not_found": null,
+        "other": 15943,
+        "other_endings": {
+          "inconclusive: limit same_time": 15943
+        },
+        "rate": 0.012350703,
+        "runs": 425158,
+        "suspects": 0,
+        "unaccounted": 0,
+        "yardstick": 9.61538462e-11,
+        "yardstick_comparison": "not applicable: the bound 1/(n*k^(d-1)) holds for a scheduler that draws priorities and d-1 change points, so that it picks the d orders; this chooser draws uniformly at each turn, and link draws and the clock rule decide when the events of each premise become ready, so it picks no d orders; n, k and d are given for information"
+      }
+    ],
+    "figure_rounding": "rate, lower_bound, confidence and yardstick are written to nine fraction digits when at least 0.0001 and to nine significant digits below it; lower_bound and confidence are cut down and the others rounded to nearest",
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941",
+      "chaos/judges/ordering/figure.py": "bfa2f001498d75e9c92695d06709d9ccb8a9ebde27e2100fd0703fe885d910b2",
+      "chaos/judges/ordering/records.py": "72aaf10fe0f471d15c7b31207f552bc21b4e5f011cedbd1337a469d90e321617",
+      "chaos/judges/ordering/validity.py": "a36e0b7d78a50edb923d6d3c21003ac9ebdf1018489b5928004b2062266cce9c"
+    },
+    "mode": "control",
+    "outcome": "broken",
+    "row": "ks-ordering-controls-caught",
+    "rows": {
+      "ks-ordering-controls-caught": "9563e9d934bb75d4a37f315214e985f986387d9f27a780658e34e4045de95ffc",
+      "ks-ordering-figure": "42a63b4f67c85edbfabf0167df559128db7ad5f647502ae20ade6ee0b4e8e0fd"
+    },
+    "scenario": "ks-ordering-figure",
+    "scope": {
+      "build": "d490e18bd0e6681c966d9af286093e5307a56f0b95a1c3dad056590364b3a11b",
+      "campaign": "ordering-premise-unmet-1125b",
+      "counts": {},
+      "profiles": [
+        "cluster-order-1",
+        "cluster-order-2",
+        "cluster-order-3"
+      ],
+      "runs": {
+        "cluster-order-1": 426208,
+        "cluster-order-2": 425378,
+        "cluster-order-3": 425158
+      },
+      "sentence": "Per-run rate at which `campaign sweep` of archive build d490e18bd0e6681c966d9af286093e5307a56f0b95a1c3dad056590364b3a11b, campaign ordering-premise-unmet-1125b, counts default, catches each planted ordering control of depth 1 to 3 beside `cluster-broad`, over 426208, 425378 and 425158 runs each, with a 95% lower bound: one thread, turn granularity, this profile, these counts and this build, and orders the turn controller can select. Each rate counts every run the sweep finished, those that ended at a limit among them, the row's floor of runs counts those that ended caught, missed or with no effect, and each bound holds for its own control and takes its run count as fixed, while --for sets that count by the wall clock. A caught run is a run that ended in the row's rule, which the sweep does not tie to the read the plant changed. Each control measures how often a drawn run reaches a rare interleaving of link deliveries with the upload: the chooser picks each GET's issue and orders the events ready at one instant, and link draws and the turn controller's clock rule decide when the others become ready. A read of version 0 that completes before the upload's session reports it published is an order of the real code that no run of this controller reaches: in the probes of blotter pull request 2117 the order formed in 0 of 300 `cluster-broad` roots and in 0 of 60,000 control runs, and the reason offered is that the turn controller holds the clock still while an event is runnable."
+    },
+    "system_build": "d490e18bd0e6681c966d9af286093e5307a56f0b95a1c3dad056590364b3a11b"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-25T07:29:54Z",
+    "run_id": "ordering-premise-unmet-1125b",
+    "started": "2026-11-25T07:19:50Z"
+  }
+}

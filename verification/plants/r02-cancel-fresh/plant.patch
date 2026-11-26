@@ -1,0 +1,20 @@
+diff --git a/crates/kestrike/src/net/serve.rs b/crates/kestrike/src/net/serve.rs
+index 7793cb8d5..59d8247e5 100644
+--- a/crates/kestrike/src/net/serve.rs
++++ b/crates/kestrike/src/net/serve.rs
+@@ -1473,13 +1473,8 @@ impl ServeCore {
+         now_us: u64,
+     ) {
+         let id = RequestId::from_wire(header.request);
+-        let active = match requests.route(session.peer, id, Operation::Get) {
+-            Route::Same { active, .. } => active,
+-            Route::Fresh => {
+-                requests.settle(session.peer, id, None);
+-                return;
+-            }
+-            Route::Outside | Route::Older | Route::WrongOperation => return,
++        let Route::Same { active, .. } = requests.route(session.peer, id, Operation::Get) else {
++            return;
+         };
+         if let Some(table) = active
+             && requests.serve(table).is_some_and(|serve| {

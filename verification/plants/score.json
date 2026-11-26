@@ -1,0 +1,926 @@
+{
+  "commit": "28b4c91c5ba588876a037d954858ddf7158a8f4c",
+  "sentence": "0 of 9 plants at commit 28b4c91c5ba588876a037d954858ddf7158a8f4c",
+  "results": {
+    "missed": 9
+  },
+  "not_live": [],
+  "settings": {
+    "workers": 28,
+    "runs": 300,
+    "seconds": 60,
+    "rounds": 10,
+    "base_archive": null,
+    "campaign_sha256": "0a7d40a714c44166fd51f192b81e47f4c6c5db30f7775eed5b225b2734d5c3b4",
+    "plants": null
+  },
+  "plants": [
+    {
+      "id": "r02-cancel-fresh",
+      "row": 2,
+      "fix": {
+        "pull_request": 1479,
+        "commit": "9a5518b05e255fab11c9d1de6ffcc377f971e2fa"
+      },
+      "files": [
+        "crates/kestrike/src/net/serve.rs"
+      ],
+      "proof": "net::serve_tests::a_cancel_ahead_of_its_get_admits_no_read",
+      "campaign": "plant-r02-cancel-fresh",
+      "profiles": [
+        "cluster-broad",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "256c62baaf46e78498aefb9749ebd2be633feeb3",
+      "tree": "50787287b833726ad0cda8d18fbc2be86011f823",
+      "archive": "214bd44403eb2b7ea3ddafaf905f040d7d0540142ef12683b6a9655f4cc6a06e",
+      "counts": {},
+      "runs": {
+        "cluster-broad": {
+          "next": 22181,
+          "runs": 22181,
+          "pass": 18608,
+          "suspects": 0,
+          "range": [
+            0,
+            22180
+          ],
+          "replays": 21,
+          "uncredited": {
+            "inconclusive: limit same_time": 844,
+            "unsuccessful: fewer exact reads than the profile requir": 2611,
+            "unsuccessful: fewer publications than the profile requi": 118
+          }
+        },
+        "cluster-swarm": {
+          "next": 5142,
+          "runs": 5142,
+          "pass": 3829,
+          "suspects": 0,
+          "range": [
+            0,
+            5141
+          ],
+          "replays": 12,
+          "uncredited": {
+            "inconclusive: limit same_time": 521,
+            "inconclusive: limit turns": 792
+          }
+        }
+      },
+      "controls": {
+        "caught": 1143,
+        "missed": 0,
+        "no_effect": 4054,
+        "other": 65,
+        "profiles": 12,
+        "runs": 5262
+      },
+      "histories": {
+        "caught": 21024,
+        "missed": 0,
+        "pass": 11332,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 32356,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "property",
+        "evidence": "On the plant, a scratch trace fired when the owner admitted a GET whose session and request ID an earlier CANCEL on a fresh route had named, a GET the head drops, in 104,218 of 118,859 cluster-broad runs and 6,386 of 18,112 cluster-swarm runs on the code of commit c6a14e9f1, and the effect, an admitted GET with no client to drive it that takes a table slot and the peer's request share and can hold them until its deadline, is judged by no rule of the boundary and cluster checks that judge a cluster run; a trace at the entry of the planted `ServeCore::cancel` fired in all 170,539 `cluster-long` runs swept, each of them a call to `cancel`, and `cluster-long` stays out of `expected` because the profile has no passing run at the default counts."
+      }
+    },
+    {
+      "id": "r03-grant-refusal",
+      "row": 3,
+      "fix": {
+        "pull_request": 1588,
+        "commit": "b3a47720f5503ace821b16a73b8362c1228b3d09"
+      },
+      "files": [
+        "crates/kestrike/src/net/serve.rs"
+      ],
+      "proof": "net::serve_tests::a_get_refused_for_its_grant_is_never_admitted_under_the_same_request_id",
+      "campaign": "plant-r03-grant-refusal",
+      "profiles": [
+        "upload",
+        "faulted",
+        "cluster-broad",
+        "cluster-pressure",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "0bc590d2de5310f2969bb09d3e2ced1ee530e600",
+      "tree": "f637eff423a2d68a32e5745ac92e09cd044cd930",
+      "archive": "3c04cb4a4fe90609b27de7768b280d0249afaa74be55bacef2a147f1192e2f1c",
+      "counts": {},
+      "runs": {
+        "upload": {
+          "next": 69210,
+          "runs": 69210,
+          "pass": 69210,
+          "suspects": 0,
+          "range": [
+            0,
+            69209
+          ],
+          "replays": 8,
+          "uncredited": {}
+        },
+        "faulted": {
+          "next": 50904,
+          "runs": 50904,
+          "pass": 50904,
+          "suspects": 0,
+          "range": [
+            0,
+            50903
+          ],
+          "replays": 5,
+          "uncredited": {}
+        },
+        "cluster-broad": {
+          "next": 15187,
+          "runs": 15187,
+          "pass": 12753,
+          "suspects": 0,
+          "range": [
+            0,
+            15186
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 588,
+            "unsuccessful: fewer exact reads than the profile requir": 1808,
+            "unsuccessful: fewer publications than the profile requi": 38
+          }
+        },
+        "cluster-pressure": {
+          "next": 6194,
+          "runs": 6194,
+          "pass": 6125,
+          "suspects": 0,
+          "range": [
+            0,
+            6193
+          ],
+          "replays": 5,
+          "uncredited": {
+            "unsuccessful: fewer publications than the profile requi": 69
+          }
+        },
+        "cluster-swarm": {
+          "next": 2172,
+          "runs": 2172,
+          "pass": 1675,
+          "suspects": 0,
+          "range": [
+            0,
+            2171
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 238,
+            "inconclusive: limit turns": 259
+          }
+        }
+      },
+      "controls": {
+        "caught": 18498,
+        "missed": 0,
+        "no_effect": 0,
+        "other": 194,
+        "profiles": 23,
+        "runs": 18692
+      },
+      "histories": {
+        "caught": 19959,
+        "missed": 0,
+        "pass": 9020,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 28979,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "workload",
+        "evidence": "Every run of the five profiles evaluates the planted grant check of `ServeCore` (a scratch trace there panicked in all 100,903 upload, 88,633 faulted, 41,018 cluster-broad, 50,405 cluster-pressure and 48,920 cluster-swarm runs at commit 6240a6fd9), and a trace inside its refusal branch fired in none of 152,904 upload, 120,280 faulted, 33,442 cluster-broad, 12,700 cluster-pressure and 5,170 cluster-swarm runs, so no swept client asks for a grant above its session window; the planted grant check also fired in all 247,397 cluster-long runs of one 60 s sweep at commit 3a9e2b08d, and `cluster-long` stays out of `expected` because the profile has no passing run at the default counts, so it gives no verdict."
+      }
+    },
+    {
+      "id": "r04-session-generation",
+      "row": 4,
+      "fix": {
+        "pull_request": 1588,
+        "commit": "761eaeb5a89e10b851471f782443dad550bbc891"
+      },
+      "files": [
+        "crates/kestrike/src/net/client.rs"
+      ],
+      "proof": "net::client_tests::a_cancel_queued_under_a_lost_session_is_not_sent_under_a_restarted_owner_s_same_epoch",
+      "campaign": "plant-r04-session-generation",
+      "profiles": [
+        "upload",
+        "faulted",
+        "cluster-broad",
+        "cluster-pressure",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "d6e313d95053acf19df6f30b634029c4993f7a9b",
+      "tree": "ece5a27df3b26195472c0cf4cb321f5d252a7d46",
+      "archive": "fd40b822a125fa862def7825c2869c864f8e2874ecd9248b48e524107fe4e7f7",
+      "counts": {},
+      "runs": {
+        "upload": {
+          "next": 61658,
+          "runs": 61658,
+          "pass": 61658,
+          "suspects": 0,
+          "range": [
+            0,
+            61657
+          ],
+          "replays": 5,
+          "uncredited": {}
+        },
+        "faulted": {
+          "next": 48816,
+          "runs": 48816,
+          "pass": 48816,
+          "suspects": 0,
+          "range": [
+            0,
+            48815
+          ],
+          "replays": 5,
+          "uncredited": {}
+        },
+        "cluster-broad": {
+          "next": 14195,
+          "runs": 14195,
+          "pass": 11840,
+          "suspects": 0,
+          "range": [
+            0,
+            14194
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 571,
+            "unsuccessful: fewer exact reads than the profile requir": 1738,
+            "unsuccessful: fewer publications than the profile requi": 46
+          }
+        },
+        "cluster-pressure": {
+          "next": 6089,
+          "runs": 6089,
+          "pass": 6025,
+          "suspects": 0,
+          "range": [
+            0,
+            6088
+          ],
+          "replays": 5,
+          "uncredited": {
+            "unsuccessful: fewer publications than the profile requi": 64
+          }
+        },
+        "cluster-swarm": {
+          "next": 2442,
+          "runs": 2442,
+          "pass": 1902,
+          "suspects": 0,
+          "range": [
+            0,
+            2441
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 270,
+            "inconclusive: limit turns": 270
+          }
+        }
+      },
+      "controls": {
+        "caught": 19029,
+        "missed": 0,
+        "no_effect": 0,
+        "other": 174,
+        "profiles": 23,
+        "runs": 19203
+      },
+      "histories": {
+        "caught": 19606,
+        "missed": 0,
+        "pass": 8471,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 28077,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "workload",
+        "evidence": "Every traced run of six profiles, the five expected and `cluster-long`, calls the planted `of_session` (a scratch trace there panicked in all 127,486 upload, 128,028 faulted, 128,518 cluster-broad, 128,359 cluster-pressure, 115,537 cluster-swarm and 454,807 cluster-long runs on the code of commit c6a14e9f1), and a trace at a frame of the active epoch below the session's first wire generation, the one frame the plant sends and the head drops, fired in none of 261,651 runs of the five other than cluster-long and none of 2,051,103 runs of all 21 live profiles with their controls and histories on that code, so no run offered the send filter a frame of the active epoch from before the session's first wire generation; `cluster-long` stays out of `expected`, although each of its traced runs calls `of_session`, because the profile has no passing run at the default counts."
+      }
+    },
+    {
+      "id": "r05-owner-tenure",
+      "row": 5,
+      "fix": {
+        "pull_request": 1588,
+        "commit": "544bcee94e7a1449d2b4bc4155a87d182a865424"
+      },
+      "files": [
+        "crates/kestrike/src/net/owner_view.rs"
+      ],
+      "proof": "net::owner::tests::a_shard_read_alone_naming_the_next_activation_grants_no_bit_to_the_new_tenure",
+      "campaign": "plant-r05-owner-tenure",
+      "profiles": [],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "06921ddacacc98cb218afae6387d99b275742998",
+      "tree": "f22f03eeedfe44fc9b0a7d0b3c64b155f4562cf6",
+      "archive": "1269a6e0c3ef3bcc155b7c8261f16f18c1d5e88825bc11e5ce746ed37f627786",
+      "counts": null,
+      "runs": {},
+      "controls": null,
+      "histories": null,
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "no expected profile; no sweep ran",
+      "miss_cause": {
+        "cause": "workload",
+        "evidence": "Every owner builds an `OwnerView`, and `net/owner.rs` calls the planted file's `tenure_of` on each authority change and on each frame its send round pulls while the owner serves, so the profiles run the file, but scratch traces at the planted `OwnerView::body` and `OwnerView::observe` fired in none of 1,527,506 and none of 1,516,611 runs of all 21 live profiles with their controls and histories on the code of commit c6a14e9f1, since `body` runs only when the owner sends an ownership reply and `observe` only through `Owner::observe_shard_view`, whose one non-test caller is `host/duties.rs`."
+      }
+    },
+    {
+      "id": "r06-lost-publication",
+      "row": 6,
+      "fix": {
+        "pull_request": 1607,
+        "commit": "ca4f74e3b5f7428b914caa4ef4577340e7d6bd85"
+      },
+      "files": [
+        "crates/kestrike/src/net/put.rs",
+        "crates/kestrike/src/storage/publication.rs"
+      ],
+      "proof": "storage::hit_tests::a_lost_volume_refuses_a_ready_fills_publication",
+      "campaign": "plant-r06-lost-publication",
+      "profiles": [
+        "upload",
+        "faulted",
+        "cluster-broad",
+        "cluster-pressure",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "3ee7c5c14901374e37a45871e4c3af95de2f0a77",
+      "tree": "ae9c8478381af218dfe4624b77128ee6246ebe61",
+      "archive": "c5bb78a3c36a71beb7c1fb64f98bd38d1614316680a8753216b02246179559e1",
+      "counts": {},
+      "runs": {
+        "upload": {
+          "next": 62938,
+          "runs": 62938,
+          "pass": 62938,
+          "suspects": 0,
+          "range": [
+            0,
+            62937
+          ],
+          "replays": 6,
+          "uncredited": {}
+        },
+        "faulted": {
+          "next": 51553,
+          "runs": 51553,
+          "pass": 51553,
+          "suspects": 0,
+          "range": [
+            0,
+            51552
+          ],
+          "replays": 6,
+          "uncredited": {}
+        },
+        "cluster-broad": {
+          "next": 14292,
+          "runs": 14292,
+          "pass": 12018,
+          "suspects": 0,
+          "range": [
+            0,
+            14291
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 566,
+            "unsuccessful: fewer exact reads than the profile requir": 1661,
+            "unsuccessful: fewer publications than the profile requi": 47
+          }
+        },
+        "cluster-pressure": {
+          "next": 6275,
+          "runs": 6275,
+          "pass": 6189,
+          "suspects": 0,
+          "range": [
+            0,
+            6274
+          ],
+          "replays": 5,
+          "uncredited": {
+            "unsuccessful: fewer publications than the profile requi": 86
+          }
+        },
+        "cluster-swarm": {
+          "next": 2388,
+          "runs": 2388,
+          "pass": 1828,
+          "suspects": 0,
+          "range": [
+            0,
+            2387
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 268,
+            "inconclusive: limit turns": 292
+          }
+        }
+      },
+      "controls": {
+        "caught": 18680,
+        "missed": 0,
+        "no_effect": 0,
+        "other": 178,
+        "profiles": 23,
+        "runs": 18858
+      },
+      "histories": {
+        "caught": 18213,
+        "missed": 0,
+        "pass": 9016,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 27229,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "workload",
+        "evidence": "Every traced run of six profiles, the five expected and `cluster-long`, reaches the planted `is_lost` check of `WritableFill::publish` (a scratch trace before it panicked in all 125,163 upload, 124,964 faulted, 125,499 cluster-broad, 126,220 cluster-pressure, 113,104 cluster-swarm and 493,086 cluster-long runs on the code of commit c6a14e9f1), and a trace inside the refusal the plant removes fired in none of 261,651 runs of the five other than cluster-long and none of 2,051,103 runs of all 21 live profiles with their controls and histories on that code, so no run publishes a fill on a lost volume; `cluster-long` stays out of `expected`, although each of its traced runs reaches the planted check, because the profile has no passing run at the default counts."
+      }
+    },
+    {
+      "id": "r07-joined-hit",
+      "row": 7,
+      "fix": {
+        "pull_request": 1586,
+        "commit": "490a505d834db2ee555577368956bbd084a38695"
+      },
+      "files": [
+        "crates/kestrike/src/storage/acquire.rs",
+        "crates/kestrike/src/storage/join.rs",
+        "crates/kestrike/src/storage/lookup.rs",
+        "crates/kestrike/src/storage/word.rs"
+      ],
+      "proof": "storage::join_tests::a_joined_acquisition_refused_closed_during_its_reservation_earns_no_hit",
+      "campaign": "plant-r07-joined-hit",
+      "profiles": [
+        "upload",
+        "faulted",
+        "cluster-broad",
+        "cluster-pressure",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "bd4ea476d9f4c5f35332041adfb30132af22b873",
+      "tree": "4241f0b994fd55f70d812bbb4a7fac113df2716e",
+      "archive": "763d9f7fc399c8c53d126eb1ea6030070d8525f5ff45de30dd5a191171c9dcbd",
+      "counts": {},
+      "runs": {
+        "upload": {
+          "next": 57480,
+          "runs": 57480,
+          "pass": 57480,
+          "suspects": 0,
+          "range": [
+            0,
+            57479
+          ],
+          "replays": 6,
+          "uncredited": {}
+        },
+        "faulted": {
+          "next": 47156,
+          "runs": 47156,
+          "pass": 47156,
+          "suspects": 0,
+          "range": [
+            0,
+            47155
+          ],
+          "replays": 6,
+          "uncredited": {}
+        },
+        "cluster-broad": {
+          "next": 13935,
+          "runs": 13935,
+          "pass": 11683,
+          "suspects": 0,
+          "range": [
+            0,
+            13934
+          ],
+          "replays": 6,
+          "uncredited": {
+            "inconclusive: limit same_time": 537,
+            "unsuccessful: fewer exact reads than the profile requir": 1657,
+            "unsuccessful: fewer publications than the profile requi": 58
+          }
+        },
+        "cluster-pressure": {
+          "next": 6209,
+          "runs": 6209,
+          "pass": 6134,
+          "suspects": 0,
+          "range": [
+            0,
+            6208
+          ],
+          "replays": 6,
+          "uncredited": {
+            "unsuccessful: fewer publications than the profile requi": 75
+          }
+        },
+        "cluster-swarm": {
+          "next": 2160,
+          "runs": 2160,
+          "pass": 1653,
+          "suspects": 0,
+          "range": [
+            0,
+            2159
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 242,
+            "inconclusive: limit turns": 265
+          }
+        }
+      },
+      "controls": {
+        "caught": 17284,
+        "missed": 0,
+        "no_effect": 0,
+        "other": 185,
+        "profiles": 23,
+        "runs": 17469
+      },
+      "histories": {
+        "caught": 17322,
+        "missed": 0,
+        "pass": 7798,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 25120,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "ordering",
+        "evidence": "The plant's refused joined read earns a hit only when a storage close lands between the follower's two cutoff reads inside one synchronous joined acquisition, and every order in which the plant's visited bit differs from the head's needs a second thread, which the one-thread, turn-level sweep worker cannot schedule; at commit 6240a6fd9 scratch traces fired at the planted `retain_right` in all 116,874 upload, 92,257 faulted, 41,304 cluster-broad and 47,866 cluster-pressure runs and in 44,419 of 44,421 cluster-swarm runs, at the joined reservation in 3,304 of 33,768 cluster-broad, 46,071 of 49,319 cluster-pressure, 6,117 of 11,215 cluster-swarm and 7,440 of 7,812 cluster-long runs and in no upload or faulted run, at the follower's two `Closed` refusals in none of 270,729 upload, 203,600 faulted, 57,693 cluster-broad, 22,918 cluster-pressure and 9,206 cluster-swarm runs, and at the refusal after the reservation in none of 2,266 cluster-long runs, where the refusal before it was not traced; `cluster-long` stays out of `expected` because the profile has no passing run at the default counts."
+      }
+    },
+    {
+      "id": "r08-place-owner",
+      "row": 8,
+      "fix": {
+        "pull_request": 1586,
+        "commit": "7aa8b9ca3b09bdf289b5bd501bcab54769b85587"
+      },
+      "files": [
+        "crates/kestrike/src/storage/place_claim.rs",
+        "crates/kestrike/src/storage/publish.rs",
+        "crates/kestrike/src/storage/attempt.rs",
+        "crates/kestrike/src/storage/remove.rs"
+      ],
+      "proof": "storage::publication_tests::a_place_word_naming_another_fills_pending_pair_refuses_corrupt_before_the_bracket",
+      "campaign": "plant-r08-place-owner",
+      "profiles": [
+        "upload",
+        "faulted",
+        "cluster-broad",
+        "cluster-pressure",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "3df194c61694e9efa42f5aa17e9af64099830d61",
+      "tree": "937e0ad70d41e5fe7e3551978e4dde943c561f6f",
+      "archive": "5bde518ae96439337762ca05dfbd49b4ad94be0d4bfa438e67bc43822baa2fda",
+      "counts": {},
+      "runs": {
+        "upload": {
+          "next": 61856,
+          "runs": 61856,
+          "pass": 61856,
+          "suspects": 0,
+          "range": [
+            0,
+            61855
+          ],
+          "replays": 7,
+          "uncredited": {}
+        },
+        "faulted": {
+          "next": 49453,
+          "runs": 49453,
+          "pass": 49453,
+          "suspects": 0,
+          "range": [
+            0,
+            49452
+          ],
+          "replays": 7,
+          "uncredited": {}
+        },
+        "cluster-broad": {
+          "next": 14142,
+          "runs": 14142,
+          "pass": 11916,
+          "suspects": 0,
+          "range": [
+            0,
+            14141
+          ],
+          "replays": 7,
+          "uncredited": {
+            "inconclusive: limit same_time": 533,
+            "unsuccessful: fewer exact reads than the profile requir": 1657,
+            "unsuccessful: fewer publications than the profile requi": 36
+          }
+        },
+        "cluster-pressure": {
+          "next": 6090,
+          "runs": 6090,
+          "pass": 6013,
+          "suspects": 0,
+          "range": [
+            0,
+            6089
+          ],
+          "replays": 5,
+          "uncredited": {
+            "unsuccessful: fewer publications than the profile requi": 77
+          }
+        },
+        "cluster-swarm": {
+          "next": 2238,
+          "runs": 2238,
+          "pass": 1739,
+          "suspects": 0,
+          "range": [
+            0,
+            2237
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 237,
+            "inconclusive: limit turns": 262
+          }
+        }
+      },
+      "controls": {
+        "caught": 17469,
+        "missed": 0,
+        "no_effect": 0,
+        "other": 196,
+        "profiles": 23,
+        "runs": 17665
+      },
+      "histories": {
+        "caught": 18135,
+        "missed": 0,
+        "pass": 8422,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 26557,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "workload",
+        "evidence": "Every traced run of six profiles, the five expected and `cluster-long`, checks a claimed place in `publish::prepare` (a scratch trace there panicked in all 126,946 upload, 126,619 faulted, 127,591 cluster-broad, 127,764 cluster-pressure, 114,919 cluster-swarm and 481,765 cluster-long runs on the code of commit c6a14e9f1), and a trace at the head's refusal of that check, which covers every place word the plant accepts and the head refuses, fired in none of 261,651 runs of the five other than cluster-long and none of 2,051,103 runs of all 21 live profiles with their controls and histories on that code, so no publication meets a place word naming another fill's pending pair; `cluster-long` stays out of `expected`, although each of its traced runs checks a claimed place there, because the profile has no passing run at the default counts."
+      }
+    },
+    {
+      "id": "r09-chunk-range",
+      "row": 9,
+      "fix": {
+        "pull_request": 1586,
+        "commit": "edddbf4445196536f3c28ecb4d5ac6a6b745a809"
+      },
+      "files": [
+        "crates/kestrike/src/storage/volume/read.rs"
+      ],
+      "proof": "storage::sequence_read_tests::a_chunk_s_checksum_of_a_wrapping_or_backward_range_panics",
+      "campaign": "plant-r09-chunk-range",
+      "profiles": [
+        "upload",
+        "faulted",
+        "cluster-broad",
+        "cluster-pressure",
+        "cluster-swarm"
+      ],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "c96e3ba002b826229a08b524a79b6f108f50a454",
+      "tree": "2a8b4e206742563f2eb105c12c8f610b06f741a0",
+      "archive": "97c29d80db0a1045d03482742ccf3b48bf92d38c415678393f99d5238aa6aa38",
+      "counts": {},
+      "runs": {
+        "upload": {
+          "next": 63737,
+          "runs": 63737,
+          "pass": 63737,
+          "suspects": 0,
+          "range": [
+            0,
+            63736
+          ],
+          "replays": 8,
+          "uncredited": {}
+        },
+        "faulted": {
+          "next": 52537,
+          "runs": 52537,
+          "pass": 52537,
+          "suspects": 0,
+          "range": [
+            0,
+            52536
+          ],
+          "replays": 9,
+          "uncredited": {}
+        },
+        "cluster-broad": {
+          "next": 14536,
+          "runs": 14536,
+          "pass": 12186,
+          "suspects": 0,
+          "range": [
+            0,
+            14535
+          ],
+          "replays": 9,
+          "uncredited": {
+            "inconclusive: limit same_time": 582,
+            "unsuccessful: fewer exact reads than the profile requir": 1731,
+            "unsuccessful: fewer publications than the profile requi": 37
+          }
+        },
+        "cluster-pressure": {
+          "next": 5980,
+          "runs": 5980,
+          "pass": 5908,
+          "suspects": 0,
+          "range": [
+            0,
+            5979
+          ],
+          "replays": 5,
+          "uncredited": {
+            "unsuccessful: fewer publications than the profile requi": 72
+          }
+        },
+        "cluster-swarm": {
+          "next": 2244,
+          "runs": 2244,
+          "pass": 1762,
+          "suspects": 0,
+          "range": [
+            0,
+            2243
+          ],
+          "replays": 5,
+          "uncredited": {
+            "inconclusive: limit same_time": 230,
+            "inconclusive: limit turns": 252
+          }
+        }
+      },
+      "controls": {
+        "caught": 19537,
+        "missed": 0,
+        "no_effect": 0,
+        "other": 180,
+        "profiles": 23,
+        "runs": 19717
+      },
+      "histories": {
+        "caught": 19087,
+        "missed": 0,
+        "pass": 9188,
+        "profiles": 293,
+        "ran": 3,
+        "runs": 28275,
+        "suspects": 0,
+        "uncredited": 0
+      },
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "each expected profile reached 300 runs and the root holds no suspect",
+      "miss_cause": {
+        "cause": "workload",
+        "evidence": "At commit 6240a6fd9 a scratch trace in `ValidatedChunk::crc` fired in all 138,869 upload, 120,817 faulted, 53,409 cluster-broad, 56,711 cluster-pressure and 59,951 cluster-long runs and in 52,547 of 52,552 cluster-swarm runs, and the head's assertion of a forward range inside the chunk, which the plant removes, failed in none of 643,945 runs of the six traced profiles in two other scratch sweeps of that commit, so no run hands the check a wrapping or backward range; the plant matches the head on every range the head accepts, and a run that reached such a range would panic on the head too, so its seed check would leave the plant with no verdict rather than a catch; `cluster-long` stays out of `expected`, although each of its 59,951 traced runs reaches the planted `crc`, because the profile has no passing run at the default counts."
+      }
+    },
+    {
+      "id": "r12-standby-recheck",
+      "row": 12,
+      "fix": {
+        "pull_request": 1580,
+        "commit": "9cbc74f0d6c0a39105d063f755aad7dbd2ebe355"
+      },
+      "files": [
+        "crates/kestrike/src/failover/reconcile.rs"
+      ],
+      "proof": "failover::reconcile_tests::a_standby_write_across_a_committed_flip_returns_no_witness",
+      "campaign": "plant-r12-standby-recheck",
+      "profiles": [],
+      "proof_exits": {
+        "head": 0,
+        "plant": 1
+      },
+      "commit": "da3cf35439007c177195b80c6432871f4ab9bfab",
+      "tree": "dfe29bf234f6c6ce6119c85df552b2aa0facc449",
+      "archive": "8cbcf75723799c1f782a08fe20999d45c4a9ee29e53f64c778a0064970717d16",
+      "counts": null,
+      "runs": {},
+      "controls": null,
+      "histories": null,
+      "keys": {},
+      "head_failures": [],
+      "result": "missed",
+      "reason": "no expected profile; no sweep ran",
+      "miss_cause": {
+        "cause": "environment",
+        "evidence": "A scratch trace that panicked at both planted writes fired in none of 1,438,013 runs of 19 of the 21 live profiles, all but cluster-long and contended, with their controls and 10 histories at commit 6240a6fd9, and no profile or history of the sweep worker calls `failover/reconcile.rs`, which runs only in library tests and in the worker's ignored fleet and cycles cases of the long-run lane."
+      }
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+C G13-composite-reader-fences-alone
+(* The stand-in over the claim and the three points with the reader's claim and pin fences alone, the writer's retire fence and the maintainer's certify fence dropped.
+   Events: P0 is the reader, its claim of record 0 by raising claimed
+   (fetch_max in the kernel, fetch_add from 0 here) and the claim fence,
+   its era load and pin store, the pin fence and its observation load of
+   bucket; P1 is the writer, its removal store and its era bump; P2 is
+   the maintainer, its start_era load, its claimed-bound load and its pin
+   load. Pinned reader missed: 0:r1=1 (the reader pins the old era),
+   0:r2=1 (it saw the entry), 2:r0=2 (the pass started after the bump),
+   and either 2:r1=0 (the bound excludes the reader's record) or 2:r2=0
+   (the pass saw no pin). *)
+{ claimed = 0; era = 1; pin = 0; bucket = 1; }
+
+P0 (atomic_int* claimed, atomic_int* era, atomic_int* pin, atomic_int* bucket) {
+  int r0 = atomic_fetch_add_explicit(claimed, 1, memory_order_acq_rel);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r1 = atomic_load_explicit(era, memory_order_acquire);
+  atomic_store_explicit(pin, 1, memory_order_release);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r2 = atomic_load_explicit(bucket, memory_order_acquire);
+}
+
+P1 (atomic_int* bucket, atomic_int* era) {
+  atomic_store_explicit(bucket, 0, memory_order_release);
+  int r0 = atomic_fetch_add_explicit(era, 1, memory_order_acq_rel);
+}
+
+P2 (atomic_int* era, atomic_int* claimed, atomic_int* pin) {
+  int r0 = atomic_load_explicit(era, memory_order_acquire);
+  int r1 = atomic_load_explicit(claimed, memory_order_acquire);
+  int r2 = atomic_load_explicit(pin, memory_order_acquire);
+}
+
+exists (0:r1=1 /\ 0:r2=1 /\ 2:r0=2 /\ (2:r1=0 \/ 2:r2=0))

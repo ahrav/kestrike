@@ -1,0 +1,57 @@
+{
+ "records/receipts.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 2
+ },
+ "records/s1.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 3
+ },
+ "records/s2.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 3
+ },
+ "records/s3.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 3
+ },
+ "records/s4.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 2
+ },
+ "records/s5.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 1
+ },
+ "activations.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 4
+ },
+ "witness.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 5
+ },
+ "origin.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 27
+ },
+ "provider.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 3
+ },
+ "blockers.jsonl": {
+  "from": 0,
+  "to": 400,
+  "lines": 1
+ }
+}

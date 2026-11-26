@@ -1,0 +1,30 @@
+diff --git a/crates/kestrike/src/failover/reconcile.rs b/crates/kestrike/src/failover/reconcile.rs
+index 922fad304..29177239c 100644
+--- a/crates/kestrike/src/failover/reconcile.rs
++++ b/crates/kestrike/src/failover/reconcile.rs
+@@ -238,12 +238,7 @@ pub fn enroll_standby<S: Store, L: WatermarkLog>(
+         .enroll(holder.host, pair, bounds)
+         .map_err(StandbyRefusal::Enrollment)?
+     {
+-        let written = client.replace(&read, next).map_err(StandbyRefusal::Write)?;
+-        if !standby_serving(client, shard, written.value(), holder.host)
+-            .map_err(StandbyRefusal::Records)?
+-        {
+-            return Err(StandbyRefusal::Tenure);
+-        }
++        client.replace(&read, next).map_err(StandbyRefusal::Write)?;
+     }
+     Ok(pair)
+ }
+@@ -503,10 +498,7 @@ impl<S: Store, L: WatermarkLog> Reconciler<S, L> {
+         let mut next = held.clone();
+         next.push(EventKind::Attach, host, era)
+             .ok_or(ReconcileError::Conflict)?;
+-        let written = self.client.replace(&read, next)?;
+-        if !standby_serving(&mut self.client, shard, written.value(), host)? {
+-            return Err(ReconcileError::Conflict);
+-        }
++        self.client.replace(&read, next)?;
+         Ok(StandbyRecorded { volume, host })
+     }
+ 

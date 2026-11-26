@@ -1,0 +1,73 @@
+{
+  "id": "ivk-2354",
+  "kind": "escape",
+  "class": "safety bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/publication.rs",
+    "function": "install"
+  },
+  "defect": "A tenure acknowledged a fill past its layout's entry cap through its open suffix; every later warm load ended `Unloadable(Entries)` on undamaged media and served nothing.",
+  "property": {
+    "text": "a retained entry outside every damage set was lost on host loss",
+    "place": "rule",
+    "pointer": "array ORACLE of crates/kestrike/src/net/world_tests/narrate/rules.rs"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1903,
+    "regression": {
+      "path": "crates/kestrike/src/storage/volume/suffix_entry_cap_tests.rs",
+      "tests": [
+        "storage::volume::warm::suffix_sim_tests::entry_cap::every_fill_acknowledged_past_the_entry_cap_is_served_after_host_loss"
+      ]
+    }
+  },
+  "note": "Cause, evidence and catch set by M1b-1 (#332). The entry-cap guard of a fill publication is the `capture.suffix.past_entry_cap` check in `install`. Also agreed at the obligation record warm-takeover-retains-s-across-host-loss and REFUSE-BEFORE-ACK of crates/kestrike/src/storage/recovery/suffix.rs. The history passes at the head with the guard's refusal as its witness; the control plants the acknowledged fill from the test tree, by running the tenure under a layout one entry wider and loading the successor under the history's layout through a probe.",
+  "cause": "workload",
+  "evidence": {
+    "steps": "The trigger needs a tenure whose records layout has an entry cap below its pool's slot count, which publishes fills up to the cap, publishes a capture pass, opens its suffix and then publishes one more fill, and a successor that attaches the same media warm. Before this unit no world ran those steps: `rg -ln 'entries:' crates/kestrike/src/net/world_tests` lists only `histories/warm_loads.rs`, whose one layout held the 41 entries of a data unit over a pool of eight slots, so no history's membership reached its cap, and the live and cluster profiles start no capture pass and open no suffix (`rg -ln 'start_capture|open_suffix' crates/kestrike/src/net/world_tests crates/kestrike/src/sim` lists only `histories/warm_loads.rs`). The history wl3-fill-past-cap-refused runs those steps under a cap of 3.",
+    "sweep": "One sweep at 628788031 of cluster-swarm, cluster-pressure and upload, archive build de9f5a81b9f2842e24b746246d280b07aaf9610a887ea2b188a1d915a4cfc2be, campaign bsw-ct1-2100-profiles, 28 workers, 121 s, counts {}: cluster-swarm 13891 runs (0..13890), 10755 pass, 3136 uncredited, 0 suspects; cluster-pressure 34765 runs (0..34764), 34320 pass, 445 uncredited, 0 suspects; upload 392404 runs (0..392403), 392404 pass, 0 uncredited, 0 suspects; controls 4509 runs, 3372 caught, 0 missed; 79 replays, 0 suspects, none of class replay differs. The trigger's code is unchanged since that commit: `git log 628788031..c4c5813fe` lists no commit that touches crates/kestrike/src/storage/publication.rs or crates/kestrike/src/storage/recovery/suffix.rs. Every run of the three profiles reaches the steps above at most in part: no profile of the set records under a layout or opens a suffix."
+  },
+  "catch": {
+    "history": "wl3-fill-past-cap-refused",
+    "control": "wl3-wide-tenure-loaded-capped",
+    "rule": "a retained entry outside every damage set was lost on host loss",
+    "tally": {
+      "build": "49e8efed3bf6b6bc97e3ad5cc9be9ca77141893d40084e676f632d608e718151",
+      "campaign": "bsw-ct1-2150-take-2154",
+      "commit": "73110fcbd",
+      "counts": {},
+      "workers": 28,
+      "seconds": 121,
+      "history": {
+        "name": "wl3-fill-past-cap-refused",
+        "runs": 124252,
+        "run_range": "0..124251",
+        "ended": {
+          "pass": 124252,
+          "violation": 0,
+          "uncredited": 0
+        },
+        "missed": 0,
+        "suspects": 0,
+        "replays": 13
+      },
+      "controls": [
+        {
+          "name": "wl3-wide-tenure-loaded-capped",
+          "runs": 105897,
+          "run_range": "0..105896",
+          "ended": {
+            "pass": 0,
+            "violation": 105897,
+            "uncredited": 0
+          },
+          "missed": 0,
+          "suspects": 0,
+          "replays": 13,
+          "rule": "a retained entry outside every damage set was lost on host loss"
+        }
+      ]
+    }
+  }
+}

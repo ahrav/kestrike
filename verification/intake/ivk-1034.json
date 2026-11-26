@@ -1,0 +1,33 @@
+{
+  "id": "ivk-1034",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/identity.rs",
+    "function": "Host::covered"
+  },
+  "defect": "A mount listed over a sysfs class directory whose link leads elsewhere in sysfs is read as the kernel's own, so an exported namespace passes the unused check.",
+  "property": {
+    "text": "A file or directory under `proc` or `sys` is evidence only as the kernel's own; a bind and a release resolve every such path through `Host::shown` and refuse a covered one as unreadable.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/bind/mod.rs, module documentation; `Host::shown` in crates/kestrike/src/bind/identity.rs"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1752,
+    "regression": {
+      "path": "crates/kestrike/src/bind/identity_tests.rs",
+      "tests": [
+        "bind::identity_tests::an_entry_behind_a_link_that_a_mount_shows_is_refused_as_unreadable",
+        "bind::identity_tests::a_parent_step_keeps_the_cover_of_the_directory_it_leaves"
+      ]
+    }
+  },
+  "pair": "dsw-4",
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "crates/kestrike/src/bind/identity_tests.rs, bind::identity_tests::an_entry_behind_a_link_that_a_mount_shows_is_refused_as_unreadable; crates/kestrike/src/bind/identity_tests.rs, bind::identity_tests::a_parent_step_keeps_the_cover_of_the_directory_it_leaves"
+  },
+  "exclusion": "bind-and-failover"
+}

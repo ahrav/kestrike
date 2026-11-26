@@ -1,0 +1,14 @@
+{
+  "sites": [
+    {"site": "sequence-begin", "symbol": "kestrike::storage::barrier_tests::sequence_begin", "order": "release"},
+    {"site": "sequence-terminate", "symbol": "kestrike::storage::barrier_tests::sequence_terminate", "order": "release"},
+    {"site": "fill-run", "symbol": "kestrike::storage::barrier_tests::fill_run", "order": "acquire"},
+    {"site": "segment-attempt", "symbol": "kestrike::storage::portable::segment_v2_barrier_tests::segment_attempt", "order": "acquire"}
+  ],
+  "callers": [
+    "storage::barrier_tests::the_sequence_callers_bracket_and_terminate_a_shard",
+    "storage::barrier_tests::the_fill_caller_observes_an_occupied_run_of_eight_words",
+    "storage::barrier_tests::the_removal_caller_ends_a_mapping_in_a_terminal_shard",
+    "storage::portable::segment_v2_barrier_tests::the_attempt_caller_reads_a_synchronized_body_and_retries_a_torn_one"
+  ]
+}

@@ -1,0 +1,4 @@
+{"host": "h1", "instance": "i-h1", "report": {"time": 100, "healthy": true}}
+{"host": "h2", "instance": "i-h2", "report": {"time": 100, "healthy": true}}
+{"host": "h3", "instance": "i-h3", "report": {"time": 100, "healthy": true}}
+{"host": "h4", "instance": "i-h4", "report": {"time": 100, "healthy": true}}

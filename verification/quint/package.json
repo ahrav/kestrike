@@ -1,0 +1,7 @@
+{
+  "name": "kestrike-quint",
+  "private": true,
+  "dependencies": {
+    "@informalsystems/quint": "file:quint.tgz"
+  }
+}

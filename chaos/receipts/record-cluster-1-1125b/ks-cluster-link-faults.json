@@ -1,0 +1,40 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/core/validity.py",
+      "ks-cluster-link-faults"
+    ],
+    "defect": "",
+    "detail": "valid: cluster-broad 200510 covered of 64 required, 83 replays; reached faults, hits, invalidated; 19227 control runs, 4008 caught",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "06859b063520fe4f74c7a8fa5fbc59e9b0ae6f8b88feaaea4e006b92e229b994",
+      "run.json": "613bf9a260983e3d37293b944db511d20779ef030a0d532d12326ec9fb2137cc",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "317791a92214917aeed8d2a24c64c395838ef45e0fbebffe7c68bc41efa2ae20"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941"
+    },
+    "mode": "live",
+    "outcome": "held",
+    "row": "ks-cluster-link-faults",
+    "rows": {
+      "ks-cluster-link-faults": "c85eaabd9ff2c2bf0b8353bf0b8ca88d5f2d85546202b23a16c6050d6b766ae7"
+    },
+    "scenario": "ks-cluster-link-faults",
+    "system_build": "c948fcfa86a0408965ecccda9755efeb50cad7c417e9d750215a04c958b0a3fe"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-25T07:03:33Z",
+    "run_id": "record-cluster-1-1125b",
+    "started": "2026-11-25T07:01:30Z"
+  }
+}

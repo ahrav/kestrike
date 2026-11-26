@@ -1,0 +1,24 @@
+{
+  "id": "dsw-23",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/host.rs",
+    "function": "batch"
+  },
+  "defect": "A word that holds a NUL byte is passed to `ip -batch`, which ends the command at the NUL; the captured network state can hold such an address word.",
+  "property": {
+    "text": "Release replays each address through ip -batch, so a captured address holding a word ip -batch would not replay as itself refuses as Unverifiable.",
+    "place": "obligation",
+    "pointer": "a-captured-address-release-cannot-replay-refuses-the-eni"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "none"
+  },
+  "exclusion": "bind-and-failover"
+}

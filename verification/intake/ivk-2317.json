@@ -1,0 +1,46 @@
+{
+  "id": "ivk-2317",
+  "kind": "escape",
+  "class": "safety bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/capture.rs",
+    "function": "Storage::begin_capture"
+  },
+  "defect": "A capture pass that starts after the close service ended the mappings publishes a checkpoint without them; the next tenure's warm load opens on undamaged media without objects the tenure published.",
+  "property": {
+    "text": "a retained entry outside every damage set was lost on host loss",
+    "place": "rule",
+    "pointer": "array ORACLE of crates/kestrike/src/net/world_tests/narrate/rules.rs"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "note": "Cause, evidence and catch set by M1-2 (#318); bug issue #300. The drain that ends the mappings is `Storage::close_service` in crates/kestrike/src/storage/closing.rs. Also agreed at `Step::cause` in storage/remove.rs and the obligation record suffix-activation-records-before-acknowledgment. The history's second pass is an attempt: a fix that refuses its start makes the history pass.",
+  "cause": "workload",
+  "evidence": {
+    "steps": "The trigger needs a tenure that publishes fills, publishes a capture pass and opens its suffix, fills again, closes its storage and lets the close service drain it, then starts and publishes a second pass, and a successor that attaches the same media warm from the record that names that checkpoint. Before this unit no listed history or swept profile issued a capture pass with a warm load: `rg -ln 'start_capture|cut_intact|WarmSource|warm_device' crates/kestrike/src/net/world_tests crates/kestrike/src/sim` lists only `net/world_tests/relaunch.rs` and `histories/warm_loads.rs`, the warm relaunch of the history world this unit adds, so no other listed history or swept profile starts a capture pass and attaches a successor warm. The takeover history cycles (`net/takeover_history_tests/cycles.rs`) and the worker case of publishing restart cycles (`host/duties_step_tests.rs`) combine a capture pass with a warm attach outside the sweep; they are no swept profile, and whether they run this trigger's sequence was not checked. The history wl1-closed-pass-lost runs those steps; its sibling wl1-closed-without-pass, with no pass after the drain, passes.",
+    "sweep": "One sweep at 8b58f1355 of cluster-swarm, cluster-pressure and upload, archive build f86c52457e1cf9a27b5576cc1d5f79004cef8b7b3d48413c21d64c13344047bd, campaign bsw-ct1-2100-profiles, 28 workers, 121 s, counts {}: cluster-swarm 13835 runs (0..13834), 10660 pass, 3175 uncredited, 0 suspects; cluster-pressure 34895 runs (0..34894), 34437 pass, 458 uncredited, 0 suspects; upload 399266 runs (0..399265), 399266 pass, 0 uncredited, 0 suspects; controls 4466 runs, 3299 caught, 0 missed; 79 replays, 0 suspects, none of class replay differs. Every run of the three profiles reaches the steps above at most in part: no profile of the set starts a capture pass and attaches a successor warm."
+  },
+  "catch": {
+    "history": "wl1-closed-pass-lost",
+    "rule": "a retained entry outside every damage set was lost on host loss",
+    "tally": {
+      "build": "f86c52457e1cf9a27b5576cc1d5f79004cef8b7b3d48413c21d64c13344047bd",
+      "campaign": "bsw-ct1-2100-warm-loads",
+      "counts": {},
+      "commit": "8b58f1355",
+      "runs": 129613,
+      "run_range": "0..129612",
+      "ended": {
+        "violation": 129613,
+        "pass": 0,
+        "uncredited": 0
+      },
+      "missed": 0,
+      "suspects": 0,
+      "replays": 13,
+      "workers": 28,
+      "seconds": 121
+    }
+  }
+}

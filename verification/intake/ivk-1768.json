@@ -1,0 +1,25 @@
+{
+  "id": "ivk-1768",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/walk.rs",
+    "function": "Walker::recheck"
+  },
+  "defect": "The recheck ends on a listing with no thread after a thread that started apart has execed, so a device open throughout is reported as open in no process.",
+  "property": {
+    "text": "The walk reads every thread's descriptor table whatever the leader's holds, reports each matching node once, tells processes apart by ID and the leader's start tick, and reads the table under a process's ID again when its witness thread is gone or an exec may have replaced the leader.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/bind/walk.rs, module documentation"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "none"
+  },
+  "exclusion": "bind-and-failover",
+  "note": "blotter pull request 1901 (merged) changes the recheck; its effect on this defect is unknown."
+}

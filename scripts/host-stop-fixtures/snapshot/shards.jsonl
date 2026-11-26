@@ -1,0 +1,5 @@
+{"shard": "s1", "owner": "h1", "standby": "h2", "generation": 7, "volume": "vol-s1", "attempts": 1, "time": 100}
+{"shard": "s2", "owner": "h1", "standby": "h3", "generation": 4, "volume": "vol-s2", "attempts": 2, "time": 100}
+{"shard": "s3", "owner": "h1", "standby": "h2", "generation": 9, "volume": "vol-s3", "attempts": 1, "time": 100}
+{"shard": "s4", "owner": "h2", "standby": "h1", "generation": 3, "volume": "vol-s4", "attempts": 1, "time": 100}
+{"shard": "s5", "owner": "h3", "standby": "h4", "generation": 5, "volume": "vol-s5", "attempts": 1, "time": 100}

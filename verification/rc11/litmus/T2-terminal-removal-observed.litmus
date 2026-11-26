@@ -1,0 +1,30 @@
+C T2-terminal-removal-observed
+(* The fenced removal, as in T0: some reader that started at the usable
+   sequence copies the removal's store. Observed: 1:r0=1 (the holder took
+   the shard), 2:r0=0 (the reader started at the usable value) and 2:r1=2.
+   Events: P0 is the terminator, its terminal store and fence, then the
+   gate's release; P1 is the next holder, the gate's acquire, its own release
+   fence, then the
+   removal's bare store of the field; P2 is the reader, its starting
+   sequence load, the field's copy and its recheck. *)
+{ seq = 0; field = 1; handed = 0; }
+
+P0 (atomic_int* seq, atomic_int* handed) {
+  atomic_store_explicit(seq, 2, memory_order_seq_cst);
+  atomic_thread_fence(memory_order_release);
+  atomic_store_explicit(handed, 1, memory_order_release);
+}
+
+P1 (atomic_int* handed, atomic_int* field) {
+  int r0 = atomic_load_explicit(handed, memory_order_acquire);
+  atomic_thread_fence(memory_order_release);
+  atomic_store_explicit(field, 2, memory_order_relaxed);
+}
+
+P2 (atomic_int* seq, atomic_int* field) {
+  int r0 = atomic_load_explicit(seq, memory_order_seq_cst);
+  int r1 = atomic_load_explicit(field, memory_order_seq_cst);
+  int r2 = atomic_load_explicit(seq, memory_order_seq_cst);
+}
+
+exists (1:r0=1 /\ 2:r0=0 /\ 2:r1=2)

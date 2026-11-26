@@ -1,0 +1,693 @@
+{
+  "upstream": "9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7",
+  "llvm": "22.1.8",
+  "rustc": {
+    "release": "1.99.0-nightly",
+    "commit": "dc3f85158a955a87a6e4363af1fbe9cf2d063cce",
+    "llvm": "22.1.8"
+  },
+  "options": [
+    "-rc11",
+    "--disable-estimation"
+  ],
+  "package": "verification/genmc/packages/kernels",
+  "transcribed": [
+    "crates/kestrike/src/index/bucket.rs",
+    "crates/kestrike/src/index/scan.rs",
+    "crates/kestrike/src/index/sequence.rs",
+    "crates/kestrike/src/storage/allocation.rs",
+    "crates/kestrike/src/storage/attempt.rs",
+    "crates/kestrike/src/storage/config.rs",
+    "crates/kestrike/src/storage/fill.rs",
+    "crates/kestrike/src/storage/join.rs",
+    "crates/kestrike/src/storage/lease.rs",
+    "crates/kestrike/src/storage/owner.rs",
+    "crates/kestrike/src/storage/place_claim.rs",
+    "crates/kestrike/src/storage/publication.rs",
+    "crates/kestrike/src/storage/publish.rs",
+    "crates/kestrike/src/storage/register.rs",
+    "crates/kestrike/src/storage/release.rs",
+    "crates/kestrike/src/storage/remove.rs",
+    "crates/kestrike/src/storage/reserve.rs",
+    "crates/kestrike/src/storage/row.rs",
+    "crates/kestrike/src/storage/slot.rs",
+    "crates/kestrike/src/storage/word.rs",
+    "crates/kestrike/src/storage/writable.rs"
+  ],
+  "strengths": [
+    {
+      "file": "src/grace_kernel.rs",
+      "impl": "impl ModelStrength for Sequential"
+    }
+  ],
+  "bindings": [
+    {"id": "claim-load", "obligation": "mc-claim-before-pin", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/storage/register.rs", "scope": ["fn register"], "call": "bound.load", "before": ["claim-raise", "Ok(Registration {"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn claim"], "call": "SLOT.claimed.load", "before": ["claim-raise", "S::fence_claim()"]}},
+    {"id": "claim-raise", "obligation": "mc-claim-before-pin", "kind": "rmw", "operands": ["index + 1"], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/storage/register.rs", "scope": ["fn register"], "call": "bound.fetch_max", "after": ["claim-load"], "before": ["Ok(Registration {"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn claim"], "call": "SLOT.claimed.fetch_max", "operands": ["record + 1"], "after": ["claim-load"], "before": ["S::fence_claim()"]}},
+    {"id": "claim-before-pin", "obligation": "mc-claim-before-pin", "kind": "call", "operands": ["record"], "orderings": [],
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn reader"], "call": "claim", "before": ["pin::<_, S>(&SLOT.era, &SLOT.records[record])"]}},
+    {"id": "pass-bound-load", "obligation": "mc-claim-before-pin", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/storage/release.rs", "scope": ["fn certify"], "call": "eras.claimed_bound.load", "after": ["PassCursor::begin::<_, Sequential>(&eras.era)"], "before": ["cursor.visit::<_, Sequential>(&record.pin)"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn maintain"], "call": "SLOT.claimed.load", "after": ["PassCursor::begin::<_, S>(&SLOT.era)"], "before": ["cursor.visit::<_, S>(&SLOT.records[index])"]}},
+    {"id": "sequence-first-load", "obligation": "mc-sequence-correspondence", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["fn read_stable"], "call": "sequence.load", "before": ["value == TERMINAL"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn reader"], "call": "SLOT.bucket.load", "after": ["claim-before-pin"], "before": ["retain_word("]}},
+    {"id": "sequence-second-load", "obligation": "mc-sequence-correspondence", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["fn still"], "call": "sequence.load", "before": ["== started"]}},
+    {"id": "sequence-odd-store", "obligation": "mc-sequence-correspondence", "kind": "store", "operands": ["stable + 1"], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["impl<'w, W: SeqWord> Busy<'w, W>", "fn begin"], "call": "sequence.store", "before": ["sequence-odd-fence"]}},
+    {"id": "sequence-odd-fence", "obligation": "mc-sequence-correspondence", "kind": "fence", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["impl<'w, W: SeqWord> Busy<'w, W>", "fn begin"], "call": "W::fence_release", "after": ["sequence-odd-store"], "before": ["Self { sequence, stable }"]}},
+    {"id": "sequence-fence-release", "obligation": "mc-sequence-correspondence", "kind": "fence", "operands": [], "orderings": ["Release"],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["macro_rules! forward_seq_word", "fn fence_release"], "call": "$fence"}},
+    {"id": "sequence-forward-load", "obligation": "mc-sequence-correspondence", "kind": "load", "operands": ["self", "order"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["macro_rules! forward_seq_word", "fn load"], "call": "Self::load"}},
+    {"id": "sequence-forward-store", "obligation": "mc-sequence-correspondence", "kind": "store", "operands": ["self", "value", "order"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["macro_rules! forward_seq_word", "fn store"], "call": "Self::store"}},
+    {"id": "sequence-fence-function", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["std::sync::atomic::AtomicU64", "std::sync::atomic::fence"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": [], "call": "forward_seq_word!", "among": 2}},
+    {"id": "sequence-commit", "obligation": "mc-sequence-correspondence", "kind": "store", "operands": ["committed"], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["impl<'w, W: SeqWord> Busy<'w, W>", "fn commit"], "call": "self.sequence.store", "after": ["let committed = self.stable + 2;"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn writer"], "call": "SLOT.bucket.store", "operands": ["NONE"], "before": ["bump::<_, S>(&SLOT.era)"]}},
+    {"id": "sequence-terminal-store", "obligation": "mc-sequence-correspondence", "kind": "store", "operands": ["TERMINAL"], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["fn terminate"], "call": "sequence.store", "before": ["sequence-terminal-fence"]}},
+    {"id": "sequence-terminal-fence", "obligation": "mc-sequence-correspondence", "kind": "fence", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/index/sequence.rs", "scope": ["fn terminate"], "call": "W::fence_release", "after": ["sequence-terminal-store"]}},
+    {"id": "bucket-control-load", "obligation": "mc-sequence-correspondence", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/scan.rs", "scope": ["impl BucketView for super::bucket::Bucket", "fn control"], "call": "self.control.load"},
+     "kernel": {"file": "src/terminal_kernel.rs", "scope": ["fn reader"], "call": "FIELD.load", "after": ["read_stable(&SEQUENCE)"], "before": ["still(&SEQUENCE, started)"]}},
+    {"id": "bucket-next-load", "obligation": "mc-sequence-correspondence", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/scan.rs", "scope": ["impl BucketView for super::bucket::Bucket", "fn next"], "call": "self.next.load"}},
+    {"id": "bucket-identity-load", "obligation": "mc-sequence-correspondence", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/index/scan.rs", "scope": ["impl BucketView for super::bucket::Bucket", "fn identity"], "call": "self.pairs[pair].word.load"}},
+    {"id": "bucket-bare-pair-store", "obligation": "mc-sequence-correspondence", "kind": "store", "operands": ["Identity::new(tag, id).pack()"], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/index/bucket.rs", "scope": ["fn publish_pair"], "call": "self.pairs[pair].word.store"}},
+    {"id": "bucket-bare-control-store", "obligation": "mc-sequence-correspondence", "kind": "store", "operands": ["control_with(control, pair, tag)"], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/index/bucket.rs", "scope": ["fn publish_pair"], "call": "self.control.store"}},
+    {"id": "bucket-pair-publish", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["place.pair", "place.control", "route.tag()", "id"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/publish.rs", "scope": ["fn store(hold: &Hold<'_>"], "call": "hold.buckets[place.bucket].publish_pair", "among": 2, "matching": 2}},
+    {"id": "bucket-link-publish", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["popped.link"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/publish.rs", "scope": ["fn store(hold: &Hold<'_>"], "call": "hold.buckets[popped.tail].link"}},
+    {"id": "install-stores-inside-bracket", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["&tables.hold", "&route", "id", "&placement"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/publication.rs", "scope": ["fn install<'s, P: Platform>"], "call": "store", "after": ["Busy::begin(&control.sequence, placement.stable)"], "before": ["commit(control, busy, &placement)"]}},
+    {"id": "removal-clear-inside-bracket", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["found.place.pair", "found.place.control"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/remove.rs", "scope": ["fn clear"], "call": "record.clear_pair", "after": ["Busy::begin(&control.sequence, stable)"], "before": ["let sequence = busy.map_or(TERMINAL, Busy::commit); probe::event(Event::Committed { sequence }); Ok(Cleared {"]}},
+    {"id": "removal-carry-link-inside-bracket", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["OverflowLink::from_raw(carried)"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/remove.rs", "scope": ["fn clear"], "call": "hold.buckets[prev].link", "after": ["Busy::begin(&control.sequence, stable)"], "before": ["let sequence = busy.map_or(TERMINAL, Busy::commit); probe::event(Event::Committed { sequence }); Ok(Cleared {"]}},
+    {"id": "removal-forget-link-inside-bracket", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["OverflowLink::NONE"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/remove.rs", "scope": ["fn clear"], "call": "record.link", "after": ["removal-carry-link-inside-bracket"], "before": ["let sequence = busy.map_or(TERMINAL, Busy::commit); probe::event(Event::Committed { sequence }); Ok(Cleared {"]}},
+    {"id": "claim-link-inside-bracket", "obligation": "mc-sequence-correspondence", "kind": "call", "operands": ["popped.link"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/place_claim.rs", "scope": ["fn claim<P: Platform>"], "call": "tables.hold.buckets[popped.tail].link", "after": ["Busy::begin(&control.sequence, stable)"], "before": ["busy.commit()"]}},
+    {"id": "retire-stamp", "obligation": "mc-era-transcription", "kind": "store", "operands": ["era"], "orderings": ["Release"],
+     "production": {"file": "crates/kestrike/src/storage/slot.rs", "scope": ["fn stamp_era"], "call": "self.fingerprint.store"},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn stamp"], "call": "self.fingerprint.store", "after": ["KEY_HASH"]}},
+    {"id": "retire-stamp-before-park", "obligation": "mc-era-transcription", "kind": "call", "operands": ["bump.retire_era"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/lease.rs", "scope": ["fn retire_anchored"], "call": "pool.records()[slot].stamp_era", "after": ["grace::bump::<_, Sequential>(&storage.eras().era)"], "before": ["abandon(pool, id, Owned::Resident, ANCHORED, evicted, counted)"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn writer"], "call": "SLOT.record.stamp", "operands": ["stamp.retire_era"], "after": ["bump::<_, S>(&SLOT.era)"], "before": ["park_word(&SLOT.record.ident, 1, ANCHORED)"]}},
+    {"id": "anchored-park-load", "obligation": "mc-era-transcription", "kind": "load", "operands": [], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/release.rs", "scope": ["fn park_marked"], "call": "slot_word.load", "before": ["anchored-park"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn park_word"], "call": "slot_word.load", "before": ["anchored-park"]}},
+    {"id": "anchored-park", "obligation": "mc-era-transcription", "kind": "cas", "operands": ["current", "next"], "orderings": ["AcqRel", "Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/release.rs", "scope": ["fn park_marked"], "call": "slot_word.compare_exchange", "after": ["anchored-park-load", "word::parked(current, incarnation, marks)"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn park_word"], "call": "slot_word.compare_exchange", "after": ["anchored-park-load", "word::parked(current, incarnation, marks)"]}},
+    {"id": "anchored-retire-update", "obligation": "mc-era-transcription", "kind": "cas", "operands": ["|current| { Some((current | set) ^ departure) }"], "orderings": ["AcqRel", "Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/allocation.rs", "scope": ["fn retire_held"], "call": "ident.try_update", "before": ["tables.mark_retired(slot)"]}},
+    {"id": "retain-current-load", "obligation": "mc-era-transcription", "kind": "load", "operands": [], "orderings": ["Acquire"],
+     "production": {"file": "crates/kestrike/src/storage/owner.rs", "scope": ["fn resolve(&self, identity: Identity)"], "call": "unsafe { self.slot_word(slot) }.load"},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn reader"], "call": "SLOT.record.ident.load", "after": ["sequence-first-load", "retain_word("], "before": ["right-release"]}},
+    {"id": "retain-exchange", "obligation": "mc-era-transcription", "kind": "cas", "operands": ["current", "target"], "orderings": ["Relaxed", "Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/lease.rs", "scope": ["impl Exchanged for AtomicU64", "fn exchange_weak"], "call": "self.compare_exchange_weak"},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn retain_word"], "call": "slot_word.compare_exchange", "operands": ["current", "next"], "after": ["word::retained(current, incarnation)"]}},
+    {"id": "right-release", "obligation": "mc-era-transcription", "kind": "rmw", "operands": ["word::REF"], "orderings": ["Release"],
+     "production": {"file": "crates/kestrike/src/storage/lease.rs", "scope": ["fn release<P: Platform>"], "call": "slot_word.fetch_sub", "before": ["return_credit(storage, credit)"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn reader"], "call": "SLOT.record.ident.fetch_sub", "operands": ["REF"], "after": ["retain_word(", "payload == PAYLOAD"], "before": ["unpin(&SLOT.records[record])"]}},
+    {"id": "state-flip", "obligation": "mc-reserve-transcription", "kind": "rmw", "operands": ["from.bits() ^ to.bits() ^ policy"], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/word.rs", "scope": ["fn move_state"], "call": "slot_word.fetch_xor"},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["impl Record", "fn reuse"], "call": "self.ident.fetch_xor", "operands": ["SlotState::Filling.bits() ^ SlotState::Resident.bits()"], "after": ["reuse_word(&self.ident, 2)"]}},
+    {"id": "state-flip-bind", "obligation": "mc-reserve-transcription", "kind": "call", "operands": ["ident", "SlotState::Filling", "SlotState::Resident", "linked"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/allocation.rs", "scope": ["fn bind"], "call": "word::move_state"}},
+    {"id": "bind-fingerprint-store", "obligation": "mc-reserve-transcription", "kind": "store", "operands": ["fingerprint"], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/slot.rs", "scope": ["fn set_fingerprint"], "call": "self.fingerprint.store"},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["impl Record", "fn reuse"], "call": "self.fingerprint.store", "operands": ["!KEY_HASH"], "after": ["reuse_word(&self.ident, 2)"], "before": ["state-flip"]}},
+    {"id": "bind-fingerprint", "obligation": "mc-reserve-transcription", "kind": "call", "operands": ["fingerprint"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/allocation.rs", "scope": ["fn bind"], "call": "record.set_fingerprint", "before": ["state-flip-bind"]}},
+    {"id": "publication-anchor", "obligation": "mc-reserve-transcription", "kind": "rmw", "operands": ["REF"], "orderings": ["Release"],
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["impl Record", "fn reuse"], "call": "self.ident.fetch_add", "after": ["state-flip"]}},
+    {"id": "publication-install", "obligation": "mc-reserve-transcription", "kind": "cas", "operands": ["current", "next"], "orderings": ["Release", "Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/word.rs", "scope": ["fn install"], "call": "slot_word.compare_exchange", "after": ["let next = current + count as u64 * REF;"]}},
+    {"id": "anchored-sighting", "obligation": "mc-era-transcription", "kind": "load", "operands": [], "orderings": ["Acquire"],
+     "production": {"file": "crates/kestrike/src/storage/release.rs", "scope": ["impl Cohort for PassCohort<'_, '_, '_, '_>", "fn member"], "call": "self.records[slot].ident.load", "before": ["self.walk.visit("]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn maintain"], "call": "SLOT.record.ident.load", "after": ["cursor.complete::<_, S>(bound, &SLOT.certified)"], "before": ["retire-era-read"]}},
+    {"id": "retire-era-read", "obligation": "mc-era-transcription", "kind": "load", "operands": [], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/slot.rs", "scope": ["fn retire_era"], "call": "self.fingerprint.load"},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn maintain"], "call": "SLOT.record.fingerprint.load", "after": ["anchored-sighting"], "before": ["release_anchor_word(&SLOT.record.ident, sighted)"]}},
+    {"id": "anchor-release", "obligation": "mc-era-transcription", "kind": "cas", "operands": ["current", "word::unanchored(current)"], "orderings": ["AcqRel", "Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/release.rs", "scope": ["fn release_anchor"], "call": "slot_word.compare_exchange", "after": ["pool.records()[slot].retire_era()", "let mut current = sighted;"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn release_anchor_word"], "call": "slot_word.compare_exchange", "after": ["let mut current = sighted;"]}},
+    {"id": "reuse-from-count", "obligation": "mc-reserve-transcription", "kind": "call", "operands": ["word::refs(sighted)"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/release.rs", "scope": ["fn visit"], "call": "released_to.unwrap_or", "after": ["release_anchor(pool, slot, sighted, self.certified)"], "before": ["if refs == 0 {"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn maintain"], "call": "released_to.unwrap_or", "after": ["release_anchor_word(&SLOT.record.ident, sighted)"], "before": ["if refs == 0 {"]}},
+    {"id": "reserve-return-clear", "obligation": "mc-reserve-transcription", "kind": "rmw", "operands": ["!(FLAGS | VISITED | STATE | POLICY | MARKER)"], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/reserve.rs", "scope": ["fn return_extent"], "call": "pool.records()[slot].ident.fetch_and", "before": ["word::refs(previous) == 0"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn reuse_word"], "call": "slot_word.fetch_and", "before": ["reserve-next-claim"]}},
+    {"id": "reserve-next-claim", "obligation": "mc-reserve-transcription", "kind": "cas", "operands": ["u64::from(incarnation - 1)", "u64::from(incarnation) | SlotState::Filling.bits()"], "orderings": ["Release", "Relaxed"],
+     "production": {"file": "crates/kestrike/src/storage/reserve.rs", "scope": ["fn install_filling"], "call": "record.ident.compare_exchange", "before": ["record.set_locator(locator)"]},
+     "kernel": {"file": "src/grace_kernel.rs", "scope": ["fn reuse_word"], "call": "slot_word.compare_exchange", "after": ["reserve-return-clear"]}},
+    {"id": "entry-cutoff-load", "obligation": "mc-pin-before-cutoff", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/storage/register.rs", "scope": ["fn enter"], "call": "self.storage.closed().load", "after": ["grace::pin::<_, Sequential>(&self.storage.eras().era, &record.pin)"], "before": ["grace::unpin(&record.pin)"]},
+     "kernel": {"file": "src/cutoff_kernel.rs", "scope": ["fn entrant"], "call": "CLOSED.load", "after": ["pin::<_, Sequential>(&ERA, &PIN)"], "before": ["ADMITTED.store(true, Ordering::SeqCst)"]}},
+    {"id": "close-store", "obligation": "mc-pin-before-cutoff", "kind": "store", "operands": ["true"], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/storage/reserve.rs", "scope": ["pub fn close"], "call": "self.closed().store"},
+     "kernel": {"file": "src/cutoff_kernel.rs", "scope": ["fn closer"], "call": "CLOSED.store"}},
+    {"id": "scan-cutoff-load", "obligation": "mc-pin-before-cutoff", "kind": "load", "operands": [], "orderings": ["SeqCst"],
+     "production": {"file": "crates/kestrike/src/storage/reserve.rs", "scope": ["pub fn is_closed"], "call": "self.closed().load"},
+     "kernel": {"file": "src/cutoff_kernel.rs", "scope": ["fn scanner"], "call": "CLOSED.load", "before": ["cursor.visit::<_, Sequential>(&PIN)"]}},
+    {"id": "terminal-removal-fence", "obligation": "mc-terminal-removal-fence", "kind": "fence", "operands": [], "orderings": ["Release"],
+     "production": {"file": "crates/kestrike/src/storage/remove.rs", "scope": ["fn clear"], "call": "fence", "after": ["let busy = sequence.map(|stable| Busy::begin(&control.sequence, stable));"], "before": ["record.clear_pair(found.place.pair, found.place.control)"]},
+     "kernel": {"file": "src/terminal_kernel.rs", "scope": ["fn holder"], "call": "std::sync::atomic::fence", "after": ["HANDED.load(Ordering::Acquire)"], "before": ["terminal-bare-store"]}},
+    {"id": "terminal-bare-store", "obligation": "mc-terminal-removal-fence", "kind": "store", "operands": ["control_without(control, pair)"], "orderings": ["Relaxed"],
+     "production": {"file": "crates/kestrike/src/index/bucket.rs", "scope": ["fn clear_pair"], "call": "self.control.store"},
+     "kernel": {"file": "src/terminal_kernel.rs", "scope": ["fn holder"], "call": "FIELD.store", "operands": ["NEW"], "after": ["terminal-removal-fence"]}},
+    {"id": "join-record-failure", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": ["failure"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/writable.rs", "scope": ["fn fail"], "call": "self.record.row.record_failure", "before": ["self.abort()"]},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn producer"], "call": "ROW.record_failure", "operands": ["FAILURE"], "before": ["fill::depart(&STATE, ORIGINAL)"]}},
+    {"id": "join-refusal-failure", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": ["failure"], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/publication.rs", "scope": ["fn refused"], "call": "record.row.record_failure"}},
+    {"id": "join-follower-observe", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/join.rs", "scope": ["fn decide"], "call": "fill::observe", "operands": ["self.state", "self.serial.get() + 1"], "before": ["join-follower-terminal"]},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn follower"], "call": "fill::observe", "operands": ["&STATE", "2"], "before": ["join-follower-terminal"]}},
+    {"id": "join-follower-terminal", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/join.rs", "scope": ["fn decide"], "call": "self.row.terminal"},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn follower"], "call": "ROW.terminal"}},
+    {"id": "join-detach", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/join.rs", "scope": ["impl<P: Platform> Drop for FillFollower<'_, P>", "fn drop"], "call": "self.row.detach"},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn follower"], "call": "ROW.detach", "after": ["join-follower-terminal"]}},
+    {"id": "join-service-observe", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/attempt.rs", "scope": ["fn pass"], "call": "fill::observe", "operands": ["state", "next_serial"], "among": 2, "matching": 2},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn servicer"], "call": "fill::observe", "operands": ["&STATE", "NEXT"], "before": ["join-service-observers"]}},
+    {"id": "join-service-observers", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/attempt.rs", "scope": ["fn pass"], "call": "view.rows[at].observers", "before": ["refund(at)?"]},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn servicer"], "call": "ROW.observers", "before": ["fill::release(&STATE)"]}},
+    {"id": "join-regrant-reset", "obligation": "mc-fill-join-observe-release", "kind": "call", "operands": [], "orderings": [],
+     "production": {"file": "crates/kestrike/src/storage/attempt.rs", "scope": ["fn grant"], "call": "row.reset", "before": ["state.store(fill::occupied(next_serial), Ordering::Relaxed)"]},
+     "kernel": {"file": "src/join_kernel.rs", "scope": ["fn servicer"], "call": "ROW.reset", "after": ["fill::release(&STATE)"], "before": ["STATE.store(fill::occupied(REGRANT), Ordering::Relaxed)"]}},
+    {"id": "join-detach-release", "obligation": "mc-fill-join-observe-release", "kind": "rmw", "operands": ["1"], "orderings": ["Release"],
+     "production": {"file": "crates/kestrike/src/storage/row.rs", "scope": ["impl FillRow", "fn detach"], "call": "self.observers.fetch_sub"}},
+    {"id": "join-observers-acquire", "obligation": "mc-fill-join-observe-release", "kind": "load", "operands": [], "orderings": ["Acquire"],
+     "production": {"file": "crates/kestrike/src/storage/row.rs", "scope": ["impl FillRow", "fn observers"], "call": "self.observers.load"}}
+  ],
+  "cases": {
+    "credit-fenced-empty": {
+      "expect": "positive",
+      "litmus": []
+    },
+    "credit-fenced-pool1": {
+      "expect": "positive",
+      "litmus": [
+        "L1-both-fences"
+      ]
+    },
+    "credit-fenced-stale": {
+      "expect": "positive",
+      "litmus": [
+        "L1-both-fences"
+      ]
+    },
+    "credit-fenced-two": {
+      "expect": "positive",
+      "litmus": [
+        "L1-both-fences"
+      ]
+    },
+    "credit-noclear-empty": {
+      "expect": "positive",
+      "litmus": []
+    },
+    "credit-noclear-pool1": {
+      "expect": "violation",
+      "file": "src/credit_kernel.rs",
+      "checks": [
+        "a record holding credits is flagged"
+      ],
+      "litmus": [
+        "L2b-scan-fence-dropped"
+      ]
+    },
+    "credit-noclear-stale": {
+      "expect": "violation",
+      "file": "src/credit_kernel.rs",
+      "checks": [
+        "a record holding credits is flagged"
+      ],
+      "litmus": [
+        "L2b-scan-fence-dropped"
+      ]
+    },
+    "credit-noclear-two": {
+      "expect": "violation",
+      "file": "src/credit_kernel.rs",
+      "checks": [
+        "a record holding credits is flagged"
+      ],
+      "litmus": [
+        "L2b-scan-fence-dropped"
+      ]
+    },
+    "credit-nopark-empty": {
+      "expect": "positive",
+      "litmus": []
+    },
+    "credit-nopark-pool1": {
+      "expect": "violation",
+      "file": "src/credit_kernel.rs",
+      "checks": [
+        "a record holding credits is flagged"
+      ],
+      "litmus": [
+        "L2a-park-fence-dropped"
+      ]
+    },
+    "credit-nopark-stale": {
+      "expect": "violation",
+      "file": "src/credit_kernel.rs",
+      "checks": [
+        "a record holding credits is flagged"
+      ],
+      "litmus": [
+        "L2a-park-fence-dropped"
+      ]
+    },
+    "credit-nopark-two": {
+      "expect": "violation",
+      "file": "src/credit_kernel.rs",
+      "checks": [
+        "a record holding credits is flagged"
+      ],
+      "litmus": [
+        "L2a-park-fence-dropped"
+      ]
+    },
+    "credit-seq-empty": {
+      "expect": "positive",
+      "litmus": []
+    },
+    "credit-seq-pool1": {
+      "expect": "positive",
+      "litmus": [
+        "L6-production-seqcst-accesses"
+      ]
+    },
+    "credit-seq-stale": {
+      "expect": "positive",
+      "litmus": [
+        "L6-production-seqcst-accesses"
+      ]
+    },
+    "credit-seq-two": {
+      "expect": "positive",
+      "litmus": [
+        "L6-production-seqcst-accesses"
+      ]
+    },
+    "cutoff-admitted": {
+      "expect": "violation",
+      "file": "src/cutoff_kernel.rs",
+      "checks": [
+        "witness reached: an admitted interval's live pin seen by a scan after the close"
+      ],
+      "litmus": [
+        "C2-cutoff-admitted-reachable"
+      ]
+    },
+    "cutoff-cutofffirst": {
+      "expect": "violation",
+      "file": "src/cutoff_kernel.rs",
+      "checks": [
+        "protection violated: a scan after the close missed an admitted interval's live pin"
+      ],
+      "litmus": [
+        "C1-cutoff-read-first"
+      ]
+    },
+    "cutoff-pinfirst": {
+      "expect": "positive",
+      "litmus": [
+        "C0-cutoff-production-pin-first"
+      ]
+    },
+    "cutoff-refusalkeeps": {
+      "expect": "violation",
+      "file": "src/cutoff_kernel.rs",
+      "checks": [
+        "a refused entry kept its pin"
+      ],
+      "litmus": [
+        "C3-cutoff-refused-reachable"
+      ]
+    },
+    "cutoff-refused": {
+      "expect": "violation",
+      "file": "src/cutoff_kernel.rs",
+      "checks": [
+        "witness reached: an entry was refused"
+      ],
+      "litmus": [
+        "C3-cutoff-refused-reachable"
+      ]
+    },
+    "grace1-bumprelaxed": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G6-grace-bump-relaxed"
+      ]
+    },
+    "grace1-claimmisencoded": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G9-claim-misencoded"
+      ]
+    },
+    "grace1-fenced": {
+      "expect": "positive",
+      "litmus": [
+        "G1-grace-all-fences",
+        "G10-composite-all-fences"
+      ]
+    },
+    "grace1-readeralone": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G3-grace-reader-fence-alone",
+        "G13-composite-reader-fences-alone"
+      ]
+    },
+    "grace1-seq": {
+      "expect": "positive",
+      "litmus": [
+        "G0-grace-production-seqcst",
+        "G8-claim-production-seqcst"
+      ]
+    },
+    "grace1-startrelaxed": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G7-grace-start-relaxed"
+      ]
+    },
+    "grace1-weakcertify": {
+      "expect": "positive",
+      "litmus": [
+        "G5-grace-certify-fence-dropped",
+        "G12-composite-certify-fence-dropped"
+      ]
+    },
+    "grace1-weakpin": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G2-grace-pin-fence-dropped"
+      ]
+    },
+    "grace1-weakretire": {
+      "expect": "positive",
+      "litmus": [
+        "G4-grace-retire-fence-dropped",
+        "G11-composite-retire-fence-dropped"
+      ]
+    },
+    "grace2-bumprelaxed": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G6-grace-bump-relaxed"
+      ]
+    },
+    "grace2-claimmisencoded": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G9-claim-misencoded"
+      ]
+    },
+    "grace2-fenced": {
+      "expect": "positive",
+      "litmus": [
+        "G1-grace-all-fences",
+        "G10-composite-all-fences"
+      ]
+    },
+    "grace2-readeralone": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G3-grace-reader-fence-alone",
+        "G13-composite-reader-fences-alone"
+      ]
+    },
+    "grace2-seq": {
+      "expect": "positive",
+      "litmus": [
+        "G0-grace-production-seqcst",
+        "G8-claim-production-seqcst"
+      ]
+    },
+    "grace2-startrelaxed": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G7-grace-start-relaxed"
+      ]
+    },
+    "grace2-weakcertify": {
+      "expect": "positive",
+      "litmus": [
+        "G5-grace-certify-fence-dropped",
+        "G12-composite-certify-fence-dropped"
+      ]
+    },
+    "grace2-weakpin": {
+      "expect": "violation",
+      "file": "src/grace_kernel.rs",
+      "checks": [
+        "protection violated: anchor released under a pinned reader",
+        "protection violated: a pinned reader's retain refused"
+      ],
+      "litmus": [
+        "G2-grace-pin-fence-dropped"
+      ]
+    },
+    "grace2-weakretire": {
+      "expect": "positive",
+      "litmus": [
+        "G4-grace-retire-fence-dropped",
+        "G11-composite-retire-fence-dropped"
+      ]
+    },
+    "join-earlydetach": {
+      "expect": "violation",
+      "file": "src/join_kernel.rs",
+      "checks": [
+        "a follower saw the departure without its terminal",
+        "a follower's record was freed or reissued under it"
+      ],
+      "litmus": []
+    },
+    "join-ignoresobservers": {
+      "expect": "violation",
+      "file": "src/join_kernel.rs",
+      "checks": [
+        "a follower's record was freed or reissued under it"
+      ],
+      "litmus": []
+    },
+    "join-production": {
+      "expect": "positive",
+      "litmus": [
+        "F0-fill-terminal-production"
+      ]
+    },
+    "join-relaxeddepart": {
+      "expect": "violation",
+      "file": "src/join_kernel.rs",
+      "checks": [
+        "a follower saw the departure without its terminal"
+      ],
+      "litmus": [
+        "F1-fill-terminal-release-dropped"
+      ]
+    },
+    "join-relaxedobserve": {
+      "expect": "violation",
+      "file": "src/join_kernel.rs",
+      "checks": [
+        "a follower saw the departure without its terminal"
+      ],
+      "litmus": [
+        "F2-fill-terminal-acquire-dropped"
+      ]
+    },
+    "intrinsic_boundaries": {
+      "expect": "positive",
+      "intrinsics": [
+        "llvm.smax.i64",
+        "llvm.smin.i64",
+        "llvm.uadd.sat.i64",
+        "llvm.umax.i64",
+        "llvm.umin.i64",
+        "llvm.usub.sat.i64"
+      ],
+      "litmus": []
+    },
+    "sb_prior_rmw": {
+      "expect": "positive",
+      "litmus": []
+    },
+    "sb_relaxed": {
+      "expect": "violation",
+      "file": "src/qualification.rs",
+      "checks": [
+        "store buffering outcome r0 == r1 == 0"
+      ],
+      "litmus": []
+    },
+    "sb_sc": {
+      "expect": "positive",
+      "litmus": []
+    },
+    "terminal-none": {
+      "expect": "violation",
+      "file": "src/terminal_kernel.rs",
+      "checks": [
+        "a copy of the terminal removal's bare store was accepted under the old sequence"
+      ],
+      "litmus": [
+        "T1-terminal-removal-fence-dropped"
+      ]
+    },
+    "terminal-observed": {
+      "expect": "violation",
+      "file": "src/terminal_kernel.rs",
+      "checks": [
+        "witness reached: a reader copied the terminal removal's bare store"
+      ],
+      "litmus": [
+        "T2-terminal-removal-observed"
+      ]
+    },
+    "terminal-own": {
+      "expect": "positive",
+      "litmus": [
+        "T0-terminal-removal-own-fence"
+      ]
+    },
+    "wrap_falsifier": {
+      "expect": "violation",
+      "file": "src/qualification.rs",
+      "checks": [
+        "zero minus one saturated to the wrapped value"
+      ],
+      "litmus": []
+    }
+  },
+  "profiles": {
+    "pr": [
+      "credit-fenced-empty",
+      "credit-fenced-pool1",
+      "credit-fenced-stale",
+      "credit-fenced-two",
+      "credit-noclear-empty",
+      "credit-noclear-pool1",
+      "credit-noclear-stale",
+      "credit-noclear-two",
+      "credit-nopark-empty",
+      "credit-nopark-pool1",
+      "credit-nopark-stale",
+      "credit-nopark-two",
+      "credit-seq-empty",
+      "credit-seq-pool1",
+      "credit-seq-stale",
+      "credit-seq-two",
+      "cutoff-admitted",
+      "cutoff-cutofffirst",
+      "cutoff-pinfirst",
+      "cutoff-refusalkeeps",
+      "cutoff-refused",
+      "grace1-bumprelaxed",
+      "grace1-claimmisencoded",
+      "grace1-fenced",
+      "grace1-readeralone",
+      "grace1-seq",
+      "grace1-startrelaxed",
+      "grace1-weakcertify",
+      "grace1-weakpin",
+      "grace1-weakretire",
+      "intrinsic_boundaries",
+      "join-earlydetach",
+      "join-ignoresobservers",
+      "join-production",
+      "join-relaxeddepart",
+      "join-relaxedobserve",
+      "sb_prior_rmw",
+      "sb_relaxed",
+      "sb_sc",
+      "terminal-none",
+      "terminal-observed",
+      "terminal-own",
+      "wrap_falsifier"
+    ],
+    "scheduled": [
+      "grace2-bumprelaxed",
+      "grace2-claimmisencoded",
+      "grace2-fenced",
+      "grace2-readeralone",
+      "grace2-seq",
+      "grace2-startrelaxed",
+      "grace2-weakcertify",
+      "grace2-weakpin",
+      "grace2-weakretire"
+    ]
+  }
+}

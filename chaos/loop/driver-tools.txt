@@ -1,0 +1,110 @@
+The coordinator and each worker are sessions of one agent host on this host, the aarch64
+machine that `chaos/project.yaml` describes, and run as its Unix user `tsw` with the AWS
+role `bsw-ct1-worker-host` and the GitHub login the fence `ks-no-workflow-file-push` names
+(`trusted_base` lists this one identity). In each session:
+
+- a shell and a file editor work in the checkout `/data/tsw/checkout`, on the branch
+  of the pull request that carries the campaign;
+- the sessions can write every file the user can write, the frozen paths, `chaos/runs/`
+  and `chaos/receipts/` included. No mount or second user keeps them out. The contract
+  check with the freeze id compares the frozen paths with the freeze commit and each
+  ledger row's frozen fields with the freeze's rows, so it finds an edit to them after
+  the fact. Under `chaos/runs/` and `chaos/receipts/` it checks only that the records
+  present agree: the evidence with the digests its receipts name, each receipt with its
+  row, judges and harness, and each run directory with its receipt directory. It reads
+  each receipt's outcome as written, reruns no judge, and cannot see a run whose
+  evidence and receipts were both removed. A session writes a scenario's `status` in
+  `chaos/ledger.json`, `chaos/runs/<run-id>/` and `chaos/receipts/<run-id>/` through the
+  harness, `chaos/receipts/fences/` through the probe command, `chaos/loop/` and
+  `chaos/READINESS.md`, and nothing else under `chaos/`;
+- the copy is the simulated Kestrike as the archived simulation worker runs it under
+  `campaign`: no address, no network and no credential. The archive is
+  `/data/tsw/campaigns/2082r/archive`, and the `campaign` binary is
+  `/data/tsw/campaigns/2082r/campaign`.
+
+How things are done:
+
+- **A run.** From the checkout, in a delegated systemd user scope, as
+  `crates/campaign-supervisor/README.md` ("Host requirements") describes:
+  `systemd-run --user --scope -p Delegate=yes --unit=chaos-2082r-<run-id> -- bash
+  /data/tsw/campaigns/2082r/run-in-scope.sh <scenario-id> <run-id> [--control <defect>]`.
+  That wrapper, mode 0700, is the script of `docs/agents/chaos.md` ("Run a scenario"). It
+  moves itself into `controller/` of the scope's cgroup, enables `+cpu +memory +pids`,
+  exports `CAMPAIGN_CGROUP_ROOT` as the scope's `campaign/` child, and runs
+  `python3 chaos/harness/run_scenario.py <scenario-id> <run-id> [--control <defect>]
+  --archive /data/tsw/campaigns/2082r/archive --campaign
+  /data/tsw/campaigns/2082r/campaign --roots /data/tsw/campaigns/2082r` from
+  `/data/tsw/checkout`. Before a launch, the harness runs with `--dry-run` for the run id,
+  and neither `chaos/runs/<run-id>/` nor `chaos/receipts/<run-id>/` exists. The harness
+  sweeps one new root, writes the evidence and runs the row's judges, which write the
+  receipts. The verdict is read from the receipts that launch wrote: they count for the
+  launch only when `chaos/receipts/<run-id>/` stood absent before it. This host takes one
+  run at a time: a sweep uses 28 of its 32 vCPUs.
+- **A run with missing receipts.** When the harness and judges have exited and the
+  contract check reports `run-without-receipts` or `incomplete-receipts` for a run,
+  `chaos/receipts/<run-id>/` is created only when it is absent, and only the rows whose
+  receipt file is missing are judged, each with its judge command from
+  `chaos/ledger.json`: `python3 -I -B <judge script> <row> --evidence
+  chaos/runs/<run-id> --receipt chaos/receipts/<run-id>/<row>.json`. A judge keeps an
+  existing receipt file as it is and exits 2. The contract check then shows whether it
+  accepts the completed set.
+- **The build on the copy.** `CARGO_PROFILE_DEV_OPT_LEVEL=3 campaign sim archive
+  --output <dir>` builds the simulation worker from the clean checkout at its head and
+  prints the archive's build digest under `build`; each `run.json` records it as
+  `system_build`. A change reaches the copy as a commit and a new archive built from it.
+  The rehearsal runs every scenario on the one archive built at commit
+  `cb9ad932154b5569783cc0e5bc64ba09dcd40d36`, build
+  `3b9e5e9f1598aa6f593107750d9770f3ba5c9ad6fa1385603e1b89cff156c6a5`, the archive of the
+  escape's enrollment runs of record. A change of cache behavior stops for the owner
+  (`chaos/approval-policy.md`), so this campaign ships none to the copy.
+- **The contract check and the fences.** `<validator>` is `chaos/tools/validate_contract.py`,
+  the pinned copy whose SHA-256 `chaos/tools/validate_contract.py.sha256` records, run as
+  `python3 -I`. Before the first run of a session and once in every 24 hours, the fences
+  are checked in this order: first the contract check with the freeze id; when it names a
+  fence `probe-not-refused`, that receipt stays as it is and no run starts. Otherwise the
+  probe of each fence whose `probe.identity` and `probe.command` equal the freeze's row
+  and start `python3 -I chaos/harness/reach.py`, while `git diff --quiet <freeze id> --
+  chaos/harness/` exits 0, is recorded again with `python3
+  /home/tsw/.claude/plugins/marketplaces/ahrav-claude-plugins/chaos-testing/skills/chaos-enrollment/scripts/probe_fence.py
+  chaos/ledger.json <fence-id>`, run from the checkout as the same user, which writes
+  `chaos/receipts/fences/<fence-id>.json`. The harness fence `ks-run-keeps-earlier-runs`
+  keeps its receipt. No run starts until each of those probes exits 0 and the contract
+  check, run again, reports no fence finding; the new fence receipts are committed before
+  the session's first run.
+- **A status.** The coordinator edits `status` in `chaos/ledger.json` and commits it on
+  the campaign's branch. A committed status is `open` or `broken`. A hold is checked in a
+  scratch checkout outside this one, made with `git worktree add --detach <dir>` and given
+  this checkout's `chaos/` tree with its runs and receipts: there `held` (or `fixed`) is
+  set in `chaos/ledger.json` and the contract check runs from the scratch root with
+  `--root .`, `--build` and `--freeze-commit`. The hold is logged in `chaos/loop/log.md`
+  with the check's exit, its build digest and the run ids only when that check exits 0 and
+  prints nothing, and the worktree is removed. Who sets a status after the owner's freeze
+  is open for the owner (OQ-1 of #297).
+- **A stop note and a finding.** Files under `chaos/loop/stops/` and
+  `chaos/loop/findings/`, committed on the campaign's branch and pushed to its draft
+  pull request. The owner reads the pull request and answers in its review or in an
+  issue the owner writes; the sessions write no issue and no review comment. The
+  sessions hold the owner's GitHub login, so an answer there counts only when the owner
+  confirms it outside the sessions.
+- **An audit report.** `chaos/loop/audits/<run-id>.md`, written by the worker that ran
+  the audit.
+- **The claim file and the final report.** The claim is rendered with the contract
+  check's `--claim` flag into a new file that `mktemp chaos/.READINESS.XXXXXX` creates,
+  which `chmod 644` and `mv -T` put in place of `chaos/READINESS.md` only when the
+  validator exits 0; `--check-claim chaos/READINESS.md` then prints nothing. The final
+  report is `chaos/loop/final-report.md`.
+- **Telemetry.** The evidence under `chaos/runs/<run-id>/` and each sweep's root under
+  `/data/tsw/campaigns/2082r/<run-id>/`, read with `campaign sweep-status`, `campaign
+  findings` and a text editor. The copy exports nothing else, and no production signal
+  exists.
+- **A worker.** The coordinator starts a worker with the agent host's sub-agent tool, as
+  a general-purpose agent with its own context and none of the coordinator's
+  conversation. Its brief is `worker-prompt.md`, with the path of `run-rules.md` and
+  its one item. The rendered files are kept in `/data/tsw/campaigns/2082r/briefs/`,
+  outside the checkout. An audit is done by a worker that wrote none of the change or
+  the history it audits, with `/chaos-testing:chaos-finding-audit` of the installed
+  plugin `chaos-testing`.
+
+There is no messaging tool. What the sessions' credentials reach beyond this host is
+what the fence receipts under `chaos/receipts/fences/` record as refused, together with
+each `unfenced reach` item of `trusted_base` in `chaos/project.yaml`.

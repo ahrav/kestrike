@@ -1,0 +1,13 @@
+{
+  "id": "contract-change-2163",
+  "kind": "contract-change",
+  "pull_request": 2163,
+  "escape": "ivk-2371",
+  "changed": "The rule texts of crates/kestrike/src/net/world_tests/narrate/rules.rs: array MIXED gains one text for the lending order of write commands, which the catches of ivk-2371 and ivk-2368 name.",
+  "property_action": {
+    "action": "added",
+    "place": "rule",
+    "reference": "a write command went to a peer at its share while a peer below its share waited",
+    "reason": "The text states the sentence of the module documentation of crates/kestrike/src/net/put.rs, \"Write commands\": from the turn after a peer below its share first finds no command, and while a PUT of such a peer ends each turn with a write to submit and no command for it, every command goes to a peer below its share. The histories of net/world_tests/histories/lent_commands.rs judge it under the progress obligation."
+  }
+}

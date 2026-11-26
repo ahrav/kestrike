@@ -1,0 +1,17 @@
+[Unit]
+Description=Simulation build publisher
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=simple
+User=sim
+Group=sim
+Environment=PATH=/home/sim/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/sim-host publish --checkout /data/sim-publish/checkout --state /data/sim-publish/state --bucket SIM_BUCKET --interval 60
+Restart=always
+RestartSec=30
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

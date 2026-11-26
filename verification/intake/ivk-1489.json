@@ -1,0 +1,31 @@
+{
+  "id": "ivk-1489",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/eni.rs",
+    "function": "Reach::of and Reach::reaches_gateway"
+  },
+  "defect": "The capture admits a gateway route whose only reach is a prefix route that an earlier replayed route replaces, so release cannot replay it.",
+  "property": {
+    "text": "A bind admits the device's network state only inside the restoration domain release replays: the MTU, the administrative link state, IPv4 addresses and main-table IPv4 routes, with each gateway reached by an address or route that release replays first. The capture refuses any other state.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/bind/eni.rs, module documentation"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1754,
+    "regression": {
+      "path": "crates/kestrike/src/bind/eni_tests.rs",
+      "tests": [
+        "bind::eni_tests::the_capture_refuses_a_gateway_whose_prefix_route_an_earlier_replayed_route_replaces"
+      ]
+    }
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "crates/kestrike/src/bind/eni_tests.rs, bind::eni_tests::the_capture_refuses_a_gateway_whose_prefix_route_an_earlier_replayed_route_replaces"
+  },
+  "exclusion": "bind-and-failover"
+}

@@ -1,0 +1,184 @@
+{
+ "record": "policy",
+ "version": 3,
+ "frame": {
+  "version": 3,
+  "sha256": "95e17f2df7733b023e441602fece4ec742521864c53a7d386ca46fd11e19d2b3"
+ },
+ "statistics": {
+  "version": 2,
+  "sha256": "f63dd09e006737a43da7dfe66cb7f011b23dd3df32bcd6e21b90ec135279bf64"
+ },
+ "family": [
+  "first_safe_hit",
+  "retained_hit_recovery",
+  "sustained_fill_readiness",
+  "rto",
+  "request_tail",
+  "origin_demand",
+  "goodput",
+  "held_capacity",
+  "peak_ram",
+  "hit_latency",
+  "fill_latency"
+ ],
+ "outcomes": {
+  "first_safe_hit": {
+   "unit": "s",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "retained_hit_recovery": {
+   "unit": "s",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "sustained_fill_readiness": {
+   "unit": "s",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "rto": {
+   "unit": "s",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "request_tail": {
+   "unit": "us",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "origin_demand": {
+   "unit": "requests",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "goodput": {
+   "unit": "bytes/s",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "held_capacity": {
+   "unit": "units",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "peak_ram": {
+   "unit": "bytes",
+   "normalization": null,
+   "boundary": null,
+   "smallest_effect": null
+  },
+  "hit_latency": {
+   "unit": "us",
+   "normalization": null,
+   "boundary": "from the intended send to the last verified hit byte",
+   "smallest_effect": null
+  },
+  "fill_latency": {
+   "unit": "us",
+   "normalization": null,
+   "boundary": "from the intended send to the FILL acknowledgment at insert",
+   "smallest_effect": null
+  }
+ },
+ "h": {
+  "boundary": "from the intended send to the last verified hit byte",
+  "nominal": {
+   "p90_ms": 1.0,
+   "p99_ms": 3.0
+  },
+  "large_object": {
+   "p90_ms": 1.0,
+   "p99_ms": 5.0
+  },
+  "reported": [
+   "p50",
+   "p999"
+  ],
+  "strata": "size",
+  "edge": {
+   "p50": null,
+   "p90": "p90_ms",
+   "p99": "p99_ms",
+   "p999": "p99_ms"
+  }
+ },
+ "f": {
+  "boundary": "from the intended send to the FILL acknowledgment at insert",
+  "percentile": null,
+  "budget_ms": null
+ },
+ "readiness": {
+  "fill_band": null,
+  "fill_window_s": null,
+  "full_load_window_s": null,
+  "request_deadline_ms": null
+ },
+ "request_tail_edge_ms": {
+  "p50": null,
+  "p90": null,
+  "p99": null,
+  "p999": null
+ },
+ "class_list": null,
+ "cold_retained_hits": {
+  "volume-loss-control": 0
+ },
+ "budgets": {
+  "warm-takeover": {
+   "first_safe_hit": null,
+   "retained_hit_recovery": null,
+   "sustained_fill_readiness": null,
+   "rto": null,
+   "request_tail": null,
+   "origin_demand": null,
+   "goodput": null,
+   "held_capacity": null,
+   "peak_ram": null,
+   "hit_latency": null,
+   "fill_latency": null
+  },
+  "same-host-restart": {
+   "first_safe_hit": null,
+   "retained_hit_recovery": null,
+   "sustained_fill_readiness": null,
+   "rto": null,
+   "request_tail": null,
+   "origin_demand": null,
+   "goodput": null,
+   "held_capacity": null,
+   "peak_ram": null,
+   "hit_latency": null,
+   "fill_latency": null
+  },
+  "volume-loss-control": {
+   "first_safe_hit": null,
+   "retained_hit_recovery": null,
+   "sustained_fill_readiness": null,
+   "rto": null,
+   "request_tail": null,
+   "origin_demand": null,
+   "goodput": null,
+   "held_capacity": null,
+   "peak_ram": null,
+   "hit_latency": null,
+   "fill_latency": null
+  }
+ },
+ "counted_by": [
+  "#139",
+  "#140",
+  "#142"
+ ],
+ "foreground_reservation": null,
+ "campaign_authority": null
+}

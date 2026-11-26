@@ -1,0 +1,24 @@
+{
+  "id": "r03-grant-refusal",
+  "row": 3,
+  "fix": {
+    "pull_request": 1588,
+    "commit": "b3a47720f5503ace821b16a73b8362c1228b3d09"
+  },
+  "files": [
+    "crates/kestrike/src/net/serve.rs"
+  ],
+  "restores": "The grant refusal in `ServeCore` settles nothing, so a GET under the same request ID with a smaller grant is admitted after its ERROR.",
+  "proof": "net::serve_tests::a_get_refused_for_its_grant_is_never_admitted_under_the_same_request_id",
+  "expected": [
+    "upload",
+    "faulted",
+    "cluster-broad",
+    "cluster-pressure",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "workload",
+    "evidence": "Every run of the five profiles evaluates the planted grant check of `ServeCore` (a scratch trace there panicked in all 100,903 upload, 88,633 faulted, 41,018 cluster-broad, 50,405 cluster-pressure and 48,920 cluster-swarm runs at commit 6240a6fd9), and a trace inside its refusal branch fired in none of 152,904 upload, 120,280 faulted, 33,442 cluster-broad, 12,700 cluster-pressure and 5,170 cluster-swarm runs, so no swept client asks for a grant above its session window; the planted grant check also fired in all 247,397 cluster-long runs of one 60 s sweep at commit 3a9e2b08d, and `cluster-long` stays out of `expected` because the profile has no passing run at the default counts, so it gives no verdict."
+  }
+}

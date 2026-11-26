@@ -1,0 +1,26 @@
+C S2-sequence-bracket-open
+(* A bracket that ends at its field store, the shape of the
+   terminal store, its fence and the bare stores that follow it: a SeqCst
+   sequence store, the release fence and a Relaxed field store, against a
+   reader's SeqCst sequence load, field copy and recheck.
+   Events: P0 is the writer, its sequence store of 1, the fence and the
+   field store; P1 is the reader, read_stable's load, the copy and
+   still's load.
+   Old sequence accepted over the new field: 1:r0=0 and 1:r2=0 (the
+   reader saw the stable 0 twice) and 1:r1=2 (it copied the field store
+   that follows the odd store). *)
+{ seq = 0; field = 1; }
+
+P0 (atomic_int* seq, atomic_int* field) {
+  atomic_store_explicit(seq, 1, memory_order_seq_cst);
+  atomic_thread_fence(memory_order_release);
+  atomic_store_explicit(field, 2, memory_order_relaxed);
+}
+
+P1 (atomic_int* seq, atomic_int* field) {
+  int r0 = atomic_load_explicit(seq, memory_order_seq_cst);
+  int r1 = atomic_load_explicit(field, memory_order_seq_cst);
+  int r2 = atomic_load_explicit(seq, memory_order_seq_cst);
+}
+
+exists (1:r0=0 /\ 1:r1=2 /\ 1:r2=0)

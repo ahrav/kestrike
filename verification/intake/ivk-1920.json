@@ -1,0 +1,25 @@
+{
+  "id": "ivk-1920",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/bind/eni.rs",
+    "function": "Host::net_state_pass"
+  },
+  "defect": "The capture admits a device that carries an XDP program; the kernel detaches the program with the device and release returns the device with none.",
+  "property": {
+    "text": "A bind admits the device's network state only inside the restoration domain release replays: the MTU, the administrative link state, IPv4 addresses and main-table IPv4 routes, with each gateway reached by an address or route that release replays first. The capture refuses any other state.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/bind/eni.rs, module documentation"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The simulated environment has no host procfs, sysfs, mount table, netlink route tables or kernel drivers, which every bind site reads or writes through `bind::Host`, and no simulation tree reaches a bind site: at 6240a6fd9, `rg -n 'crate::bind::' crates/kestrike/src/worker.rs crates/kestrike/src/sim crates/kestrike/src/net/world_tests crates/kestrike/src/net/takeover_history_tests crates/kestrike/src/oracle` lists only `bind::fixture::spawn_quiet`, a process fixture of the campaign fuzz tests. The code runs under the `kestrike-bind` binary and the bind module's own tests.",
+    "standing_check": "none"
+  },
+  "exclusion": "bind-and-failover",
+  "note": "Holds a repeat (1935): a device whose link mode is dormant."
+}

@@ -1,0 +1,26 @@
+C S1-sequence-bracket-committed-fence-dropped
+(* The committed bracket without the writer's release fence. The field
+   store carries the odd store to a reader only through a release fence
+   before it, so the reader can copy the new field and still read the
+   stable 0 on its recheck.
+   Events: P0 is the writer, the odd store of 1, the field store, then
+   the commit's store of 2; P1 is the reader, its sequence load, the copy
+   and its recheck.
+   Old sequence accepted over the new field: 1:r0=0 and 1:r2=0 (the
+   reader saw the stable 0 twice) and 1:r1=2 (it copied the field store
+   that follows the odd store). *)
+{ seq = 0; field = 1; }
+
+P0 (atomic_int* seq, atomic_int* field) {
+  atomic_store_explicit(seq, 1, memory_order_seq_cst);
+  atomic_store_explicit(field, 2, memory_order_relaxed);
+  atomic_store_explicit(seq, 2, memory_order_seq_cst);
+}
+
+P1 (atomic_int* seq, atomic_int* field) {
+  int r0 = atomic_load_explicit(seq, memory_order_seq_cst);
+  int r1 = atomic_load_explicit(field, memory_order_seq_cst);
+  int r2 = atomic_load_explicit(seq, memory_order_seq_cst);
+}
+
+exists (1:r0=0 /\ 1:r1=2 /\ 1:r2=0)

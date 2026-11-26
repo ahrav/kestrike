@@ -1,0 +1,1274 @@
+name: agent-checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+    github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  STABLE: "1.99.0"
+  NIGHTLY: "nightly-2026-07-27"
+  CARGO_FUZZ: "0.13.2"
+  LOOM: "0.7.2"
+  HERDTOOLS7: "7.58"
+  LLVM: "22.1.8"
+  KANI: "0.68.0"
+  SPDK_COMMIT: 44b23be7c35469bc0aba4b942c08c935125e2315
+  SPDK_VERSION: "25.5.1"
+  DPDK_COMMIT: cf36799c473a686fa14fde9af97f917a2125d3d5
+  DPDK_VERSION: "25.03.0"
+  SPDK_PKG_CONFIG_PATH: /opt/spdk-v25.05.1-x86-64-v2/lib/pkgconfig
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: "4"
+  RUST_TEST_THREADS: "4"
+
+jobs:
+  comment-policy:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    # Receipt cases share a bounded worker pool; hardware fault scenarios run
+    # on heavy events and changes to their inputs, with smoke checks on every event.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Comment markers
+        run: bash scripts/forbid-comment-markers.sh
+      - name: Hook regression tests
+        run: python3 scripts/test-agent-hooks.py
+      - name: Review workflow contract tests
+        run: python3 scripts/test-review-workflow.py
+      # The measurement-frame checks resolve Rust source anchors with the
+      # source-anchors crate, which they build with cargo.
+      - name: Pinned toolchain
+        run: >-
+          exec timeout --kill-after=30s 5m
+          rustup toolchain install "$STABLE" --profile minimal
+      - name: Script self-checks
+        env:
+          MEASUREMENT_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
+          RUSTUP_TOOLCHAIN: ${{ env.STABLE }}
+        run: |
+          python3 scripts/test-select-tests.py
+          python3 scripts/test-reproduce-test.py
+          python3 scripts/test-red-green.py
+          python3 scripts/test-hardware-lane.py --ci
+          python3 scripts/test-run-receipt-selftests.py
+          python3 scripts/run-receipt-selftests.py
+          python3 scripts/test-judge-rc11.py
+          python3 scripts/test-judge-genmc.py
+          python3 scripts/test-weaken-orderings.py
+          python3 scripts/weaken-orderings.py check
+          python3 scripts/test-judge-verus.py
+          python3 scripts/test-judge-kani.py
+          python3 scripts/test-judge-tlc.py
+          python3 scripts/test-judge-quint.py
+          python3 scripts/test-scan-barriers.py
+          python3 scripts/test-scan-tag-compare.py
+          python3 scripts/test-scan-weakened-tests.py
+          python3 scripts/test-guest-binder.py
+          python3 scripts/test-qualified-envelope.py
+          python3 scripts/test-hit-gate.py
+          python3 scripts/test-recovery-packages.py
+          python3 scripts/test-measurement-frame.py
+          python3 scripts/measurement-frame.py check --base "$MEASUREMENT_BASE"
+          python3 scripts/test-sizing-worksheet.py
+          python3 scripts/sizing-worksheet.py check
+          python3 scripts/test-acceptance.py
+          python3 scripts/acceptance.py check
+          python3 scripts/test-readiness.py
+          python3 scripts/readiness.py check
+          python3 scripts/test-quint-check.py
+      - name: Obligation catalog admission
+        run: python3 scripts/verify-receipts.py admit
+      # A pull request's checkout is its test merge. The merge's first parent is
+      # the base commit GitHub merged into, which `pull_request.base.sha` can lag.
+      - name: Weakened-test scan
+        env:
+          SCAN_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'origin/main' }}
+        run: python3 scripts/scan-weakened-tests.py --base "$SCAN_BASE"
+
+  lane-script:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Lane cancellation tests
+        run: python3 scripts/test-rust-lane.py
+
+  rust-format:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned rustfmt
+        run: >-
+          exec timeout --kill-after=30s 5m
+          rustup toolchain install "$STABLE" --profile minimal --component rustfmt
+      - name: Rust format check
+        run: |
+          set -euo pipefail
+          git ls-files -z '*.rs' > "$RUNNER_TEMP/rust-files"
+          test -s "$RUNNER_TEMP/rust-files"
+          exec timeout --kill-after=30s 5m \
+            xargs -0 -a "$RUNNER_TEMP/rust-files" \
+            rustup run "$STABLE" rustfmt --check
+
+  preflight:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-vm-build' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 50
+    outputs:
+      loom-modules: ${{ steps.preflight.outputs.loom-modules }}
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Native pins and registry tests
+        id: preflight
+        run: >-
+          exec timeout --kill-after=60s 30m
+          bash scripts/rust-lane.sh preflight
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-preflight-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  workspace:
+    needs: preflight
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-vm-build' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 185
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Lint, workspace suite and protocol contract
+        run: >-
+          exec timeout --kill-after=60s 165m
+          bash scripts/rust-lane.sh workspace
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary workspace
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job workspace --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-workspace-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  campaigns:
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-vm-build' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Worker campaigns by exact ID
+        run: >-
+          exec timeout --kill-after=60s 70m
+          bash scripts/rust-lane.sh campaigns
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary campaigns
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job campaigns --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-campaigns-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  search:
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-vm-build' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: ServeCore search, pull-request bound
+        run: >-
+          exec timeout --kill-after=60s 70m
+          bash scripts/rust-lane.sh search
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary search
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job search --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-search-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  fuzz-smoke:
+    needs: preflight
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-vm-build' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 100
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Frame, campaign and parser fuzz smoke
+        run: >-
+          exec timeout --kill-after=60s 80m
+          bash scripts/rust-lane.sh fuzz-smoke
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary fuzz-smoke
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job fuzz-smoke --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-fuzz-smoke-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  search-nightly:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: ServeCore search, nightly bounds
+        run: >-
+          exec timeout --kill-after=60s 70m
+          bash scripts/rust-lane.sh search-nightly
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary search-nightly
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job search-nightly --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-search-nightly-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  # The architecture qualification lanes run their kernels' witness tests by
+  # exact ID on a native host whose CPU reports every feature the lane's
+  # inventory entry declares; a host short of one fails the lane.
+  isa-x86-64:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-isa-x86-64]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Architecture qualification
+        run: >-
+          exec timeout --kill-after=60s 70m
+          bash scripts/rust-lane.sh isa-x86-64
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary isa-x86-64
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job isa-x86-64 --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-isa-x86-64-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  isa-aarch64:
+    if: >-
+      false &&
+      (github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch')
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, arm64, kestrike-isa-aarch64]
+    timeout-minutes: 175
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      # The AArch64 host keeps its native install; the portable install is
+      # x86-64 only.
+      SPDK_PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Architecture qualification
+        run: >-
+          exec timeout --kill-after=60s 70m
+          bash scripts/rust-lane.sh isa-aarch64
+      # The 50-minute timeout covers the lane's build (26 minutes), run
+      # (16 minutes), and control (3 minutes) deadlines.
+      - name: ThreadSanitizer run and planted race
+        if: ${{ !cancelled() }}
+        env:
+          EVIDENCE: ${{ github.workspace }}/evidence/tsan
+        run: >-
+          exec timeout --kill-after=60s 50m
+          bash scripts/rust-lane.sh tsan
+      # The litmus lane writes to `evidence/litmus` to keep its results
+      # separate from qualification evidence.
+      - name: Native litmus loops beside their weakened twins
+        if: ${{ !cancelled() }}
+        env:
+          EVIDENCE: ${{ github.workspace }}/evidence/litmus
+        run: >-
+          exec timeout --kill-after=60s 35m
+          bash scripts/rust-lane.sh litmus
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary isa-aarch64
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job isa-aarch64 --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-isa-aarch64-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  long-run:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Long-run gate
+        run: >-
+          exec timeout --kill-after=60s 70m
+          bash scripts/rust-lane.sh long-run
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary long-run
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job long-run --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-long-run-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  loom:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        module: ${{ fromJSON(needs.preflight.outputs.loom-modules) }}
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Loom kernel
+        run: >-
+          exec timeout --kill-after=60s 90m
+          bash scripts/rust-lane.sh loom "${{ matrix.module }}"
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary loom "${{ matrix.module }}"
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job loom
+          --module "${{ matrix.module }}" --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-loom-${{ matrix.module }}-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  fuzz:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 130
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Frame, campaign and parser fuzz
+        run: >-
+          exec timeout --kill-after=60s 110m
+          bash scripts/rust-lane.sh fuzz
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary fuzz
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job fuzz --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-fuzz-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  miri:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 85
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Miri ownership corpus
+        run: >-
+          exec timeout --kill-after=60s 65m
+          bash scripts/rust-lane.sh miri
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary miri
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job miri --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-miri-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  asan:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 75
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      SPDK_PKG_CONFIG_PATH: /opt/spdk-v25.05.1-asan/lib/pkgconfig
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      # The step holds both listings' deadlines (15 minutes each) and the run's (20).
+      - name: Address-sanitized library tests
+        run: >-
+          exec timeout --kill-after=60s 55m
+          bash scripts/rust-lane.sh asan
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary asan
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job asan --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-asan-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  # The guest lane uses provisioned inputs and the test executable built at this revision.
+  # Its measured KVM deadlines and receipt are required on schedule and manual dispatch.
+  qemu:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 85
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      KESTRIKE_GUEST_INPUTS: /etc/kestrike/guest-inputs.env
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      # The step holds the host listings' and the build's deadlines (15 minutes each) and the guest run's (16).
+      - name: Guest binder in a disposable QEMU guest
+        run: >-
+          exec timeout --kill-after=60s 65m
+          bash scripts/rust-lane.sh qemu
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary qemu
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job qemu --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-qemu-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  sweep:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 85
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Miri weak-memory sweep
+        run: >-
+          exec timeout --kill-after=60s 65m
+          bash scripts/rust-lane.sh sweep
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary sweep
+      - name: Obligation receipt and credit
+        if: always()
+        run: python3 scripts/verify-receipts.py credit --job sweep --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-sweep-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  rc11:
+    needs: [comment-policy, lane-script, rust-format]
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 50
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify provisioned herdtools7
+        run: >-
+          exec timeout --kill-after=60s 25m
+          bash scripts/rust-lane.sh herdtools
+      - name: RC11 litmus oracle
+        run: >-
+          exec timeout --kill-after=60s 15m
+          bash scripts/rust-lane.sh rc11
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary rc11
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job rc11
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-rc11-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  barriers:
+    needs: [comment-policy, lane-script, rust-format]
+    if: >-
+      false && (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, linux, arm64, kestrike-aarch64-native]
+    timeout-minutes: 75
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      # The AArch64 host keeps its native install; the portable install is
+      # x86-64 only.
+      SPDK_PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: AArch64 barrier scan
+        run: >-
+          exec timeout --kill-after=60s 55m
+          bash scripts/rust-lane.sh barriers
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-barriers-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  tag-compare-x86-64:
+    if: >-
+      false &&
+      (github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch')
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Tag comparison inspection
+        run: >-
+          exec timeout --kill-after=60s 65m
+          bash scripts/rust-lane.sh tag-compare-x86-64
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job tag-compare-x86-64
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-tag-compare-x86-64-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  tag-compare-aarch64:
+    if: >-
+      false &&
+      (github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch')
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, arm64, kestrike-aarch64-native]
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      # The AArch64 host keeps its native install; the portable install is
+      # x86-64 only.
+      SPDK_PKG_CONFIG_PATH: /usr/local/lib/pkgconfig
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Tag comparison inspection
+        run: >-
+          exec timeout --kill-after=60s 65m
+          bash scripts/rust-lane.sh tag-compare-aarch64
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job tag-compare-aarch64
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-tag-compare-aarch64-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  verus:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: workspace
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 60
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Verus proofs from the production sources
+        run: >-
+          exec timeout --kill-after=60s 40m
+          bash scripts/rust-lane.sh verus
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary verus
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job verus
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-verus-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  genmc:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 140
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      GENMC_PROFILE: >-
+        ${{ github.event_name == 'schedule' && 'scheduled' || 'pr' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: GenMC profile
+        run: >-
+          exec timeout --kill-after=60s 120m
+          bash scripts/rust-lane.sh genmc "$GENMC_PROFILE"
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary genmc "$GENMC_PROFILE"
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job genmc
+          --module "$GENMC_PROFILE"
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-genmc-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  kani:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 300
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      KANI_PROFILE: >-
+        ${{ github.event_name == 'schedule' && 'scheduled' || 'pr' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Kani profile
+        run: >-
+          exec timeout --kill-after=60s 280m
+          bash scripts/rust-lane.sh kani "$KANI_PROFILE"
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary kani "$KANI_PROFILE"
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job kani
+          --module "$KANI_PROFILE"
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-kani-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  tlc:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 130
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+      TLC_PROFILE: >-
+        ${{ github.event_name == 'schedule' && 'scheduled' || 'pr' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: TLC profile under the pinned JDK and TLA+ tools
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          exec timeout --kill-after=60s 110m
+          bash scripts/rust-lane.sh tlc "$TLC_PROFILE"
+      - name: Summary
+        if: always()
+        run: bash scripts/rust-lane.sh summary tlc "$TLC_PROFILE"
+      - name: Obligation receipt and credit
+        if: always()
+        run: >-
+          python3 scripts/verify-receipts.py credit --job tlc
+          --module "$TLC_PROFILE"
+          --receipt evidence/receipt.json --evidence evidence
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-tlc-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  quint-shard:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: [preflight, workspace]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 445
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - name: Prepare shard evidence
+        id: prepare
+        env:
+          QUINT_SHARD: ${{ matrix.shard }}
+        run: |
+          umask 077
+          evidence=$(mktemp -d "$RUNNER_TEMP/quint-shard-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$QUINT_SHARD.XXXXXXXX")
+          printf 'EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+          printf 'path=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Quint models under the pinned JDK, Node.js, Apalache and Quint
+        env:
+          QUINT_SHARD: ${{ matrix.shard }}
+        run: >-
+          exec timeout --kill-after=60s 420m
+          bash scripts/rust-lane.sh quint "$QUINT_SHARD"
+      - name: Raw shard evidence
+        if: always() && steps.prepare.outputs.path != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            quint-shard-${{ matrix.shard }}-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.path }}
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  # The join's verdict on the shard artifacts serves as the lane's receipt,
+  # including when the join refuses them.
+  quint:
+    if: >-
+      always() && needs.quint-shard.result != 'skipped' &&
+      (github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch')
+    needs: quint-shard
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 30
+    steps:
+      - name: Prepare Quint receipt
+        id: prepare
+        run: |
+          umask 077
+          evidence=$(mktemp -d "$RUNNER_TEMP/quint-receipt-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.XXXXXXXX")
+          mkdir "$evidence/shards"
+          printf 'EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+          printf 'path=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        id: checkout
+        with:
+          persist-credentials: false
+      - name: This attempt's Quint shards
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          pattern: >-
+            quint-shard-*-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.path }}/shards
+          merge-multiple: false
+      - name: Judge all Quint shards
+        run: python3 scripts/judge-quint.py judge --evidence "$EVIDENCE"
+      - name: Summary
+        if: always() && steps.checkout.outcome == 'success'
+        run: bash scripts/rust-lane.sh summary quint
+      - name: Obligation receipt and credit
+        if: always() && steps.checkout.outcome == 'success'
+        run: >-
+          python3 scripts/verify-receipts.py credit --job quint
+          --receipt "$EVIDENCE/receipt.json" --evidence "$EVIDENCE"
+      - name: Evidence
+        if: always() && steps.prepare.outputs.path != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-quint-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.path }}/report.json
+            ${{ steps.prepare.outputs.path }}/receipt.json
+            ${{ steps.prepare.outputs.path }}/credit.json
+            ${{ steps.prepare.outputs.path }}/pins.txt
+            ${{ steps.prepare.outputs.path }}/quint-shards.json
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+      - name: Raw shards of a refused judgment
+        if: failure() && steps.prepare.outputs.path != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            quint-refused-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: ${{ steps.prepare.outputs.path }}/shards
+          retention-days: 90
+          if-no-files-found: ignore
+
+  quarantine:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: preflight
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 130
+    env:
+      EVIDENCE: ${{ github.workspace }}/evidence
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pinned toolchains
+        run: >-
+          exec timeout --kill-after=60s 10m
+          bash scripts/rust-lane.sh toolchains
+      - name: Quarantined tests by exact ID
+        run: >-
+          exec timeout --kill-after=60s 110m
+          bash scripts/rust-lane.sh quarantine
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: >-
+            evidence-quarantine-${{ github.run_id
+            }}-${{ github.run_attempt }}
+          path: evidence
+          retention-days: ${{ job.status == 'success' && 14 || 90 }}
+          if-no-files-found: error
+
+  # The FIS controller suite runs its fakes for about seven minutes, a long test by the lane admission rule, so it
+  # runs on the schedule and on dispatch after the workspace, in a job of its own that no lane needs and the gate
+  # leaves outside, as the quarantine lane is: a failure here is diagnostic and holds back no other lane. A pull
+  # request's author runs the suite locally.
+  fis-controller:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch'
+    needs: workspace
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: FIS controller tests
+        run: python3 scripts/test-fis-controller.py
+
+  rust-gate:
+    if: always() && (github.event_name != 'pull_request' || !cancelled())
+    needs: [comment-policy, lane-script, rust-format, preflight, workspace, rc11, barriers, campaigns, search, fuzz-smoke, long-run, search-nightly, verus, loom, miri, sweep, genmc, kani, tlc, quint, fuzz, asan, qemu, isa-x86-64, isa-aarch64, tag-compare-x86-64, tag-compare-aarch64]
+    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    timeout-minutes: 15
+    steps:
+      # A fork pull request checks nothing out and runs no lane, so the gate
+      # fails here before any step reads the runner's workspace.
+      - name: Fork pull requests run no lanes
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name != github.repository
+        run: exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        with:
+          persist-credentials: false
+      - name: Every selected Rust lane succeeded
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: >-
+          python3 scripts/verify-receipts.py gate
+          --event "${{ github.event_name }}"
+          --action "${{ github.event.action }}"
+      - name: This attempt's lane evidence
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          pattern: >-
+            evidence-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: lanes
+      - name: Every selected lane credited its declared domain
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        run: >-
+          python3 scripts/verify-receipts.py aggregate --lanes lanes
+          --event "${{ github.event_name }}"
+          --revision "${{ github.sha }}"
+          --run "${{ github.run_id }}"
+          --run-attempt "${{ github.run_attempt }}"
+      - name: The Verus trust inventory matches its sources
+        if: >-
+          always() && (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
+        run: python3 scripts/judge-verus.py reconcile

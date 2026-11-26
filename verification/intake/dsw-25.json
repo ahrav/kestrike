@@ -1,0 +1,24 @@
+{
+  "id": "dsw-25",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/publish.rs",
+    "function": "publish_from"
+  },
+  "defect": "A preparation of a restored publication that panics under the shard gate during an unwind leaves the gate open.",
+  "property": {
+    "text": "A poisoned gate admits nobody; dropping a guard releases the gate poisoned when the drop unwinds from a panic that began after the gate was taken.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/storage/gate.rs, module documentation and `GateGuard`"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The defect needs a panic under the storage gate that `publish_from` in `crates/kestrike/src/storage/publish.rs` takes, inside a call a destructor makes on a thread already unwinding. No profile or history raises a panic there: the reason of `verification/intake/exclusions/panic-during-unwinding.json` lists every panic the simulation raises, the driver unwinds and the `panicking` and `asserting` control plants, with the commands that show where each arises.",
+    "standing_check": "none"
+  },
+  "exclusion": "panic-during-unwinding"
+}

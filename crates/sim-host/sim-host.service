@@ -1,0 +1,22 @@
+[Unit]
+Description=Simulation host runner
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=simple
+User=sim
+Group=sim
+ExecStart=/usr/local/bin/sim-host run --state /data/sim-host --bucket SIM_BUCKET --confirm-slots 1 --system-cores 0 --disk-reserve 17179869184
+Restart=always
+RestartSec=30
+Delegate=cpu memory pids
+KillMode=mixed
+TimeoutStopSec=900
+LimitNOFILE=65536
+TasksMax=infinity
+CPUAccounting=yes
+MemoryAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

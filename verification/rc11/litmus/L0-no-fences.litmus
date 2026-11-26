@@ -1,0 +1,24 @@
+C L0-no-fences
+(* The credit store-buffering shape with both model fences dropped,
+   credit_model's Model<false, false> and the control
+   dropping_both_fences_hides_a_credit. x is the record's credit word, the one
+   word park writes, and y the map word whose bit stays set while the word
+   holds nothing; x starts at 0, so the add takes park's none-to-some branch,
+   the one that loads the bit.
+   P0 is credit::park: fetch_add(ADD = Release), then load(BIT_LOAD = Acquire).
+   P1 is the scan: credit::clear's fetch_and(CLEAR = AcqRel), then the reload
+   load(RELOAD = Acquire). The hidden credit is P0 reading the stale bit
+   (0:r0=1) while P1 reads the stale word (1:r0=0). *)
+{ x = 0; y = 1; }
+
+P0 (atomic_int* x, atomic_int* y) {
+  atomic_fetch_add_explicit(x, 1, memory_order_release);
+  int r0 = atomic_load_explicit(y, memory_order_acquire);
+}
+
+P1 (atomic_int* x, atomic_int* y) {
+  atomic_fetch_and_explicit(y, 0, memory_order_acq_rel);
+  int r0 = atomic_load_explicit(x, memory_order_acquire);
+}
+
+exists (0:r0=1 /\ 1:r0=0)

@@ -1,0 +1,440 @@
+{
+  "schema": 1,
+  "system": "kestrike-simulated",
+  "fences": [
+    {
+      "id": "ks-fleet-object-storage-is-unreachable",
+      "text": "The campaign's AWS role is refused s3:ListAllMyBuckets in its own account, so it cannot enumerate the account's S3 buckets; no bucket of a live fleet was probed.",
+      "enforced_by": "S3 refuses s3:ListAllMyBuckets for the instance role bsw-ct1-worker-host, which the worker's AWS profile worker assumes, because no identity-based policy of the role allows it. The probe reads the role's own account: the worker's configuration names no bucket of a live fleet, so a grant of a named fleet bucket to this role, by an identity-based policy or by a bucket policy, stays unprobed, and trusted_base lists that limit",
+      "probe": {
+        "identity": "python3 -I chaos/harness/reach.py identity",
+        "command": "python3 -I chaos/harness/reach.py aws s3api list-buckets",
+        "expect": "is not authorized to perform: s3:ListAllMyBuckets"
+      }
+    },
+    {
+      "id": "ks-fleet-compute-is-unreachable",
+      "text": "The campaign's AWS role is refused a dry run of a stop of this worker's own instance; no instance of a live fleet was probed.",
+      "enforced_by": "EC2 refuses ec2:StopInstances to the instance role bsw-ct1-worker-host, because no identity-based policy of the role allows it, and answers the dry run with UnauthorizedOperation, where a role that held the permission would get DryRunOperation. The probe targets this worker's own instance: the worker's configuration names no instance of a live fleet, so a stop permission scoped to fleet instances, by tag or by id, stays unprobed, and trusted_base lists that limit",
+      "probe": {
+        "identity": "python3 -I chaos/harness/reach.py identity",
+        "command": "python3 -I chaos/harness/reach.py aws ec2 stop-instances --dry-run --instance-ids self",
+        "expect": "is not authorized to perform: ec2:StopInstances"
+      }
+    },
+    {
+      "id": "ks-no-new-paid-resource",
+      "text": "The campaign's AWS role is refused a dry run of the create of an EBS volume, a paid resource, of 1 GiB in us-west-2a.",
+      "enforced_by": "EC2 refuses ec2:CreateVolume to the instance role bsw-ct1-worker-host, because no identity-based policy of the role allows it, and answers a dry run of a volume create with UnauthorizedOperation, where a role that held the permission would get DryRunOperation",
+      "probe": {
+        "identity": "python3 -I chaos/harness/reach.py identity",
+        "command": "python3 -I chaos/harness/reach.py aws ec2 create-volume --dry-run --size 1 --availability-zone us-west-2a",
+        "expect": "is not authorized to perform: ec2:CreateVolume"
+      }
+    },
+    {
+      "id": "ks-no-workflow-file-push",
+      "text": "The campaign cannot push over HTTPS a commit that creates or changes a file under .github/workflows/, unless a file with the same path and contents already stands on another branch of the repository.",
+      "enforced_by": "git pushes to https://github.com/ahrav/kestrike with the token that gh holds, through the credential helper gh auth git-credential, and tsw's home holds no SSH key; the survey read this push path once, and no probe reads it again. That token lacks the OAuth scope workflow, and GitHub refuses a push that creates or changes a workflow file from a token without it, except a file whose path and contents already stand on another branch of the repository. The token's scope admin:public_key could register an account SSH key, and its scope repo lets the login, an admin of the repository, register a deploy key with write access; no OAuth scope limits a push over either key, and trusted_base lists both routes and the same-contents exception with the token's reach",
+      "probe": {
+        "identity": "python3 -I chaos/harness/reach.py identity",
+        "command": "python3 -I chaos/harness/reach.py token-scope workflow",
+        "expect": "lacks the scope workflow"
+      }
+    },
+    {
+      "id": "ks-run-keeps-earlier-runs",
+      "text": "The harness refuses a run id whose run directory or receipt directory exists, so no run writes over an earlier run's evidence or receipts.",
+      "enforced_by": "chaos/harness/run_scenario.py looks for chaos/runs/<run-id> and chaos/receipts/<run-id> before it creates anything, also in its dry-run form, refuses the run id with exit 2 when either exists, and creates both with exist_ok false. The probe names the receipt directory fences, which holds the credential fences' probe receipts",
+      "probe": {
+        "identity": "python3 chaos/harness/reach.py identity",
+        "command": "python3 chaos/harness/run_scenario.py ks-upload-no-fault fences --dry-run",
+        "expect": "names an earlier run"
+      }
+    }
+  ],
+  "invariants": [
+    {
+      "id": "ks-get-not-older-than-collected",
+      "property": {
+        "text": "No GET returns a version older than one collected or removed before it: no run of a scenario that lists this row ends in the cluster checker's violation \"a GET returned a version older than one collected or removed before it\", of the obligation History.",
+        "agreed": "owner",
+        "source": {
+          "kind": "owner",
+          "ref": "crates/kestrike/src/net/world_tests/narrate/rules.rs, array CLUSTER, the rule text the cluster profiles judge (docs/agents/simulation.md, An agreed property, place 2); #31, Acceptance: cross-window stale-read, early-reuse, late-completion and accumulating-leak controls fail their named checks; chaos/interview.md, A6, answer 1"
+        }
+      },
+      "kind": "history",
+      "judge": "chaos/judges/core/invariant.py ks-get-not-older-than-collected",
+      "oracle": "The cluster checker of the simulation harness (crates/kestrike/src/net/world_tests/cluster.rs, a cfg(test) tree), which records each upload a client collected and each removal it observed and judges every GET's version against that record, apart from the cache's own code.",
+      "witness": {
+        "check": "a valid run of ks-cluster-link-faults whose covered passes of cluster-broad reached hits and invalidated, each counted on its own, so the counts show neither the key nor the order of a read and a removal",
+        "obligation": 2,
+        "expect": "no violation under the row's rule"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "defect": "cluster-stale-read",
+        "how": "the control profile cluster-stale-read, cluster-broad's shape with one phase and with invalidation and compaction off, swaps a complete read for the object of an older publication of its key, and the sweep counts a caught run under the row's rule in caught_rules; it shows the check rejects a read of an older publication, and the rule's arms for a removal and a retired version stay without a control",
+        "scenario": "ks-cluster-link-faults",
+        "expect": "a GET returned a version older than one collected or removed before it"
+      }
+    },
+    {
+      "id": "ks-bound-record-passes-its-checks",
+      "property": {
+        "text": "Every bound slot's record passes its header and chunk checks at each stopped boundary and at teardown: no run of a scenario that lists this row ends in the observer's violation \"a bound slot's record fails its header or chunk checks\", of the obligation Bytes.",
+        "agreed": "owner",
+        "source": {
+          "kind": "owner",
+          "ref": "crates/kestrike/src/net/world_tests/narrate/rules.rs, array OBSERVER, the rule text every single-owner and cluster run judges at its stopped boundaries (docs/agents/simulation.md, An agreed property, place 2); #31, Acceptance: credited activation requires applicable healthy and faulty controls; chaos/interview.md, A6, answer 2"
+        }
+      },
+      "kind": "state",
+      "judge": "chaos/judges/core/invariant.py ks-bound-record-passes-its-checks",
+      "oracle": "The stopped-boundary and teardown observer of the simulation harness (crates/kestrike/src/net/observe.rs, a cfg(test) module). It reads each bound slot's record from the simulated device's raw media itself, outside the cache's serving path. The record's expected session, version and allocation come from the storage's own slot facts and index bindings, read through test-only lenses, and its key from the record's own framing. It checks the header with the cache's verify_header of crates/kestrike/src/storage/record/header.rs, which the serving read shares, and each chunk with the test-only VerifiedHeader::verify_chunk of the same file, which compares the chunk against the header's CRC table with the cache's Crc32c and record layout; trusted_base lists the slot facts, the bindings and the verifier as shared with the code under test. The control corrupted changes one payload byte, so it shows only that the chunk check rejects that corruption, and it credits this row only when caught_rules records the row's rule. A verifier that accepted it would leave the changed payload to the registry comparison, which rejects it under \"a bound slot's bytes match no registered content\": the sweep keeps that as a violation suspect, with no missed control and no alarm, and the control run has no caught run under the row's rule. A verifier defect of another kind, or one in the header check, would pass both.",
+      "witness": {
+        "check": "a valid run of each scenario: at least the witness minimum of passes of each of its profiles, and a pass ends only after its stopped boundaries and its teardown passed the observer's checks of every bound slot's record",
+        "obligation": 1,
+        "expect": "no violation under the row's rule"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "defect": "corrupted",
+        "how": "the control profile corrupted runs upload's scenario over a resident record whose payload byte changed before the run, and the sweep counts a caught run under the row's rule in caught_rules",
+        "scenario": "ks-upload-no-fault",
+        "expect": "a bound slot's record fails its header or chunk checks"
+      }
+    },
+    {
+      "id": "ks-no-fill-admitted-after-close",
+      "property": {
+        "text": "A cache that closed admits no fill: no run of a scenario that lists this row ends in the violation \"a fill admitted after the cache closed\", of the obligation History.",
+        "agreed": "owner",
+        "source": {
+          "kind": "owner",
+          "ref": "#298, the bug issue of this escape; crates/kestrike/src/net/world_tests/narrate/rules.rs, arrays ORACLE and HISTORY_SHARED, the rule text that the history k5-closed-admits-nothing already judges (docs/agents/simulation.md, An agreed property, place 2); the module documentation of storage::writable, \"Close refuses new receives, reservations and publications.\" (place 4)"
+        }
+      },
+      "kind": "history",
+      "judge": "chaos/judges/core/invariant.py ks-no-fill-admitted-after-close",
+      "oracle": "The closed owner's check of the scripted history k9-placement-across-close, in the simulation harness (crates/kestrike/src/net/world_tests/histories/keyops.rs, a cfg(test) tree). After the owner's close it places the fill promised before the close and asks for its shard hold, and it fails the run through the rule text when the closed cache grants the placement and then the shard hold, or refuses either Closed and keeps an additional-key claim, apart from the cache's own admission code.",
+      "witness": {
+        "check": "a run of a scenario whose history declares this violation: the history reaches the defect of #298 with no plant, so a live run of the unfixed cache is broken through the row's rule",
+        "obligation": 2,
+        "expect": "no violation under the row's rule"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "defect": "k9-placement-judged-open",
+        "how": "the history k9-placement-judged-open, the control of k9-placement-across-close, runs the pin's steps with the owner's close skipped, so the open owner grants the placed fill and the same check fails that grant through the row's rule whatever the cache does; named as the control, it joins the swept profiles and the sweep counts its caught runs under the rule in caught_rules",
+        "scenario": "ks-escape-2075",
+        "expect": "a fill admitted after the cache closed"
+      }
+    },
+    {
+      "id": "ks-required-events-reached",
+      "property": {
+        "text": "In one sweep root, each cluster profile with at least 64 covered passes has, for each event the required-event table requires of it, a covered pass that reached the event, and no profile of the scenario is listed under no_pass. The passes of a profile are evidence for an event only when a passing run reached it.",
+        "agreed": "owner",
+        "source": {
+          "kind": "issue",
+          "ref": "#180, requirement R3 and decisions KTD2 to KTD4, adopted at the merge of blotter pull request 1703, for the required-event clause; #297, unit M2-4, and #315, Scope, for the no_pass clause; crates/campaign-supervisor/README.md, sections \"Events reached by passing runs\" and \"Profiles with no pass\"; crates/campaign-supervisor/src/campaign/seeds/required.rs"
+        }
+      },
+      "kind": "threshold",
+      "judge": "chaos/judges/reach/reach.py ks-required-events-reached",
+      "threshold": {
+        "min_covered_passes": 64,
+        "min_reaching_passes": 1,
+        "measured": "in the status document campaign sweep-status prints for the run's root, over each cluster profile's covered passes from the root's first run to its last"
+      },
+      "oracle": "The required-event table of the campaign binary the run record names, and the coverage counters each passing worker run prints, which the supervisor sums. The cache under test writes neither.",
+      "witness": {
+        "check": "each of cluster-swarm, cluster-broad and cluster-pressure has an entry with at least 64 covered passes and a replay, so the gate was armed for every required pair",
+        "expect": "required events reached"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "how": "The same sweep under a campaign binary built by cargo build --release -p campaign-supervisor in a scratch copy of the commit the witness's binary was built from, with one change to crates/campaign-supervisor/src/campaign/seeds/required.rs: the excused pair (cluster-pressure, invalidated) becomes required. README: in cluster-pressure, invalidated stays at zero. The harness takes that binary's path; run.json records its SHA-256, and the dated note of the run in chaos/loop/log.md names that commit.",
+        "scenario": "ks-reach-required-events",
+        "expect": "In one sweep root, each cluster profile with at least 64 covered passes has, for each event the required-event table requires of it, a covered pass that reached the event, and no profile of the scenario is listed under no_pass. The passes of a profile are evidence for an event only when a passing run reached it.",
+        "defect": "requires-invalidated-of-cluster-pressure"
+      }
+    },
+    {
+      "id": "ks-ordering-controls-caught",
+      "property": {
+        "text": "One sweep catches each planted ordering control of depth 1 to 3 beside cluster-broad at least once in at least 1,000 of its runs that ended caught, missed or with no effect, and misses none of its runs: each caught run ends in the cluster checker's violation \"a GET returned bytes no upload of its key wrote\", of the obligation Bytes, and the receipt reports for each control the caught runs over its runs with a one-sided 95% lower bound.",
+        "agreed": "owner",
+        "source": {
+          "kind": "owner",
+          "ref": "#297, Problem (\"No figure says how reliably a sweep finds an ordering defect\"), R18 and KTD15: the owner's request of 2026-11-23 for an ordering figure, as #297 states it; crates/campaign-supervisor/src/campaign/calibration/controls.rs, ORDERING, the three controls with their depth, n and k, and FOREIGN, the rule text (#307); crates/kestrike/src/net/world_tests/narrate/rules.rs, array CLUSTER, the rule text the cluster checker raises (docs/agents/simulation.md, An agreed property, place 2); chaos/interview.md, A6, answer 3"
+        }
+      },
+      "kind": "threshold",
+      "judge": "chaos/judges/ordering/figure.py ks-ordering-controls-caught",
+      "threshold": {
+        "measured": "the status document of one sweep of ks-ordering-figure: for each of cluster-order-1, cluster-order-2 and cluster-order-3, its runs, caught, missed, the runs counted under uncredited \"unsuccessful: the control's plant took no effect\" and the runs counted under its other uncredited endings, such as \"inconclusive: limit same_time\"",
+        "min_runs_per_control": 1000,
+        "confidence": 0.95,
+        "cluster-order-1.depth": 1,
+        "cluster-order-1.n": 26,
+        "cluster-order-1.k": 20000,
+        "cluster-order-2.depth": 2,
+        "cluster-order-2.n": 26,
+        "cluster-order-2.k": 20000,
+        "cluster-order-3.depth": 3,
+        "cluster-order-3.n": 26,
+        "cluster-order-3.k": 20000
+      },
+      "oracle": "The cluster checker of the simulation harness (crates/kestrike/src/net/world_tests/cluster.rs, a cfg(test) tree), which judges each complete read's bytes against the uploads of its key apart from the cache's own code. Each ordering plant changes the last byte of one read of the hot key's version 0 only when its premise of d session-event orders holds (crates/kestrike/src/net/world_tests/cluster/order.rs), and the sweep counts the run under caught when the checker raises the rule, under missed when the plant acted and no check failed, under the no-effect ending when the premise never formed, and under an inconclusive ending when the run stopped at a limit of the simulator or the recorder.",
+      "witness": {
+        "check": "a valid run of ks-ordering-figure in which each of the three controls has at least 1,000 runs that ended caught, missed or with no effect, a replay, no suspect and a catch under the row's rule at every depth",
+        "expect": "each planted ordering control caught"
+      },
+      "control": {
+        "kind": "seeded-defect",
+        "defect": "cluster-order-1-premise-unmet",
+        "how": "the same sweep on a scratch archive built from a tree whose crates/kestrike/src/net/world_tests/cluster/order.rs has the one line `Plant::Depth1 => true,` of Order::decided changed to `Plant::Depth1 => false,`, so the depth-1 plant selects no read whatever order the session events take, and cluster-order-1 is caught in no run: each of its runs ends with no effect or at a limit; the change is never pushed, the run's label begins with the name of the control the build leaves uncaught, and the figure judge reports cluster-order-1 not found in its runs",
+        "scenario": "ks-ordering-figure",
+        "expect": "a GET returned bytes no upload of its key wrote"
+      }
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "ks-upload-no-fault",
+      "text": "One sweep of the profile upload at default counts, with no fault drawn, runs 28 workers in batches of 30 s for 120 s on a new root, and runs beside it the controls of upload that its control batches reach in that time, in the control table's order.",
+      "source": {
+        "kind": "survey",
+        "ref": "chaos/interview.md, A8, answer 1: the merged profile upload and its controls (crates/campaign-supervisor/README.md, Controls in a sweep), accepted as a scenario by the owner's request as #297 quotes it"
+      },
+      "load": {
+        "reference": "upload; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 120
+      },
+      "fault": {
+        "kind": "none"
+      },
+      "load_delivery": {
+        "min_passes_per_profile": 64
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, the count of processes in every cgroup under the cgroup root it gave the run's campaign sweep and campaign confirm, read at the run's end after every command exited, with that root present, so a missing or unreadable root stops the record; and archive_verified true, which restates the sweep's own closing verification of the archive, read as campaign sweep's return by itself with exit 0, or with its verdict exit 1 for alarm, no_pass or unreached, both of which follow that verification, with its checkpoint unmarked for a changed archive. The validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/core/validity.py ks-upload-no-fault",
+      "invariants": [
+        "ks-bound-record-passes-its-checks"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    },
+    {
+      "id": "ks-cluster-link-faults",
+      "text": "One sweep of the profile cluster-broad at default counts, whose links lose, duplicate, reorder and delay datagrams, runs 28 workers in batches of 30 s for 120 s on a new root, and runs cluster-broad's controls beside it.",
+      "source": {
+        "kind": "survey",
+        "ref": "chaos/interview.md, A8, answer 2: the merged profile cluster-broad and its controls (crates/campaign-supervisor/README.md, Controls in a sweep), accepted as a scenario by the owner's request as #297 quotes it"
+      },
+      "load": {
+        "reference": "cluster-broad; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 120
+      },
+      "fault": {
+        "kind": "link-faults",
+        "target": "the simulated datagram links between cluster-broad's clients and owners"
+      },
+      "injection_oracle": "The status document's reached.faults.runs for cluster-broad is positive, as the reach key faults requires: covered passes recorded link fault records that the simulated links wrote as they applied each loss, duplicate, reorder or delay. These records are the injector's own report, which trusted_base lists, and no observation outside the link shows the delivery change. A run of this scenario therefore shows that link faults reached its covered passes, and it carries no observation of a fault apart from the injector's own record.",
+      "reach": {
+        "text": "At least one covered pass of cluster-broad reaches each event named below by its coverage key: hits, a GET that read one upload exactly; invalidated, an invalidation that removed a bound object; and faults, a link fault record.",
+        "hits": 1,
+        "invalidated": 1,
+        "faults": 1
+      },
+      "load_delivery": {
+        "min_covered_per_profile": 64
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, the count of processes in every cgroup under the cgroup root it gave the run's campaign sweep and campaign confirm, read at the run's end after every command exited, with that root present, so a missing or unreadable root stops the record; and archive_verified true, which restates the sweep's own closing verification of the archive, read as campaign sweep's return by itself with exit 0, or with its verdict exit 1 for alarm, no_pass or unreached, both of which follow that verification, with its checkpoint unmarked for a changed archive. The validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/core/validity.py ks-cluster-link-faults",
+      "invariants": [
+        "ks-get-not-older-than-collected",
+        "ks-bound-record-passes-its-checks"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    },
+    {
+      "id": "ks-escape-2075",
+      "text": "One sweep of the scripted history k9-placement-across-close by name, which reaches the defect of #298 with no plant and declares its violation, beside its passing twin k9-placement-across-storage-close, at default counts, runs 28 workers in batches of 30 s for 120 s on a new root, and counts at least 500 caught runs of the first and 500 passing runs of the second.",
+      "source": {
+        "kind": "incident",
+        "ref": "#298, a fill placed after close, an escape that no simulation run had found; registered by #303 (M0-4 of #297) as the history k9-placement-across-close with its sibling k9-promise-after-close, its control k9-placement-judged-open and its row of KNOWN in crates/campaign-supervisor/src/campaign/known.rs; enrolled as a scenario by #304 (M0-5 of #297)"
+      },
+      "load": {
+        "reference": "k9-placement-across-close,k9-placement-across-storage-close; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 120
+      },
+      "fault": {
+        "kind": "none"
+      },
+      "load_delivery": {
+        "min_caught_per_profile": 500,
+        "min_passes_per_profile": 500
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, the count of processes in every cgroup under the cgroup root it gave the run's campaign sweep and campaign confirm, read at the run's end after every command exited, with that root present, so a missing or unreadable root stops the record; and archive_verified true, which restates the sweep's own closing verification of the archive, read as campaign sweep's return by itself with exit 0, or with its verdict exit 1 for alarm, no_pass or unreached, both of which follow that verification, with its checkpoint unmarked for a changed archive. The validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/core/validity.py ks-escape-2075",
+      "invariants": [
+        "ks-no-fill-admitted-after-close"
+      ],
+      "runs_required": 2,
+      "status": "broken"
+    },
+    {
+      "id": "ks-reach-required-events",
+      "text": "One sweep of the profiles cluster-swarm, cluster-broad and cluster-pressure at default counts, whose links lose, duplicate, reorder and delay datagrams, runs 28 workers in batches of 30 s for 120 s on a new root. The sweep adds controls and scripted histories beside them and runs those its control and history batches reach in that time.",
+      "source": {
+        "kind": "survey",
+        "ref": "#297, unit M2-4, and #315, Scope, the scenario row, accepted as a scenario by the owner's request as #297 quotes it; crates/campaign-supervisor/README.md, section \"Events reached by passing runs\"; #180; the profile set of blotter pull request 1703's swept confirmation"
+      },
+      "load": {
+        "reference": "cluster-swarm,cluster-broad,cluster-pressure; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 120
+      },
+      "fault": {
+        "kind": "link-faults",
+        "target": "the simulated datagram links between the clients and owners of cluster-swarm, cluster-broad and cluster-pressure"
+      },
+      "injection_oracle": "The status document's reached.faults.runs for each of the three profiles is positive: covered passes recorded link fault records that the simulated links wrote as they lost, duplicated, reordered or delayed datagrams, apart from each profile's drawn fault plan. The reach judge checks it: faults is a required event of each profile, so its absence on a profile at 64 covered passes or more is the unreached entry faults, and the held verdict also requires the reach key faults.",
+      "reach": {
+        "text": "At least one covered pass of each of cluster-swarm, cluster-broad and cluster-pressure reaches faults, a link fault record.",
+        "faults": 1
+      },
+      "load_delivery": {
+        "min_covered_per_profile": 64
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, the count of processes in every cgroup under the cgroup root it gave the run's campaign sweep and campaign confirm, read at the run's end after every command exited, with that root present, so a missing or unreadable root stops the record; and archive_verified true, which restates the sweep's own closing verification of the archive, read as campaign sweep's return by itself with exit 0, or with its verdict exit 1 for alarm, no_pass or unreached, both of which follow that verification, with its checkpoint unmarked for a changed archive. The validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/reach/validity.py ks-reach-required-events",
+      "invariants": [
+        "ks-required-events-reached"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    },
+    {
+      "id": "ks-ordering-figure",
+      "text": "One sweep of the three planted ordering controls cluster-order-1, cluster-order-2 and cluster-order-3, each of which runs cluster-broad's scenario, whose links lose, duplicate, reorder and delay datagrams, with a plant of depth 1, 2 or 3, at default counts, runs 28 workers in batches of 30 s for 600 s on a new root.",
+      "source": {
+        "kind": "owner",
+        "ref": "#297, M6-2 and KTD15: the figure scenario of the owner's request for an ordering figure, with the three controls named in --profiles; crates/campaign-supervisor/README.md, Controls in a sweep, the ordering controls of cluster-broad (#307); chaos/interview.md, A8, answer 3"
+      },
+      "load": {
+        "reference": "cluster-order-1,cluster-order-2,cluster-order-3; no production figure applies: a sweep runs seeds in virtual time at the rate the worker's cores allow, so its load is a count of runs and not a rate of requests",
+        "multiple": 1,
+        "workers": 28,
+        "batch_s": 30,
+        "for_s": 600
+      },
+      "fault": {
+        "kind": "link-faults",
+        "target": "the simulated datagram links between the clients and owners of cluster-broad's scenario, which each ordering control runs"
+      },
+      "injection_oracle": "The status document's faults_delivered for each of the three controls is positive: the simulated links of its runs wrote link fault records as they lost, duplicated, reordered or delayed datagrams, apart from the plant.",
+      "reach": {
+        "text": "Each control's runs deliver link faults, which with the chooser's selections decide the session-event orders of the plant's premise."
+      },
+      "load_delivery": {
+        "min_runs_per_profile": 1
+      },
+      "restoration": "Each run sweeps a new root under its own campaign name with the archive the harness is given, so no state of an earlier run reaches it. The harness records in run.json left_a_process 0, the count of processes in every cgroup under the cgroup root it gave the run's campaign sweep and campaign confirm, read at the run's end after every command exited, with that root present, so a missing or unreadable root stops the record; and archive_verified true, which restates the sweep's own closing verification of the archive, read as campaign sweep's return by itself with exit 0, or with its verdict exit 1 for alarm, no_pass or unreached, both of which follow that verification, with its checkpoint unmarked for a changed archive. The validity judge requires both.",
+      "stop_conditions": [
+        "the campaign process passes the run deadline deadline_s",
+        "campaign sweep exits 2, 3 or 4",
+        "the sweep is killed or receives SIGINT or SIGTERM"
+      ],
+      "deadline_s": 3600,
+      "judge": "chaos/judges/ordering/validity.py ks-ordering-figure",
+      "invariants": [
+        "ks-ordering-controls-caught"
+      ],
+      "runs_required": 2,
+      "status": "open"
+    }
+  ],
+  "excluded": [
+    {
+      "property": "A run that ends unsuccessful under \"a healed owner kept the resources of finished work\" breaks an agreed property, so a recovery invariant judges it.",
+      "reason": "hypothesis",
+      "detail": "OQ-5 of #297 is ruled by the workstream's lead on the owner's delegation of 25 November 2026: a run that ends so breaks an agreed property, since swept profiles judge the rule and the planted control cluster-swarm-leak is caught by it. The exclusion stands until a row with a witness and that control is added. The row needs no adopted number, since the rule's ending judges it."
+    },
+    {
+      "property": "Every required event of a cluster profile is reached at the rate the required-event table records, judged as a threshold invariant.",
+      "reason": "hypothesis",
+      "detail": "The owner adopted one covered pass in eight as the rate at which an event is admitted to the required-event table (#180), measured over 2,000 covered passes, a sample size that remains an assumption. The owner has adopted no rate that a sweep must sustain. The threshold row ks-required-events-reached judges that each required event is reached at all, not its rate."
+    },
+    {
+      "property": "After every turn the owner storage's slot extents, free runs, slot ledger and index bindings agree with each other (the conservation rule).",
+      "reason": "no-oracle",
+      "detail": "The rule compares the storage's own tables with each other, so its expected result is read back from the system under test (crates/campaign-supervisor/README.md, Controls in a sweep, on leaked)."
+    },
+    {
+      "property": "A recovery profile's restarted owner passes the oracle's restart check after each crash window it takes.",
+      "reason": "no-control",
+      "detail": "No swept control plants a restart defect for the recovery- profiles: the control table of crates/campaign-supervisor/README.md, Controls in a sweep, lists none for them."
+    },
+    {
+      "property": "The cache keeps its agreed properties when a generated profile's device lies, its report or media differing from what the device did, in one of the six lying kinds: a status that classifies as success, corrupt success, misdirected read or write, sector damage at rest, a false stop answer, and an unproduced completion or replayed write.",
+      "reason": "out-of-envelope",
+      "detail": "No generated profile draws a lying kind, so no approved scenario on this copy reaches one. The production-cause table CAUSES of crates/kestrike/src/net/world_tests/cluster/causes.rs (M4-1 of #297) gives each of the six a row marked not drawn with the reason LYING: the device's report or media differs from what the device did, and the cluster checker holds no damage record for it. Each row's source is LYING_SOURCE: #216, gap G3, and the guard every_drawn_device_fault_is_honest. chaos/interview.md, OQ-4.1. approval: open, for the owner."
+    },
+    {
+      "property": "The cache keeps its agreed properties under device faults outside the simulated device's fault contract: volatile-cache loss, timeout callbacks and queue-pair failures.",
+      "reason": "out-of-envelope",
+      "detail": "The simulated device's fault contract holds media faults, and its exclusion sentence places these three outside it (the storage::device::sim module documentation), so no approved scenario on this copy reaches them. The production-cause table CAUSES of crates/kestrike/src/net/world_tests/cluster/causes.rs (M4-1 of #297) gives each a row marked not drawn with its reason: volatile-cache loss, which #60 lists as a gap of the simulated device (#216, relation to open issues); timeout callbacks, a driver event (the fault-kinds row of crates/kestrike/src/storage/device/fidelity_tests.rs); queue-pair failures, which #60 asks fault profiles to document as a gap of the simulated device (#221, relation to open issues, and its fault-kinds row). chaos/interview.md, OQ-4.2. approval: open, for the owner."
+    },
+    {
+      "property": "The cache keeps its agreed properties across the cluster world's node lifecycle, session lifecycle, membership and placement.",
+      "reason": "out-of-envelope",
+      "detail": "The cluster world reports the four as unavailable dimensions: its module documentation says they are unsupported, and each cluster profile's listing line ends unavailable=node-lifecycle,session-lifecycle,membership,placement (UNAVAILABLE of crates/kestrike/src/net/world_tests/cluster.rs), so no approved scenario on this copy reaches them. The repository records no reason for leaving them unsupported. #31 assigns the cluster workload to the open #38, whose scope lists node and session lifecycle faults and keeps membership and placement unavailable. chaos/interview.md, OQ-4.3. approval: open, for the owner."
+    },
+    {
+      "property": "The cache keeps its agreed properties across the planned crash windows of the recovery profiles recovery-16k, recovery-512 and recovery-torn, the windows past the first included.",
+      "reason": "no-control",
+      "detail": "A sweep of the three profiles at restarts=20 lets a run of each take every cut of its built-in table (crates/campaign-supervisor/README.md, Recovery crash windows), and no invariant row of this ledger can break in such a run. The recovery world raises a violation only through the oracle's restart check and the conservation rule, and reports each as a violation of the obligation Restart (crates/kestrike/src/net/world_tests/recovery.rs; judge_recovery of crates/kestrike/src/net/world_tests/bundle.rs). Both checks are excluded above, the first for want of a control and the second for want of an oracle: no swept control plants a restart defect for these profiles. The stopped-boundary observer of ks-bound-record-passes-its-checks does not run in that world, so no recovery run can break that row. No judge of this contract reads the windows totals of the sweep status, which campaign sums from the worker's per-run counts, so no receipt shows that a window was taken. A scenario waits for an invariant that a check of the recovery world raises, with a judge and a control. chaos/interview.md, OQ-4.4. approval: open, for the owner."
+    }
+  ]
+}

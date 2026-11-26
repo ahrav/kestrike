@@ -1,0 +1,156 @@
+{
+  "archive": "/data/tsw/campaigns/2092/archive-r4",
+  "archive_build_after": "13056bc7ab0275221231118eb2ef21728bb42dc065048840a677a59c70fc1ea1",
+  "batch_s": 30,
+  "campaign": "fixture-ordering-live",
+  "campaign_binary": {
+    "path": "/data/tsw/checkout/target/release/campaign",
+    "sha256": "0a7d40a714c44166fd51f192b81e47f4c6c5db30f7775eed5b225b2734d5c3b4",
+    "sha256_after": "0a7d40a714c44166fd51f192b81e47f4c6c5db30f7775eed5b225b2734d5c3b4",
+    "source_sha256_after": "0a7d40a714c44166fd51f192b81e47f4c6c5db30f7775eed5b225b2734d5c3b4",
+    "staged": "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/campaign"
+  },
+  "cgroup_root": "/sys/fs/cgroup/user.slice/user-1001.slice/user@1001.service/app.slice/fix2092r5.scope/campaign",
+  "commands": {
+    "confirm": [
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/campaign",
+      "confirm",
+      "--root",
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live",
+      "--archive",
+      "/data/tsw/campaigns/2092/archive-r4"
+    ],
+    "findings": [
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/campaign",
+      "findings",
+      "--state",
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live/confirm/state"
+    ],
+    "listing": [
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/campaign",
+      "sim",
+      "capabilities",
+      "--archive",
+      "/data/tsw/campaigns/2092/archive-r4",
+      "--artifacts",
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/listing"
+    ],
+    "sweep": [
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/campaign",
+      "sweep",
+      "--root",
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live",
+      "--archive",
+      "/data/tsw/campaigns/2092/archive-r4",
+      "--campaign",
+      "fixture-ordering-live",
+      "--profiles",
+      "cluster-order-1,cluster-order-2,cluster-order-3",
+      "--workers",
+      "28",
+      "--batch",
+      "30",
+      "--for",
+      "120"
+    ],
+    "sweep-status": [
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live.harness/campaign",
+      "sweep-status",
+      "--root",
+      "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live"
+    ]
+  },
+  "complete": true,
+  "confirm_dispatch": "queue_empty",
+  "confirm_exit": 0,
+  "constants": {
+    "checkpoint_bytes": 16777216,
+    "judge_wait_s": 600,
+    "ledger_bytes": 16777216,
+    "line_bytes": 16777216,
+    "output_bytes": 268435456,
+    "poll_s": 0.5,
+    "receipt_bytes": 16777216,
+    "stop_wait_s": 120
+  },
+  "counts": {},
+  "deadline_fired": false,
+  "deadline_s": 3600,
+  "defect": "",
+  "environment": [
+    "CAMPAIGN_CGROUP_ROOT",
+    "HOME",
+    "LANG",
+    "LOGNAME",
+    "PATH",
+    "TMPDIR",
+    "USER",
+    "XDG_RUNTIME_DIR"
+  ],
+  "error": null,
+  "findings_exit": 0,
+  "for_s": 120,
+  "harness": {
+    "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+    "chaos/harness/run_scenario.py": "d79d8dc147cee5dd498b2252a13b6fcbe94eac631c81f10e13529ce52866ff9f"
+  },
+  "interpreter": "3.9.25",
+  "listing": {
+    "cluster-order-1": {
+      "class": "control",
+      "cluster": true,
+      "fails": null
+    },
+    "cluster-order-2": {
+      "class": "control",
+      "cluster": true,
+      "fails": null
+    },
+    "cluster-order-3": {
+      "class": "control",
+      "cluster": true,
+      "fails": null
+    }
+  },
+  "listing_exit": 0,
+  "mode": "live",
+  "profiles": [
+    "cluster-order-1",
+    "cluster-order-2",
+    "cluster-order-3"
+  ],
+  "restored": {
+    "archive_verified": true,
+    "cause": null,
+    "left_a_process": 0
+  },
+  "root": "/data/tsw/campaigns/2092/fixtures-r5/fixture-ordering-live",
+  "root_build": "13056bc7ab0275221231118eb2ef21728bb42dc065048840a677a59c70fc1ea1",
+  "run_id": "fixture-ordering-live",
+  "runs": {
+    "cluster-order-1": {
+      "first": 0,
+      "next": 85653
+    },
+    "cluster-order-2": {
+      "first": 0,
+      "next": 85389
+    },
+    "cluster-order-3": {
+      "first": 0,
+      "next": 85367
+    }
+  },
+  "scenario": "ks-ordering-figure-short",
+  "scenario_row": "04498d2a8b2988e603964ffa0421a0bf1635fdb41d5a06f5f36306272390b5e5",
+  "schema": 1,
+  "seconds": 122.882,
+  "signal": null,
+  "started": "2026-11-24T05:14:51Z",
+  "status_exit": 0,
+  "status_refusal": null,
+  "sweep_elapsed_s": 120.664,
+  "sweep_exit": 0,
+  "system_build": "13056bc7ab0275221231118eb2ef21728bb42dc065048840a677a59c70fc1ea1",
+  "workers": 28
+}

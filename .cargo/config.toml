@@ -1,0 +1,17 @@
+# Enables LSE atomics for every aarch64 build Cargo starts inside the
+# repository while RUSTFLAGS, CARGO_ENCODED_RUSTFLAGS, RUSTDOCFLAGS and
+# CARGO_ENCODED_RUSTDOCFLAGS are unset. For an aarch64 target this table takes
+# the place of `build.rustflags`, `build.rustdocflags`, CARGO_BUILD_RUSTFLAGS
+# and CARGO_BUILD_RUSTDOCFLAGS. When Cargo builds for the aarch64 host target
+# without `--target`, these `rustflags` also apply to build scripts and proc
+# macros, and either can stop the build with an illegal instruction on a host
+# CPU that lacks LSE.
+# kestrike refuses
+# an aarch64 build without the `lse` target feature at the compile_error!
+# guard in crates/kestrike/src/mod.rs. RUSTFLAGS and CARGO_ENCODED_RUSTFLAGS
+# replace `rustflags` when set, and RUSTDOCFLAGS and CARGO_ENCODED_RUSTDOCFLAGS
+# replace `rustdocflags`, so a caller that sets one carries
+# `-C target-feature=+lse` itself.
+[target.'cfg(target_arch = "aarch64")']
+rustflags = ["-C", "target-feature=+lse"]
+rustdocflags = ["-C", "target-feature=+lse"]

@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "state": "@DIR@/state",
+  "region": "us-east-1",
+  "table": "kestrike-store",
+  "pages": 4,
+  "writer": 900,
+  "status_key": "@DIR@/status.key",
+  "zone": 1,
+  "name": "us-east-1a",
+  "directory": "@DIR@/directory.json",
+  "report_period_us": 10000000,
+  "owner": {
+    "registrant_max": 8,
+    "retry_max": 2,
+    "window": 36,
+    "report_deadline": 10,
+    "report_period": 20,
+    "clock_error": 5
+  },
+  "replacement": { "units": 64, "slots": 3, "slot_units": 3, "entries": 64 }
+}

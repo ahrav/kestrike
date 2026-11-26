@@ -1,0 +1,12 @@
+{
+  "command": "python3 -I chaos/harness/reach.py aws s3api list-buckets",
+  "exit_status": 1,
+  "fence": "ks-fleet-object-storage-is-unreachable",
+  "identity": {
+    "command": "python3 -I chaos/harness/reach.py identity",
+    "output": "unix user tsw; aws role bsw-ct1-worker-host; github login ahrav"
+  },
+  "output": "aws: [ERROR]: An error occurred (AccessDenied) when calling the ListBuckets operation: User: arn:aws:sts::<account>:assumed-role/bsw-ct1-worker-host/i-02d283139ecb400e8 is not authorized to perform: s3:ListAllMyBuckets because no identity-based policy allows the s3:ListAllMyBuckets action\naws exit 254\n",
+  "ran": "2026-11-25T06:33:34Z",
+  "refused": true
+}

@@ -1,0 +1,41 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/core/invariant.py",
+      "ks-get-not-older-than-collected"
+    ],
+    "defect": "",
+    "detail": "no violation under the row's rule: no violation suspect of cluster-broad carries the rule \"a GET returned a version older than one collected or removed before it\" (obligation 2); valid: cluster-broad 206004 covered of 64 required, 83 replays; reached faults, hits, invalidated; 22819 control runs, 6505 caught",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "5c7f750e2e5e29754fdc698066206623e30297ff6c8054a470c1214cfbe4848a",
+      "run.json": "5a8ee3176bd39dec83b13830640fe73d302b5c9dfed0494797a62d35566396f2",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "87c8a9a912319c529bd5e2749c59e6b1ec74c16755fc06baca0baa75628ce21b"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941"
+    },
+    "mode": "live",
+    "outcome": "held",
+    "row": "ks-get-not-older-than-collected",
+    "rows": {
+      "ks-cluster-link-faults": "c85eaabd9ff2c2bf0b8353bf0b8ca88d5f2d85546202b23a16c6050d6b766ae7",
+      "ks-get-not-older-than-collected": "6609cb3ae94215a980e18822b4116c684d05dff5370ce151b680e2dbc043ceac"
+    },
+    "scenario": "ks-cluster-link-faults",
+    "system_build": "81f802d48d10117ec0c4c345f8aa61299f99a315e90f129a952a3ee911c5b3a3"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-24T09:25:24Z",
+    "run_id": "fixture-cluster-live",
+    "started": "2026-11-24T09:23:21Z"
+  }
+}

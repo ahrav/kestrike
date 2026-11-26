@@ -1,0 +1,24 @@
+{
+  "id": "dsw-122",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/volume/tick.rs",
+    "function": "Volume::serve"
+  },
+  "defect": "A read that hands off with a kept grant submits its next command inside the scan and spends the call's submit quota; the waiting pass runs only with quota left, so with a submit burst at or below the reads that hand off in one call a waiting read is not submitted while every resource has room.",
+  "property": {
+    "text": "Every waiting read submits within read_ops calls with room in slot order from the cursor, stopping at the first submit refused as full.",
+    "place": "obligation",
+    "pointer": "tick-cursor-moves-only-on-a-call-that-serves"
+  },
+  "fix": {
+    "state": "not-delivered"
+  },
+  "cause": "workload",
+  "evidence": {
+    "steps": "No fault. The trigger needs the submit quota left for the read scan, TickConfig::submit_burst less the call's authority Report and metadata submits, at or below the read submits of reads that hand off with a kept grant in one Volume::serve call, while the read share still has room: each such submit spends the quota, and the waiting pass runs only with quota left (storage/volume/tick.rs, work and serve). A configured burst at or below those hand-offs is one case of it. The burst is an argument of Volume::attach, outside StorageConfig.",
+    "sweep": "One sweep of cluster-swarm, cluster-pressure and upload on the unfixed build: root bsw-ct1-2101-probe-cluster-424e30371 under the campaign root, archive of head 424e30371 (build a22460533b6e3c6ed9968422d2fd549011e75c64e8393cc0301ac16c368bd18b, dirty false), campaign bsw-ct1-2101-probe-cluster-424e30371, 28 workers for 60 s; runs 0..6192 of cluster-swarm, 0..14407 of cluster-pressure and 0..158022 of upload, each run at its own root; suspects 0, new_suspects 0, replays 27, 1700 control runs caught and none missed, no alarm. Every world attaches its volume with TICK of storage/volume_fixture.rs, a submit burst of 8, over a read share of at most 3: 8 less at most one authority Report and one metadata submit of the same call leaves 6 for the read scan, and a call submits at most three read commands, so successful hand-offs never exhaust the quota the waiting pass needs; a scan submit refused as full still ends the call's waiting submits, as the property allows. No file under net/world_tests names TickConfig or submit_burst."
+  },
+  "note": "disagreement-waiting-pass-quota records the documentation of `serve` that disagrees. Another site and trigger than ivk-2376. The row stays open: a history needs a world that attaches its volume with another submit burst, a second addition beside ivk-2376's geometry."
+}

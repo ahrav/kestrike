@@ -1,0 +1,24 @@
+{
+  "id": "r04-session-generation",
+  "row": 4,
+  "fix": {
+    "pull_request": 1588,
+    "commit": "761eaeb5a89e10b851471f782443dad550bbc891"
+  },
+  "files": [
+    "crates/kestrike/src/net/client.rs"
+  ],
+  "restores": "`of_session` matches a queued frame to the active session by owner epoch alone, so a CANCEL queued under a lost session is sent under a restarted owner's session of the same epoch.",
+  "proof": "net::client_tests::a_cancel_queued_under_a_lost_session_is_not_sent_under_a_restarted_owner_s_same_epoch",
+  "expected": [
+    "upload",
+    "faulted",
+    "cluster-broad",
+    "cluster-pressure",
+    "cluster-swarm"
+  ],
+  "miss_cause": {
+    "cause": "workload",
+    "evidence": "Every traced run of six profiles, the five expected and `cluster-long`, calls the planted `of_session` (a scratch trace there panicked in all 127,486 upload, 128,028 faulted, 128,518 cluster-broad, 128,359 cluster-pressure, 115,537 cluster-swarm and 454,807 cluster-long runs on the code of commit c6a14e9f1), and a trace at a frame of the active epoch below the session's first wire generation, the one frame the plant sends and the head drops, fired in none of 261,651 runs of the five other than cluster-long and none of 2,051,103 runs of all 21 live profiles with their controls and histories on that code, so no run offered the send filter a frame of the active epoch from before the session's first wire generation; `cluster-long` stays out of `expected`, although each of its traced runs calls `of_session`, because the profile has no passing run at the default counts."
+  }
+}

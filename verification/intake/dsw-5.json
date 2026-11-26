@@ -1,0 +1,31 @@
+{
+  "id": "dsw-5",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/attempt.rs",
+    "function": "Storage::begin_fill"
+  },
+  "defect": "A grant that panics under the shard gate during an unwind leaves the gate open, not poisoned.",
+  "property": {
+    "text": "A poisoned gate admits nobody; dropping a guard releases the gate poisoned when the drop unwinds from a panic that began after the gate was taken.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/storage/gate.rs, module documentation and `GateGuard`"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1735,
+    "regression": {
+      "path": "crates/kestrike/src/storage/begin_fill_gate_tests.rs",
+      "tests": [
+        "storage::begin_fill_gate_tests::a_grant_that_panics_under_the_shard_gate_poisons_it_also_during_unwinding"
+      ]
+    }
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The defect needs a panic under the storage gate that `Storage::begin_fill` in `crates/kestrike/src/storage/attempt.rs` takes, inside a call a destructor makes on a thread already unwinding. No profile or history raises a panic there: the reason of `verification/intake/exclusions/panic-during-unwinding.json` lists every panic the simulation raises, the driver unwinds and the `panicking` and `asserting` control plants, with the commands that show where each arises.",
+    "standing_check": "crates/kestrike/src/storage/begin_fill_gate_tests.rs, storage::begin_fill_gate_tests::a_grant_that_panics_under_the_shard_gate_poisons_it_also_during_unwinding"
+  },
+  "exclusion": "panic-during-unwinding"
+}

@@ -1,0 +1,31 @@
+{
+  "id": "dsw-7",
+  "kind": "escape",
+  "class": "correctness bug",
+  "site": {
+    "path": "crates/kestrike/src/storage/writable.rs",
+    "function": "revalidate"
+  },
+  "defect": "A revalidation that panics under the shard gate during an unwind leaves the gate open.",
+  "property": {
+    "text": "A poisoned gate admits nobody; dropping a guard releases the gate poisoned when the drop unwinds from a panic that began after the gate was taken.",
+    "place": "documentation",
+    "pointer": "crates/kestrike/src/storage/gate.rs, module documentation and `GateGuard`"
+  },
+  "fix": {
+    "state": "merged",
+    "pull_request": 1735,
+    "regression": {
+      "path": "crates/kestrike/src/storage/writable_tests.rs",
+      "tests": [
+        "storage::writable_tests::a_revalidation_panic_poisons_the_shard_gate_even_during_unwinding"
+      ]
+    }
+  },
+  "cause": "environment",
+  "evidence": {
+    "gap": "The defect needs a panic under the storage gate that `revalidate` in `crates/kestrike/src/storage/writable.rs` takes, inside a call a destructor makes on a thread already unwinding. No profile or history raises a panic there: the reason of `verification/intake/exclusions/panic-during-unwinding.json` lists every panic the simulation raises, the driver unwinds and the `panicking` and `asserting` control plants, with the commands that show where each arises.",
+    "standing_check": "crates/kestrike/src/storage/writable_tests.rs, storage::writable_tests::a_revalidation_panic_poisons_the_shard_gate_even_during_unwinding"
+  },
+  "exclusion": "panic-during-unwinding"
+}

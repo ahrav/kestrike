@@ -1,0 +1,331 @@
+{
+ "record": "acceptance",
+ "version": 1,
+ "parent": {
+  "digest": "the SHA-256 of the UTF-8 bytes of the issue's body field as the GitHub REST API returns it",
+  "specification": {
+   "issue": "#91",
+   "body_sha256": "e83c0becc0459e39bb6f81b2cf3e0f2ac4882bf02af4c4b91c0f28ea8b8e9865"
+  },
+  "ticket": {"issue": "#142", "body_sha256": "5f568a6f21d80fcc8cfd9696a0e0cf54c05eee818ee4b9fef8886c94db876537"},
+  "contract": {"issue": "#120", "body_sha256": "2d87d3b8cf5dd187208efdca970e696e5a1356fde3b191ce280b81fa490dfdf9"}
+ },
+ "records": {
+  "frame": {"version": 3, "sha256": "95e17f2df7733b023e441602fece4ec742521864c53a7d386ca46fd11e19d2b3"},
+  "statistics": {"version": 2, "sha256": "f63dd09e006737a43da7dfe66cb7f011b23dd3df32bcd6e21b90ec135279bf64"},
+  "policy": {"version": 3, "sha256": "4beb2ac53945e9a7250af18bd126ded4090cd89033d68a2bf0168c0538b04895"},
+  "sizing": "ec24fa76afebdf2a735fba031de464a19f743c5e575aa112d509213440e7a633"
+ },
+ "columns": {
+  "safety": {
+   "maps": ["#120 P1", "#120 P2", "#120 P3", "#120 P5", "#120 P10"],
+   "meaning": "unique authority, checked bytes, acknowledged coverage before successor service, replay at the logical cut and deposition ending emission"
+  },
+  "containment": {
+   "maps": ["#120 P9", "#120 R3"],
+   "meaning": "the fault stays inside its class: refusals change nothing, host loss keeps the volume and generation, and damage is accounted by physical unit"
+  },
+  "retention": {
+   "maps": ["#120 P4", "#120 R2"],
+   "meaning": "every member of S at the certified cut and frontier that stays eligible is served its exact bytes, or lies on an accounted damaged unit"
+  },
+  "progress": {
+   "maps": ["#120 P8", "#120 R6", "#120 R7"],
+   "meaning": "recovery reaches Live and serves within its bounds, with H under R6 and F declared apart"
+  },
+  "conservation": {
+   "maps": ["#120 P6", "#120 P7", "#120 R9"],
+   "meaning": "at the publish-aligned boundary transient residuals are zero, units have one owner and protected history is counted, not reused"
+  }
+ },
+ "sources": {
+  "cycles": {
+   "issue": "blotter issue 1193",
+   "kind": "simulation",
+   "judge": "obligation",
+   "evidence": "seeded sampled cycle histories of the production takeover history world: counts, work and ticks, never hardware latency; seeds 1 to 16 at 32 cycles are unpowered discovery",
+   "classes": ["host-loss", "same-host-restart"],
+   "columns": ["safety", "containment", "retention", "progress"],
+   "records": [
+    "warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+    "warm-cycle-histories-pass-on-seeds-1-to-16-as-unpowered-discovery"
+   ]
+  },
+  "components": {
+   "issue": "#122",
+   "kind": "model",
+   "judge": "obligation",
+   "evidence": "composed projections of two accepted protocol models at each cross-model interface, checked exhaustively from their declared prefixes within their declared bounds: no inductive proof and no implementation refinement",
+   "classes": ["host-loss"],
+   "columns": ["safety", "retention", "conservation"],
+   "records": [
+    "join-capture-cut-durable-suffix-model",
+    "join-coverage-ack-recovered-membership-model",
+    "join-named-slots-settled-floor-reuse-model"
+   ],
+   "families": [
+    "join-capture-suffix-",
+    "join-coverage-preserve-",
+    "join-prefix-saturation-"
+   ]
+  },
+  "histories": {
+   "issue": "#136",
+   "kind": "simulation",
+   "judge": "obligation",
+   "evidence": "implementation history evidence: the production owner, storage, routing and client path recorded as histories the oracle judges for positive preservation, credited by outcome with no model-to-Rust trace replay",
+   "classes": ["host-loss", "same-host-restart"],
+   "columns": ["safety", "containment", "retention"],
+   "records": ["takeover-history-preserves-the-retained-set", "history-oracle-judges-positive-preservation"]
+  },
+  "proxies": {
+   "issue": "#140",
+   "kind": "simulation",
+   "judge": "obligation",
+   "evidence": "the packages' simulated-device proxies: same-host warm recovery over the simulated device, uncredited for hardware",
+   "classes": ["controller-reset", "process-kill"],
+   "columns": ["safety", "containment", "retention", "progress"],
+   "records": ["warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"]
+  },
+  "packages": {
+   "issue": "#140",
+   "kind": "hardware",
+   "judge": "package",
+   "evidence": "observed class-bound hardware packages, judged from lane receipts and raw artifacts by scripts/recovery-packages.py",
+   "classes": ["controller-reset", "process-kill"],
+   "columns": ["safety", "containment", "retention", "progress"]
+  },
+  "volume-loss": {
+   "issue": "#134",
+   "kind": "simulation",
+   "judge": "obligation",
+   "evidence": "the reconciler's actual-volume-loss decision and cold provisioning, apart from every host-loss path",
+   "classes": ["actual-volume-loss"],
+   "columns": ["containment", "progress"],
+   "records": ["volume-loss-provisions-only-on-isolated-permanent-loss"]
+  },
+  "comparisons": {
+   "issue": "#139",
+   "kind": "hardware",
+   "judge": "comparison",
+   "evidence": "calibrated comparison receipts under the frozen frame, statistics and policy, judged by scripts/measurement-frame.py report with H by scripts/hit-gate.py",
+   "classes": ["host-loss", "same-host-restart", "actual-volume-loss"],
+   "columns": ["retention", "progress", "conservation"]
+  }
+ },
+ "classes": {
+  "host-loss": {
+   "frame": "warm-takeover",
+   "cold": false,
+   "package": null,
+   "meaning": "host loss with warm takeover: the recorded standby, or a designated fresh host after owner and standby loss, takes over the surviving volume at its volume identity and generation and restores S from the certified cut",
+   "evidence": {
+    "model": {
+     "safety": ["components:join-capture-cut-durable-suffix-model", "components:join-coverage-ack-recovered-membership-model"],
+     "retention": ["components:join-capture-cut-durable-suffix-model", "components:join-coverage-ack-recovered-membership-model"],
+     "conservation": ["components:join-capture-cut-durable-suffix-model", "components:join-named-slots-settled-floor-reuse-model"]
+    },
+    "simulation": {
+     "safety": [
+      "cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+      "histories:takeover-history-preserves-the-retained-set"
+     ],
+     "containment": [
+      "cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+      "histories:takeover-history-preserves-the-retained-set"
+     ],
+     "retention": [
+      "cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+      "cycles:warm-cycle-histories-pass-on-seeds-1-to-16-as-unpowered-discovery",
+      "histories:takeover-history-preserves-the-retained-set",
+      "histories:history-oracle-judges-positive-preservation"
+     ],
+     "progress": [
+      "cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+      "cycles:warm-cycle-histories-pass-on-seeds-1-to-16-as-unpowered-discovery"
+     ]
+    },
+    "hardware": {
+     "retention": [
+      "comparisons:s_membership/recovery",
+      "comparisons:preserved_unaffected_bytes/recovery",
+      "comparisons:fault_local_damage/recovery",
+      "comparisons:recent_unprotected_suffix/recovery"
+     ],
+     "progress": ["comparisons:first_safe_hit/recovery", "comparisons:full_load_readiness/recovery"],
+     "conservation": ["comparisons:peak_ram/recovery", "comparisons:engine_charge/recovery"]
+    }
+   },
+   "unrun": {
+    "store": "the store column is conditional: #123 records no ST1 to ST8 qualification, and no store observation is a cited receipt"
+   }
+  },
+  "same-host-restart": {
+   "frame": "same-host-restart",
+   "cold": false,
+   "package": null,
+   "meaning": "the owner restarts on its own host and volume and restores S from the certified cut",
+   "evidence": {
+    "simulation": {
+     "safety": ["cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary"],
+     "containment": ["cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary"],
+     "retention": [
+      "cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+      "cycles:warm-cycle-histories-pass-on-seeds-1-to-16-as-unpowered-discovery",
+      "histories:history-oracle-judges-positive-preservation"
+     ],
+     "progress": [
+      "cycles:warm-cycle-histories-judge-four-verdicts-and-conserve-at-the-boundary",
+      "cycles:warm-cycle-histories-pass-on-seeds-1-to-16-as-unpowered-discovery"
+     ]
+    },
+    "hardware": {
+     "retention": [
+      "comparisons:s_membership/recovery",
+      "comparisons:preserved_unaffected_bytes/recovery",
+      "comparisons:fault_local_damage/recovery",
+      "comparisons:recent_unprotected_suffix/recovery"
+     ],
+     "progress": ["comparisons:first_safe_hit/recovery", "comparisons:full_load_readiness/recovery"],
+     "conservation": ["comparisons:peak_ram/recovery", "comparisons:engine_charge/recovery"]
+    }
+   },
+   "unrun": {
+    "model": "no model projection runs a same-host restart; the joins project host loss and the successor's recovery",
+    "store": "the store column is conditional: #123 records no ST1 to ST8 qualification, and no store observation is a cited receipt"
+   }
+  },
+  "controller-reset": {
+   "frame": null,
+   "cold": false,
+   "package": "CR-1",
+   "meaning": "a controller reset after a quiesced close recovers warm on the same host and volume",
+   "evidence": {
+    "simulation": {
+     "safety": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"],
+     "containment": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"],
+     "retention": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"],
+     "progress": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"]
+    },
+    "hardware": {
+     "safety": ["packages:safety"],
+     "containment": ["packages:containment"],
+     "retention": ["packages:retention"],
+     "progress": ["packages:progress"]
+    }
+   },
+   "unrun": {
+    "model": "no model projection runs a controller reset; the joins check the protocol, not the device",
+    "store": "the store column is conditional: #123 records no ST1 to ST8 qualification, and no store observation is a cited receipt"
+   }
+  },
+  "process-kill": {
+   "frame": null,
+   "cold": false,
+   "package": "PK-1",
+   "meaning": "a killed owner process restarts warm on the same host and volume",
+   "evidence": {
+    "simulation": {
+     "safety": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"],
+     "containment": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"],
+     "retention": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"],
+     "progress": ["proxies:warm-cycle-packages-keep-the-retained-set-across-a-controller-reset-and-a-process-kill"]
+    },
+    "hardware": {
+     "safety": ["packages:safety"],
+     "containment": ["packages:containment"],
+     "retention": ["packages:retention"],
+     "progress": ["packages:progress"]
+    }
+   },
+   "unrun": {
+    "model": "no model projection runs a process kill; the joins check the protocol, not the process",
+    "store": "the store column is conditional: #123 records no ST1 to ST8 qualification, and no store observation is a cited receipt"
+   }
+  },
+  "actual-volume-loss": {
+   "frame": "volume-loss-control",
+   "cold": true,
+   "package": null,
+   "meaning": "actual volume loss provisions a replacement volume and starts cold; the cold control never stands for host loss",
+   "evidence": {
+    "simulation": {
+     "containment": ["volume-loss:volume-loss-provisions-only-on-isolated-permanent-loss"],
+     "progress": ["volume-loss:volume-loss-provisions-only-on-isolated-permanent-loss"]
+    },
+    "hardware": {"progress": ["comparisons:cold_refill/recovery", "comparisons:origin_excess/recovery"]}
+   },
+   "unrun": {
+    "model": "no model projection runs actual volume loss",
+    "store": "the store column is conditional: #123 records no ST1 to ST8 qualification, and no store observation is a cited receipt"
+   }
+  }
+ },
+ "retention": {
+  "set": "the eligible set S at the certified recovery cut and frontier",
+  "terms": [
+   "s_membership",
+   "certified_cut",
+   "certified_frontier",
+   "eligible_exclusions",
+   "fault_local_damage",
+   "preserved_unaffected_bytes",
+   "recent_unprotected_suffix"
+  ],
+  "exclusions": ["recorded eviction", "acknowledged invalidation", "expiry", "successful replacement"],
+  "never": ["safe miss", "generic Stale eviction", "cold host-loss outcome", "all entries evicted"]
+ },
+ "quantitative": {
+  "safety": [],
+  "containment": [],
+  "retention": ["retained_hit_recovery", "origin_demand"],
+  "progress": [
+   "first_safe_hit",
+   "sustained_fill_readiness",
+   "rto",
+   "request_tail",
+   "goodput",
+   "hit_latency",
+   "fill_latency"
+  ],
+  "conservation": ["held_capacity", "peak_ram"]
+ },
+ "reopen": {
+  "claim": "the fleet reopens after an operator store restore",
+  "owner": "#123",
+  "contract": "#120 R12 and KTD9",
+  "requires": {"namespace": null, "coverage": null},
+  "insufficient": ["TableId detection", "an arbitrary generation jump"]
+ },
+ "excluded": {
+  "host-failure": "#30: a host-failure witness must survive on another host or failure domain",
+  "planned-handoff": "the Step 8 planned-handoff owner",
+  "physical-hot-removal": "#30",
+  "fis": "the fis-read, fis-write and fis-stop profiles, judged by scripts/fis-controller.py",
+  "exclusion-and-successor": "the catalog owners: the Exclusion and Successor sites stay undecided until they ratify them, and an unratified site earns no credit",
+  "staging": "each separately owned staging package keeps its owner and its own judge"
+ },
+ "unrun": {
+  "power-loss": "backend durability and power loss are unmeasured: the reset and kill leave the host and volume powered, and no case cuts volume power",
+  "provider-phenomena": "unresolved provider phenomena stay unmeasured: the END provider contract and holder-only runtime preemption are open, and the model cases resting on them are blocked",
+  "store-restore": "no case restores the store, so the reopen claim has no run behind it",
+  "trace-replay": "registered model-to-Rust trace replay of the history cases is open: hand-written tests witness their outcomes, and no trace binds a test to its model case",
+  "package-retention": "the CR-1 and PK-1 retention verdict judges the served set, the unaffected bytes and the warm-load install; no package row measures fault-local damage or the recent unprotected suffix",
+  "package-conservation": "the CR-1 and PK-1 residuals verdict and their proxy sample residuals once the second tenure's reservations drop, and no checkpoint or frontier publication follows, so neither cites conservation and the publish-aligned boundary is unmeasured for those classes"
+ },
+ "assumptions": {
+  "model": "a model result holds within its declared finite bounds under END, DURABLE and NEW-EXCLUSION, a model retention result also rests on the #148 lineage-fence premises, and neither is an inductive proof",
+  "simulation": "a seeded simulation run reports counts, work and ticks, never hardware latency, and a discovery run is no powered confirmation",
+  "proxy": "a simulated-device proxy carries no hardware credit",
+  "hardware": "a hardware cell credits only its own class and profile on a supported matching platform row",
+  "store": "a store-dependent result is conditional on the #123 store qualification",
+  "sizing": "a sizing scenario is conditional, its probability not identified, and carries no verdict"
+ },
+ "properties": {
+  "P-N-341": {
+   "name": "evidence-columns-name-their-own-identity",
+   "maps": ["#120 P4", "#120 P8"],
+   "falsifier": "a hardware cell passing from a simulator campaign"
+  }
+ }
+}

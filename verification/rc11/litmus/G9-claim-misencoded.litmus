@@ -1,0 +1,26 @@
+C G9-claim-misencoded
+(* The misencoded claimed bound: grace::Sequential's points with the claim's raise AcqRel and a SeqCst fence after it, and the bound load Acquire.
+   Events: P0 is the reader, its claim of record 0 by raising claimed
+   (fetch_max in the kernel, fetch_add from 0 here) then its era load for
+   the pin; P1 is the writer's era bump; P2 is the maintainer, its
+   start_era load then its claimed-bound load. Pinned record skipped:
+   0:r1=1 (the reader pins the old era), 2:r0=2 (the pass started after
+   the bump) and 2:r1=0 (the pass's bound excludes the reader's record). *)
+{ claimed = 0; era = 1; }
+
+P0 (atomic_int* claimed, atomic_int* era) {
+  int r0 = atomic_fetch_add_explicit(claimed, 1, memory_order_acq_rel);
+  atomic_thread_fence(memory_order_seq_cst);
+  int r1 = atomic_load_explicit(era, memory_order_seq_cst);
+}
+
+P1 (atomic_int* era) {
+  int r0 = atomic_fetch_add_explicit(era, 1, memory_order_seq_cst);
+}
+
+P2 (atomic_int* era, atomic_int* claimed) {
+  int r0 = atomic_load_explicit(era, memory_order_seq_cst);
+  int r1 = atomic_load_explicit(claimed, memory_order_acquire);
+}
+
+exists (0:r1=1 /\ 2:r0=2 /\ 2:r1=0)

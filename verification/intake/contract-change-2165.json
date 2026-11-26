@@ -1,0 +1,13 @@
+{
+  "id": "contract-change-2165",
+  "kind": "contract-change",
+  "pull_request": 2165,
+  "escape": "ivk-2350",
+  "changed": "The rule text \"an attach wrote a root generation at or below one the root slots held\", added to array MIXED of crates/kestrike/src/net/world_tests/narrate/rules.rs under the restart obligation.",
+  "property_action": {
+    "action": "added",
+    "place": "rule",
+    "reference": "an attach wrote a root generation at or below one the root slots held",
+    "reason": "The rule states the clause \"every relaunch writes its tenure session above every generation the slots held\" of the obligation record reset-roots-leave-no-older-root-selectable: an attach breaks that clause when it writes a root whose generation is at or below the generation both root slots held before the tenure's checkpoint passes. A refusal that writes no root and leaves both slots at that generation keeps the clause. The history rs1-wide-unit-roots-lost fails the rule at the head, its sibling rs1-wide-unit-without-pass refuses StaleSession without a root write and passes, and the control rs1-without-pass-reissued fails the rule through the standing plant Plant::GenerationReuse, whose RESET writes the held generation itself."
+  }
+}

@@ -1,0 +1,28 @@
+
+tcx.so:	file format elf64-x86-64
+
+Disassembly of section .text:
+
+00000000001363e0 <tag_compare_decision>:
+  1363e0:      	push	rax
+  1363e1:      	movdqu	xmm0, xmmword ptr [rdi]
+  1363e5:      	movdqu	xmm1, xmmword ptr [rsi]
+  1363e9:      	pxor	xmm1, xmm0
+  1363ed:      	movq	rax, xmm1
+  1363f2:      	pshufd	xmm0, xmm1, 238         # xmm0 = xmm1[2,3,2,3]
+  1363f7:      	movq	rcx, xmm0
+  1363fc:      	or	rcx, rax
+  1363ff:      	mov	qword ptr [rsp], rcx
+  136403:      	mov	rax, rsp
+  136406:      	xor	edi, edi
+  136408:      	cmp	qword ptr [rsp], 0
+  13640d:      	sete	dil
+  136411:      	call	0x1363b0 <subtle::black_box::<u8>>
+  136416:      	test	al, al
+  136418:      	je	0x136421 <tag_compare_decision+0x41>
+  13641a:      	call	0x1363c0 <tcx::accepted>
+  13641f:      	pop	rcx
+  136420:      	ret
+  136421:      	call	0x1363d0 <tcx::rejected>
+  136426:      	pop	rcx
+  136427:      	ret

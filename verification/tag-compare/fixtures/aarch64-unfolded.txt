@@ -1,0 +1,20 @@
+
+tcx.so:	file format elf64-littleaarch64
+
+Disassembly of section .text:
+
+000000000014094c <tag_compare_unfolded>:
+  14094c:      	stp	x29, x30, [sp, #-16]!
+  140950:      	mov	x29, sp
+  140954:      	ldp	x8, x11, [x1]
+  140958:      	ldp	x9, x10, [x0]
+  14095c:      	cmp	x9, x8
+  140960:      	ccmp	x10, x11, #0, eq
+  140964:      	cset	w0, eq
+  140968:      	bl	0x1406b8 <subtle::black_box::<u8>>
+  14096c:      	tst	w0, #0xff
+  140970:      	b.eq	0x14097c <tag_compare_unfolded+0x30>
+  140974:      	ldp	x29, x30, [sp], #16
+  140978:      	b	0x1406cc <tcx::accepted>
+  14097c:      	ldp	x29, x30, [sp], #16
+  140980:      	b	0x1406e8 <tcx::rejected>

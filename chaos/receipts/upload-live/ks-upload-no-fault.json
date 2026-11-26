@@ -1,0 +1,40 @@
+{
+  "key": {
+    "command": [
+      "chaos/judges/core/validity.py",
+      "ks-upload-no-fault"
+    ],
+    "defect": "",
+    "detail": "valid: upload 987400 pass of 64 required, 94 replays; 62526 control runs, 60644 caught",
+    "evidence": {
+      "findings.json": "b1ad033a239efa75bd330685f46f03117f82992da1169eefe7a84f59e1c50f8d",
+      "history.jsonl": "18f1c3f094044344ca48f5a91b764825802a44e817f51eda91e0623f1f00b653",
+      "run.json": "551968ce6de60900e0feae49ce0a1c4e867bafd26bbed63fed2ee4877f2f0f05",
+      "suspects.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sweep-status.json": "aa0b57dc3aec2f586b68610a2f2df1865b9120609e198dc807bdb55733607b08"
+    },
+    "harness": {
+      "chaos/harness/reach.py": "fcb258d619accd33e1a1fa226551cc8367b562b2279549d774075bd97b7c38d1",
+      "chaos/harness/run_scenario.py": "6a764f8492d7b6f96357f5dfb0036802078c7266a03444c6a759c9d667036857"
+    },
+    "judge": {
+      "chaos/judges/core/common.py": "8712c31148444945cc5ceeaa78d4deab6018d23b4cc8064826b7bc09a137dad7",
+      "chaos/judges/core/invariant.py": "d26be9f04cbccb6a0316d6cba16086264dd8cf11c13025eb9f0d829beb27a0e3",
+      "chaos/judges/core/validity.py": "49474fa66ff103f0e6d1d79edbc7caa44bf6f36409f9cd787f0626f5a03d5941"
+    },
+    "mode": "live",
+    "outcome": "held",
+    "row": "ks-upload-no-fault",
+    "rows": {
+      "ks-upload-no-fault": "55b2c9cdf9b08a7be0ee2dcecac61ecb817747764a235bc4bfc22fe448d436d5"
+    },
+    "scenario": "ks-upload-no-fault",
+    "system_build": "9277dc4c7c8f4495390b466353e2fcf92675a2f1eb3dbef5f8720652e8fb6984"
+  },
+  "run": {
+    "interpreter": "3.9.25",
+    "judged": "2026-11-24T10:23:28Z",
+    "run_id": "upload-live",
+    "started": "2026-11-24T10:21:25Z"
+  }
+}

@@ -1,0 +1,58 @@
+{
+ "id": "GD-2",
+ "kind": "staging",
+ "revision": "0000000000000000000000000000000000000001",
+ "date": "2026-11-24",
+ "clock": "synthetic seconds",
+ "note": "synthetic fixture of scripts/test-gameday-judge.py: no run made these files",
+ "target": {
+  "host": "h1",
+  "instance": "i-h1"
+ },
+ "hosts": [
+  "h1",
+  "h2",
+  "h3",
+  "h4"
+ ],
+ "shards": [
+  "s1",
+  "s2",
+  "s3",
+  "s4",
+  "s5"
+ ],
+ "witness": [
+  {
+   "key": "img/k1",
+   "shard": "s1",
+   "sha256": "2a3cea95b4092de8543406854a74486a6510c938c8357f5052b93e018e3c818a"
+  },
+  {
+   "key": "img/k2",
+   "shard": "s2",
+   "sha256": "5d8b797eff177514cd327c001becad8535136460a433893b35166f647425aeef"
+  },
+  {
+   "key": "img/k3",
+   "shard": "s3",
+   "sha256": "539e522350c27f5d10e7f079d70f03c08b0846f1259773e2396435716b3841f4"
+  }
+ ],
+ "baseline": {
+  "start": 0,
+  "end": 100
+ },
+ "run": {
+  "start": 100,
+  "end": 400
+ },
+ "interval": 30,
+ "clock_error_seconds": 0,
+ "reconciler_principal": "reconciler",
+ "working_budgets": {
+  "re-enrollment-drain": 120,
+  "origin-load": 1
+ },
+ "outside": {}
+}

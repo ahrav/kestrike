@@ -1,0 +1,12 @@
+{
+  "command": "python3 chaos/harness/run_scenario.py ks-upload-no-fault fences --dry-run",
+  "exit_status": 2,
+  "fence": "ks-run-keeps-earlier-runs",
+  "identity": {
+    "command": "python3 chaos/harness/reach.py identity",
+    "output": "unix user tsw; aws role bsw-ct1-worker-host; github login ahrav"
+  },
+  "output": "run_scenario: run id fences names an earlier run: chaos/receipts/fences exists\n",
+  "ran": "2026-11-25T06:33:38Z",
+  "refused": true
+}

@@ -1,0 +1,24 @@
+C L5-scan-fence-hb-before-intermediary-fence
+(* As L3, with P1's fence hb-before P2's: P1 release-stores z after its
+   fence, and P2 acquire-loads z and then x before its own fence. *)
+{ x = 0; y = 1; z = 0; }
+
+P0 (atomic_int* x, atomic_int* y) {
+  atomic_fetch_add_explicit(x, 1, memory_order_release);
+  int r0 = atomic_load_explicit(y, memory_order_acquire);
+}
+
+P1 (atomic_int* x, atomic_int* y, atomic_int* z) {
+  atomic_fetch_and_explicit(y, 0, memory_order_acq_rel);
+  atomic_thread_fence(memory_order_seq_cst);
+  atomic_store_explicit(z, 1, memory_order_release);
+  int r0 = atomic_load_explicit(x, memory_order_acquire);
+}
+
+P2 (atomic_int* x, atomic_int* z) {
+  int r1 = atomic_load_explicit(z, memory_order_acquire);
+  int r0 = atomic_load_explicit(x, memory_order_acquire);
+  atomic_thread_fence(memory_order_seq_cst);
+}
+
+exists (0:r0=1 /\ 1:r0=0 /\ 2:r0=1 /\ 2:r1=1)

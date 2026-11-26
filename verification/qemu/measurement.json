@@ -1,0 +1,23 @@
+{
+  "domain": "qemu",
+  "handshake_seconds": 2.341,
+  "run_seconds": 2.535,
+  "build_peak_rss_mib": 3184.2578125,
+  "peak_rss_mib": 602.59765625,
+  "cpus": 4,
+  "memory_mib": 12288,
+  "host": {
+    "machine": "x86_64",
+    "runners": [
+      "ahrav-ubuntu-kestrike-heavy-1",
+      "ahrav-ubuntu-kestrike-heavy-2"
+    ],
+    "accel": "kvm"
+  },
+  "date": "2026-10-17",
+  "guest": {
+    "cpus": 2,
+    "memory_mib": 2048,
+    "backing_mib": 64
+  }
+}

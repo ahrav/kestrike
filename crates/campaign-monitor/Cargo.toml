@@ -1,0 +1,36 @@
+[package]
+name = "campaign-monitor"
+version = "0.1.0"
+edition = "2024"
+description = "A terminal monitor for simulation campaigns: polls `campaign status`, keeps a local history, and derives signals."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ahrav/kestrike"
+publish = false
+
+[dependencies]
+libc = "0.2.189"
+# `unstable-rendered-line-info` gives `Paragraph::line_count`, which the
+# detail panes use to budget their rows after word wrapping. The feature is
+# unstable API, so ratatui is pinned to the exact version it was built on.
+ratatui = { version = "=0.30.2", features = ["unstable-rendered-line-info"] }
+# The iterator turns SIGTERM, SIGHUP and SIGINT into a quit that restores
+# the terminal; 0.3 is the version crossterm already resolves.
+signal-hook = "0.3"
+# Display columns and grapheme clusters for cutting snapshot text, at the
+# versions ratatui already resolves.
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.3"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["raw_value"] }
+
+# The PTY tests run the binary in a pseudo-terminal and read the screen it
+# draws.
+[dev-dependencies]
+portable-pty = "=0.9.0"
+vt100 = "=0.18.1"
+
+# The binary and the library would both get a unit-test target named
+# `campaign_monitor`, and scripts/test-inventory.json lists the library's.
+[[bin]]
+name = "campaign-monitor"
+test = false
