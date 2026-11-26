@@ -105,7 +105,7 @@ fn observed_duties<'w>(
 
 /// Serves `duties` until `done` holds for the entries of the statuses published so far, or the duties exit. `each`
 /// runs before every turn. Returns the exit and each published entry, in order; a status before the owner observed a
-/// shard view carries no entry and is left out.
+/// shard view carries no entry and is left out, and every status after the first entry carries one.
 fn serve<'w>(
     stage: &mut Stage<'w>,
     duties: &mut ObservedDuties<'w>,
@@ -122,8 +122,12 @@ fn serve<'w>(
             }
             each(duties, owner, now);
             let exit = duties.turn(owner, now);
-            if let Some(entry) = link.status.take().and_then(|status| status.entry) {
-                entries.push(entry);
+            if let Some(status) = link.status.take() {
+                assert!(
+                    status.entry.is_some() || entries.is_empty(),
+                    "a status after the first entry carries one"
+                );
+                entries.extend(status.entry);
             }
             exit
         },
@@ -521,4 +525,96 @@ fn with_no_control_plane_every_status_reads_the_enumeration_unavailable() {
             "{entries:?}"
         );
     });
+}
+
+/// The entries of the statuses a tenure over a clean listing publishes, in order. Once a status reads the listing
+/// judged, the next listing call is forced: the control plane refuses it and every later call when `refused`, and
+/// answers it with the clean listing otherwise. The run ends once `window` statuses after that call read the history's
+/// reading, `Unlisted` or `Matches`, or once `4 * window + 8` statuses carried an entry.
+fn listed(refused: bool, window: usize) -> Vec<VolumeEntry> {
+    let wanted = match refused {
+        true => Enumeration::Unlisted,
+        false => Enumeration::Matches,
+    };
+    staged(|mut stage| {
+        let link = leaked();
+        let client = Client::open(Armed::new(&stage.store), MemLog::default()).unwrap();
+        let listing = Listing::new(&Events::default());
+        let mut duties = observed_duties(&stage, client, Some(listing.clone()), link);
+        let switched = Cell::new(false);
+        // The number of entries published when the forced call went out.
+        let from = Cell::new(None::<usize>);
+        let (exit, entries) = serve(
+            &mut stage,
+            &mut duties,
+            link,
+            |duties, _, now| {
+                if !switched.get() && duties.enumeration == Enumeration::Matches {
+                    listing.set(match refused {
+                        true => Err(Unlisted),
+                        false => Ok(clean_listing()),
+                    });
+                    duties.listing_at = now;
+                    switched.set(true);
+                }
+            },
+            |entries| {
+                if switched.get() && from.get().is_none() {
+                    from.set(Some(entries.len()));
+                }
+                let after = &entries[from.get().unwrap_or(entries.len())..];
+                let read = after.iter().filter(|entry| entry.enumeration == wanted);
+                read.count() >= window || entries.len() >= 4 * window + 8
+            },
+        );
+        assert_eq!(exit, Exit::Stopped);
+        entries
+    })
+}
+
+/// `enumeration-unlisted`: a control plane that refuses the listing call the duties make after their first judged
+/// listing, and every call after it, leaves the duties judging no listing, and every later status reads the row's
+/// control value `Unlisted` through the row's window, which fires the row once. The same tenure whose forced call the
+/// control plane answers with the clean listing reads the clean value `Matches` on every status after its first
+/// judged listing, and the row stays silent.
+#[test]
+fn a_refused_listing_gives_the_unlisted_row_and_a_clean_listing_its_twin() {
+    use crate::failover::report::alarm_tests::{controls, fired_on_entries, window_of};
+    let window = window_of("enumeration-unlisted");
+    let unlisted = listed(true, window);
+    let first = (unlisted.iter()).position(|entry| entry.enumeration == Enumeration::Unlisted);
+    let first = first.expect("a refused listing call reads unlisted");
+    assert!(
+        unlisted[first..]
+            .iter()
+            .all(|entry| entry.enumeration == Enumeration::Unlisted),
+        "{unlisted:?}"
+    );
+    let clean = listed(false, window);
+    let judged = (clean.iter()).position(|entry| entry.enumeration == Enumeration::Matches);
+    assert!(
+        clean[judged.unwrap()..]
+            .iter()
+            .all(|entry| entry.enumeration == Enumeration::Matches),
+        "{clean:?}"
+    );
+    let twin = controls::Twin {
+        fault: unlisted.last().unwrap().enumeration,
+        clean: clean.last().unwrap().enumeration,
+    };
+    assert_eq!(
+        twin,
+        controls::enumeration_unlisted(),
+        "enumeration-unlisted"
+    );
+    assert_eq!(
+        fired_on_entries("enumeration-unlisted", &unlisted),
+        1,
+        "{unlisted:?}"
+    );
+    assert_eq!(
+        fired_on_entries("enumeration-unlisted", &clean),
+        0,
+        "{clean:?}"
+    );
 }

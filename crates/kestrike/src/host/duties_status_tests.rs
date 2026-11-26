@@ -574,3 +574,178 @@ fn a_status_counts_an_answered_request_once_and_a_held_one_in_flight() {
         assert_eq!(answered.completions, 1, "the one GET, answered once");
     });
 }
+
+/// What a churned tenure of the warm volume published: its exit, the entries of its statuses in order, and the
+/// duties' suffix signal on the turn their roll flag first read set.
+struct Churned {
+    exit: Exit,
+    entries: Vec<VolumeEntry>,
+    raised_by: Option<crate::storage::checkpoint::SuffixDue>,
+}
+
+/// Runs a churned tenure of the warm volume until `limit` statuses carried an entry or the tenure ended. The owner
+/// FILLs and INVALIDATEs on every turn, so the suffix reaches the tenure's handoff bound and then the capacity its
+/// settled floor allows. `policy` is the duties' capture policy; `rolling` builds them through [`Duties::rolling`];
+/// `unnamed` writes the stored shard record with no standby before the tenure. Every status after the first that
+/// carries an entry carries one, so the entries are the statuses' whole history from the first.
+fn churned(
+    policy: Option<crate::storage::CapturePolicy>,
+    rolling: bool,
+    unnamed: bool,
+    limit: usize,
+) -> Churned {
+    use super::step_tests::{Churn, step_duties};
+    let volume = warm_volume_certified(1);
+    if unnamed {
+        crate::failover::takeover::tests::designate(&volume.0, None);
+    }
+    staged_over(volume, |mut stage| {
+        let link = leaked();
+        let mut duties = step_duties(&stage, policy);
+        if rolling {
+            duties = duties.rolling(super::roll_tests::deadline());
+        }
+        let mut duties = duties.linked(linked(link));
+        let storage = stage.storage;
+        let mut churn = Churn::new();
+        let mut entries = Vec::new();
+        let mut raised_by = None;
+        let (served, _) = stage.serve_until(
+            |_, _, _| {},
+            |owner, now| {
+                let exit = duties.turn(owner, now);
+                if duties.roll_due() && raised_by.is_none() {
+                    raised_by = Some(duties.suffix_due());
+                }
+                if let Some(status) = link.status.take() {
+                    assert!(
+                        status.entry.is_some() || entries.is_empty(),
+                        "a status after the first entry carries one"
+                    );
+                    entries.extend(status.entry);
+                }
+                if exit.is_some() {
+                    return exit;
+                }
+                if entries.len() >= limit {
+                    return Some(Exit::Stopped);
+                }
+                if duties.open() == Open::Opened {
+                    churn.step(owner, storage, now);
+                }
+                None
+            },
+        );
+        Churned {
+            exit: served.exit,
+            entries,
+            raised_by: raised_by.flatten(),
+        }
+    })
+}
+
+/// `handoff-due`: the suffix's handoff bound raises the duties' roll flag, and the entry copies it as `roll_due`.
+/// A tenure whose stored record names no standby cannot roll, so it keeps serving and every status from the bound on
+/// reads the row's control value through the row's window, which fires the row once. The same tenure with its standby
+/// named rolls at the bound: its statuses before the bound read the clean value, the roll ends the tenure
+/// `Rerun(Planned)` inside the window, and the row stays silent.
+#[test]
+fn the_handoff_bound_gives_the_handoff_due_row_and_a_rolling_tenure_its_twin() {
+    use crate::failover::report::alarm_tests::{controls, fired_on_entries, window_of};
+    let window = window_of("handoff-due");
+    let policy = || Some(super::capture_tests::policy_every(super::step_tests::NEVER));
+    let Churned {
+        exit,
+        entries: stuck,
+        raised_by,
+    } = churned(policy(), true, true, 2 * window + 4);
+    assert_eq!(exit, Exit::Stopped, "the unnamed tenure keeps serving");
+    assert!(
+        raised_by.is_some_and(|due| due.handoff),
+        "the suffix's handoff signal raised roll_due: {raised_by:?}"
+    );
+    let raised = (stuck.iter()).position(|entry| entry.roll_due == Some(true));
+    let raised = raised.expect("the handoff bound raises roll_due");
+    assert!(
+        stuck[raised..]
+            .iter()
+            .all(|entry| entry.roll_due == Some(true)),
+        "roll_due stays raised with no standby: {stuck:?}"
+    );
+    assert!(stuck.len() - raised >= window, "{stuck:?}");
+    let Churned {
+        exit,
+        entries: rolled,
+        ..
+    } = churned(policy(), true, false, 2 * window + 4);
+    assert_eq!(
+        exit,
+        Exit::Rerun(crate::host::Rerun::Planned),
+        "the named tenure rolls"
+    );
+    let sampled = (rolled.iter()).find(|entry| entry.roll_due.is_some());
+    let twin = controls::Twin {
+        fault: stuck.last().unwrap().roll_due,
+        clean: sampled.unwrap().roll_due,
+    };
+    assert_eq!(twin, controls::handoff_due(), "handoff-due");
+    assert_eq!(fired_on_entries("handoff-due", &stuck), 1, "{stuck:?}");
+    assert_eq!(fired_on_entries("handoff-due", &rolled), 0, "{rolled:?}");
+}
+
+/// `publication-stuck`: once the suffix's reserved end reaches the capacity its settled floor allows, the duties'
+/// suffix signal reads the publication due, and the entry copies it as `publication_due`. Duties with no capture
+/// policy cannot publish, so every status from then on reads the row's control value through the row's window, which
+/// fires the row once. The same churn under a capture policy publishes a checkpoint, whose settled floor clears the
+/// signal on a later status: the statuses after it read the clean value and the row stays silent.
+#[test]
+fn a_due_publication_no_capture_runs_gives_the_publication_stuck_row() {
+    use crate::failover::report::alarm_tests::{controls, fired_on_entries, window_of};
+    let window = window_of("publication-stuck");
+    let limit = 2 * window + 4;
+    let Churned {
+        exit,
+        entries: stuck,
+        ..
+    } = churned(None, false, false, limit);
+    assert_eq!(exit, Exit::Stopped);
+    let due = (stuck.iter()).position(|entry| entry.publication_due == Some(true));
+    let due = due.expect("the churn reaches the publication capacity");
+    assert!(
+        stuck[due..]
+            .iter()
+            .all(|entry| entry.publication_due == Some(true)),
+        "the publication stays due with no capture: {stuck:?}"
+    );
+    assert!(stuck.len() - due >= window, "{stuck:?}");
+    let policy = super::capture_tests::policy_every(super::step_tests::NEVER);
+    let Churned {
+        exit,
+        entries: published,
+        ..
+    } = churned(Some(policy), false, false, limit);
+    assert_eq!(exit, Exit::Stopped);
+    let raised = (published.iter()).position(|entry| entry.publication_due == Some(true));
+    let cleared = raised.and_then(|raised| {
+        (published[raised..].iter()).position(|entry| entry.publication_due == Some(false))
+    });
+    assert!(
+        cleared.is_some(),
+        "the capture's Publish clears the signal: {published:?}"
+    );
+    let twin = controls::Twin {
+        fault: stuck.last().unwrap().publication_due,
+        clean: published.last().unwrap().publication_due,
+    };
+    assert_eq!(twin, controls::publication_stuck(), "publication-stuck");
+    assert_eq!(
+        fired_on_entries("publication-stuck", &stuck),
+        1,
+        "{stuck:?}"
+    );
+    assert_eq!(
+        fired_on_entries("publication-stuck", &published),
+        0,
+        "{published:?}"
+    );
+}

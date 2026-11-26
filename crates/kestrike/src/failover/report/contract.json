@@ -1133,7 +1133,7 @@
     "entries.readiness": "label: the volume's readiness word when the producer built the entry",
     "entries.metadata": "label: the attach's metadata outcome",
     "entries.load_refusal": "label: the warm load's refusal",
-    "entries.recovery.kind": "label: the sequence the last recovery attempt ran; lineage is a restart that preempted a recorded holder of another host after its own bump",
+    "entries.recovery.kind": "label: the sequence the last recovery attempt ran; lineage is a restart that ran the lineage arm against a recorded holder of another host: the restart reached its fencing boundary through the arm, or the arm refused it at its full-table check, its Register, its preempt or its Report #2 command, so the kind alone does not say that the arm preempted the predecessor; the entry's outcome and check say how far the arm got: a completed attempt reached its fencing boundary through the arm, after its preempt, and a refused one reads check recorded-holder and stopped inside the arm before that boundary",
     "entries.recovery.outcome": "label: where the last recovery attempt stands",
     "entries.recovery.check": "label: the check that refused the last recovery attempt, one label per top-level check of the restart, takeover and fresh sequences, a check name they share reading as one label",
     "entries.recovery.next": "label: the step after a refused recovery attempt, as the attempt's own sequence names it: flip request, hold with the volume retained, same-host restart or stop; the owner process's exit after the refusal is entries.ended, a separate classification that parks or deposes some refusals whose sequence holds or restarts",

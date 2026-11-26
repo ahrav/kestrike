@@ -423,6 +423,13 @@ impl Cell {
     pub(super) fn tick(&mut self) -> (Survey, Vec<Outcome>) {
         let survey = self.survey();
         let outcomes = self.actuate(&survey);
+        self.after_actuate();
+        (survey, outcomes)
+    }
+
+    /// The rest of a round after its actuation: the listed standbys enroll, the ended pairs drop while `drops` holds,
+    /// a loop a planted crash stopped restarts, and the clock moves one tick.
+    pub(super) fn after_actuate(&mut self) {
         self.enroll_listed();
         if self.drops {
             self.drop_ended_pairs();
@@ -431,7 +438,6 @@ impl Cell {
             self.restart();
         }
         self.now_us += 10 * S;
-        (survey, outcomes)
     }
 
     pub(super) fn enroll_listed(&mut self) {
@@ -987,6 +993,70 @@ fn a_refused_attach_retries_the_same_host_with_backoff_until_the_stuck_bound_mov
     let slot = census_of(cell.store()).unwrap().slot(shard(1)).unwrap();
     assert_eq!(slot.host, candidate);
     assert_eq!(hosts_of(&cell.volume(1)), [owner_of(1, 6), candidate]);
+}
+
+/// One round of [`Cell::tick`] through [`ZoneLoop::tick`] in place of the bare survey: the round's status part, which
+/// counts the events of the rounds before it, and its outcomes.
+fn status_round(cell: &mut Cell) -> (crate::failover::report::status::ZonePart, Vec<Outcome>) {
+    let tick = super::slot_host::part_tick(cell);
+    let outcomes = cell.actuate(&tick.survey);
+    cell.after_actuate();
+    (tick.part, outcomes)
+}
+
+/// `attach-failed`: the loop sends one attach request for the standby candidate it reserved for a shard, before it
+/// can designate that host, and the provider refuses the request once. The status parts of the rounds before and after the refusal read the failed-attach count of the row's shared
+/// control value, and the row fires once over every part of the run. The same run with the request accepted reads the
+/// clean value, and the row stays silent.
+#[test]
+fn a_refused_attach_request_gives_the_attach_failed_row_and_an_accepted_one_its_twin() {
+    use crate::failover::report::alarm_tests::{controls, fired_on_parts};
+    use crate::failover::report::status::{ATTACHES, AttachOutcome};
+    let failed =
+        crate::failover::report::alarm_tests::controls::slot(ATTACHES, AttachOutcome::Failed);
+    let run = |refused: bool| {
+        let mut cell = Cell::with(6, 1, true, config_of(8).validate().unwrap());
+        if refused {
+            cell.fixture
+                .world
+                .faults
+                .attach
+                .push_back(AttachFault::Refuse);
+        }
+        let mut parts = Vec::new();
+        let mut replied = None;
+        for _ in 0..300 {
+            let (part, outcomes) = status_round(&mut cell);
+            parts.push(part);
+            if let Some(reply) = outcomes.iter().find_map(|outcome| outcome.reply) {
+                replied = Some((parts.len(), reply));
+                break;
+            }
+        }
+        let (at, reply) = replied.expect("the loop sends an attach request");
+        let (after, _) = status_round(&mut cell);
+        parts.push(after);
+        let counts = [
+            parts[at - 1].events.attaches[failed],
+            parts[at].events.attaches[failed],
+        ];
+        cell.clean();
+        (reply, counts, parts)
+    };
+    let (reply, fault, refused_parts) = run(true);
+    assert_eq!(reply, AttachReply::Refused(AttachRefusal::Other));
+    let (reply, clean, accepted_parts) = run(false);
+    assert!(
+        matches!(reply, AttachReply::Accepted | AttachReply::AlreadyListed),
+        "{reply:?}"
+    );
+    assert_eq!(
+        controls::Twin { fault, clean },
+        controls::attach_failed(),
+        "attach-failed"
+    );
+    assert_eq!(fired_on_parts("attach-failed", &refused_parts), 1);
+    assert_eq!(fired_on_parts("attach-failed", &accepted_parts), 0);
 }
 
 #[test]

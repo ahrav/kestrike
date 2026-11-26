@@ -632,7 +632,8 @@
             "runs::a_fixed_run_writes_nothing_and_exits_0_after_the_tick_a_stop_signal_interrupts",
             "runs::each_tick_rereads_the_directory_and_reports_a_refused_one_unobserved",
             "runs::a_store_regression_withdraws_the_client_and_exits_3",
-            "runs::run_on_an_uninitialized_state_directory_exits_4"
+            "runs::run_on_an_uninitialized_state_directory_exits_4",
+            "runs::a_run_that_ends_publishes_no_later_status_and_a_running_one_publishes_each_tick"
           ]
         }
       }

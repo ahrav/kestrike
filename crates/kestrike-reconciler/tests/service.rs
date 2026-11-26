@@ -926,6 +926,94 @@ mod runs {
         }
     }
 
+    /// The zone part of each sealed status the child published, in tick order, each accepted by one reader: the
+    /// copies of every tick but the last, then the state directory's own file.
+    fn sealed_parts(
+        scratch: &Scratch,
+        ticks: usize,
+    ) -> Vec<kestrike::failover::report::status::ZonePart> {
+        let key = StatusKey::derive(&[0x99; 32]);
+        let mut reader = StatusReader::default();
+        (1..=ticks)
+            .map(|tick| {
+                let path = match tick == ticks {
+                    true => scratch.path().join("state").join("status.sealed"),
+                    false => scratch.path().join(format!("sealed-{tick}")),
+                };
+                let bytes = fs::read(path).unwrap();
+                let status = reader.accept(&bytes, |host| (host.get() == 900).then_some(key));
+                let mut status = status.unwrap();
+                assert_eq!(status.sequence, tick as u64);
+                assert_eq!(status.zones.len(), 1, "{status:?}");
+                status.zones.remove(0)
+            })
+            .collect()
+    }
+
+    /// `status-absent`, the catalog row that raises a zone whose statuses stop for its window. The child re-executes
+    /// this test binary and calls `run::serve`, the binary's composition, over a fake store table and fake zone
+    /// listings. A running service publishes one sealed status a tick, `zones.tick` one higher each, the row's clean
+    /// twin, and the default tick period, [`TICK_US`](kestrike::failover::zone_loop::config::TICK_US), lies inside
+    /// the row's window. The run itself ticks every 50 ms, which `configure` sets. A run whose second tick fails to
+    /// publish exits 4 and publishes no later status: its state directory keeps the first tick's sealed status byte
+    /// for byte, which a reader that accepted the first tick refuses as a duplicate, so the zone reads no status from
+    /// then on, the row's control. The test checks one status a tick, the default period and the kept seal; it runs
+    /// no evaluator over them.
+    #[test]
+    fn a_run_that_ends_publishes_no_later_status_and_a_running_one_publishes_each_tick() {
+        use kestrike::failover::report::ReportError;
+        let catalog = "../kestrike/src/failover/report/alarms.json";
+        let catalog = read_json(&Path::new(env!("CARGO_MANIFEST_DIR")).join(catalog));
+        let rows = catalog["rows"].as_array().unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == "status-absent")
+            .unwrap();
+        assert_eq!(
+            (&row["signal"], &row["condition"]["op"]),
+            (&json!("zones.tick"), &json!("absent"))
+        );
+        let window_us = row["window"]["us"].as_u64().unwrap();
+
+        assert!(
+            kestrike::failover::zone_loop::config::TICK_US < window_us,
+            "the default tick lies inside the window"
+        );
+
+        let scratch = Scratch::new("absent-steady");
+        let mut child = spawn(&scratch, "steady");
+        await_pause(&scratch, &mut child);
+        child.signal(libc::SIGTERM);
+        assert_eq!(exit_code(&mut child), Some(0));
+        let sealed = sealed_parts(&scratch, PAUSED_TICK);
+        let ticks: Vec<u64> = sealed.iter().map(|part| part.tick).collect();
+        assert_eq!(ticks, [1, 2, 3], "one sealed status a tick");
+
+        let scratch = Scratch::new("absent-ended");
+        let mut child = spawn(&scratch, "unpublished");
+        assert_eq!(exit_code(&mut child), Some(4));
+        assert_eq!(status_lines(&scratch).len(), 1);
+        let first = fs::read(scratch.path().join("sealed-1")).unwrap();
+        let kept = fs::read(scratch.path().join("state").join("status.sealed")).unwrap();
+        assert_eq!(
+            kept, first,
+            "the state directory keeps the first tick's seal"
+        );
+        let key = StatusKey::derive(&[0x99; 32]);
+        let mut reader = StatusReader::default();
+        let mut accept = |bytes: &[u8]| {
+            reader
+                .accept(bytes, |host| (host.get() == 900).then_some(key))
+                .map(|status| (status.sequence, status.zones[0].tick))
+        };
+        assert_eq!(accept(&first), Ok((1, 1)));
+        assert_eq!(
+            accept(&kept),
+            Err(ReportError::Duplicate),
+            "the kept file is no later status"
+        );
+    }
+
     #[test]
     fn a_stop_before_the_first_tick_exits_0_without_a_tick() {
         let scratch = Scratch::new("stopped");

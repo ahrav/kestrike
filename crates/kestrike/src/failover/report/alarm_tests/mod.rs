@@ -1314,6 +1314,65 @@ fn fired(row: &Value, steps: &[controls::Step]) -> Vec<Fired> {
     evaluate(row, &inputs, Deltas::ResetAware)
 }
 
+/// The shipped row `id`, checked to read `source` over a window counted in records: the helpers below reseal what
+/// a producer published one fixture step apart, so they judge no row whose window or rate is measured in time.
+fn record_row(id: &str, source: &str) -> Value {
+    let row = row(&catalog(), id);
+    assert_eq!(row["source"], source, "{id} reads {source} records");
+    assert!(
+        row["window"]["reports"].is_u64(),
+        "{id}: a window counted in records"
+    );
+    row
+}
+
+/// How many times the shipped report row `id` fires over `entries`, each sealed in order as one report of host 1
+/// by one fixture writer, one fixture step apart, and accepted. The emitter tests beside the deciding code judge
+/// with it the entries that code published.
+pub(crate) fn fired_on_entries(
+    id: &str,
+    entries: &[crate::failover::report::VolumeEntry],
+) -> usize {
+    let steps: Vec<controls::Step> = entries.iter().map(|entry| report(*entry)).collect();
+    fired(&record_row(id, "report"), &steps).len()
+}
+
+/// How many times the shipped status row `id` fires over `parts`, each sealed in order as one status of its own by
+/// one fixture writer, one fixture step apart, and accepted. The emitter tests beside the deciding code judge with it
+/// the zone parts that code built.
+pub(crate) fn fired_on_parts(
+    id: &str,
+    parts: &[crate::failover::report::status::ZonePart],
+) -> usize {
+    let steps: Vec<controls::Step> = (parts.iter())
+        .map(|part| controls::Step::Status(vec![part.clone()]))
+        .collect();
+    fired(&record_row(id, "status"), &steps).len()
+}
+
+/// The value the shipped report row `id` reads from `entry`, sealed as one report of host 1 and accepted: the
+/// contract view's field at the row's signal, which the entry must hold.
+pub(crate) fn signal_on_entry(id: &str, entry: crate::failover::report::VolumeEntry) -> Value {
+    let row = record_row(id, "report");
+    let (inputs, refused) = controls::sealed(&[report(entry)]);
+    assert_eq!(refused, [], "{id}: the report is accepted");
+    let Input::Record { view, .. } = &inputs[0] else {
+        panic!("{id}: a report")
+    };
+    let signal = row["signal"].as_str().unwrap();
+    assert_eq!(scope_of(signal), Some("entries"), "{id}: an entry signal");
+    let entry = view["entries"].get(0).expect("the sealed entry");
+    field(view, entry, signal)
+        .expect("the entry holds the signal")
+        .clone()
+}
+
+/// The window of the shipped row `id`, in records.
+pub(crate) fn window_of(id: &str) -> usize {
+    let window = &row(&catalog(), id)["window"]["reports"];
+    usize::try_from(window.as_u64().expect("a window in records")).unwrap()
+}
+
 /// The shipped catalog validates against the pinned contracts: every route is in `routes`, each row has one control
 /// and one clean twin, every registered history is used once, and the catalog pins both contracts' digests.
 #[test]

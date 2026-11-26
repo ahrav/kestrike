@@ -959,6 +959,93 @@ fn a_transfer_whose_lane_refuses_its_submit_issues_no_write_and_restarts_once() 
     );
 }
 
+/// The entries of every status a linked tenure of the warm volume published, in order, after it received `request`
+/// and the transfer write met `answer`: those the link took on each turn, then the exit turn's status from the
+/// link. Nothing in this harness holds the link's cell, so every turn's publication reaches it.
+fn published(request: Request, answer: Answer) -> Vec<crate::failover::report::VolumeEntry> {
+    use crate::host::link::Link;
+    let link: &'static Link = Box::leak(Box::default());
+    let entries = std::cell::RefCell::new(Vec::new());
+    let take = |status: Option<crate::host::link::Status>| {
+        entries
+            .borrow_mut()
+            .extend(status.and_then(|status| status.entry));
+    };
+    requested_with(
+        (warm(), request, at_open),
+        answer,
+        Built::BOTH,
+        super::roll_tests::deadline(),
+        |slot| {
+            let duties = slot.take().unwrap().linked(super::Linked {
+                link,
+                pid: 7,
+                status_us: super::tests::TEST_VIEW_US,
+                recovery: Some(crate::failover::report::RecoveryStatus::NO_ATTEMPT),
+            });
+            *slot = Some(duties);
+        },
+        |_| take(link.status.take()),
+    );
+    take(link.status.take());
+    entries.into_inner()
+}
+
+/// `exit-restarting`, its planned-exit labels: the statuses a tenure publishes after a transfer the store refuses,
+/// after a transfer whose reply is lost and whose write did not commit, and after an accepted restart request end in
+/// the exit `restarting` for a refused transfer, an unknown transfer and a planned restart, three labels the row's
+/// condition names, and each history fires the row once. The refused transfer's value is the row's shared control.
+/// The transfer whose lost reply committed publishes no `restarting` status and ends `exited`, the row's clean value,
+/// and the row stays silent on its history.
+#[test]
+fn the_planned_exit_outcomes_give_the_restarting_labels_and_a_committed_transfer_its_twin() {
+    use crate::failover::report::alarm_tests::{controls, fired_on_entries, signal_on_entry};
+    use crate::failover::report::{ExitStatus, Restart};
+    let restarting = [
+        (
+            published(transfer_request, Answer::Moved),
+            Restart::TransferRefused,
+            "restarting-transfer-refused",
+        ),
+        (
+            published(transfer_request, Answer::Unknown { commit: false }),
+            Restart::TransferUnknown,
+            "restarting-transfer-unknown",
+        ),
+        (
+            published(restart_request, Answer::Commit),
+            Restart::Planned,
+            "restarting-planned",
+        ),
+    ];
+    assert_eq!(
+        controls::exit_restarting().fault,
+        ExitStatus::Restarting(restarting[0].1)
+    );
+    for (entries, restart, label) in restarting {
+        let last = *entries.last().expect("a published status");
+        let status = last.exit.map(|exit| exit.status);
+        assert_eq!(status, Some(ExitStatus::Restarting(restart)), "{label}");
+        assert_eq!(signal_on_entry("exit-restarting", last), *label, "{label}");
+        assert_eq!(fired_on_entries("exit-restarting", &entries), 1, "{label}");
+    }
+    let exited = published(transfer_request, Answer::Unknown { commit: true });
+    let status = exited
+        .last()
+        .and_then(|entry| entry.exit)
+        .map(|exit| exit.status);
+    assert_eq!(
+        status,
+        Some(controls::exit_restarting().clean),
+        "exit-restarting"
+    );
+    assert_eq!(
+        fired_on_entries("exit-restarting", &exited),
+        0,
+        "{exited:?}"
+    );
+}
+
 /// A transfer at whose withdrawal another cause has already withdrawn the authority, here a recorded force detach:
 /// the planned withdrawal finds the authority withdrawn for that cause, the driver issues no transfer and ends the
 /// tenure as the earlier cause decides, with the flip it requests; the record keeps this owner.

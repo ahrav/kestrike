@@ -689,7 +689,7 @@ fn a_slot_host_whose_attach_never_enrolls_is_ended_and_yields_its_slot_to_the_na
     cell.clean();
 }
 
-fn part_tick(cell: &mut Cell) -> Tick {
+pub(super) fn part_tick(cell: &mut Cell) -> Tick {
     for number in 1..=cell.fixture.hosts {
         if !cell.silent.contains(&number) {
             cell.fixture.publish(number, &[]);

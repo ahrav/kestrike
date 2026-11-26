@@ -1,10 +1,15 @@
 //! Emitter tests: for each row whose deciding code this tree holds, one injected history through that code produces
 //! the row's shared control value and its matched clean history the clean value. The rows read through the owner's
-//! entry assert their values in `net::owner_entry_tests`.
-//! `handoff-due` and `publication-stuck` read flags that `Owner::report_entry` copies from the driver's `Observed`;
-//! `SuffixLog::publication_due` decides the publication flag, and the driver that fills `Observed` lies outside
-//! this tree. The `unlisted` enumeration and the failed-attach count come from producers outside this tree, and
-//! `status-absent` reads the absence of a record. Those five rows rest on control values and evaluator histories.
+//! entry assert their values in `net::owner_entry_tests`. The rows the owner's duties decide assert theirs beside the
+//! duties' tests: `handoff-due` and `publication-stuck` in `host::duties::status_tests`, `enumeration-unlisted` in
+//! `host::duties::observed_tests`, and the planned-exit labels of `exit-restarting` in
+//! `host::duties::transfer_tests`. `attach-failed` asserts its count in `zone_loop::tests::actuate`. Each of these
+//! judges what the deciding code published with [`super::fired_on_entries`] or [`super::fired_on_parts`].
+//! `quorum-unreachable` compares the zone part's blocker counts with its control pair in
+//! `zone_loop::tests::unserved`.
+//! `status-absent` asserts one sealed status a tick and the default tick period inside the row's window in the
+//! reconciler service's `runs` tests, which re-execute their test binary as a child that calls `run::serve` over
+//! fakes; they run no evaluator.
 
 use super::controls::{self, Twin};
 use crate::failover::attachments::{InstanceId, check};
@@ -334,6 +339,74 @@ fn the_restart_refusals_give_the_hold_rows() {
     assert_eq!(twin(part(&suffix), completed), controls::suffix_only());
 }
 
+/// `hold-recorded-holder` through the lineage arm's own hold: a handoff target whose Report #1 shows the predecessor's
+/// recorded pair holding takes the arm, and a Register or a lineage preempt that completes with a reservation
+/// conflict refuses inside the arm with a hold and no flip. Its recovery part, as published, equals the row's
+/// shared control value with kind `lineage`, the kind the zone planner's device-hold guard reads, and fires the
+/// row once. The rerun, over the store and the reservation table the refused attempt left, reaches its fencing
+/// boundary through the arm; marked as the arm's, as the caller marks a restart that reached it, its recovery part
+/// equals the clean value with the same kind, and the row stays silent on it.
+#[test]
+fn the_lineage_arm_s_failed_steps_give_the_recorded_holder_row() {
+    use crate::failover::restart::Lineage;
+    let handed = crate::failover::takeover::tests::lineage_on(
+        restart_tests::volume_id(),
+        (restart_tests::standby_host(), restart_tests::standby_pair()),
+        &[(restart_tests::host(), restart_tests::own())],
+    );
+    let shared = controls::hold_recorded_holder();
+    let as_lineage = |recovery: Recovery| Recovery {
+        kind: Some(RecoveryKind::Lineage),
+        ..recovery
+    };
+    let expected = twin(as_lineage(shared.fault), as_lineage(shared.clean));
+    let entry = |recovery| crate::failover::report::VolumeEntry {
+        recovery,
+        ..controls::owner()
+    };
+    let reached = {
+        let mut status = RecoveryStatus::NO_ATTEMPT;
+        status.start(RecoveryKind::Restart, 100);
+        status.lineage();
+        status.complete();
+        status.recovery(150)
+    };
+    for fault in [
+        restart_tests::Fault::Register(0x83),
+        restart_tests::Fault::Preempt(0x83),
+    ] {
+        let store = restart_tests::store(shard_record(5), handed.clone());
+        let mut card = Card::new();
+        card.entries = vec![restart_tests::holder(restart_tests::standby_pair(), 1)];
+        card.fault = Some(fault);
+        let refused = restart_tests::restart()
+            .run(&mut client(&store), &sample(), &mut card)
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused.check,
+                Check::Lineage(Lineage::Register(_) | Lineage::Preempt(_))
+            ),
+            "{fault:?}: {refused:?}"
+        );
+        let held = reported(RecoveryKind::Restart, Some(&refused));
+        let mut rerun_card = Card::new();
+        rerun_card.entries = card.entries.clone();
+        let rerun = restart_tests::restart()
+            .run(&mut client(&store), &sample(), &mut rerun_card)
+            .unwrap();
+        assert!(rerun.lineage(), "{fault:?}: the rerun takes the arm again");
+        assert_eq!(twin(held, reached), expected, "{fault:?}");
+        let row = "hold-recorded-holder";
+        assert_eq!(super::fired_on_entries(row, &[entry(held)]), 1, "{fault:?}");
+        assert_eq!(
+            super::fired_on_entries(row, &[entry(reached)]),
+            0,
+            "{fault:?}"
+        );
+    }
+}
+
 /// `recovery-stuck`: a running takeover reads its age from its start, one microsecond past the row's threshold on
 /// the control and at the threshold on the clean twin.
 #[test]
@@ -483,7 +556,11 @@ fn the_recorded_ancestry_gives_the_chain_row() {
 }
 
 /// `exit-restarting`: an exit request the target refuses as stale restarts, and one whose successor record arrives
-/// while the authority is withdrawn exits.
+/// while the authority is withdrawn exits. The refusal's labels `restarting-refused-target` and
+/// `restarting-refused-volume` have no production producer on this tree: retirement admission's stale refusal
+/// (`retire::Request::admit`) reaches no owner's tracker, so this test drives [`ExitTracker::refused`] itself and
+/// compares its value with the label, and the shared control reads `restarting-transfer-refused`, which the planned
+/// exit's real code produces (`host::duties::transfer_tests`).
 #[test]
 fn the_exit_tracker_gives_the_restarting_row() {
     let record = |generation: u64| ShardRecord {
@@ -502,9 +579,12 @@ fn the_exit_tracker_gives_the_restarting_row() {
     exited.received(operation, &serving);
     exited.observe(&withdrawn, Some(&record(4)));
     let status = |tracker: &ExitTracker| tracker.last().unwrap().status;
+    let stale = ExitStatus::Restarting(crate::failover::report::Restart::Refused(
+        crate::failover::retire::Stale::Target,
+    ));
     assert_eq!(
         twin(status(&refused), status(&exited)),
-        controls::exit_restarting()
+        twin(stale, controls::exit_restarting().clean)
     );
 }
 

@@ -272,9 +272,10 @@ pub(crate) fn handoff_due() -> Twin<Option<bool>> {
     }
 }
 
+/// An exit whose planned transfer the store refused restarts, and one whose successor record arrived exits.
 pub(crate) fn exit_restarting() -> Twin<ExitStatus> {
     Twin {
-        fault: ExitStatus::Restarting(Restart::Refused(crate::failover::retire::Stale::Target)),
+        fault: ExitStatus::Restarting(Restart::TransferRefused),
         clean: ExitStatus::Exited,
     }
 }
