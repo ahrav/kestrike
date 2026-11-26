@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2301",
+  "kind": "contract-change",
+  "pull_request": 2301,
+  "changed": "The admission of a GD-2 run record by scripts/readiness.py judge. The GD-2 entry of the inputs file's gamedays list holds seal_sha256, the SHA-256 of the evidence directory's injection/collected.json as the stop controller's seal printed it, and evidence, that directory or null; an entry of another package holds neither, and an inputs file off that shape is refused with exit 2. Admission refuses a record whose seal.sha256 differs from seal_sha256, runs scripts/gameday-judge.py's read_evidence and judge in its own process over the directory under the committed catalog and fault-injection profiles, refuses the evidence when the rerun's seal differs from seal_sha256, and refuses a record whose keys or values differ from the rerun's record, naming the stated and the rerun's run_status and verdict. Either seal refusal grades MISSING; a record that differs from the rerun's grades FAILED when the rerun reads DISPROVEN and MISSING otherwise. Where evidence is null or absent, or the game-day judge refuses the directory, a record that would grade VERIFIED grades UNVERIFIED with that reason. Before this change a GD-2 record was graded from its own stated verdict after its bindings. scripts/gameday-judge.py joins the owning judges whose digests the receipt holds, and the receipt's GD-2 evidence entry holds the rerun's seal digest, run_status and verdict, or the reason no rerun confirms the record.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "readiness-admits-a-gd2-record-on-its-pinned-seal-and-the-game-day-judges-rerun",
+    "reason": "Its invariant states the new contract: the export's record under the seal the test computed is confirmed, a record beside a removed directory is left unconfirmed with the reason, the record the judge writes for a directory sealed again after its collection changed is refused against the pinned seal, and a record stating HELD over evidence the judge reads DISPROVEN is refused and grades FAILED, where before each of those records graded VERIFIED."
+  }
+}

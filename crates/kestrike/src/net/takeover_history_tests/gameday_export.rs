@@ -1169,3 +1169,131 @@ fn a_package_host_list_past_the_fleet_directorys_bound_is_refused() {
     );
     assert!(stderr.contains(&words), "{stderr}");
 }
+
+/// `admission` judges `files` with the game-day judge, applies `state` to the record it wrote, and asks the
+/// readiness judge's admission of a GD-2 record (`confirmation` of `scripts/readiness.py` over its `rerun` of the
+/// evidence directory) about that stated record under the seal `pinned`. With `absent` the directory is removed
+/// before admission. It returns the admission's `{refused, doubt}`: the refusal grade or null, and the reason no
+/// rerun confirms the record or null.
+fn admission(files: Files, state: impl FnOnce(&mut Value), pinned: &str, absent: bool) -> Value {
+    let (code, stderr, scratch) = judgment(files);
+    assert!(
+        code == 0 || code == 1,
+        "the judge wrote no record, exit {code}: {stderr}"
+    );
+    let written = scratch.0.join("record.json");
+    let mut record: Value =
+        serde_json::from_slice(&std::fs::read(&written).expect("the record is read"))
+            .expect("JSON");
+    state(&mut record);
+    let stated = scratch.0.join("stated.json");
+    std::fs::write(&stated, json_file(&record)).expect("the stated record is written");
+    let evidence = scratch.0.join("evidence");
+    if absent {
+        std::fs::remove_dir_all(&evidence).expect("the evidence directory is removed");
+    }
+    let readiness = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/readiness.py");
+    let output = (Command::new("python3").arg("-c").arg(ADMIT))
+        .arg(&readiness)
+        .arg(&evidence)
+        .arg(&stated)
+        .arg(pinned)
+        .output()
+        .expect("python3 starts the admission");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "the admission ran: {stderr}");
+    serde_json::from_slice(&output.stdout).expect("the admission prints JSON")
+}
+
+/// The admission `admission` runs: `scripts/readiness.py` loaded by its path, the catalog and the fault-injection
+/// profiles parsed as the game-day judge parses them, then `rerun` and `confirmation`. Its arguments are the script,
+/// the evidence directory, the stated record and the pinned seal.
+const ADMIT: &str = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("readiness", sys.argv[1])
+rd = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(rd)
+catalog, fis = (rd.parse(rd.gj.read_bytes(path, what), what) for path, what in (
+    (rd.gj.CATALOG, "the game-day catalog"), (rd.gj.PROFILES, "the fault-injection profiles")))
+stated = rd.parse(open(sys.argv[3], "rb").read(), "the stated record")
+again = rd.rerun(sys.argv[2], catalog, fis)
+refused, doubt = rd.confirmation({"record": stated, "input": {"seal_sha256": sys.argv[4]}, "rerun": again}, None)
+print(json.dumps({"refused": refused, "doubt": doubt}))
+"#;
+
+/// The SHA-256 of the export's seal, computed here apart from both judges: the digest the stop controller's `seal`
+/// prints and an inputs entry pins.
+fn pinned_seal(files: &Files) -> String {
+    hex(&Sha256::digest(&files["injection/collected.json"]))
+}
+
+/// The readiness judge admits a GD-2 run record on the seal its inputs entry pins and on the game-day judge's own
+/// rerun over the evidence: the export's record, stated as the judge wrote it with the seal the test computed, is
+/// confirmed, and the same record beside a removed directory is left unconfirmed with the reason.
+#[test]
+fn the_readiness_admission_confirms_the_exports_record_on_its_pinned_seal_and_the_judges_rerun() {
+    let files = export(&root_one());
+    let pinned = pinned_seal(&files);
+    let admitted = admission(files.clone(), |_| {}, &pinned, false);
+    assert_eq!(admitted, json!({"refused": null, "doubt": null}));
+    let admitted = admission(files, |_| {}, &pinned, true);
+    assert_eq!(admitted["refused"], Value::Null, "{admitted:#}");
+    let doubt = admitted["doubt"]
+        .as_str()
+        .expect("a reason no rerun confirms the record");
+    assert!(
+        doubt.contains("is absent, so no rerun of the game-day judge confirms the record"),
+        "{doubt}"
+    );
+}
+
+/// A witness row removed after the export's seal, its count lowered in `coverage.json` and the directory sealed
+/// again: the game-day judge reads the new seal as it reads the first, and the readiness admission refuses the record
+/// it wrote against the seal pinned before the change.
+#[test]
+fn control_a_resealed_export_is_refused_against_the_seal_pinned_before_its_collection_changed() {
+    let mut files = export(&root_one());
+    let pinned = pinned_seal(&files);
+    let rows = lines(&files, "witness.jsonl");
+    let kept = &rows[..rows.len() - 1];
+    files.insert("witness.jsonl".into(), json_lines(kept.iter().cloned()));
+    let mut coverage: Value = serde_json::from_slice(&files["coverage.json"]).expect("JSON");
+    coverage["witness.jsonl"]["lines"] = json!(kept.len());
+    files.insert("coverage.json".into(), json_file(&coverage));
+    let sealed: Value = serde_json::from_slice(&files["injection/collected.json"]).expect("JSON");
+    seal(&mut files, &sealed["time"]);
+    let resealed = pinned_seal(&files);
+    assert_ne!(resealed, pinned);
+    let admitted = admission(files, |_| {}, &pinned, false);
+    assert_eq!(admitted["refused"]["grade"], "MISSING", "{admitted:#}");
+    let reason = admitted["refused"]["reason"].as_str().expect("a reason");
+    let words = format!("the record's seal {resealed} differs from the seal_sha256 {pinned}");
+    assert!(reason.contains(&words), "{reason}");
+    assert!(
+        reason.contains("its inputs entry pins: the record is refused"),
+        "{reason}"
+    );
+}
+
+/// The export of a planted restored-entry miss, which the game-day judge reads DISPROVEN, beside a record that
+/// states it HELD under the same seal: the readiness admission takes the rerun's verdict and refuses the record by
+/// name.
+#[test]
+fn control_a_record_stating_a_verdict_the_rerun_does_not_reproduce_is_refused_by_name() {
+    let report = run(&Config::host_loss(1).hostile(Plant::RestoredEntryMiss, 1))
+        .expect("a run inside the limits");
+    let files = export(&report);
+    let pinned = pinned_seal(&files);
+    let admitted = admission(
+        files,
+        |record| record["verdict"] = json!("HELD"),
+        &pinned,
+        false,
+    );
+    assert_eq!(admitted["refused"]["grade"], "FAILED", "{admitted:#}");
+    let reason = admitted["refused"]["reason"].as_str().expect("a reason");
+    assert!(
+        reason.contains("the record states COMPLETED HELD and the game-day judge's rerun over the evidence reads COMPLETED DISPROVEN"),
+        "{reason}"
+    );
+}

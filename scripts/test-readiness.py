@@ -24,12 +24,13 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -2214,6 +2215,15 @@ class Fake:
     def gameday(self, path):
         return self._get(path)
 
+    def rerun(self, evidence):
+        """The result supplied for `evidence`; MIRROR stands for a directory whose rerun reproduces the GD-2 record the
+        results hold, whatever it states."""
+        if self.results.get(evidence) is not MIRROR:
+            return self._get(evidence)
+        stated = self.results["gd-GD-2"]
+        return {"record": copy.deepcopy(stated["record"]), "identity": {"seal_sha256": SEAL_PIN}} \
+            if "record" in stated else copy.deepcopy(stated)
+
     def rehearsal(self, path):
         return self._get(path)
 
@@ -2254,6 +2264,8 @@ def budgeted(ctx):
 
 
 BUDGETED = budgeted(copy.deepcopy(CTX))
+# The seal a GD-2 inputs entry pins and its run record carries, and the evidence whose rerun reproduces that record.
+SEAL_PIN, MIRROR = "d" * 64, object()
 
 
 def run_record(name, verdict=None, status="COMPLETED", revision=REV, objectives=None, date="2026-11-20", **fields):
@@ -2263,7 +2275,8 @@ def run_record(name, verdict=None, status="COMPLETED", revision=REV, objectives=
     return {"record": {"id": name, "mode": entry["mode"], "revision": revision, "run_status": status,
                        "verdict": verdict or ("HELD" if causal else "MET"), "package_sha256": "9" * 64,
                        "catalog_sha256": digest_of(BUDGETED, name), "objectives": objectives, "date": date,
-                       **people, **fields},
+                       **people, **({"seal": {"sha256": SEAL_PIN, "time": 430}} if name == rd.RERUN else {}),
+                       **fields},
             "identity": {"record_sha256": "8" * 64, "date": date}}
 
 
@@ -2325,15 +2338,16 @@ def passing():
                                                      "receipt_sha256": "3" * 64, "judge_sha256": "4" * 64},
                "hit": {"receipt": {"verdict": "pass", "candidate": REV, "pacing": {"verdict": "pass"}, "cells": {}},
                        "identity": {"campaign_sha256": "5" * 64, "receipt_sha256": "a" * 64}},
-               "fis": episode(), **{f"gd-{g}": run_record(g) for g in rd.GAMEDAYS}}
+               "fis": episode(), **{f"gd-{g}": run_record(g) for g in rd.GAMEDAYS}, f"ev-{rd.RERUN}": MIRROR}
     reviews = [{"item": i["id"], "reviewer": "reviewer-a", "revision": REV, "date": "2026-11-20",
                 "artifact_sha256": "7" * 64, "grade": "VERIFIED", "reason": "inspected"}
                for i in record["items"] if i["source"] == "review"]
     inputs = {"revision": REV, "date": "2026-11-21", "acceptance": "acc", "hit_gate": "hit",
               "lanes": [{"job": "workspace", "module": None, "evidence": "lane"}],
               "fis": {"fis-pause": {"episode": "fis", "lane": "fis-lane"}},
-              "gamedays": [{"id": g, "package_sha256": "9" * 64,
-                            "catalog_sha256": digest_of(ctx, g), "record": f"gd-{g}"}
+              "gamedays": [{"id": g, "package_sha256": "9" * 64, "catalog_sha256": digest_of(ctx, g),
+                            "record": f"gd-{g}",
+                            **({"seal_sha256": SEAL_PIN, "evidence": f"ev-{g}"} if g == rd.RERUN else {})}
                            for g in rd.GAMEDAYS], "reviews": reviews}
     return record, ctx, inputs, results
 
@@ -2663,7 +2677,8 @@ class Judge(unittest.TestCase):
         self.assertEqual((receipt["envelope"], receipt["revision"], receipt["date"]),
                          ({"version": 1, "section": "readiness"}, REV, "2026-11-21"))
         owning = ("acceptance.py", "verify-receipts.py", "hit-gate.py", "hardware-lane.py", "recovery-packages.py",
-                  "measurement-frame.py", "sizing-worksheet.py", "reproduce-test.py", "select-tests.py")
+                  "measurement-frame.py", "sizing-worksheet.py", "reproduce-test.py", "select-tests.py",
+                  "gameday-judge.py")
         self.assertEqual(receipt["owning_judges_sha256"],
                          {name: sha((ROOT / "scripts" / name).read_bytes()) for name in owning})
 
@@ -2676,10 +2691,11 @@ class Judge(unittest.TestCase):
                     scripts_of(value, seen)
             return seen
 
-        # Every script the judge loads into its own process is named: those the acceptance judge loads and those
-        # the hardware lane loads, whose code decides a fault-injection grade.
-        loaded = scripts_of(rd.acc, set()) | scripts_of(gate.lane_module(), set())
-        self.assertLessEqual({"sizing-worksheet.py", "reproduce-test.py", "select-tests.py"}, loaded)
+        # Every script the judge loads into its own process is named: the game-day judge, those the acceptance judge
+        # loads and those the hardware lane loads, whose code decides a fault-injection grade.
+        loaded = scripts_of(rd, set()) | scripts_of(gate.lane_module(), set())
+        self.assertLessEqual({"sizing-worksheet.py", "reproduce-test.py", "select-tests.py", "gameday-judge.py"},
+                             loaded)
         self.assertLessEqual(loaded, set(receipt["owning_judges_sha256"]))
         self.assertEqual(receipt["items"]["support-model"]["identity"],
                          {"reviewer": "reviewer-a", "date": "2026-11-20", "artifact_sha256": "7" * 64,
@@ -3338,6 +3354,213 @@ class Judge(unittest.TestCase):
         cell = judged(record, ctx, inputs, results)["classes"]["census-full"]["staging"]
         self.assertEqual((cell["grade"], cell["ungraded"]), ("MISSING", ["fleet:census-drill"]))
 
+HELD_EVIDENCE = ROOT / "scripts/gameday-fixtures/held"
+GD2_ITEMS = ("host-loss-multi-shard-staging", "host-loss-multi-shard-staging-safety")
+# GD-2's two budgets at values under which the game-day judge reads its held fixture HELD, as its self-test sets them.
+HOLDING = {"re-enrollment-drain": 100, "origin-load": 2}
+
+
+def evidence_copy(root, edit=None):
+    """A copy of the game-day judge's held fixture at `root / "evidence"`. `edit(directory)` changes its files, and the
+    copy is then sealed again as a writer of the directory can: each digest `injection/collected.json` names follows
+    its file's bytes."""
+    target = root / "evidence"
+    shutil.copytree(HELD_EVIDENCE, target)
+    if edit:
+        edit(target)
+        seal = json.loads((target / "injection/collected.json").read_text())
+        seal["files"] = {rel: sha((target / rel).read_bytes()) for rel in seal["files"]}
+        (target / "injection/collected.json").write_text(json.dumps(seal))
+    return target
+
+
+def origin_row_dropped(directory):
+    """Drop the last origin request and lower its count in `coverage.json`, as a writer who shortens a collection
+    after the seal and keeps the coverage consistent does."""
+    origin = directory / "origin.jsonl"
+    rows = origin.read_text().splitlines(keepends=True)
+    origin.write_text("".join(rows[:-1]))
+    coverage = json.loads((directory / "coverage.json").read_text())
+    coverage["origin.jsonl"]["lines"] -= 1
+    (directory / "coverage.json").write_text(json.dumps(coverage))
+
+
+class Admission(unittest.TestCase):
+    """GD-2's admission through `judge`: the run record against the seal its inputs entry pins and the game-day judge's
+    own rerun over the evidence directory that entry names, over copies of the judge's held fixture. Every other
+    input is `passing()`'s; the GD-2 entry binds the fixture's package and revision, under a catalog whose GD-2
+    budgets let the judge read the fixture HELD (`holding`) or under `passing()`'s budgets, under which it reads
+    DISPROVEN."""
+
+    def setUp(self):
+        deferred = mock.patch.dict(rd.DEFERRED, clear=True)
+        deferred.start()
+        self.addCleanup(deferred.stop)
+        self.temp = tempfile.TemporaryDirectory(prefix="readiness-admission-")
+        self.root = Path(self.temp.name)
+        self.addCleanup(self.temp.cleanup)
+
+    @staticmethod
+    def holding(ctx):
+        for budget, value in HOLDING.items():
+            ctx["gamedays"]["budgets"][budget]["value"] = value
+        return ctx
+
+    def admitted(self, evidence, stated=None, pinned=None, holding=True, around=None):
+        """(GD-2's two item grades, the receipt's GD-2 evidence entry) when `judge` admits the run record `stated`
+        (the held fixture's record by default, or a function of it) with the seal `pinned` (the fixture's by default)
+        for the directory `evidence`, which the real game-day judge reruns inside the context `around`."""
+        record, ctx, inputs, results = passing()
+        if holding:
+            self.holding(ctx)
+        fixture = rd.rerun(str(HELD_EVIDENCE), ctx["gamedays"], ctx["fis"])["record"]
+        with around or nullcontext():
+            again = rd.rerun(None if evidence is None else str(evidence), ctx["gamedays"], ctx["fis"])
+        run = fixture if stated is None else stated(copy.deepcopy(fixture)) if callable(stated) else stated
+        entry = next(g for g in inputs["gamedays"] if g["id"] == "GD-2")
+        entry.update(package_sha256=sha((HELD_EVIDENCE / "package.json").read_bytes()),
+                     catalog_sha256=digest_of(ctx, "GD-2"), evidence=None if evidence is None else str(evidence),
+                     seal_sha256=pinned or fixture["seal"]["sha256"])
+        results["gd-GD-2"] = {"record": run, "identity": {"record_sha256": "8" * 64, "date": run["date"]}}
+        results[None if evidence is None else str(evidence)] = again
+        receipt = judged(record, ctx, {**inputs, "revision": fixture["revision"], "date": fixture["date"]}, results)
+        return {i: receipt["items"][i] for i in GD2_ITEMS}, receipt["evidence"]["gamedays"]["GD-2"]
+
+    def grades(self, items):
+        return {i["grade"] for i in items.values()}
+
+    def test_the_judges_held_fixture_is_admitted_on_its_pinned_seal_and_its_rerun(self):
+        items, shown = self.admitted(HELD_EVIDENCE)
+        self.assertEqual(self.grades(items), {"VERIFIED"}, items)
+        self.assertEqual({i["reason"] for i in items.values()}, {"GD-2 reads HELD"})
+        self.assertEqual(shown["rerun"], {"seal_sha256": sha((HELD_EVIDENCE / "injection/collected.json").read_bytes()),
+                                          "run_status": "COMPLETED", "verdict": "HELD"})
+        # Under `passing()`'s budgets the judge reads the fixture DISPROVEN, and a record stating so is admitted.
+        items, _ = self.admitted(HELD_EVIDENCE, holding=False)
+        self.assertEqual(self.grades(items), {"FAILED"}, items)
+
+    def test_a_directory_sealed_again_after_its_collection_changed_is_refused_against_the_pinned_seal(self):
+        pinned = sha((HELD_EVIDENCE / "injection/collected.json").read_bytes())
+        resealed = evidence_copy(self.root, origin_row_dropped)
+        again = rd.rerun(str(resealed), self.holding(passing()[1])["gamedays"], LIVE["fis"])
+        # The game-day judge alone reads the resealed directory as it reads an honest one.
+        self.assertEqual((again["record"]["run_status"], again["record"]["verdict"]), ("COMPLETED", "HELD"))
+        resealed_sha = again["record"]["seal"]["sha256"]
+        self.assertNotEqual(resealed_sha, pinned)
+        # The record the judge writes for the resealed directory carries its new seal.
+        items, _ = self.admitted(resealed, stated=again["record"], pinned=pinned)
+        self.assertEqual(self.grades(items), {"MISSING"}, items)
+        for item in items.values():
+            self.assertEqual(item["reason"], f"the record's seal {resealed_sha} differs from the seal_sha256 {pinned} "
+                             "its inputs entry pins: the record is refused")
+        # The record of the first seal, kept, beside the resealed directory.
+        items, _ = self.admitted(resealed, pinned=pinned)
+        self.assertEqual(self.grades(items), {"MISSING"}, items)
+        for item in items.values():
+            self.assertEqual(item["reason"], f"the evidence's seal {resealed_sha} differs from the seal_sha256 "
+                             f"{pinned} its inputs entry pins: the collection was sealed again after the pinned seal, "
+                             "and the record is refused")
+
+    def test_a_seal_refusal_reads_missing_over_a_rerun_that_reads_disproven(self):
+        other = "5" * 64
+
+        def of_another_seal(run):
+            return {**run, "seal": {**run["seal"], "sha256": other}}
+
+        # Under `passing()`'s budgets the judge reads the fixture DISPROVEN. A record of another seal beside the
+        # pinned evidence is refused on its seal, and the receipt's rerun holds the DISPROVEN.
+        fixture_sha = sha((HELD_EVIDENCE / "injection/collected.json").read_bytes())
+        items, shown = self.admitted(HELD_EVIDENCE, stated=of_another_seal, holding=False)
+        self.assertEqual(shown["rerun"]["verdict"], "DISPROVEN")
+        self.assertEqual(self.grades(items), {"MISSING"}, items)
+        for item in items.values():
+            self.assertEqual(item["reason"], f"the record's seal {other} differs from the seal_sha256 {fixture_sha} "
+                             "its inputs entry pins: the record is refused")
+        # The same record under a pin of its own seal: the evidence's seal is the one that differs.
+        items, shown = self.admitted(HELD_EVIDENCE, stated=of_another_seal, pinned=other, holding=False)
+        self.assertEqual(shown["rerun"]["verdict"], "DISPROVEN")
+        self.assertEqual(self.grades(items), {"MISSING"}, items)
+        for item in items.values():
+            self.assertEqual(item["reason"], f"the evidence's seal {fixture_sha} differs from the seal_sha256 {other} "
+                             "its inputs entry pins: the collection was sealed again after the pinned seal, and the "
+                             "record is refused")
+
+    def test_a_record_stating_its_objectives_met_over_the_held_fixture_is_refused_by_name(self):
+        def met(run):
+            run.update(run_status="COMPLETED", verdict="HELD", result="held on 11 rules")
+            for rule in run["rules"].values():
+                rule.update(result="held", guardrail=None, past_stop_condition=False)
+            return run
+
+        # Under `passing()`'s budgets the judge reads the fixture DISPROVEN, and the record states it HELD.
+        items, shown = self.admitted(HELD_EVIDENCE, stated=met, holding=False)
+        self.assertEqual(shown["rerun"]["verdict"], "DISPROVEN")
+        self.assertEqual(self.grades(items), {"FAILED"}, items)
+        for item in items.values():
+            self.assertEqual(item["reason"], "the record states COMPLETED HELD and the game-day judge's rerun over the "
+                             "evidence reads COMPLETED DISPROVEN: the record differs from the rerun's in ['result', "
+                             "'rules', 'verdict'] and is refused")
+        # A record that adds per-item objectives the judge does not write, all MET, over a rerun that reads HELD.
+        items, _ = self.admitted(HELD_EVIDENCE, stated=lambda run: {**run, "objectives": dict.fromkeys(GD2_ITEMS,
+                                                                                                      "MET")})
+        self.assertEqual(self.grades(items), {"MISSING"}, items)
+        self.assertTrue(all(i["reason"].endswith("differs from the rerun's in ['objectives'] and is refused")
+                            for i in items.values()), items)
+        # A record that states less than the rerun is refused too: the rerun's record is the only one admitted.
+        items, _ = self.admitted(HELD_EVIDENCE, stated=lambda run: {**run, "verdict": "INCONCLUSIVE"})
+        self.assertEqual(self.grades(items), {"MISSING"}, items)
+
+    def test_absent_evidence_leaves_a_held_record_unverified_with_its_reason(self):
+        absent = self.root / "never-written"
+        for evidence, reason in ((absent, f"the evidence directory {str(absent)!r} is absent"),
+                                 (None, "the inputs entry names no evidence directory")):
+            with self.subTest(evidence=evidence):
+                items, shown = self.admitted(evidence)
+                self.assertEqual(self.grades(items), {"UNVERIFIED"}, items)
+                for item in items.values():
+                    self.assertEqual(item["reason"], f"GD-2 reads HELD, but {reason}, so no rerun of the game-day "
+                                     "judge confirms the record")
+                self.assertEqual(shown["rerun"]["refused"], f"{reason}, so no rerun of the game-day judge confirms "
+                                 "the record")
+        # A stated failure stays a failure without its evidence.
+        items, _ = self.admitted(absent, stated=lambda run: {**run, "verdict": "DISPROVEN"})
+        self.assertEqual(self.grades(items), {"FAILED"}, items)
+
+    def test_a_wrong_shaped_or_oversized_directory_is_the_judges_refusal_passed_on(self):
+        def stray(directory):
+            (directory / "notes.txt").write_text("an operator's note\n")
+
+        wrong = evidence_copy(self.root, stray)
+        items, _ = self.admitted(wrong)
+        self.assertEqual(self.grades(items), {"UNVERIFIED"}, items)
+        refusal = (f"the game-day judge refuses the evidence directory {str(wrong)!r}: notes.txt is no file of the "
+                   "layout")
+        self.assertTrue(all(i["reason"] == f"GD-2 reads HELD, but {refusal}" for i in items.values()), items)
+        items, shown = self.admitted(HELD_EVIDENCE, around=mock.patch.object(rd.gj, "FILE_LIMIT", 1 << 10))
+        self.assertEqual(self.grades(items), {"UNVERIFIED"}, items)
+        self.assertIn("holds more than 1024 bytes", shown["rerun"]["refused"])
+        failing = mock.patch.object(rd.gj, "judge", side_effect=KeyError("time"))
+        items, shown = self.admitted(HELD_EVIDENCE, around=failing)
+        self.assertEqual(self.grades(items), {"UNVERIFIED"}, items)
+        self.assertEqual(shown["rerun"]["refused"], f"the game-day judge fails on the evidence directory "
+                         f"{str(HELD_EVIDENCE)!r}: KeyError: 'time'")
+
+    def test_the_gd2_entry_names_its_seal_and_evidence_and_no_other_entry_does(self):
+        record, ctx, inputs, results = passing()
+        gd2 = next(g for g in inputs["gamedays"] if g["id"] == "GD-2")
+        shapes = {"no seal": {k: v for k, v in gd2.items() if k != "seal_sha256"},
+                  "no evidence key": {k: v for k, v in gd2.items() if k != "evidence"},
+                  "a seal off its shape": {**gd2, "seal_sha256": "D" * 64},
+                  "an empty evidence path": {**gd2, "evidence": ""}}
+        for label, entry in shapes.items():
+            with self.subTest(label=label), self.assertRaises(rd.Refusal) as caught:
+                judged(record, ctx, {**inputs, "gamedays": [entry]}, results)
+            self.assertIn("a GD-2 entry with its seal_sha256 and its evidence directory or null", str(caught.exception))
+        gd9 = next(g for g in inputs["gamedays"] if g["id"] == "GD-9")
+        with self.assertRaises(rd.Refusal):
+            judged(record, ctx, {**inputs, "gamedays": [{**gd9, "seal_sha256": SEAL_PIN, "evidence": None}]}, results)
+        judged(record, ctx, {**inputs, "gamedays": [{**gd2, "evidence": None}]}, results)
+
 
 class Adapters(unittest.TestCase):
     """The real owning-judge adapters over files in a temp directory, with a stub hardware lane where a case needs
@@ -3358,6 +3581,19 @@ class Adapters(unittest.TestCase):
         path = self.root / name
         path.write_text(json.dumps(value))
         return str(path)
+
+    def test_the_rerun_adapter_judges_the_named_directory_and_keeps_the_output_out_of_it(self):
+        evidence = evidence_copy(self.root)
+        result = self.judges.rerun(str(evidence))
+        # The committed catalog leaves GD-2's budgets null, so the fixture's working values bound its rules.
+        self.assertEqual((result["record"]["verdict"], result["identity"]["seal_sha256"]),
+                         ("HELD", sha((evidence / "injection/collected.json").read_bytes())))
+        with self.assertRaises(rd.Refusal) as caught:
+            rd.guard_output(str(evidence / "receipt.json"), self.judges)
+        self.assertIn("names evidence this run read", str(caught.exception))
+        rd.guard_output(str(self.root / "receipt.json"), self.judges)
+        self.assertEqual(self.judges.rerun(None), rd.rerun(None, LIVE["gamedays"], LIVE["fis"]))
+        self.assertIn("is absent", self.judges.rerun(str(self.root / "absent"))["missing"])
 
     def test_a_run_record_is_parsed_with_its_digest_and_date(self):
         path = self.write("gd.json", {"id": "GD-9", "date": "2026-11-20"})

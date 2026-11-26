@@ -757,14 +757,16 @@ class Held(Judging):
     def grade(self, record, catalog, source=None, revision=None):
         """Each GD-2 item's grade from `scripts/readiness.py` for `record`, the package report built from `catalog`
         as `check` builds it, with no readiness context, bound to the package bytes and revision of the judged
-        `source` (the held fixture by default) or to `revision`."""
+        `source` (the held fixture by default) or to `revision`, under the record's own seal and with a rerun that
+        reproduces the record, so the grader's rules after the rerun are what decide."""
         source = source or Evidence()
         entries = {e["id"]: e for e in catalog["entries"]}
         report, _ = rd.check_gamedays(FAILOVER, {"packages": entries, "gamedays": catalog, "fis": FIS})
         self.assertEqual(record["catalog_sha256"], report["GD-2"]["digest"])
         ev = {"record": record, "identity": {"record_sha256": "judged in process"},
               "input": {"package_sha256": hashlib.sha256(source.bytes()["package.json"]).hexdigest(),
-                        "catalog_sha256": record["catalog_sha256"]}}
+                        "catalog_sha256": record["catalog_sha256"], "seal_sha256": record["seal"]["sha256"]},
+              "rerun": {"record": copy.deepcopy(record)}}
         revision = revision or source.package["revision"]
         return {item: rd.gameday_grade(item, entries["GD-2"], ev, revision, report["GD-2"])
                 for item in entries["GD-2"]["items"]}

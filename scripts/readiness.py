@@ -223,14 +223,26 @@ nor that a wave is authorized. Every pass prints NOT READY, because a verdict ne
               `scripts/hardware-lane.py judge_profile` re-validates at the revision under the pinned manifest; the
               lane receipt must carry the hardware lane's envelope and the pinned profile's lane profile and role.
               `lane` is null only for an episode that failed to inject or reads INVALID before a launch.
-  gamedays    [{id, package_sha256, catalog_sha256, record}]: a run record kept outside the repository. The record
-              holds `id`, `mode`, `revision`, `run_status`, `verdict`, `package_sha256` and `catalog_sha256` (equal to
-              the inputs entry's, the latter the package digest `check` reports), optional per-item `objectives`
-              (item -> MET, NOT_MET or INVALID) and `date`, and for a tabletop `executor`, who walked it, and
-              `author`, who wrote it, two attested names the judge compares as text. The record's `verdict` and
-              `objectives` are its producer's attestation: the judge checks the record's bindings and reads the
-              outcome as stated. One record per package: the receipt covers the runs supplied, and the owner
-              reads any earlier attempt apart.
+  gamedays    [{id, package_sha256, catalog_sha256, record}]: a run record kept outside the repository. The record holds
+              `id`, `mode`, `revision`, `run_status`, `verdict`, `package_sha256` and `catalog_sha256` (equal to the
+              inputs entry's, the latter the package digest `check` reports), optional per-item `objectives` (item ->
+              MET, NOT_MET or INVALID) and `date`, and for a tabletop `executor`, who walked it, and `author`, who wrote
+              it, two attested names the judge compares as text. The entry of RERUN (GD-2, the one package
+              `scripts/gameday-judge.py` judges) also holds `seal_sha256`, the SHA-256 of the evidence directory's seal
+              `injection/collected.json` as the stop controller printed it, and `evidence`, that directory or null,
+              which `--output` may not lie inside. The inputs file pins the seal apart from the directory, so a
+              directory sealed again after its collection changed no longer matches the pin. For RERUN the judge refuses
+              a record whose `seal.sha256` differs from the pin, runs the game-day judge's loader and rules in this
+              process over `evidence` under the committed catalog and profiles, refuses the evidence when the rerun's
+              seal differs from the pin, and refuses a record whose keys or values differ from the rerun's record,
+              naming the stated and the rerun's `run_status` and `verdict`. Either seal refusal reads MISSING; a record
+              that differs from the rerun's reads FAILED when the rerun reads DISPROVEN and MISSING otherwise. A null or
+              absent `evidence`, or a directory the game-day judge refuses (its refusal passed on, a wrong-shaped
+              directory or a file over its size limit among them), leaves the record unconfirmed: a grade it would read
+              VERIFIED reads UNVERIFIED with that reason. For every other package the record's `verdict` and
+              `objectives` are its producer's attestation: the judge checks the record's bindings and reads the outcome
+              as stated. One record per package: the receipt covers the runs supplied, and the owner reads any earlier
+              attempt apart.
   runbooks    {index id: rehearsal record file}, each id an index entry. The judge hashes the file's bytes and
               compares the SHA-256 with the `record_sha256` the committed entry records, so the operator holds the
               record the reviewed index names. The bytes are hashed and left unparsed: the entry's result, paths,
@@ -247,7 +259,8 @@ nor that a wave is authorized. Every pass prints NOT READY, because a verdict ne
 Every file this script decodes itself is decoded with distinct object keys; the files the acceptance inputs file or a
 hit-gate campaign names are decoded by their owning judges. Each item reads one of GRADES. An item that is not
 applicable reads NOT APPLICABLE once its approver is set, MISSING before. Otherwise its source decides. A game-day run
-record, a fault-injection episode and a lane receipt are checked for their bindings before their verdict; an index
+record, a fault-injection episode and a lane receipt are checked for their bindings before their verdict, and a GD-2 run
+record against its pinned seal and the game-day judge's rerun after its bindings (see `gamedays`); an index
 entry's DRAFT or STALE status decides before its supplied record. A null source, an absent input or an absent reviewer
 entry reads MISSING; evidence naming no revision, evidence its owning judge refuses or a record of another filled
 package reads UNVERIFIED; a run record of another game-day package id or mode is refused and reads MISSING; evidence
@@ -286,7 +299,8 @@ VERIFIED grade to STALE past that age on `date`, and to UNVERIFIED when it or th
 
 The receipt holds the SHA-256 of the record, the inputs file, this script and each owning judge's script, the pins, each
 piece of evidence's identity (for refused evidence the reason and the SHA-256 of each file read before it, and for the
-acceptance receipt its own evidence identities), per item its grade, reason and identity, per domain its unresolved
+acceptance receipt its own evidence identities, and for a GD-2 run record the rerun's seal digest, `run_status` and
+`verdict` or the reason no rerun confirms it), per item its grade, reason and identity, per domain its unresolved
 items, per class row its cells by kind (the worst of its citations by ORDER, EXCLUDED, or MISSING with the citations
 that grade nothing) and, for a row delegated to the acceptance record, its class verdict, the open gates with their
 reasons, the lifted gates the evidence contradicts (a lifted `monitors`, `runbooks`, `gamedays` or `real-path` gate
@@ -311,7 +325,8 @@ refused too: the judge creates its receipt and replaces no file, so a rerun name
 campaign names in turn (a samples file, a receipt or a raw artifact), which its owning judge alone opens; the operator
 keeps `--output` apart from a path such a campaign names where no file exists. The receipt holds each
 owning judge's script digest read at load, and the run is refused if one changed. The owning judges (OWNING) are the
-scripts this process loads to grade evidence, through `acceptance.py` and through the hardware lane, and
+scripts this process loads to grade evidence, the game-day judge directly and the others through `acceptance.py` and
+through the hardware lane, and
 `verify-receipts.py`, which the lane runner runs as a command. A lane's `judge_sha256` names `verify-receipts.py`
 alone, and this list follows it: the checkers that command loads in its own process are outside both, and the check of
 the checkout's tracked files binds them to the revision. The receipt is a recommendation, and its reader is the named
@@ -330,6 +345,7 @@ import re
 import subprocess
 import sys
 import tokenize
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -342,6 +358,11 @@ acc = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acc)
 mf, gate = acc.mf, acc.gate
 Refusal, FAULTS = acc.Refusal, acc.FAULTS
+GJ_SPEC = importlib.util.spec_from_file_location("gameday_judge", HERE / "gameday-judge.py")
+if GJ_SPEC is None or GJ_SPEC.loader is None:
+    raise SystemExit("scripts/gameday-judge.py cannot be loaded")
+gj = importlib.util.module_from_spec(GJ_SPEC)
+GJ_SPEC.loader.exec_module(gj)
 
 
 def parse(data, what):
@@ -464,10 +485,11 @@ STANDING_PINS = {opens: key for key, (_, opens) in PINS.items() if opens in STAN
 ENVELOPE = {"version": 1, "section": "readiness"}
 FIS_ENVELOPE = {"version": 1, "section": "fis"}
 JUDGE_SHA256 = hashlib.sha256(gate.read_file(__file__, "judge")).hexdigest()
-# The scripts whose code grades evidence here: each one this process loads, through `acceptance.py` or the hardware
-# lane, and `verify-receipts.py`, which the acceptance judge's lane runner runs as a command.
+# The scripts whose code grades evidence here: each one this process loads, the game-day judge directly and the
+# others through `acceptance.py` or the hardware lane, and `verify-receipts.py`, which the acceptance judge's lane
+# runner runs as a command.
 OWNING = ("acceptance.py", "verify-receipts.py", "hit-gate.py", "hardware-lane.py", "recovery-packages.py",
-          "measurement-frame.py", "sizing-worksheet.py", "reproduce-test.py", "select-tests.py")
+          "measurement-frame.py", "sizing-worksheet.py", "reproduce-test.py", "select-tests.py", "gameday-judge.py")
 
 
 def owning_digests():
@@ -478,6 +500,10 @@ def owning_digests():
 OWNING_SHA256 = owning_digests()
 INPUT_KEYS = {"revision", "date", "acceptance", "lanes", "hit_gate", "fis", "gamedays", "runbooks", "reviews",
               "exceptions"}
+# The keys of a `gamedays` inputs entry, and the package whose run record admission confirms by the game-day judge's
+# own rerun with the keys that entry adds: `scripts/gameday-judge.py` judges that package alone.
+GAMEDAY_INPUT_KEYS = {"id", "package_sha256", "catalog_sha256", "record"}
+RERUN, RERUN_KEYS = gj.PACKAGE, {"seal_sha256", "evidence"}
 GRADES = ("VERIFIED", "FAILED", "STALE", "MISSING", "UNVERIFIED", "NOT APPLICABLE")
 REVIEW_GRADES = GRADES[:-1]
 ORDER = ("VERIFIED", "NOT APPLICABLE", "UNVERIFIED", "MISSING", "STALE", "FAILED")
@@ -1403,10 +1429,13 @@ def check_inputs(inputs, record, ctx):
        "fis maps fault-injection profile names to {episode, lane} receipt files, the lane null only before a launch")
     gamedays = inputs.get("gamedays", [])
     ok(isinstance(gamedays, list) and all(
-        isinstance(g, dict) and set(g) == {"id", "package_sha256", "catalog_sha256", "record"} and g["id"] in GAMEDAYS
-        and mf.digest(g["package_sha256"]) and mf.digest(g["catalog_sha256"]) and text(g["record"]) for g in gamedays)
-       and len({g["id"] for g in gamedays}) == len(gamedays), "gamedays are no distinct {id, package_sha256, "
-       "catalog_sha256, record} of GD-1 to GD-14")
+        isinstance(g, dict) and g.get("id") in GAMEDAYS
+        and set(g) == GAMEDAY_INPUT_KEYS | (RERUN_KEYS if g["id"] == RERUN else set())
+        and mf.digest(g["package_sha256"]) and mf.digest(g["catalog_sha256"]) and text(g["record"])
+        and (g["id"] != RERUN or mf.digest(g["seal_sha256"]) and (g["evidence"] is None or text(g["evidence"])))
+        for g in gamedays) and len({g["id"] for g in gamedays}) == len(gamedays),
+       "gamedays are no distinct {id, package_sha256, catalog_sha256, record} of GD-1 to GD-14, a "
+       f"{RERUN} entry with its seal_sha256 and its evidence directory or null")
     runbooks = inputs.get("runbooks", {})
     unknown = sorted(set(runbooks) - {e["id"] for e in runbook_index(ctx)}) if isinstance(runbooks, dict) else []
     ok(isinstance(runbooks, dict) and not unknown and all(text(v) for v in runbooks.values()),
@@ -1454,11 +1483,12 @@ def independent(run):
 
 def gameday_grade(item, entry, ev, revision, package):
     """One item's grade from its package's run record; `package` is the check report's entry, its digest and blocking
-    reasons. The bindings decide first: a record of another mode or package id is refused and grades MISSING, one
-    bound to another catalog definition or revision reads STALE, and one of another filled package UNVERIFIED. Then a
-    failed injection or an INVALID run grades MISSING, a run that did not complete UNVERIFIED, and a tabletop without
-    an executor apart from its author UNVERIFIED. A rehearsal or tabletop objective for the item decides over a MET or
-    PARTIAL summary, and a blocked package earns no VERIFIED."""
+    reasons. The bindings decide first: a record of another mode or package id is refused and grades MISSING, one bound
+    to another catalog definition or revision reads STALE, and one of another filled package UNVERIFIED. A RERUN record
+    is then refused or left unconfirmed by `confirmation`. Then a failed injection or an INVALID run grades MISSING, a
+    run that did not complete UNVERIFIED, and a tabletop without an executor apart from its author UNVERIFIED. A
+    rehearsal or tabletop objective for the item decides over a MET or PARTIAL summary, and a blocked package earns no
+    VERIFIED."""
     if stopped := unusable(ev, f"no run record of {entry['id']}"):
         return stopped
     run, identity, digest = ev["record"], ev["identity"], package["digest"]
@@ -1472,6 +1502,9 @@ def gameday_grade(item, entry, ev, revision, package):
         return stale
     if run.get("package_sha256") != ev["input"]["package_sha256"]:
         return graded("UNVERIFIED", "the record names another filled package than the inputs entry", identity)
+    refused, unconfirmed = confirmation(ev, identity) if entry["id"] == RERUN else (None, None)
+    if refused:
+        return refused
     status, verdict = run.get("run_status"), run.get("verdict")
     if status == "FAILED_TO_INJECT" or verdict == "INVALID":
         return graded("MISSING", f"the run reads {status} {verdict}: the fault was not injected or the run is "
@@ -1487,11 +1520,69 @@ def gameday_grade(item, entry, ev, revision, package):
     if grade in ("FAILED", "MISSING"):
         return graded(grade, reason, identity)
     doubts = [*([f"the run reads {status}, not COMPLETED"] if status != "COMPLETED" else []),
+              *([unconfirmed] if unconfirmed else []),
               *(["the tabletop names no executor apart from its author"]
                 if entry["mode"] == "tabletop" and not independent(run) else []),
               *([f"the committed package is blocked: {package['blocked'][0]}"] if package["blocked"] else [])]
     return graded("UNVERIFIED", f"{reason}, but {'; '.join(doubts)}", identity) if doubts and grade == "VERIFIED" \
         else graded(grade, reason, identity)
+
+
+def confirmation(ev, identity):
+    """(refusal, doubt) of a RERUN run record against the seal its inputs entry pins and the game-day judge's rerun over
+    the evidence that entry names. The refusal, a grade carrying `identity`, names the record's seal when it differs
+    from the pinned `seal_sha256`, the evidence's seal when that differs, and the record's `run_status` and `verdict`
+    beside the rerun's when a key of the record is absent from the rerun's record, or the reverse, or reads another
+    canonical JSON value there. Either seal refusal grades MISSING; a record that differs from the rerun's grades FAILED
+    when the rerun reads DISPROVEN and MISSING otherwise. The doubt, which demotes a VERIFIED grade to UNVERIFIED, is
+    the reason no rerun confirms the record: no evidence named, an absent directory, or the judge's refusal of it. A
+    record the rerun reproduces under the pinned seal gives (None, None)."""
+    run, pinned, again = ev["record"], ev["input"]["seal_sha256"], ev["rerun"]
+    seal = run.get("seal")
+    stated = seal.get("sha256") if isinstance(seal, dict) else None
+    if stated != pinned:
+        return graded("MISSING", f"the record's seal {stated} differs from the seal_sha256 {pinned} its inputs entry "
+                      "pins: the record is refused", identity), None
+    if "missing" in again:
+        return None, again["missing"]
+    judged = again["record"]
+    if (sealed := judged["seal"]["sha256"]) != pinned:
+        return graded("MISSING", f"the evidence's seal {sealed} differs from the seal_sha256 {pinned} its inputs entry "
+                      "pins: the collection was sealed again after the pinned seal, and the record is refused",
+                      identity), None
+    differ = [k for k in sorted({*run, *judged}) if k not in run or k not in judged
+              or mf.canonical(run[k]) != mf.canonical(judged[k])]
+    if differ:
+        grade = "FAILED" if VERDICT_GRADES.get((True, judged["verdict"])) == "FAILED" else "MISSING"
+        return graded(grade, f"the record states {run.get('run_status')} {run.get('verdict')} and the game-day judge's "
+                      f"rerun over the evidence reads {judged['run_status']} {judged['verdict']}: the record differs "
+                      f"from the rerun's in {differ} and is refused", identity), None
+    return None, None
+
+
+def rerun(evidence, catalog, fis):
+    """The game-day judge's record of the evidence directory `evidence` under the parsed game-day catalog and
+    fault-injection profiles, judged in this process by the judge's own loader and rules, as {record, identity}; or
+    {missing: reason} when `evidence` is None or absent, or when the judge refuses the directory or fails on it, with
+    the judge's refusal passed on. The judge reads the directory and the two Rust files of its FLEET_BOUNDS and
+    writes nothing."""
+    if evidence is None:
+        return {"missing": "the inputs entry names no evidence directory, so no rerun of the game-day judge confirms "
+                           "the record"}
+    if not os.path.lexists(evidence):
+        return {"missing": f"the evidence directory {evidence!r} is absent, so no rerun of the game-day judge confirms "
+                           "the record"}
+    try:
+        record = gj.judge(gj.read_evidence(evidence), catalog, fis, types.SimpleNamespace(
+            package_digest=package_digest))
+    except gj.Refusal as error:
+        return {"missing": f"the game-day judge refuses the evidence directory {evidence!r}: {error}"}
+    except Exception as error:
+        # The judge's command line reads any other failure as exit 2 with no record, and so does admission.
+        return {"missing": f"the game-day judge fails on the evidence directory {evidence!r}: "
+                           f"{type(error).__name__}: {error}"}
+    return {"record": record, "identity": {"seal_sha256": record["seal"]["sha256"],
+                                           "run_status": record["run_status"], "verdict": record["verdict"]}}
 
 
 def failed_injection(section):
@@ -1888,7 +1979,8 @@ def judge(record, inputs, ctx, judges, record_sha256, inputs_sha256):
           "acceptance_record": ctx["acceptance"], "lanes": lanes,
           "hit_gate": inputs.get("hit_gate") and judged(judges.hit_gate, inputs["hit_gate"]),
           "fis": {p: judged(judges.fis, p, v, revision) for p, v in inputs.get("fis", {}).items()},
-          "gamedays": {g["id"]: {"input": g, **judged(judges.gameday, g["record"])}
+          "gamedays": {g["id"]: {"input": g, **judged(judges.gameday, g["record"]),
+                                 **({"rerun": judged(judges.rerun, g["evidence"])} if g["id"] == RERUN else {})}
                        for g in inputs.get("gamedays", [])},
           "packages": report["gamedays"],
           "runbooks": {name: judged(judges.rehearsal, path) for name, path in inputs.get("runbooks", {}).items()},
@@ -1903,7 +1995,8 @@ def judge(record, inputs, ctx, judges, record_sha256, inputs_sha256):
     graded_by = {g: {n["id"] for n in record["items"] if n["source"] == f"{GAMEDAY}:{g}"} for g in ev["gamedays"]}
     packages = {g: {"identity": evidence_identity(v), "refused": [
         f"objective {i} names an item {g} does not grade: a package grades only its own items, of its mode's kind"
-        for i in objectives_of(v) if i not in graded_by[g]]} for g, v in ev["gamedays"].items()}
+        for i in objectives_of(v) if i not in graded_by[g]],
+        **({"rerun": evidence_identity(v["rerun"])} if "rerun" in v else {})} for g, v in ev["gamedays"].items()}
     if (owning := owning_digests()) != OWNING_SHA256:
         raise Refusal(f"owning judges {sorted(n for n in OWNING if owning[n] != OWNING_SHA256[n])} changed while the "
                       "judge ran")
@@ -2072,8 +2165,9 @@ class Judges:
         return {"record_sha256": self.seen[str(path)]}
 
     def gameday(self, path):
-        """The parsed run record with the SHA-256 of its bytes and its date. Its verdict is its producer's
-        attestation, which `gameday_grade` reads after the record's bindings."""
+        """The parsed run record with the SHA-256 of its bytes and its date. `gameday_grade` reads its verdict after
+        the record's bindings: for RERUN once `rerun` reproduces the record, and for any other package as its producer
+        attests it."""
         run = parse(self.read(path, "game-day run record"), "game-day run record")
         if not isinstance(run, dict):
             raise Refusal("the game-day run record is no object")
@@ -2082,6 +2176,14 @@ class Judges:
             raise Refusal(f"the game-day run record's {wrong} are not text")
         return {"record": run, "identity": {"record_sha256": self.seen[str(path)], "date": run.get("date")
                                             if dated(run.get("date")) else None}}
+
+
+    def rerun(self, evidence):
+        """`rerun` of `evidence` under the committed game-day catalog and fault-injection profiles, the directory
+        recorded as a tree `--output` may not name."""
+        if evidence is not None:
+            self.tree(evidence)
+        return rerun(evidence, self.ctx["gamedays"], self.ctx["fis"])
 
 
 def guard_output(path, judges, *named):

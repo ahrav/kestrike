@@ -817,9 +817,19 @@ the lane receipt's observed events witness the fault window the episode names:
 a timeout after the controller's fault-start mark, then restored bytes after
 its fault-end mark or the named stop under the fault. The episode's status and
 verdict are the controller's attestation of what the provider reported. `judge`
-checks a game-day run record against its committed package's digest and reads
-the record's verdict as its producer attests it; each grade read from a run
-record is marked `run_record_graded`. A reviewer entry names the release
+checks a game-day run record against its committed package's digest. For
+GD-2, the package `scripts/gameday-judge.py` judges, the inputs entry also
+pins `seal_sha256`, the SHA-256 of the evidence directory's seal as the stop
+controller printed it, and names that directory under `evidence`. `judge`
+refuses a record whose seal differs from the pin, reruns the game-day judge's
+loader and rules in its own process over the directory, refuses evidence whose
+seal differs from the pin, and refuses a record that differs from the rerun's,
+naming both verdicts. Either seal refusal reads MISSING; a record that differs
+from the rerun's reads FAILED when the rerun reads DISPROVEN and MISSING
+otherwise. Absent evidence, or evidence the game-day judge refuses, leaves a
+HELD record UNVERIFIED with that reason. For every other package `judge` reads
+the record's verdict as its producer attests it. Each grade read
+from a run record is marked `run_record_graded`. A reviewer entry names the release
 revision it graded and reads STALE under another. The inputs name each
 runbook's rehearsal record by its file, and `judge` compares the SHA-256 of
 its bytes with the digest the index entry records. `--output` names a new
@@ -1063,8 +1073,10 @@ match, a span widened after it, or an abort or restoration mark removed, added o
 seal names, and the judge refuses it. A restoration that ends no observation, dated at or after the run window's end
 plus `clock_error_seconds`, may stand unsealed. The seal itself is a file
 of DIR, checked for shape: a seal removed and written again over changed files, by the controller or another writer,
-reads as the first one does. The record carries the seal's SHA-256 and time, and `seal` prints that digest, so an
-approver who kept the printed digest can tell a second seal from the first. The run's producers write every file of DIR,
+reads to the judge as the first one does. The record carries the seal's SHA-256 and time, and `seal` prints that digest.
+The inputs file of `readiness.py judge` pins the printed digest as GD-2's `seal_sha256`, outside DIR, and `judge`
+refuses a record or a directory whose seal differs from it, so a second seal over changed files is told from the first
+there. The run's producers write every file of DIR,
 so a directory with a shard, a row or a date left out or changed reads as an honest one does, and a `HELD` record states
 that the evidence delivered meets GD-2's oracle. The record's `package_sha256` covers `package.json` alone (the lists,
 the revision and the date): `readiness.py judge` compares it with its inputs entry, which binds them when that entry's
