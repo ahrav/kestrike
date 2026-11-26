@@ -549,6 +549,64 @@ pub(crate) fn row_unit(named: NamedCheckpoint, index: usize) -> u32 {
     1 + named.slot * layout().slot_units + data as u32
 }
 
+/// The entries the units of checkpoint `named` of `shard` hold on `store`, in capture order: the named slot's units
+/// decoded by [`SlotDecode`](super::super::super::recovery::checkpoint::SlotDecode) as one destination, for a reader
+/// of the capturing session under `storage`'s geometry, with no suffix replayed. Panics when a unit fails its identity
+/// or crc check, the load guard refuses the entries, or the decode withholds one.
+pub(crate) fn checkpoint_entries(
+    storage: &Storage<TestPlatform>,
+    store: &Media,
+    (shard, named): (crate::net::ownership::Shard, NamedCheckpoint),
+) -> Vec<CaptureEntry> {
+    use super::super::super::recovery::checkpoint::SlotDecode;
+    use super::super::super::recovery::checkpoint_tests::{no_suffix, routing, settle};
+    let descriptor = storage.pool().descriptor();
+    let limits = super::super::super::recovery::LoadLimits {
+        payload_start: 0,
+        payload_end: descriptor.geometry.payload_units(),
+        reserve_units: 0,
+        slot_count: descriptor.slot_count,
+        n_max: descriptor.slot_count,
+        record_chunk_len: storage.record.chunk_len(),
+    };
+    let checkpoint = Checkpoint {
+        shard,
+        session: named.session,
+        capture: named.capture,
+    };
+    let mut decode = SlotDecode::new(
+        Crc32c::detect(),
+        checkpoint,
+        named.units,
+        named.session,
+        limits,
+        routing(1),
+        (no_suffix(), 0, &[]),
+    )
+    .expect("a decode of the named units");
+    let first = (1 + named.slot as usize * layout().slot_units as usize) * IO_UNIT;
+    let bytes = store.borrow()[first..first + named.units as usize * IO_UNIT].to_vec();
+    let window = decode.window(0, named.units, bytes);
+    settle(&mut decode, Some(window));
+    let load = decode.finish().expect("no helper failed");
+    assert_eq!((load.verdict, &load.damage), (Ok(()), &None), "{named:?}");
+    let chunks = load.shards.iter().flatten();
+    let entries: Vec<CaptureEntry> = chunks
+        .flat_map(|chunk| chunk.captured())
+        .map(|(entry, _)| entry)
+        .collect();
+    assert_eq!(
+        (
+            entries.len() as u64,
+            load.slot_withheld,
+            load.slot_superseded
+        ),
+        (load.slot_found, 0, 0),
+        "{named:?}"
+    );
+    entries
+}
+
 /// The device unit of `entry`'s one payload unit.
 pub(crate) fn payload_unit(entry: &CaptureEntry) -> u32 {
     let locator = super::ExtentLocator::from_bits(entry.extents[0]);

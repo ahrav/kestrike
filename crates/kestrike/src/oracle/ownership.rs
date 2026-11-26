@@ -46,10 +46,11 @@
 //! tenure emitted zero `Commands` steps. The monitor retains the accepted count
 //! from the tenure's first `Withdrawn`. A step that breaks O1 and O2 fails O1.
 //!
-//! - `Fenced.durable` is the takeover history harness's one cut when the
-//!   shard record read at the fence names a checkpoint, and `None` otherwise.
-//!   The store double's initial record names its checkpoint, and the harness
-//!   maps the initial checkpoint to its one oracle cut. When the harness
+//! - `Fenced.durable` is the oracle cut of the checkpoint the shard record
+//!   read at the fence names, and `None` when it names none. The store
+//!   double's initial record names its checkpoint, which the harness maps to
+//!   its seeded oracle cut, and the harness maps each checkpoint a tenure's
+//!   serving duties publish to a cut of its own. When the harness
 //!   recorded a whole-volume loss since the volume's previous `Fenced` step,
 //!   or since the history began, the step carries `None`, so a cold start at
 //!   the first fence after a recorded volume loss passes O3. A later fence
@@ -108,10 +109,10 @@ pub(crate) const O3: &str =
 /// reads steps in emission order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Step {
-    /// `durable` is the harness's one cut when the shard record read at the
-    /// fence names a checkpoint and no whole-volume loss was recorded since the
-    /// volume's previous fence, or since the history began, and `None`
-    /// otherwise.
+    /// `durable` is the harness's cut of the checkpoint the shard record read
+    /// at the fence names, when it names one and no whole-volume loss was
+    /// recorded since the volume's previous fence, or since the history
+    /// began, and `None` otherwise.
     Fenced {
         tenure: Tenure,
         durable: Option<CutId>,

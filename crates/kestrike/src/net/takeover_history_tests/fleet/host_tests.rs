@@ -47,11 +47,16 @@ fn last_records(report: &Report) -> Vec<ShardRecord> {
 }
 
 fn hosted(config: &Config) -> (Fleet<'_>, Draws) {
-    let mut draws = Draws::record(config.root);
-    let seeded = Fleet::seeded(config, &mut draws, WAIT_ROUNDS);
-    let mut fleet = seeded.expect("a recorded topology");
+    let (mut fleet, draws) = hosted_unstarted(config);
     fleet.start_hosts();
     (fleet, draws)
+}
+
+/// `config`'s seeded fleet under its scenario's fault script, before its hosts start, and its recording draws.
+fn hosted_unstarted(config: &Config) -> (Fleet<'_>, Draws) {
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(config, &mut draws, WAIT_ROUNDS);
+    (seeded.expect("a recorded topology"), draws)
 }
 
 /// Runs `config`'s fleet under `script` in place of its scenario's episodes.
@@ -91,7 +96,7 @@ fn a_host_with_no_serving_tenure_counts_each_live_attach_unbound_and_its_roles_o
         let (fleet, _) = hosted(config);
         let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
         let member = (fleet.member_of(Host::new(host).unwrap())).expect("the host's member");
-        let headroom = fleet.headroom(&live, member, 0);
+        let headroom = fleet.headroom(&live, member);
         let scenario = config.scenario;
         assert_eq!(
             headroom.attachments,
@@ -187,6 +192,76 @@ pub(super) fn a_host_lost_in_several_roles_hands_its_shards_to_their_named_stand
             assert_eq!(recovered.len(), 1, "shard {} keeps its tenure", shard.get());
         }
     }
+}
+
+/// F3 over a recovery from a checkpoint the serving duties published. In the host-loss run, s0's boot tenure on H0
+/// runs its duties under a capture policy and publishes a checkpoint of its own tenure before H0 is lost; its World
+/// records that capture as a cut of its own, and H3's takeover of the record that names it activates that cut, restores its members from it and
+/// serves them, so the history oracle decides F3 and passes the run's retention, and the ownership monitor finds
+/// the successor's cut equal to the one the record made durable. The published capture holds the boot tenure's
+/// resident set, object 1 still among its slots, and H3 restores every member but the INVALIDATEd object 1, which
+/// the coverage pages exclude and the retained set leaves out. In the planted control every restore of the run names
+/// the seeded cut in place of the activated one, and F3 fails at s0, whose activation named the published cut: a
+/// restore names a cut other than its tenure's activation.
+#[test]
+fn a_takeover_from_a_checkpoint_the_duties_published_is_judged_against_that_capture() {
+    const CAPTURING: usize = 0;
+    let config = Config::host_loss(1);
+    let play = |planted: bool| {
+        let (mut fleet, draws) = hosted_unstarted(&config);
+        fleet.capturing = vec![CAPTURING];
+        fleet.alarms.scripted = true;
+        if planted {
+            for cell in &mut fleet.cells {
+                cell.world.restore_from = Some(super::super::CUT);
+            }
+        }
+        let _agent = super::AgentPlant::set(&config);
+        let _inline = Inline::set();
+        fleet.play_script(draws).expect("a run inside the limits")
+    };
+    let report = play(false);
+    let (shard, versions) = &report.evidence.histories[CAPTURING];
+    let seeded = versions.first().expect("a seeded record").checkpoint;
+    let h3 = Host::new(H3).unwrap();
+    let taken = versions.iter().find(|version| version.owner == h3);
+    let named = taken.expect("H3's takeover").checkpoint;
+    let boot = report.shards[CAPTURING].recoveries[0].tenure;
+    assert_ne!(named, seeded, "shard {}: the duties published", shard.get());
+    let session = named.expect("a named checkpoint").session;
+    assert_eq!(
+        tenure_of(session),
+        boot,
+        "H3 took over the boot tenure's checkpoint"
+    );
+    let last = report.shards[CAPTURING]
+        .recoveries
+        .last()
+        .expect("a takeover");
+    assert_eq!(
+        (last.host, last.sweep),
+        (Host::new(H3).unwrap(), Some((7, 7)))
+    );
+    assert_eq!(
+        report.verdicts.retained,
+        Verdict::Pass,
+        "{}",
+        report.summary()
+    );
+    assert_eq!(
+        report.verdicts.one_owner,
+        Verdict::Pass,
+        "{}",
+        report.summary()
+    );
+    let control = play(true);
+    let unnamed = "a recorded restore from a checkpoint the store did not name";
+    assert_eq!(
+        control.verdicts.retained,
+        Verdict::Fail(unnamed, "shard 1".into()),
+        "{}",
+        control.summary()
+    );
 }
 
 /// The `trio` layout holds the three properties the at-threshold partition arms rest on: its first partition holds
@@ -4494,7 +4569,7 @@ impl std::fmt::Debug for Declared {
     }
 }
 
-/// Runs `small` under `Config::stall(root)`, with one GET a loss, under a script that stalls the volumes of the shards
+/// Runs `small` under `Config::stall(root)`, with two GETs a loss, under a script that stalls the volumes of the shards
 /// at `stalled` (each owner's restart then ends `Exit::Held` and its agent declares its host unhealthy) and crashes
 /// the hosts at `crashed`, all once every owner acknowledged its workload. When the script crashes a host (s5's
 /// owner, the one crash scripted here), two last episodes with no effect mark rounds: one fires at the first round a
@@ -4505,8 +4580,9 @@ impl std::fmt::Debug for Declared {
 /// twice the stall's length. Each marker fires in every run of its script. With `defect`, the detector runs with
 /// that planted defect of `failover::detect` for the whole run.
 ///
-/// One GET a loss: with two GETs, the losses the stalls and the crash open together send more GETs to one owner than
-/// one peer's allowance, and the owner answers one with request pressure, which the untouched check reads unserved.
+/// The losses the stalls and the crash open together each owe s2's owner H0 two GETs; a GET past one peer's
+/// allowance in flight waits for one to settle (`Fleet::neighbour_gets`), so H0 answers every GET and the untouched
+/// check judges them all.
 pub(super) fn declared(
     root: u64,
     stalled: &[usize],
@@ -4567,10 +4643,7 @@ pub(super) fn declared(
             heal: Some(0),
         });
     }
-    let config = Config {
-        requests: 1,
-        ..Config::stall(root)
-    };
+    let config = Config::stall(root);
     let run = || scripted_with(&config, script, false);
     let report = match defect {
         Some(defect) => crate::failover::detect::tests::planted(defect, run),
@@ -4656,6 +4729,7 @@ pub(super) fn two_held_hosts_and_a_silent_one_at_a_threshold_of_three_nominate_t
     assert_eq!(s5.host.get(), H1);
     assert!(s5.sweep.is_some_and(|(of, served)| of > 0 && of == served));
     passes_its_fleet_checks(report);
+    assert_eq!(report.credit(), Verdict::Pass, "{}", report.summary());
 }
 
 /// Each start of `shard`'s entry in phase `Held` as its report round and its host, in the order the fleet received
@@ -4680,8 +4754,9 @@ fn held_once_by(report: &Report, shard: u32, holders: [u64; 2]) {
 }
 
 /// The fleet checks that judge a declared-hold script: one owner per tenure, the volume check, the retained set, the
-/// host share and the untouched shards. The stall scenario's settle verdict and credit judge one stalled volume, so
-/// a second stalled or a crashed owner's shard reads to them as a healthy volume that changed hands.
+/// host share and the untouched shards. The stall scenario's credit judges each stalled volume and excuses the shard
+/// of a crashed owner, so the two-held case also earns it; the three-declarations case moves no stalled shard and
+/// reads the stall scenario's takeover witness missing.
 fn passes_its_fleet_checks(report: &Report) {
     let verdicts = &report.verdicts;
     let judged = [
@@ -4875,6 +4950,99 @@ fn a_replay_whose_round_lacks_one_tenure_or_one_reconciler_is_refused_with_every
     assert_eq!(refusal, None);
     assert!(after.0 == before.0 + 1 && after.1 > before.1, "{after:?}");
     assert_eq!(replayed.ok(), Some(tape));
+}
+
+/// A held entry the fleet publishes carries the hold's real age and attempt count. On the host-loss layout, H3's
+/// restart of s3 holds at round 10 and its next incarnation holds again at round 25 on an unknown bump. The hold the
+/// agent's status and headroom read then counts two attempts, and at round 40 its age is the 15 rounds since the
+/// second incarnation started, in the held entry H3's status publishes as in the hold its headroom counts. A hold of
+/// another member starts its own count of one.
+#[test]
+fn a_hold_of_several_incarnations_publishes_its_age_and_its_attempt_count() {
+    use crate::failover::report::RecoveryRefusal;
+    use crate::failover::restart::{Check, Refused};
+    use crate::storage::store::StoreError;
+    const S3: usize = 3;
+    let config = Config::host_loss(1);
+    let (mut fleet, _) = hosted(&config);
+    let target = crate::failover::retire::Target::of(&fleet.record_now(S3));
+    let refusal = RecoveryRefusal::from(&Refused {
+        check: Check::Bump(StoreError::Unknown),
+        flip: None,
+        recovery: Some(target),
+    });
+    let h3 = (fleet.member_of(Host::new(H3).unwrap())).expect("H3's member");
+    let h0 = (fleet.member_of(Host::new(H0).unwrap())).expect("H0's member");
+    for round in [10, 25] {
+        fleet.round = round;
+        fleet.held(S3, h3, super::volumes::Held::of_restart(refusal));
+    }
+    fleet.round = 40;
+    let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let now = fleet.detector_now();
+    let (at, held, _) = fleet.holds(&live, h3).next().expect("H3's hold");
+    let recovery = held.status().recovery(now);
+    assert_eq!(at, S3);
+    assert_eq!(recovery.attempts, Some(2), "two incarnations held");
+    assert_eq!(
+        recovery.age_us,
+        Some(15 * ROUND_US),
+        "aged from the second start"
+    );
+    assert_eq!(fleet.headroom(&live, h3).recovery, Gauge::known(1, 1));
+    let statuses = fleet.statuses(&live, h3, now);
+    let held_entry = (statuses.iter()).find(|status| status.shard.get() == 4);
+    let published = (held_entry.and_then(|status| status.entry.as_ref()))
+        .expect("H3 publishes s3's held entry")
+        .recovery;
+    assert_eq!(
+        (published.attempts, published.age_us),
+        (Some(2), Some(15 * ROUND_US))
+    );
+    fleet.held(S3, h0, super::volumes::Held::of_restart(refusal));
+    let (_, other, _) = fleet.holds(&live, h0).next().expect("H0's hold");
+    assert_eq!(other.status().recovery(now).attempts, Some(1));
+}
+
+/// A hold the store caused, with the device up, turns the owner's host unhealthy and its named standby takes the
+/// shard over, as the host health rule has it. On the host-loss layout H3 crashes and returns two rounds later, and
+/// its restart of s3 meets a bump whose reply is unknown with no commit, so the restart ends `Exit::Held` with the
+/// `Bump` check. The fleet records the hold and H3's status publishes s3's entry in phase `Held`; s3's record names
+/// H0 standby in another partition, so H3's agent reads its host unhealthy with s3 exempt, a detector nominates H3
+/// for s3, and H0 takes s3 over and sweeps its retained set whole, with one owner per tenure.
+#[test]
+fn a_store_caused_hold_turns_the_owners_host_unhealthy_and_its_named_standby_takes_over() {
+    let mut script = h3_crash_and_return();
+    script.push(Episode {
+        scope: vec![3],
+        action: Action::StoreWrite(Arm::Timeout { commit: false }),
+        heal: None,
+        ..script[0].clone()
+    });
+    let report = scripted(&Config::host_loss(1), script);
+    let s3 = &report.shards[3];
+    assert_eq!(s3.blockers, ["Bump"], "the restart held on its bump");
+    assert_eq!(
+        held_starts(&report, 4),
+        [(2, H3)],
+        "{:?}",
+        report.hosts.held
+    );
+    assert_eq!(report.hosts.exempt, BTreeSet::from([4]));
+    assert!(report.hosts.nominations >= 1);
+    assert_eq!(taken(&report), [(4, H0)], "H0 takes s3 over");
+    let last = s3.recoveries.last().expect("H0's recovery");
+    assert_eq!(last.host.get(), H0);
+    assert!(
+        last.sweep
+            .is_some_and(|(of, served)| of > 0 && of == served)
+    );
+    assert_eq!(
+        report.verdicts.one_owner,
+        Verdict::Pass,
+        "{}",
+        report.summary()
+    );
 }
 
 /// The settle fleet with its hosts started and s0's standby, host 3, removed from the volume record's pairs, so

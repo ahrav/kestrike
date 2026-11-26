@@ -952,7 +952,7 @@ impl<S: Store> Store for Decoding<S> {
 /// The check `refusal`'s class names, as a held restart's status reads it.
 pub(super) fn check_of(refusal: RecoveryRefusal) -> Option<RecoveryCheck> {
     super::volumes::Held::of_restart(refusal)
-        .status(0)
+        .status()
         .recovery(0)
         .check
 }

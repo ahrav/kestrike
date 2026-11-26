@@ -841,7 +841,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v32";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v32-rest";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1712,6 +1712,8 @@ struct Cell {
     planned: Vec<(Host, bool)>,
     /// Each member whose restart or takeover of the shard holds, with the recovery its reports state.
     held: Vec<(usize, volumes::Held)>,
+    /// Each member's recovery attempts on the cell's volume since the member's host booted ([`Cell::attempt`]).
+    attempts: Vec<(usize, u32)>,
 }
 
 /// How a scenario seeds one shard: with or without its named standby, and with a third attached host.
@@ -1852,6 +1854,7 @@ impl Cell {
             fresh_unread: None,
             planned: Vec::new(),
             held: Vec::new(),
+            attempts: Vec::new(),
         }
     }
 
@@ -1889,6 +1892,22 @@ impl Cell {
         if self.local_of(member).is_none_or(|(held, _)| held != pair) {
             self.enrolled.push((member, pair, local));
         }
+    }
+
+    /// Counts one more recovery attempt of `member` on the cell's volume and returns the member's count since its
+    /// host booted: one for each recovery of the member that served ([`Fleet::recovered`]) and one for each of its
+    /// incarnations that held ([`Fleet::held`]), the count a report's recovery part carries for its writer's boot.
+    /// The member's count ends when its host goes down, and every count ends when a replacement volume becomes the
+    /// cell's volume.
+    fn attempt(&mut self, member: usize) -> u32 {
+        let at = (self.attempts.iter()).position(|(of, _)| *of == member);
+        let at = at.unwrap_or_else(|| {
+            self.attempts.push((member, 0));
+            self.attempts.len() - 1
+        });
+        let count = &mut self.attempts[at].1;
+        *count = count.saturating_add(1);
+        *count
     }
 
     /// Accounts a refused restart, takeover or fresh activation that holds the shard: the check joins the cell's
@@ -2301,6 +2320,9 @@ struct Fleet<'c> {
     /// Whether the host loop runs a due rerun of [`Fleet::refused`] ahead of a queued takeover in the same pass: the
     /// order of a held process's rerun and a standby's takeover that both became due in one round.
     rerun_first: bool,
+    /// The cells whose tenures' serving duties run under [`capture_policy`]: each such tenure publishes a checkpoint
+    /// of its own at its open, and its World records that capture as a cut of its own ([`World::note_capture`]).
+    capturing: Vec<usize>,
     /// The rounds since the hosts started after which an unsettled host scenario stops as stalled:
     /// `hosts::HORIZON_ROUNDS`, or fewer in a control that expects the stall.
     horizon: u64,
@@ -2495,6 +2517,7 @@ impl<'c> Fleet<'c> {
             retaken: std::collections::BTreeMap::new(),
             witnessed: std::collections::BTreeMap::new(),
             rerun_first: false,
+            capturing: Vec::new(),
             horizon: hosts::HORIZON_ROUNDS,
             witness_hold: None,
             kept_owner: false,
@@ -2943,6 +2966,9 @@ impl<'c> Fleet<'c> {
                 // An exit ends the duties' store work, which `Cell::close` records; the owner keeps its state for the
                 // fleet's own close of the tenure.
                 let _ = actors::duties(serving);
+                let cell =
+                    (self.cells.iter_mut()).find(|cell| cell.placement.shard == serving.shard);
+                note_capture(&mut cell.expect("the tenure's cell").world, serving);
             }
         }
         if !self.hosts.is_empty() {
@@ -3544,8 +3570,9 @@ impl<'c> Fleet<'c> {
     /// of the cell's own duty actor ([`duty_actor`]) inside the outage windows of the cell's holder host
     /// ([`HostOut`]), a watermark log of its own, which starts empty, and the tenure's storage; no attachment listing,
     /// the suffix bounds of the World's own suffix open ([`super::suffix_bounds`]) and [`duty_periods`] over the
-    /// cell's bounds. The duties' storage samples one fixed clock reading, so a suffix step certifies no block, and
-    /// the duties publish no checkpoint: they run with no capture policy.
+    /// cell's bounds. The duties' storage samples one fixed clock reading, so a suffix step certifies no block. The
+    /// duties of a cell in [`Fleet::capturing`] run under [`capture_policy`] and publish checkpoints; every other
+    /// cell's duties run with no capture policy and publish none.
     fn duties_of<'w>(
         &self,
         at: usize,
@@ -3574,7 +3601,7 @@ impl<'c> Fleet<'c> {
         };
         let periods = duty_periods(&self.cells[at].world.bounds);
         let bounds = super::suffix_bounds();
-        crate::host::Duties::new(
+        let duties = crate::host::Duties::new(
             (
                 &crate::host::HostGate::qualified(),
                 crate::failover::reconcile::StandbyGate::qualified(),
@@ -3584,7 +3611,15 @@ impl<'c> Fleet<'c> {
             None,
             bounds,
             periods,
-        )
+        );
+        if !self.capturing.contains(&at) {
+            return duties;
+        }
+        let policy = capture_policy(serving.turn * ROUND_US);
+        match duties.capturing(policy, crate::storage::EngineBudget::unlimited()) {
+            Ok(duties) => duties,
+            Err(refused) => panic!("cell {at}'s duties refused the capture policy: {refused:?}"),
+        }
     }
 
     /// `hosts_requests` subtracts reconciler, enrollment, host agent record-view, serving-duty, and local standby-wait
@@ -4216,6 +4251,39 @@ fn withdrawn(
         .flatten()
 }
 
+/// Records in `world` a checkpoint `serving`'s serving duties published ([`World::note_capture`]), for duties under a
+/// capture policy; every other tenure publishes none. Each call site that turns a tenure's duties in the host loop
+/// calls it after the turn.
+fn note_capture(world: &mut World, serving: &Serving<'_>) {
+    let capturing =
+        (serving.duties.as_ref()).is_some_and(|duties| duties.captures().refused.is_some());
+    if capturing {
+        world.note_capture(serving);
+    }
+}
+
+/// The capture policy of a capturing cell's tenure that opens at `now_us`: due at its first turn, with a time ceiling
+/// of `now_us` from a start of zero, and so due again once the tenure has served as long as the run had run when it
+/// opened. No byte trigger fires.
+fn capture_policy(now_us: u64) -> crate::storage::CapturePolicy {
+    let now_ns = now_us.saturating_mul(1_000).max(1);
+    let config = crate::storage::CaptureConfig {
+        n_max: 1 << 12,
+        slot_bound: 1 << 12,
+        byte_trigger: u64::MAX,
+        time_ceiling_ns: now_ns,
+        paced_unit_ns: 1_000,
+        fast_unit_ns: 1_000,
+        decision_ns: 1,
+        max_removals_per_second: 1,
+        q_cap: 1 << 12,
+        extent_words: 1 << 12,
+    };
+    let mut budget = crate::storage::EngineBudget::unlimited();
+    (crate::storage::CapturePolicy::new(config, 0, &mut budget))
+        .expect("the fleet's capture policy")
+}
+
 /// Whether `serving`'s turn named an exit that ends its process with no park, a rerun or `Deposed`, which the fleet
 /// tears down as `serve` does. `serve::ended` and `Duties::turn` name `Stopped`, `Deposed`, `Retire` or `Rerun`; a
 /// `Held` exit comes from a bring-up or a recovery, before the tenure serves.
@@ -4244,6 +4312,7 @@ fn duties_acknowledged(world: &mut World, serving: &mut Serving<'_>, n: u8) -> b
         if serving.duty_exit.is_some() || actors::duties(serving).is_some() {
             return false;
         }
+        note_capture(world, serving);
         let Some(duties) = serving.duties.as_ref() else {
             return false;
         };

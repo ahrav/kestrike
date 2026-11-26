@@ -2389,6 +2389,7 @@ fn join_fills(run: &mut Run<'_>, world: &mut World, serving: &Serving<'_>, fresh
             n,
             label: super::first(n),
             units: (unit, unit),
+            cut: super::CUT,
         });
         run.uncovered.insert(n);
     }

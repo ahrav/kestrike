@@ -180,9 +180,21 @@ fn six() -> Config {
     Config::six(1)
 }
 
+/// The six-host run driven through the round loop's own steps, every shard booted and crashed once, earns credit
+/// with six crashes and no takeover. Each shard's Report tally counts exactly the Reports its table logged while
+/// one of its tenures served: every shard restarts on its own host, so its table holds the Reports its pair issued
+/// over the whole run, of which each incarnation's fence (a restart's two Reports) precedes its tenure, and one
+/// Report a foreign pair logs on s3's table while its restarted tenure serves counts once more there. The account
+/// takes no tenure's start mark, so a tally that summed the table's count at each close, or that started a tenure's
+/// count before its fence, differs from it.
 #[test]
 fn the_same_steps_with_no_fault_earn_credit() {
-    let report = driven(
+    const FOREIGN: usize = 3;
+    let fence = restart_tests::FULL
+        .iter()
+        .filter(|c| **c == "report")
+        .count();
+    let (report, logged) = driven(
         &six(),
         (&ALL, &ALL),
         |_| {},
@@ -190,11 +202,39 @@ fn the_same_steps_with_no_fault_earn_credit() {
             for at in ALL {
                 fleet.crash(at);
             }
-            fleet.judged()
+            let foreign = fleet.fleet.cells[(FOREIGN + 1) % ALL.len()].pair;
+            {
+                let mut table = fleet.fleet.cells[FOREIGN].world.reservation.borrow_mut();
+                let report = crate::storage::ReservationCommand::Report { not_before: 0 };
+                table.log.push(report);
+                table.issuers.push(foreign);
+            }
+            fleet.turns(4);
+            let logged: Vec<(usize, usize)> = (fleet.fleet.cells.iter())
+                .map(|cell| {
+                    let table = cell.world.reservation.borrow();
+                    let others = (table.issuers.iter())
+                        .filter(|by| **by != cell.pair)
+                        .count();
+                    (table.reports_by(cell.pair), others)
+                })
+                .collect();
+            (fleet.judged(), logged)
         },
     );
     assert_eq!(report.credit(), Verdict::Pass, "{}", report.summary());
     assert_eq!((report.crashes, report.takeovers), (6, 0));
+    for (at, shard) in report.shards.iter().enumerate() {
+        let (own, others) = logged[at];
+        let name = format!("shard {}", shard.placement.shard.get());
+        assert_eq!(shard.recoveries.len(), 2, "{name}");
+        assert_eq!(others, usize::from(at == FOREIGN), "{name}");
+        assert_eq!(
+            shard.reports,
+            own - fence * shard.recoveries.len() + others,
+            "{name}: {own} own Reports, {others} foreign"
+        );
+    }
 }
 
 #[test]
@@ -799,6 +839,94 @@ fn a_turn_whose_duties_withdrew_the_tenure_notes_the_withdrawal_before_the_teard
             };
             assert_eq!([*polled, *sampled, *withdrawn, *drained], [tenure; 4]);
             assert_eq!(before, after, "the drain accepted no command");
+        },
+    );
+}
+
+/// A published capture's `Captured` rows name the entries its checkpoint holds, whatever the tenure's resident set
+/// is when the World observes the publication. s0's boot tenure runs its duties under a capture policy, with no
+/// observation after its turns, until the shard record names a checkpoint the history holds no capture of. An
+/// INVALIDATE's hold then removes object 1 from the resident set, and the observation that follows records the
+/// checkpoint's members, object 1 among them, each on its own payload unit.
+#[test]
+fn a_published_capture_records_its_checkpoints_entries_after_the_resident_set_changed() {
+    use super::super::{CUT, Event, hold};
+    use crate::storage::warm_sim::row_unit;
+    driven(
+        &Config::host_loss(1),
+        (&[0], &[]),
+        |fleet| fleet.capturing = vec![0],
+        |mut fleet| {
+            let serving = fleet.live[0].as_mut().expect("a live tenure");
+            let world = &mut fleet.fleet.cells[0].world;
+            assert!(duties_opened(serving), "the duties' open");
+            let unrecorded = |world: &super::super::World| {
+                let named = world.checkpoint_named();
+                named.filter(|named| world.cuts.iter().all(|(of, _)| of != named))
+            };
+            for _ in 0..4 * OPEN_ROUNDS {
+                if unrecorded(world).is_some() {
+                    break;
+                }
+                assert_eq!(actors::duties(serving), None);
+            }
+            let named = unrecorded(world).expect("the duties published a checkpoint");
+            // The members before the hold, read from the tenure's slots and not through the checkpoint's decode.
+            let members: Vec<(u8, (u32, u32))> = (serving.resident().into_iter().enumerate())
+                .map(|(index, (fingerprint, unit))| {
+                    let n = world.resident_object(serving, fingerprint).n;
+                    (n, (row_unit(named, index), unit as u32))
+                })
+                .collect();
+            let mut objects: Vec<u8> = members.iter().map(|&(n, _)| n).collect();
+            objects.sort_unstable();
+            assert_eq!(objects, [1, 2, 3, 4, 5, 6, 7, 8], "the seeded objects");
+            assert_eq!(hold(serving, 1), Ok(true), "the hold removed object 1");
+            let before = world.events.len();
+            note_capture(world, serving);
+            let cut = world.cut_named().expect("the record names a checkpoint");
+            assert_ne!(cut, CUT, "the published checkpoint has a cut of its own");
+            let captured: Vec<(u8, (u32, u32))> = (world.events[before..].iter())
+                .filter_map(|event| match event {
+                    Event::Captured {
+                        n, units, cut: of, ..
+                    } if *of == cut => Some((*n, *units)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(captured, members, "checkpoint {named:?}");
+        },
+    );
+}
+
+/// A hold's attempt count is the volume's count since its host booted, completed recoveries included. s0's owner
+/// recovers s0 at boot and serves; its next incarnation holds on a bump whose reply is unknown while the host stays
+/// up. The hold then reads two attempts, the boot recovery and the refused restart, and a later incarnation that
+/// holds reads three.
+#[test]
+fn a_hold_after_a_recovery_that_served_counts_both_attempts() {
+    use crate::failover::report::RecoveryRefusal;
+    use crate::failover::restart::{Check, Refused};
+    use crate::storage::store::StoreError;
+    driven(
+        &Config::host_loss(1),
+        (&[0], &[]),
+        |_| {},
+        |mut fleet| {
+            let fleet = &mut fleet.fleet;
+            let member = fleet.cells[0].holder;
+            let target = crate::failover::retire::Target::of(&fleet.record_now(0));
+            let refusal = RecoveryRefusal::from(&Refused {
+                check: Check::Bump(StoreError::Unknown),
+                flip: None,
+                recovery: Some(target),
+            });
+            let live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+            for attempts in [2, 3] {
+                fleet.held(0, member, super::volumes::Held::of_restart(refusal));
+                let (_, held, _) = fleet.holds(&live, member).next().expect("the hold");
+                assert_eq!(held.status().recovery(0).attempts, Some(attempts));
+            }
         },
     );
 }

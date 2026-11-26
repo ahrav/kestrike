@@ -243,6 +243,8 @@ pub(crate) struct Registry {
     pub(crate) rtype: u8,
     /// Every reservation command submitted by any host double, in order.
     pub(crate) log: Vec<ReservationCommand>,
+    /// The pair of the host double that submitted each command of `log`, index for index.
+    pub(crate) issuers: Vec<Pair>,
     /// Reservation completions the host doubles together may still deliver; `None` delivers every one.
     pub(crate) budget: Option<usize>,
     /// An entry the Acquire adds after it succeeds, as a racing host would.
@@ -306,6 +308,7 @@ impl Default for Registry {
             entries: Vec::new(),
             rtype: 0,
             log: Vec::new(),
+            issuers: Vec::new(),
             budget: None,
             after_acquire: None,
             acquired_rtype: 2,
@@ -353,6 +356,12 @@ impl Registry {
             .iter()
             .filter(|command| command.is_report())
             .count()
+    }
+
+    /// The Report commands the host double issuing as `issuer` submitted, answered or still pending.
+    pub(crate) fn reports_by(&self, issuer: Pair) -> usize {
+        let logged = self.log.iter().zip(&self.issuers);
+        (logged.filter(|(command, by)| command.is_report() && **by == issuer)).count()
     }
 
     /// The host double issues the command as `own` from controller `cntlid`; `execute` returns its status. A Report
@@ -543,6 +552,7 @@ unsafe impl Disk for Reserving {
         }
         crate::instrument::unmeasured(|| {
             registry.log.push(command);
+            registry.issuers.push(own);
             self.pending.push_back((token, command, memory));
         });
         Ok(())

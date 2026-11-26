@@ -1252,15 +1252,20 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
     if log.lapsed_acted > 0 {
         return Verdict::Fail(LAPSED_ACTED, format!("{} periods", log.lapsed_acted));
     }
-    // The host health rule: in a stall scenario no host fails, so only a shard of a stalled volume
-    // may change hands; a held process makes its host unhealthy only for a shard that names a standby elsewhere.
+    // The host health rule: in a stall scenario only a shard of a stalled volume, or of a host the script lost, may
+    // change hands; a held process makes its host unhealthy only for a shard that names a standby elsewhere.
     // A log with no stalled volume reads the scenario's stall witness missing instead.
     let stall_only = matches!(
         report.config.scenario,
         Scenario::Stall | Scenario::Impaired | Scenario::ImpairedBrief
     ) && !volumes.stalled.is_empty();
     let shards = 1..=report.evidence.histories.len() as u32;
-    let healthy = |shard: &u32| !volumes.stalled.contains(shard) && !volumes.lost.contains(shard);
+    let host_lost = &report.evidence.losses.hosts;
+    let healthy = |shard: &u32| {
+        !volumes.stalled.contains(shard)
+            && !volumes.lost.contains(shard)
+            && !host_lost.contains(shard)
+    };
     if stall_only && let Some(shard) = shards.filter(healthy).find(|&shard| moved(shard) > 0) {
         let at = format!("shard {shard} moved {} times", moved(shard));
         return Verdict::Fail(HEALTHY_MOVED, at);
@@ -1296,6 +1301,9 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
         return Verdict::Fail(STRANDED, format!("volume {}", volume.as_str()));
     }
     let stalled_moves = volumes.stalled.first().map(|&shard| moved(shard));
+    // In the stall scenario one stalled volume's shard changes hands; the `MOVED_TWICE` check above bounds every
+    // stalled shard at one move.
+    let stalled_taken = volumes.stalled.iter().any(|&shard| moved(shard) == 1);
     let warm = |shard: u32| {
         let recoveries = &report.shards[shard as usize - 1].recoveries;
         let swept = |r: &Recovered| {
@@ -1400,8 +1408,8 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
             ),
         ],
         Scenario::Stall => vec![
-            (volumes.stalled.len() == 1, VOLUME_STALLED),
-            (stalled_moves == Some(1), STALLED_TAKEOVER),
+            (!volumes.stalled.is_empty(), VOLUME_STALLED),
+            (stalled_taken, STALLED_TAKEOVER),
             (blocked(Blocker::DeviceFailureHold) >= 1, DEVICE_HOLD),
         ],
         Scenario::LostAlone => replaced,
@@ -1679,7 +1687,7 @@ impl<'c> Fleet<'c> {
         Client::open(store, self.hosts[member].log.clone()).expect("a host's store client")
     }
 
-    fn detector_now(&self) -> u64 {
+    pub(super) fn detector_now(&self) -> u64 {
         self.round * H
     }
 
@@ -1845,7 +1853,7 @@ impl<'c> Fleet<'c> {
             .filter(|of| of.zone == zone && of.host != self.hosts[member].host)
             .map(|of| of.host)
             .collect();
-        let headroom = self.headroom(live, member, t);
+        let headroom = self.headroom(live, member);
         let round = self.round;
         let probe_keys = &self.probe_keys;
         let host = &mut self.hosts[member];
@@ -2087,7 +2095,7 @@ impl<'c> Fleet<'c> {
     ///   the cells whose load runs on the host from its bring-up until its client session is active (`Fleet::rises`,
     ///   and `Fleet::recovering` for the synchronous bring-up before the hosts start). A held cell the host serves
     ///   is no hold, so the load and the holds never name one volume twice.
-    pub(super) fn headroom(&self, live: &Live<'_>, member: usize, now: u64) -> report::Headroom {
+    pub(super) fn headroom(&self, live: &Live<'_>, member: usize) -> report::Headroom {
         let host = self.hosts[member].host;
         let serves = |at: usize| self.cells[at].holder == member && live[at].is_some();
         let mappings: Vec<crate::bind::Mappings> = (0..self.cells.len())
@@ -2114,7 +2122,7 @@ impl<'c> Fleet<'c> {
         let loading = loading.count() as u64;
         let held: Vec<report::RecoveryStatus> = (self.holds(live, member))
             .filter(|&(_, _, hidden)| !hidden)
-            .map(|(_, held, _)| held.status(now))
+            .map(|(_, held, _)| held.status())
             .collect();
         let recovering = report::recovering(held.iter().map(|status| Some((status, false))))
             .map(|holds| holds.saturating_add(loading));
@@ -2217,7 +2225,7 @@ impl<'c> Fleet<'c> {
     ///   waits on as standby and does not hold, on a volume no other process of the host publishes;
     /// - under the enroll-back plant, an entryless `Withdrawn` status for the hidden hold;
     /// - and an entryless `Withdrawn` status, once, for a process that published last turn and runs no more.
-    fn statuses(&mut self, live: &Live<'_>, member: usize, t: u64) -> Vec<LinkStatus> {
+    pub(super) fn statuses(&mut self, live: &Live<'_>, member: usize, t: u64) -> Vec<LinkStatus> {
         use crate::failover::serving::State;
         // The flat-progress plant freezes the counters of each tenure status the host publishes, with one command
         // pending, from its first turn.
@@ -2277,7 +2285,7 @@ impl<'c> Fleet<'c> {
             let entry = report::VolumeEntry {
                 shard,
                 phase: Some(report::Phase::Held),
-                recovery: held.status(t).recovery(t),
+                recovery: held.status().recovery(t),
                 ..report::tests::bare(volume.as_str(), report::RecordedRole::Owner)
             };
             statuses.push(LinkStatus {
@@ -2525,6 +2533,7 @@ impl<'c> Fleet<'c> {
         if up == Up::Down {
             for cell in &mut self.cells {
                 cell.held.retain(|(of, _)| *of != member);
+                cell.attempts.retain(|(of, _)| *of != member);
             }
             while let Some(index) = self.parks.iter().position(|parked| parked.member == member) {
                 self.leave_park(index, None);
@@ -2605,15 +2614,23 @@ impl<'c> Fleet<'c> {
         Ok(())
     }
 
+    /// Sends each open loss's due GETs, in loss order. A GET due to a shard whose bring-up is in progress waits until
+    /// that shard serves, and one due to a shard that already holds one peer's allowance of GETs in flight
+    /// ([`bounds::LIMITS`]'s `requests`) waits until one of them settles, so the GETs of several losses that open
+    /// together stay inside the allowance the owner grants its one client.
     fn neighbour_gets(&mut self, live: &mut Live<'_>) {
+        let allowance = super::bounds::LIMITS.requests as usize;
         for loss in 0..self.losses.len() {
             let since = self.round - self.losses[loss].round;
-            // A GET due to a shard whose bring-up is in progress waits until that shard serves.
-            let rises = &self.rises;
-            let (now, later): (Vec<_>, Vec<_>) = (self.losses[loss].episode.due.drain(..))
-                .partition(|due| due.round <= since && rises.iter().all(|rise| rise.at != due.at));
-            self.losses[loss].episode.due = later;
-            for super::Due { at: other, n, .. } in now {
+            let mut later = Vec::new();
+            for due in std::mem::take(&mut self.losses[loss].episode.due) {
+                let rising = self.rises.iter().any(|rise| rise.at == due.at);
+                let in_flight = (self.flights.iter()).filter(|flight| flight.at == due.at);
+                if due.round > since || rising || in_flight.count() >= allowance {
+                    later.push(due);
+                    continue;
+                }
+                let super::Due { at: other, n, .. } = due;
                 if live[other].is_none() {
                     continue;
                 }
@@ -2624,6 +2641,7 @@ impl<'c> Fleet<'c> {
                 self.cells[other].requested.push(n);
                 self.send(live, other, n, Purpose::Neighbour);
             }
+            self.losses[loss].episode.due = later;
         }
     }
 
@@ -3330,6 +3348,7 @@ impl<'c> Fleet<'c> {
             self.planted |= super::drop_from_ram(serving, n);
         }
         let member = self.cells[at].holder;
+        self.cells[at].attempt(member);
         if self.config.planted_at(Plant::UnchargedRead, member) {
             read_bytes += 2 * share.bytes + 1;
             self.planted = true;

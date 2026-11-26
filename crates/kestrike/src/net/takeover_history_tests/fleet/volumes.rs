@@ -141,25 +141,36 @@ pub(crate) struct CrashPoint {
 }
 
 /// The recovery a held restart or takeover reports: its kind and refusal, as the production mapping of the
-/// refusal gives them.
+/// refusal gives them, the start of the incarnation that last held, on the host agents' clock
+/// ([`Fleet::detector_now`]) at the round it held, and the member's recovery attempts on the cell's volume since its
+/// host booted ([`Cell::attempt`](super::Cell::attempt)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Held {
     pub(crate) kind: RecoveryKind,
     pub(crate) refusal: RecoveryRefusal,
+    pub(crate) started_us: u64,
+    pub(crate) attempts: u32,
 }
 
 impl Held {
-    /// The hold of a production restart whose `Ended` carries `refusal`.
+    /// The hold of a production restart whose `Ended` carries `refusal`: one attempt, started at zero until
+    /// [`Fleet::held`] records it.
     pub(crate) fn of_restart(refusal: RecoveryRefusal) -> Self {
         Self {
             kind: RecoveryKind::Restart,
             refusal,
+            started_us: 0,
+            attempts: 1,
         }
     }
 
-    pub(crate) fn status(self, now_us: u64) -> crate::failover::report::RecoveryStatus {
+    /// The hold's recovery status: `attempts` attempts, the last of kind `kind` started at `started_us` and refused
+    /// with `refusal`, so its age at a turn is that turn's time less the last incarnation's start.
+    pub(crate) fn status(self) -> crate::failover::report::RecoveryStatus {
         let mut status = crate::failover::report::RecoveryStatus::NO_ATTEMPT;
-        status.start(self.kind, now_us);
+        for _ in 0..self.attempts {
+            status.start(self.kind, self.started_us);
+        }
         status.refuse(self.refusal);
         status
     }
@@ -405,16 +416,25 @@ impl Fleet<'_> {
     /// refusal's class. `member`'s next report carries the held entry, from which the loop's status names the shard's
     /// blocker; a hold other than `RecordedHolder` while the volume is stalled or lost also joins the cell's device
     /// holds, which the survey's device-hold guard reads.
+    /// Records that `member`'s incarnation for cell `at` held with `recovery`, started at this round on the host
+    /// agents' clock, as one more recovery attempt of the member on the cell.
     pub(super) fn held(&mut self, at: usize, member: usize, recovery: Held) {
         // The new hold replaces the process's earlier one, a returned host's included.
         self.held_returns.remove(&(at, member));
-        let check = recovery.status(0).recovery(0).check;
+        let check = recovery.status().recovery(0).check;
         let recorded = check == Some(crate::failover::report::RecoveryCheck::RecordedHolder);
         if self.repairs() && !recorded && self.cells[at].device != Device::Up {
             self.cells[at].device_holds.insert(member);
         }
+        let started_us = self.detector_now();
         let cell = &mut self.cells[at];
+        let attempts = cell.attempt(member);
         cell.held.retain(|(of, _)| *of != member);
+        let recovery = Held {
+            started_us,
+            attempts,
+            ..recovery
+        };
         cell.held.push((member, recovery));
     }
 
@@ -792,6 +812,7 @@ impl Fleet<'_> {
                 cell.enrolled.clear();
                 cell.device_holds.clear();
                 cell.held.clear();
+                cell.attempts.clear();
                 cell.cold = true;
                 cell.world.a.media =
                     crate::storage::device::sim::media(crate::storage::volume_fixture::MEDIA);

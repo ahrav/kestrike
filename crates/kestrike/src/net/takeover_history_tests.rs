@@ -55,7 +55,7 @@ use std::sync::Arc;
 
 use crate::failover::evidence::{Pair, RESERVATION_CONFLICT};
 use crate::failover::record::LocalRecord;
-use crate::failover::records::Host;
+use crate::failover::records::{Host, NamedCheckpoint, Record, ShardRecord};
 use crate::failover::restart::Restarted;
 use crate::failover::restart::tests as restart_tests;
 use crate::failover::takeover::Refused;
@@ -79,8 +79,8 @@ use crate::storage::store::sim::Shared;
 use crate::storage::store::{Client as StoreClient, Store, WatermarkLog};
 use crate::storage::store_tests::{client as store_client, shard};
 use crate::storage::warm_sim::{
-    Appended, TenureA, acknowledged_invalidation, attach_successor, object_key, payload_unit,
-    row_unit, shard_store, storage, tenure_a_with,
+    Appended, TenureA, acknowledged_invalidation, attach_successor, checkpoint_entries, object_key,
+    payload_unit, row_unit, shard_store, storage, tenure_a_with,
 };
 use crate::storage::write_guard::{self, Guarded};
 use crate::storage::{
@@ -148,6 +148,15 @@ struct Object {
 }
 
 impl Object {
+    /// The label of the object's slot that starts on device unit `unit`: its later label when that label's payload
+    /// unit is `unit`, else its first.
+    fn label_on(&self, unit: u64) -> Label {
+        match self.later {
+            Some((label, at)) if u64::from(at) == unit => label,
+            _ => first(self.n),
+        }
+    }
+
     /// The labels a GET of the object may return, the latest first.
     fn labels(&self) -> Vec<Label> {
         (self.later.iter().map(|(label, _)| *label))
@@ -178,11 +187,12 @@ enum Event {
         label: Label,
         tenure: Option<Tenure>,
     },
-    /// The cut's capture of an object's label on its row and payload units.
+    /// Cut `cut`'s capture of an object's label on its row and payload units.
     Captured {
         n: u8,
         label: Label,
         units: (u32, u32),
+        cut: CutId,
     },
     /// An acknowledged INVALIDATE of every label of an object, before the host loss or in a successor's tenure.
     Invalidate { n: u8, tenure: Option<Tenure> },
@@ -194,8 +204,13 @@ enum Event {
     VolumeLost,
     /// A successor's activation, from the cut or from none.
     Activate { tenure: Tenure, cut: Option<CutId> },
-    /// An object's label the successor's index holds from the cut.
-    Restore { n: u8, label: Label, tenure: Tenure },
+    /// An object's label the successor's index holds from cut `cut`.
+    Restore {
+        n: u8,
+        label: Label,
+        tenure: Tenure,
+        cut: CutId,
+    },
     /// A client GET a tenure answered, with the route's high-water when the GET ended and whether the client
     /// admitted the response: false when its shard route refused a response frame during the GET.
     Read {
@@ -227,8 +242,13 @@ impl Event {
                 script.in_tenure(*tenure);
                 script.publish_sized(KeyId(*n), *label, METADATA, BODY);
             }
-            Self::Captured { n, label, units } => {
-                script.captured(EVIDENCE, (KeyId(*n), *label), CUT, *units);
+            Self::Captured {
+                n,
+                label,
+                units,
+                cut,
+            } => {
+                script.captured(EVIDENCE, (KeyId(*n), *label), *cut, *units);
             }
             Self::Invalidate { n, tenure } => {
                 script.in_tenure(*tenure);
@@ -245,9 +265,14 @@ impl Event {
             Self::Activate { tenure, cut } => {
                 script.activate(EVIDENCE, Some(*tenure), *cut);
             }
-            Self::Restore { n, label, tenure } => {
+            Self::Restore {
+                n,
+                label,
+                tenure,
+                cut,
+            } => {
                 script.in_tenure(Some(*tenure));
-                script.restore(KeyId(*n), *label, CUT);
+                script.restore(KeyId(*n), *label, *cut);
             }
             Self::Read {
                 n,
@@ -320,7 +345,16 @@ struct World {
     /// unless a history sets a moving clock with a finite window.
     strategy: Strategy,
     bounds: crate::failover::bounds::Bounds,
+    /// Each checkpoint the history recorded a capture of, with its oracle cut: the seeded checkpoint as [`CUT`], then
+    /// each checkpoint a tenure's serving duties published, in publication order ([`World::note_capture`]).
+    cuts: Vec<(NamedCheckpoint, CutId)>,
+    /// A planted control's cut, which every restore names in place of the cut its tenure activated.
+    restore_from: Option<CutId>,
 }
+
+/// The cut a shard record names when the history recorded no capture of its checkpoint: no `Captured` row names it,
+/// so an activation from it fails F3 ("host loss activated a cut no capture recorded").
+const UNRECORDED: CutId = CutId(u64::MAX);
 
 /// The volume's ownership steps in emission order, and whether a tenure's device capture passed its bound.
 #[derive(Default)]
@@ -412,8 +446,10 @@ impl World {
             n: o.n,
             label: first(o.n),
             units: o.units.expect("a captured object"),
+            cut: CUT,
         });
         let events = published.chain(captured).collect();
+        let cuts = vec![(a.named, CUT)];
         Self {
             shard,
             fixture: false,
@@ -430,7 +466,71 @@ impl World {
             guarded: Guarded::default(),
             strategy: Strategy::Frozen,
             bounds: bounds_of(limits()),
+            cuts,
+            restore_from: None,
         }
+    }
+
+    /// The oracle cut of the checkpoint the shard record names, read without a store request: [`CUT`] for the seeded
+    /// checkpoint, the cut [`World::note_capture`] gave a published one, [`UNRECORDED`] for any other, and `None`
+    /// when the record names none.
+    fn cut_named(&self) -> Option<CutId> {
+        let named = self.checkpoint_named()?;
+        let cut = self.cuts.iter().find(|(of, _)| *of == named);
+        Some(cut.map_or(UNRECORDED, |&(_, cut)| cut))
+    }
+
+    /// The checkpoint the shard record names, read without a store request.
+    fn checkpoint_named(&self) -> Option<NamedCheckpoint> {
+        let store = self.records.0.borrow();
+        let item = (store.current(&crate::storage::store::Key::Shard(self.shard)))
+            .expect("a stored shard record");
+        let record = ShardRecord::decode(&item.value).expect("a shard record that decodes");
+        record.checkpoint
+    }
+
+    /// Records the capture of a checkpoint `serving`'s serving duties published, once, when the shard record names a
+    /// checkpoint the history holds no capture of: the checkpoint takes the next oracle cut, and each entry the
+    /// checkpoint's units hold on the media ([`checkpoint_entries`]) becomes one `Captured` row of that cut. A capture
+    /// pass encodes one row per one-extent entry in capture order, so the `i`th entry's row lies on the published
+    /// slot's `i`th entry row, and its payload unit is the unit its extent names. An object's label is its later
+    /// label when the entry starts on that label's payload unit, else its first.
+    ///
+    /// The members are the pass's walk as the checkpoint encodes it, whatever FILL or INVALIDATE the tenure ran
+    /// between the walk and this observation.
+    fn note_capture(&mut self, serving: &Serving<'_>) {
+        let Some(named) = self.checkpoint_named() else {
+            return;
+        };
+        if self.cuts.iter().any(|(of, _)| *of == named) {
+            return;
+        }
+        let cut = CutId(CUT.0 + self.cuts.len() as u64);
+        self.cuts.push((named, cut));
+        let entries = checkpoint_entries(serving.storage, &self.a.media, (self.shard, named));
+        for (index, entry) in entries.iter().enumerate() {
+            let captured = |o: &&Object| object_key(o.n) == entry.key;
+            let object =
+                (self.objects.iter().find(captured)).expect("an entry of a key the history knows");
+            let unit = payload_unit(entry);
+            let (n, label) = (object.n, object.label_on(u64::from(unit)));
+            let units = (row_unit(named, index), unit);
+            self.events.push(Event::Captured {
+                n,
+                label,
+                units,
+                cut,
+            });
+        }
+    }
+
+    /// The object whose key routes to the resident slot of `fingerprint` in `serving`'s storage.
+    fn resident_object(&self, serving: &Serving<'_>, fingerprint: u64) -> &Object {
+        let routed = |o: &&Object| {
+            let route = serving.storage.fingerprint_of(&object_key(o.n));
+            route.expect("a route").2 == fingerprint
+        };
+        (self.objects.iter().find(routed)).expect("a resident slot of a key the history knows")
     }
 
     fn units(&self, n: u8) -> (u32, u32) {
@@ -550,14 +650,13 @@ impl World {
         self.fence_tenure(tenure_of(taken.session().get()));
     }
 
-    /// Emits `tenure`'s `Fenced` step. Its durable cut is [`CUT`] when the shard record names a checkpoint and the
-    /// history recorded no whole-volume loss since the previous fence.
+    /// Emits `tenure`'s `Fenced` step. Its durable cut is the cut of the checkpoint the shard record names
+    /// ([`World::cut_named`]) when the history recorded no whole-volume loss since the previous fence.
     fn fence_tenure(&self, tenure: Tenure) {
         let mut steps = self.steps.borrow_mut();
         let since = std::mem::replace(&mut steps.events_at_fence, self.events.len());
         let lost = (self.events[since..].iter()).any(|event| matches!(event, Event::VolumeLost));
-        let named = (restart_tests::shard_now_of(&self.records, self.shard).checkpoint).is_some();
-        let durable = (named && !lost).then_some(CUT);
+        let durable = (!lost).then(|| self.cut_named()).flatten();
         steps.list.push(Step::Fenced { tenure, durable });
     }
 
@@ -625,22 +724,20 @@ impl World {
         restored
     }
 
-    /// Records a restore for each slot `serving`'s storage holds resident: the object whose key routes to the slot's
-    /// fingerprint, under its later label when the slot starts on that label's payload unit.
-    fn record_restores(&mut self, serving: &Serving<'_>) {
+    /// Records a restore from `cut` for each slot `serving`'s storage holds resident: the object whose key routes to
+    /// the slot's fingerprint, under its later label when the slot starts on that label's payload unit. A planted
+    /// control's `restore_from` names its own cut in place of `cut`.
+    fn record_restores(&mut self, serving: &Serving<'_>, cut: CutId) {
+        let cut = self.restore_from.unwrap_or(cut);
         for (fingerprint, unit) in serving.resident() {
-            let routed = |o: &&Object| {
-                let route = serving.storage.fingerprint_of(&object_key(o.n));
-                route.expect("a route").2 == fingerprint
-            };
-            let object = (self.objects.iter().find(routed))
-                .expect("a resident slot of a key the history knows");
-            let label = match object.later {
-                Some((label, at)) if u64::from(at) == unit => label,
-                _ => first(object.n),
-            };
-            let (n, tenure) = (object.n, serving.tenure);
-            self.events.push(Event::Restore { n, label, tenure });
+            let object = self.resident_object(serving, fingerprint);
+            let (n, label, tenure) = (object.n, object.label_on(unit), serving.tenure);
+            self.events.push(Event::Restore {
+                n,
+                label,
+                tenure,
+                cut,
+            });
         }
     }
 
@@ -1624,8 +1721,9 @@ impl<'w> Serving<'w> {
     }
 }
 
-/// `activate` records `serving`'s `Activate` event and `Recovered` step in `world`. Both name the cut when the
-/// attach's device write count is zero, and such an opened load also records a restore for every resident slot.
+/// `activate` records `serving`'s `Activate` event and `Recovered` step in `world`. Both name the cut of the checkpoint
+/// the shard record names ([`World::cut_named`], [`CUT`] when it names none) when the attach's device write count is
+/// zero, and such an opened load also records a restore from that cut for every resident slot.
 /// `activate` brings an opened load to `Live`. The caller completes the bootstrap first.
 fn activate(world: &mut World, serving: &mut Serving<'_>, source: Source) -> MetadataOutcome {
     let tenure = serving.tenure;
@@ -1636,12 +1734,12 @@ fn activate(world: &mut World, serving: &mut Serving<'_>, source: Source) -> Met
         source == Source::Named,
         "a warm attach writes nothing"
     );
-    let cut = warm.then_some(CUT);
+    let cut = warm.then(|| world.cut_named().unwrap_or(CUT));
     world.events.push(Event::Activate { tenure, cut });
     (world.steps.borrow_mut().list).push(Step::Recovered { tenure, cut });
     if outcome == MetadataOutcome::Open {
-        if warm {
-            world.record_restores(serving);
+        if let Some(cut) = cut {
+            world.record_restores(serving, cut);
         }
         // The production bring-up replayed the load in the turn that ended it.
         if serving.risen.is_none() {
@@ -2677,6 +2775,7 @@ fn suffixed(evictions: u8, suffix: Suffix, chain: Chain) -> (World, Appended) {
         n: 2,
         label: SECOND,
         units: (block_unit(lap), new_unit),
+        cut: CUT,
     });
     for (at, (lsn, bytes)) in appended.blocks.iter().enumerate() {
         let durable = suffix != Suffix::Unwritten;

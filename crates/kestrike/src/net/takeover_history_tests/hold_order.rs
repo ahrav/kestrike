@@ -211,6 +211,7 @@ fn run(others: u64, arrangement: u8) -> Seen {
                 n: MEMBER,
                 label: first(MEMBER),
                 units: (unit, unit),
+                cut: super::CUT,
             });
             let served = serving.read_all(world);
             (pending, served, covered(serving, &member, PUBLISHED))
