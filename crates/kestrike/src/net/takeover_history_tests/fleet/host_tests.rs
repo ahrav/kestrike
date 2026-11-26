@@ -3775,6 +3775,188 @@ fn a_hosts_store_outage_stops_the_record_views_of_its_boot_tenure() {
     );
 }
 
+/// Replay over scheduled actors: each round of a host scenario from the hosts' start on records its runnable
+/// actors, every running host, every tenure that steps and every running reconciler, as one forced decision at
+/// `draws::ACTORS`. The host-loss recording replays to an equal report. Control: the same tape replayed under a
+/// script that also crashes H1, which holds no tenure, so its crash opens no loss and draws nothing, is refused with
+/// `Candidates` in the round after the crash, before any actor of that round steps. Sibling: with the actor decision
+/// off in the recording and in the replay, the same extra crash replays with no refusal, so the refusal comes from
+/// the actor decision and from no other draw. The candidates are those three kinds: a standby's or an unnamed host's
+/// wait and the owner processes the host loop runs between rounds (a queued takeover, restart or rerun, a fresh
+/// activation) are not among them, so this test shows no refusal for a change in those alone.
+#[test]
+fn a_tape_recorded_with_another_set_of_runnable_actors_is_refused_before_its_round_steps() {
+    let config = Config::host_loss(1);
+    let script = || {
+        let mut script = Scenario::HostLoss.episodes(false);
+        script.push(Episode {
+            trigger: Trigger::AtTime(5),
+            scope: vec![1],
+            action: Action::Crash,
+            heal: None,
+        });
+        script
+    };
+    let played = |mut draws: Draws, script: Vec<Episode>, actors: bool| {
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(script, fleet.topology.members.len());
+        fleet.record_actors = actors;
+        let _inline = Inline::set();
+        fleet.play_script(draws)
+    };
+    let recorded = played(
+        Draws::record(config.root),
+        Scenario::HostLoss.episodes(false),
+        true,
+    );
+    let recorded = recorded.expect("a run inside the limits");
+    assert!(recorded.actor_turns > 0);
+    let replayed = played(
+        Draws::replay(recorded.tape.clone()),
+        Scenario::HostLoss.episodes(false),
+        true,
+    );
+    assert_eq!(
+        replayed.map(|report| report.digest()),
+        Ok(recorded.digest())
+    );
+
+    let refused = played(Draws::replay(recorded.tape.clone()), script(), true);
+    let Err(Stopped::Choice(refusal)) = refused.map(|report| report.summary()) else {
+        panic!("another set of runnable actors replays");
+    };
+    assert_eq!(refusal.error, crate::sim::choice::ChoiceError::Candidates);
+    assert!(refusal.applied < recorded.decisions, "{refusal:?}");
+
+    let unrecorded = played(
+        Draws::record(config.root),
+        Scenario::HostLoss.episodes(false),
+        false,
+    );
+    let unrecorded = unrecorded.expect("a run inside the limits");
+    assert_eq!(unrecorded.actor_turns, 0);
+    let unrefused = played(Draws::replay(unrecorded.tape.clone()), script(), false);
+    assert!(
+        unrefused.is_ok(),
+        "{:?}",
+        unrefused.map(|report| report.summary())
+    );
+}
+
+/// A refused runnable-actor decision steps no actor of its round. One recorded round of the host-loss fleet names
+/// every host. The same tape replayed with H1 stopped keeps a `Candidates` refusal, and the round count, the hosts'
+/// report count and the standby waits' period count stay as they were before the turn. The tape replayed with every
+/// host stopped, a round with no runnable actor, is refused the same way. Sibling: the tape replayed with every host
+/// running steps the round, so the round count, the report count and the period count all rise and the three counts
+/// can tell a stepped round from a refused one.
+#[test]
+fn a_refused_runnable_actor_decision_steps_no_actor_of_its_round() {
+    let config = Config::host_loss(1);
+    let stepped = |fleet: &Fleet<'_>| {
+        let periods: usize = fleet.cells.iter().map(|cell| cell.waits.len()).sum();
+        (fleet.round, fleet.log.reports, periods)
+    };
+    let _inline = Inline::set();
+    let (mut fleet, draws) = hosted(&config);
+    fleet.draws = Some(draws);
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let before = stepped(&fleet);
+    fleet.turn(&mut live);
+    assert_eq!(fleet.draw_refusal, None);
+    assert_eq!(fleet.actor_turns, 1);
+    let draws = fleet.draws.take().expect("the round's decisions");
+    let tape = draws.finish().expect("a recorded tape");
+
+    let replayed = |stopped: &[usize]| {
+        let mut draws = Draws::replay(tape.clone());
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("the recorded topology");
+        fleet.start_hosts();
+        for &member in stopped {
+            fleet.hosts[member].up = hosts::Up::Down;
+        }
+        fleet.draws = Some(draws);
+        let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+        assert_eq!(stepped(&fleet), before);
+        fleet.turn(&mut live);
+        (
+            fleet.draw_refusal.map(|refusal| refusal.error),
+            stepped(&fleet),
+        )
+    };
+    let candidates = Some(crate::sim::choice::ChoiceError::Candidates);
+    let every: Vec<usize> = (0..config.shape.hosts as usize).collect();
+    for stopped in [&[1][..], &every[..]] {
+        let (refusal, after) = replayed(stopped);
+        assert_eq!(refusal, candidates, "hosts {stopped:?} stopped");
+        assert_eq!(after, before, "a refused round stepped an actor");
+    }
+
+    let (refusal, after) = replayed(&[]);
+    assert_eq!(refusal, None);
+    assert_eq!(after.0, before.0 + 1);
+    assert!(after.1 > before.1 && after.2 > before.2, "{after:?}");
+}
+
+/// Each kind of runnable actor is a candidate of the round's decision. A booted reconciler fleet records one round,
+/// whose decision names its hosts, its boot tenures and its reconciler. With every host running, the tape replayed
+/// with s3's boot tenure out of its slot is refused with `Candidates`, and so is the tape replayed with the
+/// reconciler down; each refused round leaves the round count and the reconcilers' call count as they were. Sibling:
+/// the unaltered replay is refused nowhere and steps the round.
+#[test]
+fn a_replay_whose_round_lacks_one_tenure_or_one_reconciler_is_refused_with_every_host_running() {
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Lacks {
+        Nothing,
+        Tenure,
+        Reconciler,
+    }
+    let config = Config::settle(1);
+    let round = |draws: Draws, lacks: Lacks| {
+        let mut draws = draws;
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+        let _inline = Inline::set();
+        let mut seen = None;
+        let ran = fleet.play_script_with(draws, |fleet, live, _| {
+            let running = (fleet.hosts.iter()).all(|host| host.up == hosts::Up::Running);
+            assert!(running && live[3].is_some() && !fleet.reconcilers.is_empty());
+            // The tenure taken out of its slot stays alive until the round ends.
+            let _held = match lacks {
+                Lacks::Tenure => live[3].take(),
+                Lacks::Reconciler => {
+                    fleet.reconcilers[0].status = reconcile::Status::Down { until: u64::MAX };
+                    None
+                }
+                Lacks::Nothing => None,
+            };
+            let before = (fleet.round, fleet.recon.calls);
+            fleet.turn(live);
+            let refusal = fleet.draw_refusal.take().map(|refusal| refusal.error);
+            seen = Some((refusal, before, (fleet.round, fleet.recon.calls)));
+            Ok(())
+        });
+        (seen.expect("the round ran"), ran.map(|report| report.tape))
+    };
+    let ((refusal, before, after), tape) = round(Draws::record(config.root), Lacks::Nothing);
+    assert_eq!(refusal, None);
+    assert!(after.0 == before.0 + 1 && after.1 > before.1, "{after:?}");
+    let tape = tape.expect("a recorded round");
+
+    for lacks in [Lacks::Tenure, Lacks::Reconciler] {
+        let ((refusal, before, after), _) = round(Draws::replay(tape.clone()), lacks);
+        let candidates = Some(crate::sim::choice::ChoiceError::Candidates);
+        assert_eq!(refusal, candidates, "{lacks:?}");
+        assert_eq!(after, before, "{lacks:?}: a refused round stepped an actor");
+    }
+    let ((refusal, before, after), replayed) = round(Draws::replay(tape.clone()), Lacks::Nothing);
+    assert_eq!(refusal, None);
+    assert!(after.0 == before.0 + 1 && after.1 > before.1, "{after:?}");
+    assert_eq!(replayed.ok(), Some(tape));
+}
+
 /// The settle fleet with its hosts started and s0's standby, host 3, removed from the volume record's pairs, so
 /// that host's unnamed wait is due.
 fn unenrolled(config: &Config) -> Fleet<'_> {

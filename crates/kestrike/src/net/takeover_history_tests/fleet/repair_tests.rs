@@ -485,7 +485,7 @@ fn a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create_o
 /// reservation makes 0's exact-version census write lose its version condition; reconciler 1's designation over a
 /// survey a round old is refused by TICK-ORDER before any effect; each shard takes at most one designation, and the
 /// census stays under its cap. Each order of the two reconcilers in a round is one recorded decision beyond the
-/// host-loss run's.
+/// host-loss run's, with each round's runnable-actor decision left out of both counts.
 #[test]
 fn two_reconcilers_over_one_census_converge_on_one_designation_per_need() {
     two_reconcilers_over_one_census_converge_on_one_designation_per_need_on(1);
@@ -496,9 +496,13 @@ fn two_reconcilers_over_one_census_converge_on_one_designation_per_need_on(root:
     let recon = &report.recon;
     assert!(recon.condition >= 1 && recon.stale() >= 1);
     assert!(recon.raced && recon.race_shard.is_some());
-    let unrepaired = passing(&Config::host_loss(root)).decisions;
+    let unrepaired = passing(&Config::host_loss(root));
+    let unrepaired = unrepaired.decisions - unrepaired.actor_turns;
     assert!(recon.orders >= 1);
-    assert_eq!(report.decisions, unrepaired + u64::from(recon.orders));
+    assert_eq!(
+        report.decisions - report.actor_turns,
+        unrepaired + u64::from(recon.orders)
+    );
     let stale = (recon.refusals.iter())
         .any(|(_, _, refused)| matches!(refused, Refused::Discarded(Step::Designate { .. }, _)));
     assert!(stale, "{:?}", recon.refusals);
@@ -1085,21 +1089,23 @@ fn each_blocker_is_backed_by_its_own_typed_refusal_alone() {
     }
 }
 
-/// A repair run draws decisions beyond the host-loss run's, replays its tape to an equal report, and a tape one byte
-/// short is refused.
+/// A repair run draws decisions beyond the host-loss run's, each round's runnable-actor decision left out of both
+/// counts, replays its tape to an equal report, and a tape one byte short is refused.
 #[test]
 fn a_repair_run_replays_its_recording_and_a_short_tape_is_refused() {
-    let unrepaired = passing(&Config::host_loss(1)).decisions;
+    let unrepaired = passing(&Config::host_loss(1));
+    let unrepaired = unrepaired.decisions - unrepaired.actor_turns;
     for config in [Config::racing(1), Config::double_loss(1)] {
         let report = passing(&config);
         let reconcilers = config.shape.reconcilers;
+        let drawn_here = report.decisions - report.actor_turns;
         assert_eq!(
-            report.decisions > unrepaired,
+            drawn_here > unrepaired,
             reconcilers > 1,
             "two reconcilers draw their order"
         );
         let drawn = u64::from(report.recon.orders);
-        assert_eq!(report.decisions, unrepaired + drawn);
+        assert_eq!(drawn_here, unrepaired + drawn);
         assert_eq!(replay(&config, &report.recording()), Ok(report.clone()));
         let mut short = report.recording();
         short.tape.truncate(short.tape.len() - 1);

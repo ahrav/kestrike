@@ -2504,6 +2504,11 @@ impl<'c> Fleet<'c> {
                 });
             }
             self.turn(live);
+            // A refused decision stops the run before the next fault step: a runnable-actor refusal before any actor
+            // of the round stepped, a reconciler-order refusal before the round's reconcilers stepped.
+            if let Some(refusal) = self.draw_refusal.take() {
+                return Err(Stopped::Choice(refusal));
+            }
         }
         if let Some(refusal) = self.draw_refusal.take() {
             return Err(Stopped::Choice(refusal));

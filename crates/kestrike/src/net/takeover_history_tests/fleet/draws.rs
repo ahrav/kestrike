@@ -46,7 +46,21 @@ pub(crate) const RECONCILER: Site = Site {
     site: 7,
 };
 
-const SITES: [Site; 7] = [OWNER, STANDBY, NEXT, NEIGHBOUR, ROUND, OBJECT, RECONCILER];
+/// The runnable actors of a host scenario's round once its hosts started: each running host, each tenure that steps and
+/// each running reconciler, or one idle candidate when the round has none. The decision is forced to its first
+/// candidate, so it changes no step; a replay whose round holds another set of runnable actors refuses it before any
+/// actor of that round steps. The owner processes a host runs beside its serving tenures are not candidates: a
+/// standby's or an unnamed host's wait, and every owner process the host loop runs between rounds (a queued takeover,
+/// restart or rerun, a fresh activation).
+pub(crate) const ACTORS: Site = Site {
+    domain: Domain::Workload,
+    actor: SCHEDULE,
+    site: 8,
+};
+
+const SITES: [Site; 8] = [
+    OWNER, STANDBY, NEXT, NEIGHBOUR, ROUND, OBJECT, RECONCILER, ACTORS,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

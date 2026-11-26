@@ -28,10 +28,20 @@
 //! A run on the `az` layout also fills `fenced` from `oracles::fenced_before_admission`: each tenure's fence commits
 //! precede its first admitted operation.
 //!
-//! Every placement, recovery order and neighbour GET is a recorded decision, and so is the order of two reconcilers
-//! in a round; the zone loop ranks its own candidate hosts. A replay refuses a decision whose candidates differ. The round
-//! loop steps every live tenure in shard order each round, so the tape holds no runnable-actor choice among hosts
-//! and tenures, and a replay does not detect a changed set of them.
+//! Every placement, recovery order and neighbour GET is a recorded decision, and so is the order of two reconcilers in
+//! a round; the zone loop ranks its own candidate hosts. A replay refuses a decision whose candidates differ. Each
+//! round of a host scenario from the hosts' start on also records its runnable actors, the running hosts, the tenures
+//! that step and the running reconcilers, or one idle candidate when none runs, as one forced decision
+//! (`draws::ACTORS`), so a replay whose round holds another set of them is refused before that round steps; the order
+//! of those actors within a round is fixed and not recorded. The boot rounds before the hosts start record no such
+//! decision: the configuration, the recorded placements and the recorded boot order fix which tenures step in them. The
+//! owner processes a host runs beside its serving tenures are outside that decision: the waits a round steps and every
+//! owner process the host loop (`Fleet::run_hosts`) runs between rounds. Each follows its own source: a named standby's
+//! wait the shard record, an unnamed host's wait the volume record's unenrolled attach, a queued takeover an agent's
+//! nomination, a restart its host's return or its volume's cleared stall, a rerun the exit that named it, and a fresh
+//! activation the flip that made its replacement volume active. A replay that differs only in those processes meets no
+//! refused choice; its report differs where the report holds them: each shard's record history, its wait periods' read
+//! and write counts, its wait exits, and the host log.
 //!
 //! Once `Live`, every tenure runs the production serving duties, `host::Duties::turn` after each owner poll of a
 //! fleet round over an inline store lane (`host::Lane::inline`) whose client reaches the store through the cell's own
@@ -781,7 +791,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v22-inbox";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v23";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -909,6 +919,9 @@ pub(crate) struct Report {
     /// Whether the profile's plant changed the run.
     pub(crate) planted: bool,
     pub(crate) decisions: u64,
+    /// The decisions of `decisions` that record a host scenario's runnable actors, one a round from the hosts' start
+    /// on (`draws::ACTORS`).
+    pub(crate) actor_turns: u64,
     pub(crate) tape: Vec<u8>,
     pub(crate) hosts: HostLog,
     /// The oracles' inputs, which a control alters and judges again.
@@ -1098,13 +1111,14 @@ impl Report {
             self.summary(),
             format!("fleet: {id} configuration {:?}", self.config),
             format!(
-                "fleet: {id} takeovers {} crashes {} rounds {} reconciler ticks {} records without standby {} decisions {} tape {}",
+                "fleet: {id} takeovers {} crashes {} rounds {} reconciler ticks {} records without standby {} decisions {} actor-turns {} tape {}",
                 self.takeovers,
                 self.crashes,
                 self.rounds,
                 self.reconciled.ticks,
                 self.reconciled.unnamed,
                 self.decisions,
+                self.actor_turns,
                 hex(&Sha256::digest(&self.tape)),
             ),
         ];
@@ -2169,6 +2183,11 @@ struct Fleet<'c> {
     /// The rounds since the hosts started after which an unsettled host scenario stops as stalled:
     /// `hosts::HORIZON_ROUNDS`, or fewer in a control that expects the stall.
     horizon: u64,
+    /// The runnable-actor decisions [`Fleet::runnable`] recorded.
+    actor_turns: u64,
+    /// Whether [`Fleet::runnable`] records the round's runnable actors: true in every run but the replay control's
+    /// sibling, which shows the decision is what refuses another set of actors.
+    record_actors: bool,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2311,6 +2330,8 @@ impl<'c> Fleet<'c> {
             witnessed: std::collections::BTreeMap::new(),
             rerun_first: false,
             horizon: hosts::HORIZON_ROUNDS,
+            actor_turns: 0,
+            record_actors: true,
             standby_extra: None,
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));
@@ -2615,6 +2636,57 @@ impl<'c> Fleet<'c> {
         }
     }
 
+    /// Records the round's runnable actors as a forced decision at `draws::ACTORS` ([`Fleet::draws`]): each running
+    /// host by member, each live tenure that steps by `1_000` plus its slot, and each running reconciler by `2_000`
+    /// plus its index; a round with none of them records the one value `3_000`. Returns whether the round runs: a
+    /// replay whose tape names another set refuses the decision, which [`Fleet::draw_refusal`] keeps, and no actor
+    /// of the round steps. [`Fleet::turn`] calls it once the hosts started; a boot round records no decision.
+    fn runnable(&mut self, live: &Live<'_>) -> bool {
+        /// The candidate of a round with no runnable actor, above every host, tenure and reconciler value.
+        const IDLE: u64 = 3_000;
+        if self.draw_refusal.is_some() {
+            return false;
+        }
+        if !self.record_actors {
+            return true;
+        }
+        let Some(mut draws) = self.draws.take() else {
+            return true;
+        };
+        let hosts =
+            (0..self.hosts.len()).filter(|&member| self.hosts[member].up == hosts::Up::Running);
+        let tenures = (0..live.len())
+            .filter(|&slot| live[slot].is_some() && self.stepping(slot))
+            .map(|slot| 1_000 + slot);
+        // A reconciler steps when it runs, and one whose restart falls due this tick restarts before it steps.
+        let round = self.round;
+        let tick = round.is_multiple_of(reconcile::TICK_ROUNDS);
+        let running = |r: &usize| match self.reconcilers[*r].status {
+            reconcile::Status::Running => true,
+            reconcile::Status::Down { until } => tick && until <= round,
+        };
+        let reconcilers = (0..self.reconcilers.len())
+            .filter(running)
+            .map(|r| 2_000 + r);
+        let mut values: Vec<u64> = (hosts.chain(tenures).chain(reconcilers))
+            .map(|actor| actor as u64)
+            .collect();
+        // A round with no runnable actor records `IDLE`, so a replay compares that round's set too.
+        if values.is_empty() {
+            values.push(IDLE);
+        }
+        let forced = draws.forced(draws::ACTORS, draws::Tag::Actor, &values, 0);
+        self.actor_turns += 1;
+        self.draws = Some(draws);
+        match forced {
+            Ok(_) => true,
+            Err(refusal) => {
+                self.draw_refusal = Some(refusal);
+                false
+            }
+        }
+    }
+
     /// A tenure steps while its host runs.
     fn stepping(&self, slot: usize) -> bool {
         let member = match slot.checked_sub(self.cells.len()) {
@@ -2645,6 +2717,9 @@ impl<'c> Fleet<'c> {
     /// once the recovering tenure's client session is active, or in a host scenario once every open loss is
     /// restored, before the round's GETs collect, so a GET that completes in that round counts outside the window.
     fn turn(&mut self, live: &mut Live<'_>) {
+        if !self.hosts.is_empty() && !self.runnable(live) {
+            return;
+        }
         if self.repairs() {
             self.sample_roles();
         }
@@ -2851,6 +2926,11 @@ impl<'c> Fleet<'c> {
                 return Err(self.stalled(shard, waited));
             }
             self.turn(live);
+            // A refused decision stops the run: a runnable-actor refusal before any actor of the round stepped, a
+            // reconciler-order refusal before the round's reconcilers stepped.
+            if let Some(refusal) = self.draw_refusal.take() {
+                return Err(Stopped::Choice(refusal));
+            }
             turns += 1;
         }
         Ok(())
@@ -3609,6 +3689,7 @@ impl<'c> Fleet<'c> {
                         .any(|(key, _)| matches!(key, Key::Page(..))))
                 || AgentPlant::fired(self.config),
             decisions,
+            actor_turns: self.actor_turns,
             tape,
             hosts: self.log.clone(),
             evidence: Evidence {
