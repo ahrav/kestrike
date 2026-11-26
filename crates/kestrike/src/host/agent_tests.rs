@@ -3259,6 +3259,52 @@ fn the_restart_grace_is_the_constant_unless_a_test_sets_it_and_the_set_value_mov
     }
 }
 
+/// The rule [`sixty_second_grace`] fails by.
+const SIXTY: &str = "the host health bit does not turn at a silence of 60 s";
+
+/// Judges the restart grace of the agents `make` builds against the specification's 60 s, held here in `SIXTY_S`: a
+/// named role with no status, and a process silent since its last status, each leave the host healthy at 60 s and
+/// turn it unhealthy one microsecond later.
+fn sixty_second_grace(make: impl Fn(&[Status]) -> Agent) -> Result<(), &'static str> {
+    const SIXTY_S: u64 = 60_000_000;
+    let healthy_at = |agent: &mut Agent, now: u64| beat_to(&at(agent, now, &[]), 11).0.healthy;
+    let serving = [status(1, Phase::Serving)];
+    for statuses in [&[][..], &serving[..]] {
+        let (mut on_time, mut late) = (make(statuses), make(statuses));
+        if !healthy_at(&mut on_time, SIXTY_S) || healthy_at(&mut late, SIXTY_S + 1) {
+            return Err(SIXTY);
+        }
+    }
+    Ok(())
+}
+
+/// An agent under its default grace, [`RESTART_GRACE_US`], passes [`sixty_second_grace`].
+#[test]
+fn the_default_restart_grace_is_sixty_seconds() {
+    let named = [record(1, OWN, Some(11))];
+    let default = |statuses: &[Status]| synced(&named, statuses);
+    assert_eq!(sixty_second_grace(default), Ok(()));
+}
+
+/// Control of [`sixty_second_grace`]: agents whose grace is ten times the figure, or one microsecond under it, fail
+/// the rule.
+#[test]
+fn control_a_restart_grace_other_than_sixty_seconds_fails_the_rule() {
+    let named = [record(1, OWN, Some(11))];
+    for grace in [600_000_000, 59_999_999] {
+        let scaled = |statuses: &[Status]| {
+            let mut agent = synced(&named, statuses);
+            agent.set_restart_grace(grace);
+            agent
+        };
+        assert_eq!(
+            sixty_second_grace(scaled),
+            Err("the host health bit does not turn at a silence of 60 s"),
+            "a grace of {grace} us"
+        );
+    }
+}
+
 /// The status a waiting standby publishes for shard `shard` as the wait builds it: phase `Standby` at a target with
 /// no tenure, and an entry in the standby role with no tenure and no serving state.
 fn waiting_status(shard: u32) -> Status {
