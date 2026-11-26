@@ -7,6 +7,7 @@ use super::volumes::{Boundary, CrashPoint, ReplaceCell};
 use super::*;
 use crate::failover::loss::{Phase, Receipt};
 use crate::failover::records::VolumeId;
+use crate::failover::report::Gauge;
 use crate::failover::zone_loop::status::Blocker;
 
 const H0: u64 = 1001;
@@ -101,13 +102,15 @@ fn with_no_fault_the_reconciler_writes_no_receipt_and_calls_no_provider_on(root:
 }
 
 /// s3's volume stalls and the control plane reports it impaired. The loop retains the volume and its status names
-/// `VolumeImpaired` for the shard for the rest of the run. H3's restart holds at its device step, its host reports
-/// itself unhealthy, and H0, the named standby, takes the shard over by its own write and holds at its device step
-/// too. No standby is enrolled for H0 while it holds, so the shard moves once. After the stall clears, H0's restart
-/// finds H3's recorded registration still holding and recovers the shard through its lineage arm: it serves warm,
-/// and the shard carries `VolumeImpaired` while served. The loop's status puts `VolumeImpaired` before every
-/// enrollment state, so the recovered shard serves with no standby, and the volume is retained once. Nothing is
-/// provisioned, and no other shard moves.
+/// `VolumeImpaired` for the shard on every row from the impairment on, and no other blocker. H3's restart holds at its
+/// device step, its host reports itself unhealthy, and H0, the named standby, takes the shard over by its own write and
+/// holds at its device step too; each of the two hosts reports s3's entry in phase `Held` while it holds. The loop's
+/// planner passes over the standby need of the shard while its volume reads impaired (ONE-STATE of
+/// `failover::zone_loop::status`), so the shard moves once. After the stall clears, H0's restart finds H3's recorded
+/// registration still holding and recovers the shard through its lineage arm: it serves warm with no standby
+/// and carries `VolumeImpaired` while served, and the volume is retained once. Nothing is provisioned, and no other
+/// shard moves. The test reads no device-hold guard count, because under `VolumeImpaired` the planner never reaches
+/// the device-hold guard.
 #[test]
 fn an_impaired_volume_is_retained_through_one_takeover_that_holds_and_the_successor_s_restart() {
     an_impaired_volume_is_retained_through_one_takeover_that_holds_and_the_successor_s_restart_on(
@@ -125,6 +128,12 @@ fn an_impaired_volume_is_retained_through_one_takeover_that_holds_and_the_succes
     assert_eq!(report.volumes.retained, 1);
     assert_eq!(report.recon.designations, []);
     assert_eq!(carried(&report, S3), Some(Blocker::VolumeImpaired));
+    let (_, held) = held_by_both(&report);
+    let runs = runs(&report, S3);
+    assert!(
+        matches!(runs[..], [(Blocker::VolumeImpaired, _, None)]),
+        "{runs:?}"
+    );
     assert_eq!(entered(&report, S3), [Blocker::VolumeImpaired]);
     assert_eq!(moves(&report, S3), 1);
     let last = history(&report, S3).last().unwrap();
@@ -135,6 +144,7 @@ fn an_impaired_volume_is_retained_through_one_takeover_that_holds_and_the_succes
     // The stalled volume delivers no completion, so the takeover's first Report after its compare-and-swap times out.
     assert_eq!(attempts, [(S3, H0, Some("FirstReport"))]);
     let recovered = recovered_by_the_arm(&report);
+    assert!(held < recovered && runs[0].1 < recovered, "{runs:?}");
     no_standby_while_held(&report, recovered);
     others_keep_serving(&report, &[S3]);
     assert_eq!(report.hosts.exempt, BTreeSet::from([S3]));
@@ -196,10 +206,38 @@ fn no_standby_while_held(report: &Report, recovered: u64) {
     assert!(early.is_empty(), "{early:?}");
 }
 
-/// A stall the control plane reports healthy: H3 holds, H0 takes s3 over once and holds at its own device step, the
-/// shard carries `DeviceFailureHold` with no standby enrolled for H0, and nothing is provisioned. After the stall
-/// clears, H0's restart finds H3's recorded registration still holding and recovers the shard through its lineage
-/// arm: the shard ends served with a standby enrolled again and carries no blocker.
+/// `shard`'s runs of one blocker in the loop's status rows: the blocker, the round of its first row and the round of
+/// the first row that named another or none.
+fn runs(report: &Report, shard: u32) -> Vec<(Blocker, u64, Option<u64>)> {
+    (report.recon.runs.iter())
+        .filter(|(of, ..)| *of == shard)
+        .map(|(_, blocker, from, to)| (*blocker, *from, *to))
+        .collect()
+}
+
+/// The faulted shard's two holds as the hosts report them: each of H3, the first owner, and H0, its successor, begins
+/// to carry s3's entry in phase `Held` (the harness's `volumes::Held`) once, H3 in a report sealed no later than H0's.
+/// Both first appear in the reports of one seal, since H0's takeover holds within the report period of H3's hold, so
+/// the order is read from the sealing rounds and not from the log's order within a round. Returns those two rounds.
+fn held_by_both(report: &Report) -> (u64, u64) {
+    let held: Vec<_> = (report.hosts.held.iter())
+        .filter(|(.., shard)| *shard == S3)
+        .collect();
+    assert_eq!(held.len(), 2, "{held:?}");
+    let began = |host: u64| {
+        let at = held.iter().find(|(_, of, _)| *of == host);
+        at.map(|(round, ..)| *round).expect("the host's held entry")
+    };
+    let (first, successor) = (began(H3), began(H0));
+    assert!(first <= successor, "{held:?}");
+    (first, successor)
+}
+
+/// A stall the control plane reports healthy: H3 holds, H0 takes s3 over once and holds at its own device step, each
+/// host reports s3's entry in phase `Held` while it holds, the status names `DeviceFailureHold` in one continuous run
+/// from the first host's hold to the successor's recovery with no standby enrolled for H0, and nothing is provisioned.
+/// After the stall clears, H0's restart finds H3's recorded registration still holding and recovers the shard through
+/// its lineage arm: the shard ends served with a standby enrolled again and carries no blocker.
 #[test]
 fn a_stall_the_control_plane_reports_healthy_moves_the_shard_once_holds_and_recovers_by_the_successor_s_restart()
  {
@@ -212,12 +250,29 @@ fn a_stall_the_control_plane_reports_healthy_moves_the_shard_once_holds_and_reco
     provisions_nothing(&report);
     assert_eq!(report.volumes.retained, 0);
     assert_eq!(moves(&report, S3), 1);
+    let (first, held) = held_by_both(&report);
     let hold = Blocker::DeviceFailureHold;
     assert_eq!(entered(&report, S3), [hold]);
     assert_eq!(carried(&report, S3), None);
     let recovered = recovered_by_the_arm(&report);
+    assert!(held < recovered);
     assert!(report.volumes.guarded >= 1);
     no_standby_while_held(&report, recovered);
+    // H0's recovery slot as its sealed reports read it, by sealing round.
+    let slot: Vec<(u64, Gauge)> = (report.hosts.headrooms.iter())
+        .filter(|(_, host, _)| *host == H0)
+        .map(|(round, _, gauges)| (*round, gauges[2]))
+        .collect();
+    let (busy, free) = (Gauge::known(1, 1), Gauge::known(0, 1));
+    let freed = slot
+        .iter()
+        .find(|(round, gauge)| *round >= recovered && *gauge == free);
+    let (freed, _) = *freed.expect("a report of H0 sealed after its recovery");
+    let runs = runs(&report, S3);
+    assert!(
+        matches!(runs[..], [(Blocker::DeviceFailureHold, from, Some(to))] if first <= from && from < recovered && to == freed),
+        "{runs:?}"
+    );
     let settled = &report.evidence.settled[FAULTED];
     assert!(settled.served && settled.blocker.is_none(), "{settled:?}");
     let last = history(&report, S3).last().unwrap();
@@ -227,20 +282,18 @@ fn a_stall_the_control_plane_reports_healthy_moves_the_shard_once_holds_and_reco
         "the recovered shard has a standby enrolled again"
     );
     others_keep_serving(&report, &[S3]);
-    // s3's former owner H3 and its successor H0 each hold their recovery of s3, and a sealed report of each reads
-    // the recovery slot held. H3's last sealed report still reads it held; H0's, sealed after its restart serves
-    // through the lineage arm, reads the slot free.
-    let held = crate::failover::report::Gauge::known(1, 1);
-    for host in [1001, 1004] {
-        let sealed = report.hosts.sealed(host);
-        assert!(sealed.iter().any(|gauges| gauges[2] == held), "host {host}");
-    }
-    let last = |host| report.hosts.sealed(host).last().map(|gauges| gauges[2]);
-    assert_eq!(last(1004), Some(held), "host 1004");
+    // s3's former owner H3 holds its recovery of s3 to the end, so its last sealed report reads the recovery slot
+    // held. Its successor H0 reads it held in a report sealed while it holds and free in its last report, after it
+    // recovered through the arm.
+    let last = report.hosts.sealed(H3).last().map(|gauges| gauges[2]);
+    assert_eq!(last, Some(busy), "host {H3}");
+    let holding =
+        (slot.iter()).any(|(round, gauge)| (held..recovered).contains(round) && *gauge == busy);
+    assert!(holding, "host {H0}: {slot:?}");
     assert_eq!(
-        last(1001),
-        Some(crate::failover::report::Gauge::known(0, 1)),
-        "host 1001"
+        slot.last().map(|(_, gauge)| *gauge),
+        Some(free),
+        "host {H0}"
     );
 }
 

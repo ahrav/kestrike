@@ -23,8 +23,8 @@
 //! `reconcile::REPAIR_SETTLE_ROUNDS` in a reconciler scenario, `within_share` HOST-SHARE over each host's seeded
 //! roles, or in a reconciler scenario over the shape's static roles bound and the most roles each host held,
 //! `untouched` the shards that serve through another shard's recovery, whose only store requests are their own
-//! duties' record views, and `census` fleet oracle F4 in a reconciler
-//! scenario.
+//! duties' record views and, in a host scenario, their standby's wait, at most two record reads and no write a view
+//! period, and `census` fleet oracle F4 in a reconciler scenario.
 //! A run on the `az` layout also fills `fenced` from `oracles::fenced_before_admission`: each tenure's fence commits
 //! precede its first admitted operation.
 //!
@@ -206,10 +206,13 @@ pub(crate) enum Plant {
     /// coverage write of a tenure's duties reached the store and got an unknown reply; a write a holder host's
     /// outage answers unknown ([`HostOut`]) reaches no store and is not counted.
     AckOnUnknown,
+    /// Each view period while waiting, the indexed shard's standby supplements its role read with one read of
+    /// either its own shard record or the record named by `Fleet::standby_extra`.
+    StandbyExtraRead,
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -231,6 +234,7 @@ impl Plant {
         Self::ExtraRead,
         Self::DutyRewrite,
         Self::AckOnUnknown,
+        Self::StandbyExtraRead,
     ];
 
     /// `Config::identity` encodes the hostile profile with the plant code.
@@ -257,6 +261,7 @@ impl Plant {
             Self::ExtraRead => 51,
             Self::DutyRewrite => 52,
             Self::AckOnUnknown => 53,
+            Self::StandbyExtraRead => 54,
         }
     }
 }
@@ -720,9 +725,8 @@ impl Config {
     }
 }
 
-/// The format tag [`Config::identity`] hashes first: `fleet-v18-deposed`, since the duties line lists each deposed
-/// tenure that `serve::teardown` closed.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v18-deposed";
+/// The format tag [`Config::identity`] hashes first.
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v19-inbox";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -778,6 +782,10 @@ pub(crate) struct ShardReport {
     /// per tenure from its start: a fencer's or an overlapping tenure's Report on the same table in that interval
     /// counts too.
     pub(crate) reports: usize,
+    /// The reads and the writes of each view period of the shard's standby wait, in period order.
+    pub(crate) waits: Vec<(u64, u64)>,
+    /// The exit of each view period of the shard's standby wait that ended other than `Exit::Stopped`.
+    pub(crate) wait_exits: Vec<String>,
 }
 
 impl ShardReport {
@@ -1023,9 +1031,10 @@ impl Report {
         )
     }
 
-    /// The summary, the configuration, the run's counts with the tape's hash, for a host run one line with every
-    /// field of its host log, for a reconciler run one line with the reconcilers' counts and logs, one line per shard,
-    /// and the hash of the whole report's `Debug` form, which holds the oracles' inputs and all other report fields.
+    /// The output includes the summary, configuration, run counts, and tape hash. Host runs include one line with
+    /// host log counts and lists. Reconciler runs include one line with reconciler counts and logs. Each shard has one
+    /// line. The output also includes a hash of the entire report's `Debug` form, including oracle inputs and held
+    /// starts (`HostLog::held`).
     pub(crate) fn lines(&self) -> Vec<String> {
         let id = &self.identity;
         let mut lines = vec![
@@ -1161,7 +1170,7 @@ impl Report {
         }
         for shard in &self.shards {
             lines.push(format!(
-                "fleet: {id} shard {} zone {} owner {} standby {} attempts {} neighbour {}/{} objects {:?} reports {} blockers {:?} activated {:?} recoveries {:?}",
+                "fleet: {id} shard {} zone {} owner {} standby {} attempts {} neighbour {}/{} objects {:?} reports {} blockers {:?} activated {:?} recoveries {:?} waits {:?} wait-exits {:?}",
                 shard.placement.shard.get(),
                 shard.placement.zone.0,
                 shard.owner.get(),
@@ -1174,6 +1183,8 @@ impl Report {
                 shard.blockers,
                 shard.activated,
                 shard.recoveries,
+                shard.waits,
+                shard.wait_exits,
             ));
         }
         let whole = Sha256::digest(format!("{self:?}").as_bytes());
@@ -1444,6 +1455,13 @@ struct Cell {
     duty_exits: Vec<(Tenure, crate::host::Exit)>,
     /// Each closed tenure whose serving turn read its recovery line.
     lines: Vec<Tenure>,
+    /// The store requests the shard's standby sent to each of the shard's records over the view periods of its
+    /// wait, by key.
+    waited: std::collections::BTreeMap<Key, u64>,
+    /// The reads and the writes of each view period of the shard's standby wait, in period order.
+    waits: Vec<(u64, u64)>,
+    /// The exit of each view period of the shard's standby wait that ended other than `Exit::Stopped`.
+    wait_exits: Vec<String>,
     /// While a rerun's restart runs, the round its tenure ended, which the recovery's rounds count from.
     rerun_from: Option<u64>,
     /// The object of each GET offered to the shard during another shard's recovery.
@@ -1593,6 +1611,9 @@ impl Cell {
             duty_opened: 0,
             duty_exits: Vec::new(),
             lines: Vec::new(),
+            waited: std::collections::BTreeMap::new(),
+            waits: Vec::new(),
+            wait_exits: Vec::new(),
             rerun_from: None,
             requested: Vec::new(),
             third: third.map(|(member, record)| (member, record.pair(), Stored(Ok(record)))),
@@ -1660,6 +1681,17 @@ impl Cell {
         self.keys().map(|key| store.requests(&key)).sum()
     }
 
+    /// Adds the requests of one view period of the shard's standby wait on the shard's records to `waited`.
+    fn excuse(&mut self, counts: &owners::WaitCounts) {
+        let keys: Vec<Key> = self.keys().collect();
+        for key in keys {
+            let requests = counts.on(&key);
+            if requests > 0 {
+                *self.waited.entry(key).or_default() += requests;
+            }
+        }
+    }
+
     /// The key of the coverage page that holds object `n`, from the page count the seeded shard record declares.
     /// The cell holds that count, so the store's request counters stay as they were.
     fn page_key(&self, n: u8) -> Key {
@@ -1706,9 +1738,11 @@ impl Cell {
     }
 
     /// Ends `serving`'s tenure in the cell's account: samples its device capture, counts a flip request its
-    /// authority latched, adds the Reports it submitted and, when `counted`, counts an authority that no longer
-    /// reads `Serving`. A caller counts a tenure whose client session opened and that no fault deposed. A tenure
-    /// that ends at a `Rerun` or a `Deposed` exit closes uncounted: `hosts::unscripted_exit` judges its exit.
+    /// authority latched, settles the INVALIDATEs the tenure held and never acknowledged against the coverage pages
+    /// committed under its fence, adds the Reports the volume's table logged since the tenure started and, when
+    /// `counted`, counts an authority that no longer reads `Serving`. A caller counts a tenure whose client session
+    /// opened and that no fault deposed. A tenure that ends at a `Rerun` or a `Deposed` exit closes uncounted:
+    /// `hosts::unscripted_exit` judges its exit.
     fn close(&mut self, serving: &Serving<'_>, counted: bool) {
         closed(&self.world, serving);
         let opened = (serving.duties.as_ref())
@@ -1850,6 +1884,8 @@ struct Sampled {
     /// The round of the sample, and the requests the shard's serving duties made on its records by then.
     round: u64,
     duty: oracles::Views,
+    /// The view periods of the shard's standby wait by then.
+    waits: usize,
 }
 
 /// One GET drawn for an episode: the down round it goes out in, its target cell and its object.
@@ -1971,10 +2007,12 @@ struct Fleet<'c> {
     faulted_withdrawal: Option<crate::failover::serving::Cause>,
     /// [`DutyLog::torn`].
     torn: Vec<(u32, Tenure, bool)>,
-    /// The cells whose next incarnation a tenure's exit queued, until that restart runs. The host loop runs each once
-    /// every open loss has sent its drawn GETs, so a rerun's load and sweep take no round from them, and while its host
-    /// is not paused (`Fleet::rerun_due`).
-    reruns: std::collections::BTreeMap<usize, (usize, u64)>,
+    /// When a control targets another shard, [`Plant::StandbyExtraRead`] reads the record identified by this key.
+    standby_extra: Option<Key>,
+    /// The cells whose next incarnation a tenure's exit queued, each with its member, its ended tenure and the round
+    /// it ended, until that restart runs. The host loop runs each once every open loss has sent its drawn GETs, so a
+    /// rerun's load and sweep take no round from them, and while its host is not paused (`Fleet::rerun_due`).
+    reruns: std::collections::BTreeMap<usize, (usize, Tenure, u64)>,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2107,6 +2145,7 @@ impl<'c> Fleet<'c> {
             faulted_withdrawal: None,
             torn: Vec::new(),
             reruns: std::collections::BTreeMap::new(),
+            standby_extra: None,
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));
         Ok(fleet)
@@ -2445,6 +2484,9 @@ impl<'c> Fleet<'c> {
         }
         if !self.hosts.is_empty() {
             self.host_round(live);
+            if self.round.is_multiple_of(DUTY_VIEW_US / ROUND_US) {
+                self.standby_waits();
+            }
         }
         if self.repairs() {
             self.reconcile_round();
@@ -2550,13 +2592,14 @@ impl<'c> Fleet<'c> {
             }
             let serving = live[at].take().expect("the ended tenure");
             let reruns = matches!(serving.duty_exit, Some(crate::host::Exit::Rerun(_)));
+            let tenure = serving.tenure;
             let shut = self.tear_down(at, serving);
             self.release_watches(at);
             // A kept owner holds its custody: `serve` returns it as `Served::Kept`, and its process neither parks nor
             // reruns. The fleet's device double needs no proven stop, so the kept owner drops here.
             let member = self.cells[at].holder;
             if reruns && shut && self.record_now(at).owner == self.topology.members[member].host {
-                self.reruns.insert(at, (member, self.round));
+                self.reruns.insert(at, (member, tenure, self.round));
             }
         }
     }
@@ -3080,8 +3123,8 @@ impl<'c> Fleet<'c> {
         )
     }
 
-    /// The requests on cell `at`'s records that no reconciler, no host's enrollment and no tenure's serving duties
-    /// made.
+    /// `hosts_requests` subtracts reconciler, enrollment, serving-duty, and local standby-wait requests from the
+    /// store's record-request count for cell `at`. `oracles::STANDBY_READS` checks the standby-wait budget.
     fn hosts_requests(&self, at: usize) -> u64 {
         let cell = &self.cells[at];
         let tallied = self.tallied.borrow();
@@ -3089,13 +3132,40 @@ impl<'c> Fleet<'c> {
             .keys()
             .map(|key| tallied.get(&key).copied().unwrap_or(0))
             .sum();
+        let waited: u64 = cell
+            .keys()
+            .map(|key| cell.waited.get(&key).copied().unwrap_or(0))
+            .sum();
         let duty = self.duty_views(at);
         cell.requests(&self.store)
             - reconciled
+            - waited
             - duty.volume
             - duty.shard
             - duty.other
             - duty.writes
+    }
+
+    fn standby_client(
+        &self,
+        member: usize,
+        counts: &owners::WaitCounts,
+    ) -> crate::storage::store::Client<
+        crate::storage::store::sim::Faulted<DutyCounted>,
+        crate::storage::store::sim::MemLog,
+    > {
+        let store = crate::storage::store::sim::Faulted {
+            inner: DutyCounted {
+                inner: self.store.clone(),
+                counts: counts.keys.clone(),
+                unknowns: DutyUnknowns::default(),
+                stale: StaleRead::default(),
+            },
+            actor: member as u32,
+            faults: self.faults.store.clone(),
+        };
+        let client = crate::storage::store::Client::open(store, self.hosts[member].log.clone());
+        client.expect("a host's store client")
     }
 
     /// A store of the serving duties' counts over the shared store, with no stale read aimed.
@@ -3127,7 +3197,7 @@ impl<'c> Fleet<'c> {
         views
     }
 
-    /// Cell `at`'s requests, records and duty requests now, for the untouched-shard check.
+    /// Cell `at`'s requests, records, duty requests and standby wait periods now, for the untouched-shard check.
     fn sample(&self, at: usize) -> Sampled {
         Sampled {
             at,
@@ -3135,11 +3205,12 @@ impl<'c> Fleet<'c> {
             seen: self.cells[at].seen(&self.store),
             round: self.round,
             duty: self.duty_views(at),
+            waits: self.cells[at].waits.len(),
         }
     }
 
     /// Records, for each shard that served when the episode's owner crashed, whether its records took a store
-    /// request other than its own serving duties' since the crash, what those duties requested, and whether its record's tenure and owner or its route differ from the crash's
+    /// request other than its own serving duties' and its standby wait's since the crash, the periods of that wait, what those duties requested, and whether its record's tenure and owner or its route differ from the crash's
     /// sample or its authority no longer reads `Serving`. The samples are taken once the episode's GETs
     /// drained, so a change confined to the interval between is not seen.
     fn watch(&mut self, live: &Live<'_>, episode: &Episode) {
@@ -3160,6 +3231,8 @@ impl<'c> Fleet<'c> {
                     writes: now.writes - then.writes,
                     rounds: self.round - neighbor.round,
                 },
+                waits: (!self.hosts.is_empty())
+                    .then(|| oracles::Waits::of(&cell.waits[neighbor.waits..])),
             });
         }
     }
@@ -3351,6 +3424,8 @@ impl<'c> Fleet<'c> {
                         .map(|&(_, tenure, host)| (tenure, host))
                         .collect(),
                     reports: cell.reports,
+                    waits: cell.waits.clone(),
+                    wait_exits: cell.wait_exits.clone(),
                 })
                 .collect(),
             crashes: self.crashes,
@@ -3700,7 +3775,7 @@ fn duties_acknowledged(world: &mut World, serving: &mut Serving<'_>, n: u8) -> b
     false
 }
 
-/// The reads and the writes of the tenures' serving duties, by key.
+/// The reads and the writes of the tenures' serving duties, or of one view period of a standby wait, by key.
 pub(crate) type DutyCounts =
     std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<Key, (u64, u64)>>>;
 
@@ -3737,7 +3812,8 @@ pub(crate) enum Stale {
     Record,
 }
 
-/// Counts each read and each write it forwards in `counts`, by key: the store of a tenure's serving duties. Each
+/// Counts each read and each write it forwards in `counts`, by key: the store of a tenure's serving duties and of a
+/// standby wait's view period, which aims no stale read. Each
 /// write whose reply is unknown joins `unknowns`. While `stale` aims at a shard and a record kind, the next read of
 /// such a record of the shard that holds two committed versions or more returns the earlier version [`Stale`] names,
 /// clears the aim and marks the stale read served.

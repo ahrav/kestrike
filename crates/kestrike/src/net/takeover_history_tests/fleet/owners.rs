@@ -282,23 +282,30 @@ where
         strategy: cell.world.strategy,
         now: Rc::clone(&now),
     };
-    let (disk, control) = device(cell, pair);
-    grounds.fencer.drive(&control);
     let gate = HostGate::qualified();
     let (store, host) = (store.clone(), of.host);
-    // The record a device call met before the committed takeover, judged once `host::stand_by` returns, outside
-    // its unwind boundary.
-    let early_call: Slot<Option<(Host, Option<Host>)>> = Slot::new(None);
+    // The device double is made at the connect, the takeover's first device call, so a period that starts no
+    // takeover makes none. The record a device call met before the committed takeover is judged once
+    // `host::stand_by` returns, outside its unwind boundary.
+    let connected: RefCell<Option<SimControl>> = RefCell::new(None);
+    // The record the connect met: its owner and standby, or `None` for an absent or undecodable record or one of
+    // another shard, each of which the assertion after `host::stand_by` fails.
+    type Met = Option<(Host, Option<Host>)>;
+    let early_call: Slot<Option<Met>> = Slot::new(None);
     let connect = || {
-        let record = {
+        let met = {
             let store = store.0.borrow();
-            let item = store.current(&crate::storage::store::Key::Shard(shard));
-            ShardRecord::decode(&item.expect("a stored shard record").value)
-                .expect("a shard record")
+            (store.current(&crate::storage::store::Key::Shard(shard)))
+                .and_then(|item| ShardRecord::decode(&item.value).ok())
+                .filter(|record| record.shard == shard)
+                .map(|record| (record.owner, record.standby))
         };
-        if (record.owner, record.standby) != (host, None) {
-            early_call.set(Some((record.owner, record.standby)));
+        if met != Some((host, None)) {
+            early_call.set(Some(met));
         }
+        let (disk, control) = device(cell, pair);
+        grounds.fencer.drive(&control);
+        *connected.borrow_mut() = Some(control);
         Ok((disk, pair))
     };
     let mut fencer =
@@ -339,8 +346,9 @@ where
         None,
         "the first device call follows the committed takeover"
     );
+    let control = connected.into_inner();
     match stood {
-        Ok(tenure) => Stood::Tenure(tenure, control, now),
+        Ok(tenure) => Stood::Tenure(tenure, control.expect("a takeover's device"), now),
         Err(ended) => {
             let host::recover::Ended {
                 exit,
@@ -348,7 +356,7 @@ where
                 refusal,
             } = *ended;
             if let host::fencer::Release::Outstanding(table) = device {
-                stop_table(table, &control);
+                stop_table(table, control.as_ref().expect("a connected device"));
             }
             // `host::stand_by` contains a takeover's unwind and ends `Rerun(Unwound)`. The period fails here,
             // outside that boundary.
@@ -468,5 +476,102 @@ pub(super) fn blocker(exit: &Exit, refusal: Option<RecoveryRefusal>) -> String {
     match refusal.and_then(check_of) {
         Some(check) => format!("{check:?}"),
         None => format!("{exit:?}"),
+    }
+}
+
+/// `WaitCounts` holds the reads and the writes of one view period of a standby wait, by key.
+#[derive(Default)]
+pub(crate) struct WaitCounts {
+    pub(crate) keys: super::DutyCounts,
+}
+
+impl WaitCounts {
+    /// The period's reads and writes over every key.
+    fn tally(&self) -> (u64, u64) {
+        let counts = self.keys.borrow();
+        counts
+            .values()
+            .fold((0, 0), |(reads, writes), (read, written)| {
+                (reads + read, writes + written)
+            })
+    }
+
+    /// The period's requests on `key`.
+    pub(crate) fn on(&self, key: &crate::storage::store::Key) -> u64 {
+        let counts = self.keys.borrow();
+        counts.get(key).map_or(0, |(reads, writes)| reads + writes)
+    }
+}
+
+thread_local! {
+    /// The arena and fencer clock a standby's view period with no witness takes: such a period starts no takeover,
+    /// so its fencer never connects and nothing attaches over them.
+    static WAITS: &'static Grounds = Box::leak(Box::new(Grounds::over(crate::storage::warm_sim::storage(1))));
+}
+
+impl Fleet<'_> {
+    /// One view period of every standby wait: each running host the shard record names standby of a shard it does
+    /// not hold, and whose nomination queue holds no witness for the shard's active volume, runs `host::stand_by`
+    /// for one period with no witness, over its own store client, whose requests the
+    /// client counts by key for that period ([`WaitCounts`]). `Cell::excuse` adds the period's requests on the
+    /// shard's records to `Cell::waited`, by key. Each
+    /// period's reads and writes join the shard's wait tally (`Cell::waits`), and a period that ended other than
+    /// `Exit::Stopped` is listed (`Cell::wait_exits`); the untouched-shard rule bounds every period at two reads and
+    /// no write. Under [`super::Plant::StandbyExtraRead`] the standby of the shard at the index reads the
+    /// shard record once more in each period.
+    pub(super) fn standby_waits(&mut self) {
+        for at in 0..self.cells.len() {
+            let record = self.record_now(at);
+            let Some(standby) = record.standby else {
+                continue;
+            };
+            let Some(member) = self.member_of(standby) else {
+                continue;
+            };
+            let cell = &self.cells[at];
+            if cell.holder == member || self.hosts[member].up != super::hosts::Up::Running {
+                continue;
+            }
+            // A process whose inbox holds a nomination for the shard's active volume runs its period with the
+            // witness, in `Fleet::take_over`.
+            let inbox = (member, record.active);
+            if (self.nominated.iter()).any(|(of, on, ..)| (*of, *on) == inbox) {
+                continue;
+            }
+            let Some((pair, local)) = cell.local_of(member) else {
+                continue;
+            };
+            let of = self.topology.members[member];
+            let counts = WaitCounts::default();
+            let mut client = self.standby_client(member, &counts);
+            if self.config.planted_at(super::Plant::StandbyExtraRead, at) {
+                self.planted = true;
+                let own = crate::storage::store::Key::Shard(cell.placement.shard);
+                let key = self.standby_extra.unwrap_or(own);
+                let _ = client.read::<crate::failover::records::ShardRecord>(key);
+            }
+            let refused = |_| Err(AdmissionError::AttemptConsumed);
+            let stood = WAITS.with(|grounds| {
+                stand_by(
+                    (cell, of, pair),
+                    (self.round, &self.store),
+                    grounds,
+                    (&mut client, &local),
+                    (None, false),
+                    refused,
+                )
+            });
+            drop(client);
+            let Stood::Ended(exit, _) = stood else {
+                panic!("a view period with no witness acquired a tenure");
+            };
+            let (reads, writes) = counts.tally();
+            let cell = &mut self.cells[at];
+            cell.excuse(&counts);
+            cell.waits.push((reads, writes));
+            if exit != Exit::Stopped {
+                cell.wait_exits.push(format!("{exit:?}"));
+            }
+        }
     }
 }

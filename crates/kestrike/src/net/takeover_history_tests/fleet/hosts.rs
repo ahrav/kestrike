@@ -645,6 +645,8 @@ pub(crate) struct HostActor {
     probes: Vec<(u64, [u8; probe::LEN])>,
     /// Each process status the latest turn passed to the agent: its shard, volume, process id and phase.
     published: Vec<(crate::net::ownership::Shard, VolumeId, u32, OwnerPhase)>,
+    /// The shards whose entry the host's last accepted report carried in phase `Held`.
+    held: Vec<u32>,
     pub(super) log: MemLog,
 }
 
@@ -671,8 +673,9 @@ pub(crate) struct HostLog {
     pub(crate) lapsed: u32,
     /// The reruns of an ended tenure that found no free tenure slot on their host and ran no incarnation.
     pub(crate) unslotted: u32,
-    /// The reruns of an ended tenure whose shard record named another owner, or whose host had stopped, when the
-    /// rerun's turn came; they ran no incarnation.
+    /// The reruns of an ended tenure whose shard record named another owner or another tenure of its host, whose
+    /// cell served a tenure, or whose host was down, when the rerun's turn came; they ran no incarnation. A paused
+    /// host's rerun stays queued until the host resumes.
     pub(crate) rerun_dropped: u32,
     pub(crate) takeovers: Vec<Attempt>,
     pub(crate) reports: u32,
@@ -708,6 +711,9 @@ pub(crate) struct HostLog {
     /// Each change of a host's accepted report in its attachments, workers and recovery gauges: the round since the
     /// hosts started, the host and the three gauges, the host's first accepted report included.
     pub(crate) headrooms: Vec<(u64, u64, [Gauge; 3])>,
+    /// Each start of a host's held entry: the round since the hosts started, the host and the shard, at the first
+    /// accepted report of the host's boot that carries the shard's entry in phase `Held` after one that did not.
+    pub(crate) held: Vec<(u64, u64, u32)>,
 }
 
 /// One entry of [`HostLog::stores`]: the round since the hosts started, the host, the shard, and the entry's store
@@ -1489,6 +1495,7 @@ impl<'c> Fleet<'c> {
         host.inbox.clear();
         host.probes.clear();
         host.published.clear();
+        host.held.clear();
         let period = NonZeroU64::new(REPORT_ROUNDS * ROUND_US).expect("a report period");
         let writer =
             report::tests::writer_for(host.host, &host_key(host.host), host.nonce(), period);
@@ -1519,6 +1526,7 @@ impl<'c> Fleet<'c> {
                 inbox: Vec::new(),
                 probes: Vec::new(),
                 published: Vec::new(),
+                held: Vec::new(),
                 log: MemLog::default(),
             })
             .collect();
@@ -1733,6 +1741,15 @@ impl<'c> Fleet<'c> {
                     if last.is_none_or(|(_, _, before)| *before != gauges) {
                         let round = self.round - self.host_start;
                         self.log.headrooms.push((round, host, gauges));
+                    }
+                    let held: Vec<u32> = (accepted.entries.iter())
+                        .filter(|entry| entry.phase == Some(OwnerPhase::Held))
+                        .map(|entry| entry.shard.get())
+                        .collect();
+                    let before = std::mem::replace(&mut self.hosts[member].held, held.clone());
+                    for shard in held.into_iter().filter(|shard| !before.contains(shard)) {
+                        let round = self.round - self.host_start;
+                        self.log.held.push((round, host, shard));
                     }
                     for entry in &accepted.entries {
                         let store = SealedStore {
@@ -2097,13 +2114,8 @@ impl<'c> Fleet<'c> {
                     let reservation = &self.cells[at].world.reservation;
                     let cntlid = reservation.borrow().entries.len() as u16 + 1;
                     let entry = crate::failover::fresh::tests::registrant(foreign, cntlid, false);
+                    // Every fleet tenure answers Reports from this table (`Fleet::rise`).
                     reservation.borrow_mut().entries.push(entry);
-                    // A tenure whose device answers Reports from the volume's table already reads the entry.
-                    if let Some(serving) = &live[at]
-                        && !std::rc::Rc::ptr_eq(&serving.registry, reservation)
-                    {
-                        serving.registry.borrow_mut().entries.push(entry);
-                    }
                     self.planted = true;
                 }
                 Effect::Stall(at) => {
@@ -2342,8 +2354,8 @@ impl<'c> Fleet<'c> {
             // A rerun waits until each open loss has sent its drawn GETs, so its load takes no round from them.
             let sent = self.losses.iter().all(|loss| loss.episode.due.is_empty());
             if sent && let Some(at) = self.rerun_due() {
-                let (member, ended) = self.reruns.remove(&at).expect("the due rerun");
-                self.rerun(live, slots, (at, member, ended))?;
+                let (member, tenure, ended) = self.reruns.remove(&at).expect("the due rerun");
+                self.rerun(live, slots, (at, member, tenure, ended))?;
                 continue;
             }
             if let Some(at) = self.fresh_due() {
@@ -2388,7 +2400,7 @@ impl<'c> Fleet<'c> {
     /// rerun stays queued until the host resumes; a run that ends with the host still paused leaves it unrun.
     fn rerun_due(&self) -> Option<usize> {
         let mut queued = self.reruns.iter();
-        queued.find_map(|(&at, &(member, _))| (self.hosts[member].up != Up::Paused).then_some(at))
+        queued.find_map(|(&at, &(member, ..))| (self.hosts[member].up != Up::Paused).then_some(at))
     }
 
     /// Tracks the settle phase of a run whose reconcilers run. The phase starts at the first round with every

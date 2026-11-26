@@ -668,9 +668,8 @@ fn bring_up_case(case: Case, drive: Drive) -> (Ended, Target) {
 /// `bring_up` and a bring-up driven turn by turn through `start_up` and `turn_up` end in the same state for the same
 /// inputs: the same end (`Live`, `Held` at the tenure, `Retire` at the tenure), readiness, resident units, clock reads
 /// (one per poll), device writes (the fresh case's one format) and reservation commands. The clock reads, device
-/// writes and reservation commands of each case are pinned to the counts the single blocking poll loop gave over
-/// the same inputs, so a change of `turn_up` that both arms share, such as a second poll in a turn or a poll past the
-/// bootstrap's end, changes a pinned count.
+/// writes and reservation commands of each case are pinned, so a change of `turn_up` that both arms share, such as a
+/// poll past the bootstrap's end, changes a pinned count.
 #[test]
 fn a_bring_up_driven_turn_by_turn_ends_where_bring_up_ends() {
     for (case, pinned) in [

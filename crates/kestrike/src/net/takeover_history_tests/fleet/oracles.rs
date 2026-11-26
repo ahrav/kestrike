@@ -47,6 +47,9 @@ pub(crate) const STORE_REQUEST: &str =
 pub(crate) const VIEW_WRITE: &str = "an untouched shard's serving duties wrote its records";
 pub(crate) const VIEW_READS: &str = "an untouched shard's reads were other than one volume-record and one shard-record read a view period";
 pub(crate) const TENURE_MOVED: &str = "an untouched shard changed its tenure";
+pub(crate) const STANDBY_READS: &str = "an untouched shard's standby made more than two record reads or a write in a view period of its wait";
+pub(crate) const NO_WAIT: &str =
+    "no untouched shard's standby ran a view period of its wait during a recovery";
 pub(crate) const REFUSED: &str = "an untouched shard did not serve a request its object's bytes";
 pub(crate) const NO_NEIGHBOUR: &str = "no request reached an untouched shard during a recovery";
 pub(crate) const NO_WATCH: &str = "a request reached a shard that no watch covers";
@@ -336,6 +339,29 @@ pub(crate) struct Watched {
     pub(crate) moved: bool,
     /// What the shard's own serving duties did on its records over the same interval.
     pub(crate) views: Views,
+    /// The view periods of the shard's standby wait over the same interval, the most reads one of them made, and the
+    /// writes they made together; `None` in a run with no hosts.
+    pub(crate) waits: Option<Waits>,
+}
+
+/// A standby wait's view periods over an interval, judged period by period: their count, the most reads one period
+/// made, and the writes of all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Waits {
+    pub(crate) periods: u64,
+    pub(crate) most_reads: u64,
+    pub(crate) writes: u64,
+}
+
+impl Waits {
+    /// The summary of the periods `waits` lists as their reads and writes.
+    pub(crate) fn of(waits: &[(u64, u64)]) -> Self {
+        Self {
+            periods: waits.len() as u64,
+            most_reads: waits.iter().map(|&(reads, _)| reads).max().unwrap_or(0),
+            writes: waits.iter().map(|&(_, writes)| writes).sum(),
+        }
+    }
 }
 
 /// What a shard's serving duties did on its records over `rounds` fleet rounds: the reads of its volume record, of
@@ -408,9 +434,22 @@ pub(crate) fn untouched(
         if watch.moved {
             return fail(TENURE_MOVED, format!("shard {}", watch.shard.get()));
         }
+        if let Some(waits) = watch.waits
+            && (waits.most_reads > 2 || waits.writes > 0)
+        {
+            let (reads, writes) = (waits.most_reads, waits.writes);
+            let at = format!("shard {} reads {reads} writes {writes}", watch.shard.get());
+            return fail(STANDBY_READS, at);
+        }
     }
     if requests.is_empty() {
         return Verdict::Unrun(NO_NEIGHBOUR);
+    }
+    // A run with hosts needs one view period of a watched standby's wait to judge the standby's bound.
+    let hosted = watched.iter().any(|watch| watch.waits.is_some());
+    let waited = (watched.iter()).any(|watch| watch.waits.is_some_and(|waits| waits.periods > 0));
+    if hosted && !waited {
+        return Verdict::Unrun(NO_WAIT);
     }
     let covered = |shard: &Shard| watched.iter().any(|watch| watch.shard == *shard);
     if !requests.iter().all(|(shard, _)| covered(shard)) {

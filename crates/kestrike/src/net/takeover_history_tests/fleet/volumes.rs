@@ -432,20 +432,22 @@ impl Fleet<'_> {
         self.restart_by(live, slots, (at, true), member).map(|_| ())
     }
 
-    /// The next incarnation of `member`'s process, whose tenure of cell `at` ended at its exit in round `ended`: its
-    /// restart, once the record still names its host owner and the host runs, on a free tenure slot of the host. It
-    /// follows no loss or crash, so its recovery arms no loss plant, counts no drop and counts its rounds from
-    /// `ended`. A rerun the record or the host no longer admits, and one with no free slot, runs no incarnation and
-    /// is counted. The host loop calls this for a host that is not paused (`Fleet::rerun_due`), so a host that does
-    /// not run here is a stopped one.
+    /// The next incarnation of `member`'s process, whose tenure `tenure` of cell `at` ended at its exit in round
+    /// `ended`: its restart, once the record still names its host owner at that tenure, no tenure serves the cell and
+    /// the host runs, on a free tenure slot of the host. It follows no loss or crash, so its recovery arms no loss
+    /// plant, counts no drop and counts its rounds from `ended`. A rerun the record, the cell or the host no longer
+    /// admits, and one with no free slot, runs no incarnation and is counted. The host loop calls this for a host
+    /// that is not paused (`Fleet::rerun_due`), so a host that does not run here is a stopped one.
     pub(super) fn rerun<'w>(
         &mut self,
         live: &mut Live<'w>,
         slots: &mut Slots<'w>,
-        (at, member, ended): (usize, usize, u64),
+        (at, member, tenure, ended): (usize, usize, crate::oracle::Tenure, u64),
     ) -> Result<(), Stopped> {
-        let named = self.record_now(at).owner == self.topology.members[member].host;
-        if !named || self.hosts[member].up != Up::Running {
+        let record = self.record_now(at);
+        let named = record.owner == self.topology.members[member].host
+            && super::owners::tenure_at(crate::failover::retire::Target::of(&record)) == tenure;
+        if !named || live[at].is_some() || self.hosts[member].up != Up::Running {
             self.log.rerun_dropped += 1;
             return Ok(());
         }
@@ -580,7 +582,8 @@ impl Fleet<'_> {
     }
 
     /// The cell whose record names a volume other than the one its cell runs, at `E = 0` with its owner running: a
-    /// flip made the replacement active and its owner has not activated.
+    /// flip made the replacement active and its owner has not activated. A cell whose fresh activation's role read
+    /// failed in an earlier round is due again over its installed replacement.
     pub(super) fn fresh_due(&self) -> Option<usize> {
         let activated = self.volumes.cold.len() + self.volumes.fresh_refused.len();
         if self.store.0.borrow().flips.len() <= activated {
@@ -601,7 +604,8 @@ impl Fleet<'_> {
 
     /// The owner's fresh activation on cell `at`'s replacement volume: the cell moves to the replacement's blank
     /// media and empty reservation table, `Fresh::run` activates `E = 1` over the zone double's listing, and the
-    /// tenure attaches cold and sweeps, with no object counted as retained.
+    /// tenure attaches cold and sweeps, with no object counted as retained. A retry after a failed role read keeps
+    /// the installed media, reservation table and local record.
     pub(super) fn activate_fresh<'w>(
         &mut self,
         live: &mut Live<'w>,

@@ -793,7 +793,7 @@ fn every_host_scenario_prints_its_host_line_with_the_exempt_shards() {
 fn the_digest_of_a_host_run_changes_with_every_field_of_its_host_log() {
     let report = passing(&Config::host_loss(1));
     type Edit = fn(&mut hosts::HostLog);
-    let edits: [(&str, Edit); 24] = [
+    let edits: [(&str, Edit); 26] = [
         ("nominations", |log| log.nominations += 1),
         ("addressed", |log| log.addressed += 1),
         ("unmatched probes", |log| log.unmatched_probes += 1),
@@ -802,6 +802,8 @@ fn the_digest_of_a_host_run_changes_with_every_field_of_its_host_log() {
         ("repair demands", |log| log.repair_demands += 1),
         ("host losses", |log| log.host_losses += 1),
         ("lapsed", |log| log.lapsed += 1),
+        ("unslotted", |log| log.unslotted += 1),
+        ("rerun dropped", |log| log.rerun_dropped += 1),
         ("takeovers", |log| log.takeovers[0].commands.push("ready")),
         ("reports", |log| log.reports += 1),
         ("refused", |log| log.refused += 1),
@@ -1468,6 +1470,162 @@ fn reran(report: &Report, faulted: Tenure) {
         of.get() == shard && *tenure == rerun.tenure && *host == rerun.host
     });
     assert!(activated, "the rerun's tenure is activated");
+}
+
+/// The standby of every shard waits through the production standby wait, one `host::stand_by` view period each
+/// `DUTY_VIEW_US`: in the host-loss case each period of each shard's standby wait made its role read, two record
+/// reads, and wrote nothing, and every period ended `Exit::Stopped`. Control: one more read of s4's shard record in
+/// each period of its standby's wait fails the untouched-shard rule by the standby's bound.
+#[test]
+fn a_standby_waits_with_two_record_reads_a_period_and_one_more_read_fails_the_bound() {
+    let report = passing(&Config::host_loss(1));
+    let waited: Vec<&Vec<(u64, u64)>> = report.shards.iter().map(|shard| &shard.waits).collect();
+    let whole = waited[hosts::DUTY_CELL].len();
+    assert!(
+        whole > 0 && waited[hosts::DUTY_CELL + 1].len() == whole,
+        "the standbys of s4 and s5 run through the whole run and wait in every view period: {waited:?}"
+    );
+    assert!(
+        waited.iter().all(|waits| waits.len() <= whole),
+        "no standby waits in more periods than one that runs through the whole run: {waited:?}"
+    );
+    assert!(
+        waited
+            .iter()
+            .all(|waits| waits.iter().all(|&period| period == (2, 0))),
+        "{waited:?}"
+    );
+    let exits: Vec<&String> = report
+        .shards
+        .iter()
+        .flat_map(|shard| &shard.wait_exits)
+        .collect();
+    assert!(exits.is_empty(), "{exits:?}");
+    assert_eq!(report.verdicts.untouched, Verdict::Pass);
+    let extra = hostile(
+        Config::host_loss(1),
+        Plant::StandbyExtraRead,
+        hosts::DUTY_CELL as u32,
+    );
+    let bound = "an untouched shard's standby made more than two record reads or a write in a view period of its wait";
+    assert_eq!(
+        extra.verdicts.untouched.rule(),
+        Some(bound),
+        "{}",
+        extra.summary()
+    );
+}
+
+#[test]
+fn every_running_standby_waits_once_each_view_period() {
+    let config = Config::host_loss(1);
+    let (mut fleet, _) = hosted(&config);
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    for _ in 0..2 * (DUTY_VIEW_US / ROUND_US) {
+        fleet.turn(&mut live);
+    }
+    let waited: Vec<&Vec<(u64, u64)>> = fleet.cells.iter().map(|cell| &cell.waits).collect();
+    assert!(
+        waited.iter().all(|waits| waits[..] == [(2, 0), (2, 0)]),
+        "{waited:?}"
+    );
+}
+
+/// A standby process whose inbox holds a nomination runs its next view period with that witness, which is the
+/// period `Fleet::take_over` runs: while the nominations of s4's and s5's standbys are queued,
+/// `Fleet::standby_waits` runs no period for them, and every other shard's standby waits as before.
+#[test]
+fn a_standby_with_a_queued_nomination_runs_no_period_without_the_witness() {
+    use crate::failover::detect::host::Revalidated;
+    use crate::failover::retire::Target;
+    let config = Config::host_loss(1);
+    let (mut fleet, _) = hosted(&config);
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let period = DUTY_VIEW_US / ROUND_US;
+    for _ in 0..period {
+        fleet.turn(&mut live);
+    }
+    let waits = |fleet: &Fleet<'_>| -> Vec<usize> {
+        fleet.cells.iter().map(|cell| cell.waits.len()).collect()
+    };
+    assert!(waits(&fleet).iter().all(|&periods| periods == 1));
+    let queued = [hosts::DUTY_CELL, hosts::DUTY_CELL + 1];
+    for at in queued {
+        let record = fleet.record_now(at);
+        let standby = record.standby.expect("the seeded standby");
+        let member = fleet.member_of(standby).expect("a placed standby");
+        let witness = Revalidated {
+            shard: record.shard,
+            target: Target::of(&record),
+            until_us: u64::MAX,
+        };
+        fleet.deliver(member, record.active, witness, fleet.round);
+    }
+    for _ in 0..period {
+        fleet.turn(&mut live);
+    }
+    assert_eq!(fleet.nominated.len(), 2, "both nominations stay queued");
+    let expected: Vec<usize> = (0..fleet.cells.len())
+        .map(|at| if queued.contains(&at) { 1 } else { 2 })
+        .collect();
+    assert_eq!(waits(&fleet), expected);
+}
+
+/// A cell that moves to another volume, as a fresh activation moves it, excuses its standby's waits on the records
+/// it then holds: the two role reads of the volume record it left leave the count with that record's requests.
+#[test]
+fn a_cell_that_moves_to_another_volume_excuses_only_the_waits_on_the_records_it_holds() {
+    let config = Config::host_loss(1);
+    let (mut fleet, _) = hosted(&config);
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    for _ in 0..2 * (DUTY_VIEW_US / ROUND_US) {
+        fleet.turn(&mut live);
+    }
+    let at = hosts::DUTY_CELL;
+    assert_eq!(fleet.cells[at].waits[..], [(2, 0), (2, 0)]);
+    let before = fleet.hosts_requests(at);
+    let left = Key::Volume(fleet.cells[at].placement.volume);
+    let on_left = fleet.store.0.borrow().requests(&left);
+    assert!(
+        on_left >= 2,
+        "each period's role read reads the volume record"
+    );
+    fleet.cells[at].placement.volume =
+        crate::failover::records::VolumeId::new("vol-0f000000000000bbb").unwrap();
+    // The volume record the cell left held `on_left` requests, two of them the standby's role reads.
+    assert_eq!(fleet.hosts_requests(at), before - (on_left - 2));
+}
+
+/// A waiting standby has a read-only budget of two reads per view period across all records. A cross-shard read
+/// counts against the reader's budget and violates the target shard's request rule.
+#[test]
+fn a_standby_read_of_another_shards_record_fails_the_bound_and_that_shards_request_rule() {
+    let bound = "an untouched shard's standby made more than two record reads or a write in a view period of its wait";
+    let request =
+        "an untouched shard's records took a store request other than its own record views";
+    let (s4, s5) = (hosts::DUTY_CELL, hosts::DUTY_CELL + 1);
+    let strayed = |reader: usize, read: usize| {
+        let config = Config::host_loss(1).hostile(Plant::StandbyExtraRead, reader as u32);
+        let mut draws = Draws::record(config.root);
+        let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.standby_extra = Some(Key::Shard(fleet.cells[read].placement.shard));
+        let _inline = Inline::set();
+        let report = (fleet.play_script(draws)).expect("a run inside the limits");
+        assert!(report.planted, "the extra read changed the run");
+        report
+    };
+    let (third, foreign) = (strayed(s4, s5), strayed(s5, s4));
+    assert_eq!(
+        (&third.verdicts.untouched, &foreign.verdicts.untouched),
+        (
+            &Verdict::Fail(bound, "shard 5 reads 3 writes 0".into()),
+            &Verdict::Fail(request, "shard 5".into())
+        ),
+        "{}\n{}",
+        third.summary(),
+        foreign.summary()
+    );
 }
 
 /// An exit that names a rerun while a GET to its shard is in flight still ends the process before the run does.

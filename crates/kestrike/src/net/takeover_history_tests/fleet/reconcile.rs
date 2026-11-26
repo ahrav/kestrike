@@ -291,6 +291,10 @@ pub(crate) struct ReconLog {
     pub(crate) designations: Vec<Designation>,
     pub(crate) refusals: Vec<(u64, u32, Refused)>,
     pub(crate) blockers: Vec<(u64, u32, Blocker, Option<u64>)>,
+    /// Each continuous run of the status rows that named one blocker for a shard: the shard, the blocker, the round
+    /// of its first row and the round of the first row that named another or none, `None` when the run lasted to
+    /// the end; rounds since the hosts started, as a designation's round is.
+    pub(crate) runs: Vec<(u32, Blocker, u64, Option<u64>)>,
     pub(crate) crashed: Vec<String>,
     pub(crate) crash_writes: Vec<(usize, usize)>,
     pub(crate) crash_aim: Option<(u32, Need)>,
@@ -1673,6 +1677,15 @@ impl Fleet<'_> {
         let shard = self.cells[at].placement.shard.get();
         let guard = state == ShardState::NoCandidate && blocker == Some(Blocker::DeviceFailureHold);
         self.volumes.guarded += u32::from(guard && self.cells[at].device_holds.len() >= 2);
+        let round = self.round - self.host_start;
+        let runs = &mut self.recon.runs;
+        let open = (runs.iter()).rposition(|(of, .., to)| *of == shard && to.is_none());
+        if open.map(|run| runs[run].1) != blocker {
+            if let Some(run) = open {
+                runs[run].3 = Some(round);
+            }
+            runs.extend(blocker.map(|blocker| (shard, blocker, round, None)));
+        }
         if !self.recon.planted
             && blocker.is_none()
             && self.config.planted_at(Plant::UnbackedBlocker, at)
@@ -1860,6 +1873,9 @@ impl Fleet<'_> {
         partitions.len() >= 2
     }
 
+    /// The local record `member` persists for its attach of cell `at`'s volume under `key`, the key
+    /// `enroll_standby` hands its persist (KEY-PER-ATTACH), so a retried enrollment of the same attach persists the
+    /// same pair.
     pub(super) fn local_record(
         &self,
         at: usize,

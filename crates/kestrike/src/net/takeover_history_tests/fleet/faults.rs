@@ -35,8 +35,9 @@ pub(crate) enum Pattern {
     Nominated,
 }
 
-/// Member indices of hosts. A store arm at a host's index reaches that host's agent and recovery requests, and a store
-/// outage at a host's index stops those and the serving duties of each tenure the host holds (`fleet::HostOut`);
+/// Member indices of hosts. A store arm at a host's index reaches that host's agent, recovery and standby wait
+/// requests, and a store outage at a host's index stops those and the serving duties of each tenure the host holds
+/// (`fleet::HostOut`);
 /// the duties' own write arms go to a duty actor of their cell (`fleet::duty_actor`), which no scope names. A store
 /// arm or outage at an index at or past the host count reaches reconciler `index - hosts`'s requests; a crash, a
 /// pause and a link action name hosts alone.

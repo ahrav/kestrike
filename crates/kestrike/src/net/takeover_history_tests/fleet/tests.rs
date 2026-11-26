@@ -405,19 +405,19 @@ fn a_request_count_past_one_peers_allowance_is_refused_before_any_draw() {
 }
 
 #[test]
-fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_45_and_50_to_53() {
+fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_45_and_50_to_54() {
     let codes: Vec<u8> = Plant::ALL.iter().map(|plant| plant.code()).collect();
     assert_eq!(
         codes,
         [
-            13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53
+            13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53, 54
         ]
     );
     let identities: BTreeSet<String> = (Plant::ALL.iter())
         .map(|plant| Config::six(1).hostile(*plant, 0).identity())
         .chain([Config::six(1).identity()])
         .collect();
-    assert_eq!(identities.len(), 22);
+    assert_eq!(identities.len(), 23);
 }
 
 #[test]
@@ -874,6 +874,7 @@ fn each_oracle_fails_each_rule_by_name_and_reads_a_missing_event_unrun() {
             writes: 0,
             rounds: 9,
         },
+        waits: None,
     };
     let served = [(shard(1), true)];
     assert_eq!(oracles::untouched(&[watch], &served, 1), Verdict::Pass);
@@ -904,6 +905,42 @@ fn each_oracle_fails_each_rule_by_name_and_reads_a_missing_event_unrun() {
         judged.rule(),
         Some("an untouched shard's records took a store request other than its own record views")
     );
+    // The standby's wait in a run with hosts: every period within two reads and no write passes, a period with a
+    // third read or a write fails, and watches whose standbys ran no period read the rule unrun.
+    let waiting = |waits: &[(u64, u64)]| {
+        let watch = Watched {
+            waits: Some(oracles::Waits::of(waits)),
+            ..watch
+        };
+        oracles::untouched(&[watch], &served, 1)
+    };
+    assert_eq!(waiting(&[(2, 0), (1, 0), (2, 0)]), Verdict::Pass);
+    let bound = "an untouched shard's standby made more than two record reads or a write in a view period of its wait";
+    let third = waiting(&[(2, 0), (3, 0)]);
+    assert_eq!(
+        third,
+        Verdict::Fail(bound, "shard 1 reads 3 writes 0".into())
+    );
+    assert_eq!(
+        waiting(&[(2, 1)]).rule(),
+        Some(bound),
+        "a write in a period"
+    );
+    // The bound is per period: periods whose totals match the passing (2, 0), (2, 0) still fail when one of them
+    // makes a third read or a write.
+    assert_eq!(waiting(&[(2, 0), (2, 0)]), Verdict::Pass);
+    assert_eq!(
+        waiting(&[(1, 0), (3, 0)]).rule(),
+        Some(bound),
+        "a third read in one period"
+    );
+    assert_eq!(
+        waiting(&[(1, 1)]).rule(),
+        Some(bound),
+        "a write within two requests"
+    );
+    let idle = "no untouched shard's standby ran a view period of its wait during a recovery";
+    assert_eq!(waiting(&[]), Verdict::Unrun(idle));
     let reads = "an untouched shard's reads were other than one volume-record and one shard-record read a view period";
     let read_with = |views: oracles::Views| {
         let watch = Watched { views, ..watch };
