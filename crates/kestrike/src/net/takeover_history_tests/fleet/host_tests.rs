@@ -297,6 +297,15 @@ pub(super) fn a_paused_or_isolated_owner_withdraws_each_deposed_tenure_on(root: 
         let shards: Vec<u32> = log.withdrawals.iter().map(|(shard, _)| *shard).collect();
         assert_eq!(shards, [1, 2, 3], "{:?}", config.scenario);
         assert_eq!(log.unwithdrawn, 0);
+        // Each withdrawn tenure ends as `serve` ends a deposed process: torn down, its owner's parts returned.
+        let torn = report.duties.torn.iter();
+        let torn: Vec<(u32, bool)> = torn.map(|&(shard, _, shut)| (shard, shut)).collect();
+        assert_eq!(
+            torn,
+            [(1, true), (2, true), (3, true)],
+            "{:?}",
+            config.scenario
+        );
     }
 }
 
@@ -1354,9 +1363,9 @@ fn store_killed(config: &Config) -> Report {
 /// returns the page's first version, whose fence lies below the tenure's. The tenure's authority withdraws with
 /// `Cause::Regression`, and the INVALIDATE stays unacknowledged. A record view that reads an older shard record
 /// version than the one last observed withdraws the duties' store client and the authority with
-/// `Cause::Regression`. The duties return `Rerun(Withdrawn)` in both runs. H2's sealed report includes the store
-/// regression alarm for s4. The legal profile refuses each regression before any draw. The scheduled case runs
-/// root 2.
+/// `Cause::Regression`. The duties return `Rerun(Withdrawn)` in both runs, the process tears the tenure down, and its
+/// next incarnation serves the shard at the next attempt. H2's sealed report includes the store regression alarm for
+/// s4. The legal profile refuses each regression before any draw. The scheduled case runs root 2.
 #[test]
 fn a_regressed_read_withdraws_the_tenure_and_the_hosts_report_carries_the_regression_alarm() {
     a_regressed_read_withdraws_the_tenure_and_the_hosts_report_carries_the_regression_alarm_on(1);
@@ -1385,6 +1394,7 @@ pub(super) fn a_regressed_read_withdraws_the_tenure_and_the_hosts_report_carries
         page.duties.exits,
         [(shard, faulted.tenure, withdrawn.clone())]
     );
+    reran(&page, faulted.tenure);
 
     let record = store_killed(&Config::record_regressed(root));
     let faulted = record
@@ -1403,6 +1413,7 @@ pub(super) fn a_regressed_read_withdraws_the_tenure_and_the_hosts_report_carries
         "the authority withdrew for the regressed record"
     );
     assert_eq!(record.duties.exits, [(shard, faulted.tenure, withdrawn)]);
+    reran(&record, faulted.tenure);
     let alarmed = (record.hosts.sealed_stores(hosts::DUTY_HOST, shard))
         .any(|store| store.watermark == crate::failover::report::Watermark::Regression);
     assert!(alarmed, "{:?}", record.hosts.stores);
@@ -1420,6 +1431,120 @@ pub(super) fn a_regressed_read_withdraws_the_tenure_and_the_hosts_report_carries
             config.scenario
         );
     }
+}
+
+/// The faulted tenure's exit ended the process as `serve` ends it: `serve::teardown` shut the owner down with its
+/// parts returned, and the next incarnation on the same host restarted the shard at the next attempt, activated that
+/// tenure, swept its whole retained set and serves at the run's end.
+fn reran(report: &Report, faulted: Tenure) {
+    let shard = hosts::DUTY_SHARD;
+    assert_eq!(report.duties.torn, [(shard, faulted, true)]);
+    let recoveries = &report.shards[hosts::DUTY_CELL].recoveries;
+    let rerun = recoveries.last().expect("the rerun's recovery");
+    assert_eq!(
+        rerun.tenure,
+        Tenure {
+            a: faulted.a + 2,
+            ..faulted
+        }
+    );
+    assert_eq!(
+        rerun.host, recoveries[0].host,
+        "the same host's next incarnation"
+    );
+    assert!(
+        rerun
+            .sweep
+            .is_some_and(|(eligible, served)| eligible == served && eligible > 0)
+    );
+    let lined =
+        (report.duties.lines.iter()).any(|&(of, tenure)| of == shard && tenure == rerun.tenure);
+    assert!(
+        lined,
+        "the rerun's serving turn read its recovery line: {:?}",
+        report.duties.lines
+    );
+    let activated = (report.evidence.activations.iter()).any(|(of, tenure, host)| {
+        of.get() == shard && *tenure == rerun.tenure && *host == rerun.host
+    });
+    assert!(activated, "the rerun's tenure is activated");
+}
+
+/// An exit that names a rerun while a GET to its shard is in flight still ends the process before the run does.
+/// With no episode scripted the hosts are settled when s4's tenure names `Rerun(Withdrawn)` and a GET to s4 goes out:
+/// the host loop waits for the GET, tears the tenure down with its parts returned and gives the rerun its turn. H2's
+/// one tenure slot is taken, so the rerun is counted unslotted.
+#[test]
+fn an_exit_named_while_a_get_is_in_flight_is_torn_down_and_rerun_before_the_run_ends() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    let _inline = Inline::set();
+    let at = hosts::DUTY_CELL;
+    let mut ended = None;
+    let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+        for _ in 0..hosts::TAIL_ROUNDS {
+            fleet.turn(live);
+        }
+        let serving = live[at].as_mut().expect("the boot tenure");
+        serving.duty_exit = Some(crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn));
+        ended = Some(serving.tenure);
+        fleet.send(live, at, 2, Purpose::Neighbour);
+        assert_eq!(fleet.flights.len(), 1, "the GET is in flight");
+        fleet.run_hosts(live, slots)
+    });
+    let report = ran.expect("a run inside the limits");
+    let ended = ended.expect("the ended tenure");
+    assert_eq!(report.duties.torn, [(hosts::DUTY_SHARD, ended, true)]);
+    assert_eq!(report.hosts.unslotted, 1, "{}", report.summary());
+}
+
+/// A rerun queued for a host that pauses before the host loop gives it its turn waits for the host's resume: a
+/// paused host's processes run nothing, and the process's next incarnation starts once the host runs again. s4's
+/// tenure names `Rerun(Withdrawn)` and is torn down, then H2 pauses: the host loop ends with the rerun still queued
+/// and none dropped. Once H2 runs again the loop gives the rerun its turn; H2's one tenure slot is taken, so the rerun
+/// is counted unslotted.
+#[test]
+fn a_rerun_queued_for_a_paused_host_waits_for_its_resume() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
+    let mut fleet = seeded.expect("a recorded topology");
+    fleet.faults = Faults::new(Vec::new(), fleet.topology.members.len());
+    let _inline = Inline::set();
+    let at = hosts::DUTY_CELL;
+    let mut ended = None;
+    let ran = fleet.play_script_with(draws, |fleet, live, slots| {
+        for _ in 0..hosts::TAIL_ROUNDS {
+            fleet.turn(live);
+        }
+        let serving = live[at].as_mut().expect("the boot tenure");
+        serving.duty_exit = Some(crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn));
+        ended = Some(serving.tenure);
+        fleet.turn(live);
+        assert!(fleet.reruns.contains_key(&at), "the exit queued a rerun");
+        let member = fleet.cells[at].holder;
+        fleet.hosts[member].up = hosts::Up::Paused;
+        fleet.run_hosts(live, slots)?;
+        assert_eq!(fleet.log.rerun_dropped, 0, "the paused host's rerun");
+        assert!(fleet.reruns.contains_key(&at), "the rerun waits");
+        fleet.hosts[member].up = hosts::Up::Running;
+        fleet.run_hosts(live, slots)?;
+        assert!(fleet.reruns.is_empty(), "the rerun had its turn");
+        Ok(())
+    });
+    let report = ran.expect("a run inside the limits");
+    let ended = ended.expect("the ended tenure");
+    assert_eq!(report.duties.torn, [(hosts::DUTY_SHARD, ended, true)]);
+    let log = &report.hosts;
+    assert_eq!(
+        (log.rerun_dropped, log.unslotted),
+        (0, 1),
+        "{}",
+        report.summary()
+    );
 }
 
 /// Controls of the untouched-shard rule's exact form: one extra read of s4's shard record

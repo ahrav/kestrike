@@ -324,7 +324,19 @@ impl Scenario {
                 .saturating_mul(super::REPAIR_SLOTS as u32),
             false => 0,
         };
-        shape.shards.saturating_mul(2).saturating_add(repair)
+        // The faulted boot tenure of a store-result scenario reruns on its host once its duties end at their exit.
+        let rerun = u32::from(self.duty_faulted());
+        (shape.shards.saturating_mul(2))
+            .saturating_add(repair)
+            .saturating_add(rerun)
+    }
+
+    /// Whether the scenario faults the serving duties of [`DUTY_CELL`]'s boot tenure.
+    pub(crate) fn duty_faulted(self) -> bool {
+        matches!(
+            self,
+            Self::StoreUnknown(_) | Self::PageRegressed | Self::RecordRegressed
+        )
     }
 
     /// How the scenario seeds cell `at`.
@@ -657,6 +669,11 @@ pub(crate) struct HostLog {
     pub(crate) repair_demands: u32,
     pub(crate) host_losses: u32,
     pub(crate) lapsed: u32,
+    /// The reruns of an ended tenure that found no free tenure slot on their host and ran no incarnation.
+    pub(crate) unslotted: u32,
+    /// The reruns of an ended tenure whose shard record named another owner, or whose host had stopped, when the
+    /// rerun's turn came; they ran no incarnation.
+    pub(crate) rerun_dropped: u32,
     pub(crate) takeovers: Vec<Attempt>,
     pub(crate) reports: u32,
     /// The inputs a host's own agent or the report reader refused: a heartbeat or a probe message the agent refused,
@@ -1391,7 +1408,7 @@ pub(super) struct Loss {
     lost: Vec<usize>,
     /// The tenure each lost cell served when the loss began, in `lost` order.
     held: Vec<Option<Tenure>>,
-    episode: super::Episode,
+    pub(super) episode: super::Episode,
     refusing: bool,
 }
 
@@ -2207,10 +2224,9 @@ impl<'c> Fleet<'c> {
         let before: Vec<_> = (0..self.cells.len())
             .filter(|&at| {
                 let holder = self.cells[at].holder;
-                // The tenure a regression scenario's fault withdrew serves through no loss.
-                let serving = live[at]
-                    .as_ref()
-                    .is_some_and(|serving| !self.cells[at].excused_exit(serving));
+                // A tenure whose serving duties ended at an exit serves through no loss.
+                let serving =
+                    (live[at].as_ref()).is_some_and(|serving| serving.duty_exit.is_none());
                 serving && self.hosts[holder].up == Up::Running && !lost.contains(&at)
             })
             .map(|at| self.sample(at))
@@ -2323,6 +2339,13 @@ impl<'c> Fleet<'c> {
                 self.restart_named(live, slots, at)?;
                 continue;
             }
+            // A rerun waits until each open loss has sent its drawn GETs, so its load takes no round from them.
+            let sent = self.losses.iter().all(|loss| loss.episode.due.is_empty());
+            if sent && let Some(at) = self.rerun_due() {
+                let (member, ended) = self.reruns.remove(&at).expect("the due rerun");
+                self.rerun(live, slots, (at, member, ended))?;
+                continue;
+            }
             if let Some(at) = self.fresh_due() {
                 self.activate_fresh(live, slots, at)?;
                 continue;
@@ -2340,20 +2363,32 @@ impl<'c> Fleet<'c> {
             let quiet = last + TAIL_ROUNDS;
             let due = self.losses.iter().any(|loss| !loss.episode.due.is_empty());
             let settled = !self.repairs() || self.recon.settled;
-            if self.faults.settled() && since >= quiet && !due && settled {
-                break;
+            let rerun = self.rerun_due().is_some();
+            if self.faults.settled() && since >= quiet && !due && settled && !rerun {
+                // The GETs in flight settle first. A tenure whose exit waited for its GET is torn down in the turn
+                // below, and a rerun queued meanwhile takes its turn at the top of the loop.
+                self.drain(live)?;
+                if self.rerun_due().is_none() && !self.ending(live) {
+                    break;
+                }
             }
             if since > HORIZON_ROUNDS {
                 return Err(self.stalled(None, "the host scenario's settle"));
             }
             self.turn(live);
         }
-        self.drain(live)?;
         if let Some(refusal) = self.draw_refusal.take() {
             return Err(Stopped::Choice(refusal));
         }
         self.close_losses(live, true);
         Ok(())
+    }
+
+    /// The first cell with a queued rerun whose host is not paused. A paused host's processes run nothing, so its
+    /// rerun stays queued until the host resumes; a run that ends with the host still paused leaves it unrun.
+    fn rerun_due(&self) -> Option<usize> {
+        let mut queued = self.reruns.iter();
+        queued.find_map(|(&at, &(member, _))| (self.hosts[member].up != Up::Paused).then_some(at))
     }
 
     /// Tracks the settle phase of a run whose reconcilers run. The phase starts at the first round with every

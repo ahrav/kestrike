@@ -259,7 +259,7 @@ fn a_replay_whose_choices_differ_is_refused_before_the_differing_choice_applies(
     // A recording of the same configuration under another format tag is refused before its tape is read, an
     // unreadable tape included.
     let earlier = Recording {
-        identity: config.identity_tagged(b"fleet-v16-recover"),
+        identity: config.identity_tagged(b"fleet-v18"),
         tape: vec![0xff; 3],
     };
     assert_ne!(earlier.identity, config.identity());

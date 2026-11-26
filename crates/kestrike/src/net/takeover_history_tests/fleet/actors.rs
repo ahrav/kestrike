@@ -10,15 +10,23 @@ use crate::storage::store_tests::client as store_client;
 use super::super::Serving;
 
 /// `duties` steps `serving`'s owner one round and then, when the tenure runs its serving duties and no exit ended
-/// them yet, one [`Duties::turn`](crate::host::Duties::turn) at that round's time. As the serving loop does after
+/// them yet, one [`Duties::turn`](crate::host::Duties::turn) at that round's time and, until it is held, the read
+/// of the tenure's recovery line (`serve::recovery_line`), the serving loop's turn in its order. As the serving loop does after
 /// a turn, it takes the exit the owner's state names ([`serve::ended`](crate::host::serve::ended)) over the duties'
-/// own. Returns the exit of this turn, which `serving` keeps.
+/// own. A turn whose duties withdrew the authority emits the tenure's `Commands` and `Withdrawn` steps at once, so
+/// the ownership monitor judges every later round of its device, the teardown's drain included. Returns the exit of
+/// this turn, which `serving` keeps.
 pub(super) fn duties(serving: &mut Serving<'_>) -> Option<crate::host::Exit> {
     let now = serving.step();
     if serving.duty_exit.is_some() {
         return None;
     }
     let named = serving.duties.as_mut()?.turn(&mut serving.owner, now);
+    serving.note_late_withdrawal();
+    // The serving loop's one write of the tenure's recovery line, once its first-safe-hit span has closed.
+    if serving.recovery_line.is_none() {
+        serving.recovery_line = crate::host::serve::recovery_line(&serving.owner);
+    }
     let exit = crate::host::serve::ended(&serving.owner).or(named)?;
     serving.duty_exit = Some(exit.clone());
     Some(exit)

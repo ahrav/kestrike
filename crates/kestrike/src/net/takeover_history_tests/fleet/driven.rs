@@ -674,3 +674,131 @@ fn a_recovery_reports_its_rounds_from_the_crash_its_owners_peak_and_its_storages
     assert_eq!(recovery.peak_bytes, peak);
     assert_eq!(recovery.share, odd);
 }
+
+/// Across one tenure's FILL and acknowledged INVALIDATE, the requests on its shard's records are those of its
+/// serving duties alone, and `Cell::page_key`, which keys the coverage page of a held INVALIDATE, sends none: it
+/// reads the cell's seeded page count and returns the key the stored shard record gives. The request count the
+/// untouched-shard rule samples stays equal across both. The test calls `Cell::page_key` itself; the acknowledged
+/// INVALIDATE takes the branch of `Fleet::acknowledge` that keys no page.
+#[test]
+fn an_acknowledged_invalidate_takes_no_store_request_beyond_its_duties() {
+    driven(
+        &six(),
+        (&ALL, &[]),
+        |_| {},
+        |mut fleet| {
+            let fill = fleet.fleet.config.shape.objects + 1;
+            let before = fleet.fleet.hosts_requests(2);
+            let acknowledged = fleet.fleet.acknowledge(&mut fleet.live, 2, (fill, 1));
+            assert!(acknowledged, "the FILL and the INVALIDATE");
+            let page = fleet.fleet.cells[2].page_key(1);
+            assert_eq!(fleet.fleet.hosts_requests(2), before);
+            // The world's key reads the stored shard record through a store client, one counted request.
+            assert_eq!(page, fleet.fleet.cells[2].world.page_key(1));
+            assert_eq!(fleet.fleet.hosts_requests(2), before + 1);
+        },
+    );
+}
+
+/// A torn-down tenure's device is sampled once its drain ends. The tenure is torn down with a GET's medium read on
+/// its device, which the drain executes: the tenure's last `Commands` step then counts every command the device
+/// accepted, and a capture that passed its bound during the drain marks the shard's step list overflowed, which the
+/// ownership verdict reads as truncated evidence.
+#[test]
+fn a_teardown_samples_the_tenures_device_after_its_drain() {
+    use crate::oracle::ownership::Step;
+    use crate::storage::Operation;
+    driven(
+        &six(),
+        (&ALL, &[]),
+        |_| {},
+        |mut fleet| {
+            let mut serving = fleet.live[2].take().expect("a live tenure");
+            let _get = serving.send(object_key(1));
+            let mut rounds = 0;
+            while serving.control.outstanding() == 0 {
+                assert!(rounds < 16, "the GET reads the medium");
+                serving.step();
+                rounds += 1;
+            }
+            let (control, tenure) = (serving.control.clone(), serving.tenure);
+            let steps = std::rc::Rc::clone(&fleet.fleet.cells[2].world.steps);
+            fleet.fleet.cells[2].close(&serving, true);
+            assert!(
+                !steps.borrow().overflowed,
+                "no capture overflow before the drain"
+            );
+            // The capture holds its bound from here, so the drain's first captured event overflows it.
+            control.set_capture_bound(control.capture().events.len());
+            let listed = steps.borrow().list.len();
+            assert!(serving.tear_down(TEARDOWN_ROUNDS), "the owner shut down");
+            assert_eq!(control.outstanding(), 0, "the drain executed the read");
+            let accepted = control.accepted(Operation::Read) + control.accepted(Operation::Write);
+            let steps = steps.borrow();
+            assert_eq!(steps.list.len(), listed + 1, "one step for the drain");
+            let sampled = matches!(
+                steps.list.last(),
+                Some(Step::Commands { tenure: of, accepted: count, succeeded })
+                    if *of == tenure && *count == accepted as u64 && succeeded.is_empty()
+            );
+            assert!(sampled, "{:?}", steps.list.last());
+            assert!(steps.overflowed, "the drain's capture overflow");
+        },
+    );
+}
+
+/// A turn whose duties withdrew the tenure gives the ownership monitor the count at the withdrawal. The duties read
+/// a record that names a later tenure and withdraw the authority after the turn's `Commands` step: that turn emits a
+/// second `Commands` step and the tenure's `Withdrawn` step, and the teardown of its `Deposed` exit adds the drain's
+/// `Commands` step, which the monitor judges against the count at the withdrawal. `Fleet::tear_down` lists the
+/// tenure torn down and counts no withdrawal for it.
+#[test]
+fn a_turn_whose_duties_withdrew_the_tenure_notes_the_withdrawal_before_the_teardowns_drain() {
+    use crate::oracle::ownership::Step;
+    driven(
+        &six(),
+        (&ALL, &[]),
+        |_| {},
+        |mut fleet| {
+            fleet.record_later_attempt(2);
+            let mut serving = fleet.live[2].take().expect("a live tenure");
+            let steps = std::rc::Rc::clone(&fleet.fleet.cells[2].world.steps);
+            let (mut rounds, mut listed) = (0, 0);
+            while serving.duty_exit.is_none() {
+                assert!(rounds < 64, "the duties read the later tenure");
+                listed = steps.borrow().list.len();
+                let _ = super::actors::duties(&mut serving);
+                rounds += 1;
+            }
+            assert_eq!(serving.duty_exit, Some(crate::host::Exit::Deposed));
+            let tenure = serving.tenure;
+            assert!(fleet.fleet.tear_down(2, serving), "the owner shut down");
+            let shard = fleet.fleet.cells[2].placement.shard.get();
+            assert_eq!(fleet.fleet.torn, [(shard, tenure, true)]);
+            assert_eq!(
+                fleet.fleet.cells[2].withdrawals, 0,
+                "its exit judges a torn-down tenure"
+            );
+            let steps = steps.borrow();
+            let [
+                Step::Commands { tenure: polled, .. },
+                Step::Commands {
+                    tenure: sampled,
+                    accepted: before,
+                    ..
+                },
+                Step::Withdrawn { tenure: withdrawn },
+                Step::Commands {
+                    tenure: drained,
+                    accepted: after,
+                    ..
+                },
+            ] = &steps.list[listed..]
+            else {
+                panic!("{:?}", &steps.list[listed..]);
+            };
+            assert_eq!([*polled, *sampled, *withdrawn, *drained], [tenure; 4]);
+            assert_eq!(before, after, "the drain accepted no command");
+        },
+    );
+}

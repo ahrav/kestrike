@@ -250,7 +250,7 @@ impl Fleet<'_> {
     ) -> Result<(), Stopped> {
         let shard = self.cells[at].placement.shard.get();
         let host = self.topology.members[member].host.get();
-        let (tenure, from) = match self.restart_by(live, slots, at, member)? {
+        let (tenure, from) = match self.restart_by(live, slots, (at, true), member)? {
             Restarted::Served { tenure, from } => (tenure, from),
             Restarted::Deposed { check, attempts } => {
                 let check = check.unwrap_or_else(|| RESTARTED.to_owned());

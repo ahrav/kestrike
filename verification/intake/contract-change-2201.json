@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2201",
+  "kind": "contract-change",
+  "pull_request": 2201,
+  "changed": "The invariants of the obligation records fleet-serving-duties-retry-an-unknown-store-result-in-place-and-withdraw-on-a-regressed-read and fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure. A tenure of the fleet whose serving turn names an exit that reruns its process, or that reads Deposed, ends through serve::teardown, where the fleet closed it and dropped its owner; a deposed tenure that withdrew in a slot past the cells ends the same way. After a rerun exit the process's next incarnation restarts the shard, where the withdrawn tenure stayed unserved to the end of the run. A withdrawal the serving duties make is recorded for the ownership monitor in the turn that made it, so rule O2 judges every later round of that tenure's device, the teardown's drain included. The LIMITS of the first record no longer say that the fleet runs no next incarnation after a withdrawal.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-serving-duties-retry-an-unknown-store-result-in-place-and-withdraw-on-a-regressed-read",
+    "reason": "Its invariant states the new contract for the two regressed reads: the process ends the withdrawn tenure through serve::teardown with its owner's parts returned, and its next incarnation on the same host restarts the shard at the next attempt, activates that tenure and sweeps its whole retained set (host_tests::a_regressed_read_withdraws_the_tenure_and_the_hosts_report_carries_the_regression_alarm). The record fleet-host-loss-takes-each-lost-shard-over-on-its-named-standby-with-one-owner-per-tenure states the same end for a paused or isolated owner's deposed tenures (host_tests::a_paused_or_isolated_owner_withdraws_each_deposed_tenure). Not stated in a record: the teardown of a tenure that a fresh activation replaces, which no run reaches, and the retirement exits, which keep the tenure in its slot."
+  }
+}

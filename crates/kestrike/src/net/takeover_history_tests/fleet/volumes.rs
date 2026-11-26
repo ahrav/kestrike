@@ -429,7 +429,35 @@ impl Fleet<'_> {
         let Some(member) = self.member_of(record.owner) else {
             return Ok(());
         };
-        self.restart_by(live, slots, at, member).map(|_| ())
+        self.restart_by(live, slots, (at, true), member).map(|_| ())
+    }
+
+    /// The next incarnation of `member`'s process, whose tenure of cell `at` ended at its exit in round `ended`: its
+    /// restart, once the record still names its host owner and the host runs, on a free tenure slot of the host. It
+    /// follows no loss or crash, so its recovery arms no loss plant, counts no drop and counts its rounds from
+    /// `ended`. A rerun the record or the host no longer admits, and one with no free slot, runs no incarnation and
+    /// is counted. The host loop calls this for a host that is not paused (`Fleet::rerun_due`), so a host that does
+    /// not run here is a stopped one.
+    pub(super) fn rerun<'w>(
+        &mut self,
+        live: &mut Live<'w>,
+        slots: &mut Slots<'w>,
+        (at, member, ended): (usize, usize, u64),
+    ) -> Result<(), Stopped> {
+        let named = self.record_now(at).owner == self.topology.members[member].host;
+        if !named || self.hosts[member].up != Up::Running {
+            self.log.rerun_dropped += 1;
+            return Ok(());
+        }
+        if !slots.free(member) {
+            self.log.unslotted += 1;
+            return Ok(());
+        }
+        // The rerun's recovery counts its rounds from the round its tenure ended.
+        self.cells[at].rerun_from = Some(ended);
+        let restarted = self.restart_by(live, slots, (at, false), member);
+        self.cells[at].rerun_from = None;
+        restarted.map(|_| ())
     }
 
     /// `member`'s incarnation for cell `at`, its role read and then `host::recover`, with the shard record read just
@@ -441,7 +469,7 @@ impl Fleet<'_> {
         &mut self,
         live: &mut Live<'w>,
         slots: &mut Slots<'w>,
-        at: usize,
+        (at, after_loss): (usize, bool),
         member: usize,
     ) -> Result<Restarted, Stopped> {
         if self.hosts[member].up != Up::Running {
@@ -515,7 +543,9 @@ impl Fleet<'_> {
         };
         self.cells[at].holder = member;
         self.cells[at].blocked = false;
-        let lost_at = self.cells[at].lost_at.unwrap_or(self.round);
+        let lost_at = (self.cells[at].rerun_from)
+            .or(self.cells[at].lost_at)
+            .unwrap_or(self.round);
         let lineage = tenure.lineage();
         let tenure = self.rise(
             live,
@@ -537,7 +567,8 @@ impl Fleet<'_> {
             self.volumes.arm.push((shard.get(), of.host.get(), round));
         }
         self.unhold(at);
-        self.recovered(live, at, tenure, self.round - lost_at, (true, true))?;
+        let rounds = self.round - lost_at;
+        self.recovered(live, at, tenure, rounds, (after_loss, after_loss))?;
         let from = before.attempts;
         Ok(Restarted::Served { tenure, from })
     }
@@ -578,8 +609,15 @@ impl Fleet<'_> {
         at: usize,
     ) -> Result<(), Stopped> {
         self.drain(live)?;
-        if let Some(serving) = live[at].take() {
-            self.cells[at].close(&serving, true);
+        // A replaced tenure whose `Rerun` or `Deposed` exit waited for a GET's outcome ends through `serve::teardown`,
+        // and each open loss drops its watch of the shard. The fresh activation is the shard's next process.
+        match live[at].take() {
+            Some(serving) if super::awaits_teardown(&serving) => {
+                self.tear_down(at, serving);
+                self.release_watches(at);
+            }
+            Some(serving) => self.cells[at].close(&serving, true),
+            None => {}
         }
         let record = self.record_now(at);
         let member = self.member_of(record.owner).expect("a running owner");

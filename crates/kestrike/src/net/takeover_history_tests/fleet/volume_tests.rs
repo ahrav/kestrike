@@ -592,6 +592,15 @@ fn control_a_host_loss_reported_as_volume_loss_fails_host_loss_keeps_volume_on(
     assert_eq!(sibling.volumes.calls, 0);
     let provisioned = Verdict::Fail(hosts::PROVISIONED, "1 create calls".to_owned());
     assert_eq!(hosts::expected(&report), provisioned);
+    // The flip deposes s0's serving tenure in its own slot. Its `Deposed` exit ends as `serve` ends it: torn down
+    // with its owner's parts returned.
+    let exits = report.duties.exits.iter();
+    let deposed = exits.filter(|(.., exit)| *exit == crate::host::Exit::Deposed);
+    let deposed: Vec<_> = deposed
+        .map(|&(shard, tenure, _)| (shard, tenure, true))
+        .collect();
+    assert_eq!(deposed.len(), 1, "{:?}", report.duties.exits);
+    assert_eq!(report.duties.torn, deposed);
 }
 
 /// F2 judges against what the injector lost: a generation change of a shard whose volume it marked lost passes, of

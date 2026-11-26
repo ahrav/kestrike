@@ -246,7 +246,9 @@ pub(crate) struct Settle {
     pub(crate) standby: bool,
     /// The blockers the shard's last recovery reported.
     pub(crate) blockers: usize,
-    /// The tenures that opened a client session and ended with an authority other than `Serving`.
+    /// The tenures that opened a client session and that the fleet's own close ended with an authority other than
+    /// `Serving`. A tenure that `serve::teardown` ended at a `Rerun` or a `Deposed` exit is judged by that exit
+    /// (`hosts::unscripted_exit`, the first rule of `Report::credit`) and is counted in no shard's withdrawals.
     pub(crate) withdrawals: usize,
     pub(crate) rounds: Vec<u64>,
 }

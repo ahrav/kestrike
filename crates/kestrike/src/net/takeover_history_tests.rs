@@ -325,7 +325,8 @@ struct World {
 #[derive(Default)]
 struct Steps {
     list: Vec<Step>,
-    /// Set in each deposed turn, whose success list reads the capture, and when each tenure's `serve` call returns.
+    /// Set in each deposed turn, whose success list reads the capture, when each tenure's `serve` call returns and
+    /// when a torn-down tenure's drain ends.
     /// A judgment inside a tenure sees that tenure's overflow only from a deposed turn it follows; no later tenure
     /// clears the flag.
     overflowed: bool,
@@ -891,6 +892,8 @@ struct Serving<'w> {
     rising: Option<crate::failover::retire::Target>,
     /// How the production bring-up ended: `Live` or its exit short of `Live`.
     risen: Option<crate::host::serve::Rising>,
+    /// The tenure's recovery line, once its first-safe-hit span has closed.
+    recovery_line: Option<String>,
 }
 
 impl<'w> Serving<'w> {
@@ -903,25 +906,10 @@ impl<'w> Serving<'w> {
             .any(|entry| entry.pair == self.own)
     }
 
-    /// The device's round: a medium command the device has not executed completes with Reservation Conflict once
-    /// the tenure is `deposed`, while `scripts_conflict` holds, and then the device ticks. A command an earlier round
-    /// already gave that conflict keeps it; any other refusal of the fault, a command carrying another fault
-    /// included, fails the test.
+    /// The device's round ([`device_round`]), fenced once the tenure is `deposed` while `scripts_conflict` holds.
     fn device_round(&mut self, deposed: bool) {
-        if deposed && self.scripts_conflict {
-            let conflict = Fault::Status(DeviceStatus::Nvme(RESERVATION_CONFLICT << 1));
-            for token in self.control.ready(Stage::Execute) {
-                match self.control.try_fault(token, conflict) {
-                    Ok(()) => self.conflicted.push(token),
-                    Err(ScriptRefusal {
-                        reason: ScriptReason::Faulted(faulted),
-                        ..
-                    }) if self.conflicted.contains(&faulted) => {}
-                    Err(refusal) => panic!("the conflict is refused: {refusal:?}"),
-                }
-            }
-        }
-        self.control.tick(64);
+        let fenced = deposed && self.scripts_conflict;
+        device_round(&self.control, &mut self.conflicted, fenced);
     }
 
     /// The owner's turn at the current time. Once the tenure is deposed, its Report table first takes the shared
@@ -979,24 +967,10 @@ impl<'w> Serving<'w> {
         now
     }
 
-    /// Emits the turn's `Commands` step, which lists successes only while the tenure is deposed, then `Withdrawn` in
-    /// the first turn whose authority report reads `Withdrawn`, unless a history emitted it already.
+    /// Emits the turn's `Commands` step ([`commands_step`]), then `Withdrawn` in the first turn whose authority report
+    /// reads `Withdrawn`, unless a history emitted it already.
     fn record_turn(&mut self, deposed: bool) {
-        let device = &self.control;
-        let accepted = device.accepted(Operation::Read) + device.accepted(Operation::Write);
-        let mut steps = self.steps.borrow_mut();
-        let mut succeeded = Vec::new();
-        if deposed {
-            let capture = device.capture();
-            steps.overflowed |= capture.overflow;
-            succeeded = successes(&capture);
-        }
-        steps.list.push(Step::Commands {
-            tenure: self.tenure,
-            accepted: accepted as u64,
-            succeeded,
-        });
-        drop(steps);
+        commands_step(&self.steps, &self.control, self.tenure, deposed);
         self.note_withdrawal();
     }
 
@@ -1010,6 +984,16 @@ impl<'w> Serving<'w> {
             self.steps.borrow_mut().list.push(Step::Withdrawn {
                 tenure: self.tenure,
             });
+        }
+    }
+
+    /// Emits a `Commands` step and then the tenure's `Withdrawn` step when its authority reads `Withdrawn` and no
+    /// `Withdrawn` step was emitted yet: a withdrawal after the turn's `Commands` step, such as one the serving duties
+    /// made. The ownership monitor then holds the accepted count at the withdrawal, before the device's next round.
+    fn note_late_withdrawal(&mut self) {
+        let state = self.owner.authority_report().state;
+        if !self.withdrawn && state == crate::failover::serving::State::Withdrawn {
+            self.record_turn(self.deposed());
         }
     }
 
@@ -1027,6 +1011,39 @@ impl<'w> Serving<'w> {
         self.turn_owner();
         self.turn += 1;
         now
+    }
+
+    /// Ends the tenure as `serve` ends it: `serve::teardown` closes the owner and drains it for at most `rounds`
+    /// rounds past the close. Each clock read of the drain is one further round of the tenure's true-time cell and
+    /// device alone: the cell takes the round's time and the device runs its round, fenced as in a serving turn,
+    /// before the close or the poll that the read gates. Once the drain ends, the tenure's last `Commands` step and
+    /// the overflow of its capture are sampled, so the ownership monitor judges the commands the device accepted
+    /// while the owner closed. Returns whether the owner shut down with its parts returned.
+    fn tear_down(self, rounds: u64) -> bool {
+        let deposed = self.deposed();
+        let fenced = deposed && self.scripts_conflict;
+        let Serving {
+            owner,
+            control,
+            mut conflicted,
+            steps,
+            now,
+            tenure,
+            mut turn,
+            ..
+        } = self;
+        let clock = || {
+            let at = turn * ROUND_US;
+            now.set(at);
+            device_round(&control, &mut conflicted, fenced);
+            turn += 1;
+            at
+        };
+        let gate = crate::host::HostGate::qualified();
+        let shut = crate::host::serve::teardown(&gate, owner, clock, rounds * ROUND_US).is_ok();
+        commands_step(&steps, &control, tenure, deposed);
+        sample_overflow(&steps, &control);
+        shut
     }
 
     /// Invalidates object `n` in the owner's RAM. Returns whether the invalidation removed an entry.
@@ -1232,6 +1249,51 @@ impl<'w> Serving<'w> {
             later: None,
         });
         true
+    }
+}
+
+/// One round of a tenure's device. While `fenced`, each medium command the device has not executed completes with
+/// Reservation Conflict; a command an earlier round already gave that conflict keeps it, and any other refusal of
+/// the fault, a command carrying another fault included, fails the test. Then the device ticks.
+fn device_round(device: &SimControl, conflicted: &mut Vec<CommandToken>, fenced: bool) {
+    if fenced {
+        let conflict = Fault::Status(DeviceStatus::Nvme(RESERVATION_CONFLICT << 1));
+        for token in device.ready(Stage::Execute) {
+            match device.try_fault(token, conflict) {
+                Ok(()) => conflicted.push(token),
+                Err(ScriptRefusal {
+                    reason: ScriptReason::Faulted(faulted),
+                    ..
+                }) if conflicted.contains(&faulted) => {}
+                Err(refusal) => panic!("the conflict is refused: {refusal:?}"),
+            }
+        }
+    }
+    device.tick(64);
+}
+
+/// Emits `tenure`'s `Commands` step from `device`: the medium commands it accepted over its life and, only while
+/// the tenure is `deposed`, the successes its capture lists, whose overflow then marks `steps`.
+fn commands_step(steps: &RefCell<Steps>, device: &SimControl, tenure: Tenure, deposed: bool) {
+    let accepted = device.accepted(Operation::Read) + device.accepted(Operation::Write);
+    let mut steps = steps.borrow_mut();
+    let mut succeeded = Vec::new();
+    if deposed {
+        let capture = device.capture();
+        steps.overflowed |= capture.overflow;
+        succeeded = successes(&capture);
+    }
+    steps.list.push(Step::Commands {
+        tenure,
+        accepted: accepted as u64,
+        succeeded,
+    });
+}
+
+/// Marks `steps` overflowed when `device`'s capture passed its bound.
+fn sample_overflow(steps: &RefCell<Steps>, device: &SimControl) {
+    if device.capture().overflow {
+        steps.borrow_mut().overflowed = true;
     }
 }
 
@@ -1556,6 +1618,7 @@ impl<'w> Serving<'w> {
             now,
             rising: None,
             risen: None,
+            recovery_line: None,
         }
     }
 }
@@ -1595,9 +1658,7 @@ fn activate(world: &mut World, serving: &mut Serving<'_>, source: Source) -> Met
 /// Samples `serving`'s device capture when its tenure ends: a capture past its bound makes the world's ownership
 /// verdict `Truncated`. Call it before the tenure drops and before `World::judged`.
 fn closed(world: &World, serving: &Serving<'_>) {
-    if serving.control.capture().overflow {
-        world.steps.borrow_mut().overflowed = true;
-    }
+    sample_overflow(&world.steps, &serving.control);
 }
 
 /// `host`'s takeover, which must succeed, served warm.
