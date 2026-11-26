@@ -153,12 +153,31 @@ fn device(cell: &Cell, pair: Pair) -> (Reserving, SimControl) {
 ///
 /// The incarnation panics when `host::recover` ends `Rerun(Unwound)` for a restart or a fresh activation.
 pub(super) fn incarnate<'w, S, L, R, K>(
+    cell: (&Cell, Member, Pair),
+    round: u64,
+    grounds: &'w Grounds,
+    client: &mut Client<S, L>,
+    sources: (&mut R, &mut K, &mut Refusals),
+) -> Incarnation<'w>
+where
+    S: Store,
+    L: WatermarkLog,
+    R: LocalSource + LocalRecords,
+    K: ControlPlane,
+{
+    incarnate_read(cell, round, grounds, client, sources).0
+}
+
+/// [`incarnate`], with the tenure its role read named for the host as owner: the tenure of the shard record the
+/// read returned when the role is `Role::Restart` or `Role::Fresh`, and none for a waiting or retired role and for
+/// a role read that failed.
+pub(super) fn incarnate_read<'w, S, L, R, K>(
     (cell, of, pair): (&Cell, Member, Pair),
     round: u64,
     grounds: &'w Grounds,
     client: &mut Client<S, L>,
     (local, plane, refusals): (&mut R, &mut K, &mut Refusals),
-) -> Incarnation<'w>
+) -> (Incarnation<'w>, Option<Tenure>)
 where
     S: Store,
     L: WatermarkLog,
@@ -168,10 +187,11 @@ where
     let volume = cell.placement.volume;
     let holder = crate::failover::takeover::tests::holder_on(volume, of.host, of.instance);
     let shard = cell.placement.shard;
-    let (role, volume, _) = match host::survey(client, shard, &holder) {
+    let (role, volume, record) = match host::survey(client, shard, &holder) {
         Ok(surveyed) => surveyed,
-        Err(error) => return Incarnation::Unread(error),
+        Err(error) => return (Incarnation::Unread(error), None),
     };
+    let named = matches!(role, Role::Restart | Role::Fresh).then(|| tenure_at(Target::of(&record)));
     let peers = host::inputs::peers(&holder, &volume, fleet_instance)
         .expect("the holder's own volume record");
     let inputs = host::Inputs::new(shard, holder, cell.world.bounds, limits(), 4)
@@ -207,7 +227,7 @@ where
     );
     // The fencer reads its clock only inside `recover`.
     grounds.fencer.release();
-    match recovered {
+    let incarnation = match recovered {
         Recovery::Tenure(tenure) => Incarnation::Tenure(tenure, control, now),
         Recovery::Ended(ended) => {
             let host::recover::Ended {
@@ -234,7 +254,8 @@ where
             Incarnation::Ended(exit, refusal)
         }
         Recovery::Waits => Incarnation::Waits(role),
-    }
+    };
+    (incarnation, named)
 }
 
 /// What one view period of a standby's or unnamed host's wait returned.
@@ -258,7 +279,9 @@ pub(super) enum Stood<'w> {
 /// `grounds`. Its connect records whether the shard record already names `of`'s host owner with no standby, read
 /// from `store` with no request, and once `host::stand_by` returns the period asserts that every device call
 /// followed the committed takeover (CAS-BEFORE-DEVICE) and that no takeover unwound. Under `early`, the fencer
-/// starts the device before the period runs, while the record still names the lost owner.
+/// starts the device before the period runs and before any takeover write. With a witness that early call fails
+/// the assertion. With no witness the wait returns the device with `Exit::Fault` before its first period, and the
+/// period skips the assertion for that exit.
 pub(super) fn stand_by<'w, S, L>(
     (cell, of, pair): (&Cell, Member, Pair),
     (round, store): (u64, &crate::storage::store::sim::Shared),
@@ -324,6 +347,7 @@ where
         }
         true
     };
+    let waiting = witness.is_none();
     let read_at = witness.as_ref().map_or(round * ROUND_US, |(_, at)| *at);
     let status = host::link::StatusCell::default();
     let mut witness = witness.map(|(witness, _)| witness);
@@ -349,11 +373,17 @@ where
         signals,
     );
     grounds.fencer.release();
-    assert_eq!(
-        early_call.get(),
-        None,
-        "the first device call follows the committed takeover"
-    );
+    // A wait with no witness whose fencer already held a device returns it with `Exit::Fault` before any period, the
+    // production refusal of a waiting phase that holds a device; the caller lists that exit.
+    let refused =
+        early && waiting && matches!(&stood, Err(ended) if matches!(ended.exit, Exit::Fault(_)));
+    if !refused {
+        assert_eq!(
+            early_call.get(),
+            None,
+            "the first device call follows the committed takeover"
+        );
+    }
     let control = connected.into_inner();
     match stood {
         Ok(tenure) => Stood::Tenure(tenure, control.expect("a takeover's device"), now),
@@ -606,8 +636,9 @@ impl WaitCounts {
 }
 
 thread_local! {
-    /// The arena and fencer clock a standby's view period with no witness takes: such a period starts no takeover,
-    /// so its fencer never connects and nothing attaches over them.
+    /// The arena and fencer clock a standby's view period with no witness takes: such a period starts no takeover
+    /// and nothing attaches over them. Its fencer connects only under `Plant::WaitDevice`, which starts the device
+    /// over these grounds before each period of the planted wait.
     static WAITS: &'static Grounds = Box::leak(Box::new(Grounds::over(crate::storage::warm_sim::storage(1))));
 }
 
@@ -663,13 +694,15 @@ impl Fleet<'_> {
                 counts.returned.borrow_mut().clear();
             }
             let refused = |_| Err(AdmissionError::AttemptConsumed);
+            let early = self.config.planted_at(super::Plant::WaitDevice, at);
+            self.planted |= early;
             let stood = WAITS.with(|grounds| {
                 stand_by(
                     (cell, of, pair),
                     (self.round, &self.store),
                     grounds,
                     (&mut client, &local),
-                    (None, false),
+                    (None, early),
                     refused,
                 )
             });

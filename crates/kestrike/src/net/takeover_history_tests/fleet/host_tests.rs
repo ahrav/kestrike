@@ -66,6 +66,7 @@ pub(super) fn scripted_with(config: &Config, script: Vec<Episode>, rerun_first: 
     let mut fleet = seeded.expect("a recorded topology");
     fleet.faults = Faults::new(script, fleet.topology.members.len());
     fleet.rerun_first = rerun_first;
+    let _agent = super::AgentPlant::set(config);
     let _inline = Inline::set();
     fleet.play_script(draws).expect("a run inside the limits")
 }
@@ -2133,14 +2134,9 @@ fn a_fresh_activation_whose_confirm_reply_is_unknown_after_its_bump_runs_again_a
     assert_eq!(report.credit(), Verdict::Pass, "{}", report.summary());
 }
 
-/// A restart whose incarnation ends with an exit that names a rerun runs again: H3, the owner of s3 alone, crashes
-/// and returns two rounds later, before a suspicion, under a store outage of its own requests. Each restart's role
-/// read fails, which ends the incarnation `Rerun::Records`, and the host loop runs the next incarnation from the
-/// round after, as the process's supervisor starts it. Once the outage heals, the next incarnation restarts s3 warm
-/// on H3, and no takeover starts. That incarnation completes H3's return as a restart that served at once does: the
-/// zone log records the restart at its tenure, and the tenure acknowledges its FILL and its INVALIDATE.
-#[test]
-fn a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage() {
+/// H3, the owner of s3 alone, crashes and returns two rounds later, before a suspicion, under an outage of its own
+/// store requests that heals 20 rounds after the crash.
+fn return_under_an_outage() -> Vec<Episode> {
     let mut script = Scenario::HostLoss.episodes(false);
     script[0].scope = vec![3];
     script[0].heal = Some(2);
@@ -2150,7 +2146,19 @@ fn a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage() 
         heal: Some(20),
         ..script[0].clone()
     });
-    let report = scripted(&Config::host_loss(1), script);
+    script
+}
+
+/// A restart whose incarnation ends with an exit that names a rerun runs again: H3, the owner of s3 alone, crashes
+/// and returns two rounds later, before a suspicion, under a store outage of its own requests. Each restart's role
+/// read fails, which ends the incarnation `Rerun::Records`, and the host loop runs the next incarnation from the
+/// round after, as the process's supervisor starts it. Once the outage heals, the next incarnation restarts s3 warm
+/// on H3, and no takeover starts. That incarnation completes H3's return as a restart that served at once does: the
+/// zone log records the restart at its tenure, and the tenure acknowledges its FILL and its INVALIDATE.
+#[test]
+fn a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage() {
+    let report = scripted(&Config::host_loss(1), return_under_an_outage());
+    assert_eq!(report.verdicts.one_owner, Verdict::Pass);
     assert!(
         report.hosts.takeovers.is_empty(),
         "{:?}",
@@ -2278,6 +2286,271 @@ fn host_loss_under_the_4_mib_share_fails_the_limiter_check_with_no_refused_charg
     }
     let unrun = Verdict::Unrun("no recovery load was judged against its limiter");
     assert_eq!(oracles::meets_limiter(&[]), unrun);
+}
+
+/// NAMED-STANDBY: a kept nomination is sent again each window until its target leaves the records.
+/// Under plant `EmitOnce` (code 57) the agents send each nomination once, at its publication: after H5's takeover of
+/// s2 times out at its compare-and-swap with a write that did not commit, H5 waits as s2's standby again and no agent
+/// addresses it a second witness. The run stops at the host loop's horizon, and the stall names s2 and the resend
+/// rule: the record still names the target of the standby's one witness, and no witness followed in the windows
+/// since its wait began. Without the plant the same script and horizon serve s2 on the second witness.
+#[test]
+fn an_agent_that_sends_a_nomination_once_strands_a_retaken_shard_and_stalls_the_run() {
+    let mut script = Scenario::HostLoss.episodes(false);
+    script.push(Episode {
+        scope: vec![5],
+        action: Action::StoreWrite(Arm::Timeout { commit: false }),
+        heal: None,
+        ..script[0].clone()
+    });
+    // Both runs stop at 600 rounds; the unplanted one takes s2 again within a few windows of the timeout.
+    let played = |config: &Config| {
+        let mut draws = Draws::record(config.root);
+        let seeded = Fleet::seeded(config, &mut draws, WAIT_ROUNDS);
+        let mut fleet = seeded.expect("a recorded topology");
+        fleet.faults = Faults::new(script.clone(), fleet.topology.members.len());
+        fleet.horizon = 600;
+        let _agent = super::AgentPlant::set(config);
+        let _inline = Inline::set();
+        let ended = fleet.play_script(draws);
+        (ended, super::AgentPlant::fired(config))
+    };
+    let (resent, _) = played(&Config::host_loss(1));
+    let resent = resent.expect("the unplanted run settles within 600 rounds");
+    assert_eq!(taken(&resent), [(1, H3), (2, H3), (3, H5)]);
+    let (stalled, dropped) = played(&Config::host_loss(1).hostile(Plant::EmitOnce, 0));
+    assert!(dropped, "the mutant dropped a kept nomination");
+    let Err(Stopped::Stalled(stall)) = stalled.map(|report| report.summary()) else {
+        panic!("the run settles without a second witness");
+    };
+    let rule = "a kept nomination was not sent again while its target stayed in the records";
+    assert_eq!(rule, hosts::RESEND);
+    assert_eq!((stall.waited, stall.shard), (rule, Some(3)));
+}
+
+/// The resend rule's reading of the witnesses the agents addressed: it names a cell whose standby has waited, with
+/// the record naming a target it was addressed a witness for, for more than `RESEND_WINDOWS` rounds since the later
+/// of the last such witness and the start of its wait. A standby that never got a witness, a witness for another
+/// shard of the same host, a wait or a witness inside the window, and a record whose present target no witness
+/// named each leave the cell unnamed, so a horizon stall keeps the settle's name. A later witness for a target
+/// that left the record keeps the round of the present target's last witness.
+#[test]
+fn the_resend_rule_names_a_waiting_standby_whose_last_witness_and_wait_are_older_than_the_window() {
+    use crate::failover::records::{Record, ShardRecord};
+    use crate::storage::store::{Key, Outcome, Store, Write};
+    let window = hosts::RESEND_WINDOWS;
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let mut fleet = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS).expect("a recorded topology");
+    fleet.start_hosts();
+    let at = 2;
+    let member = fleet.cells[at].placement.standby;
+    let shard = fleet.cells[at].placement.shard.get();
+    let target = crate::failover::retire::Target::of(&fleet.record_now(at));
+    let stale = crate::failover::retire::Target {
+        attempts: target.attempts - 1,
+        ..target
+    };
+    let read = |fleet: &mut Fleet<'_>, round: u64| {
+        fleet.round = round;
+        fleet.unsent()
+    };
+    // An agent's witness for `target` to the standby's process of `shard`, addressed in `round`.
+    let witness = |fleet: &mut Fleet<'_>, shard: u32, target, round: u64| {
+        fleet.round = round;
+        fleet.witness(member, shard, target);
+    };
+    assert_eq!(read(&mut fleet, 500), None, "no standby waits again");
+    fleet.round = 100;
+    fleet.retake(at, member);
+    assert_eq!(
+        read(&mut fleet, 500),
+        None,
+        "no witness reached the standby"
+    );
+    witness(&mut fleet, shard + 1, target, 4);
+    assert_eq!(read(&mut fleet, 500), None, "a witness for another shard");
+    witness(&mut fleet, shard, stale, 4);
+    assert_eq!(
+        read(&mut fleet, 500),
+        None,
+        "a witness for a target the record does not name"
+    );
+
+    // A witness before the wait, which a takeover consumed or let lapse: the wait's start is the floor.
+    witness(&mut fleet, shard, target, 4);
+    assert_eq!(read(&mut fleet, 100 + window), None);
+    assert_eq!(read(&mut fleet, 101 + window), Some(at));
+    // A witness after the wait began that started no takeover, or whose takeover left the wait going on. A later
+    // witness for the stale target keeps its round.
+    witness(&mut fleet, shard, target, 106);
+    witness(&mut fleet, shard, stale, 108);
+    assert_eq!(read(&mut fleet, 106 + window), None);
+    assert_eq!(read(&mut fleet, 107 + window), Some(at));
+    // An agent that resends while every takeover fails: the last witness is one or two rounds old.
+    witness(&mut fleet, shard, target, 298);
+    assert_eq!(read(&mut fleet, 300), None);
+    // A second wait after a second failed takeover is measured from its own start.
+    fleet.round = 300;
+    fleet.retake(at, member);
+    assert_eq!(read(&mut fleet, 300 + window), None);
+    assert_eq!(read(&mut fleet, 301 + window), Some(at));
+
+    // The owner bumps its attempt: the record names the same owner and standby under a new target, which no
+    // witness names.
+    let key = Key::Shard(fleet.cells[at].placement.shard);
+    let item = (fleet.store.0.borrow().current(&key).cloned()).expect("a stored shard record");
+    let mut record = ShardRecord::decode(&item.value).expect("a shard record");
+    record.attempts += 1;
+    let write = Write::Exact {
+        expect: item.version,
+        value: record.encode(),
+    };
+    let outcome = Store::write(&mut fleet.store.clone(), &key, &write);
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+    assert_eq!(fleet.retakes.get(&at), Some(&member));
+    assert_eq!(
+        read(&mut fleet, 900),
+        None,
+        "witnesses for targets that left the record"
+    );
+}
+
+/// The host health rule: a host reads unhealthy only for a held or silent process whose shard names a
+/// standby elsewhere. On the stall scenario H0's takeover of s3 holds at its device step while s3's record names no
+/// standby, so H0 stays healthy and its own shards s0, s1 and s2 keep their tenures. Under plant `UnhealthyOnAnyHold`
+/// (code 58) the hold of a shard with no standby makes H0 unhealthy too, its agent's peers nominate H0's shards, and
+/// they change hands although their volumes are healthy.
+#[test]
+fn a_health_rule_that_reads_any_hold_unhealthy_moves_shards_whose_volumes_are_healthy() {
+    let moved = |report: &Report, at: usize| {
+        let versions = &report.evidence.histories[at].1;
+        versions
+            .windows(2)
+            .filter(|pair| pair[0].owner != pair[1].owner)
+            .count()
+    };
+    // The stall test checks the rule's side: s3 alone is exempt and every other shard keeps serving.
+    let mutant = run(&Config::stall(1).hostile(Plant::UnhealthyOnAnyHold, 0)).expect("a run");
+    let moves: Vec<usize> = (0..3).map(|at| moved(&mutant, at)).collect();
+    let rule = "a shard whose volume is healthy changed hands";
+    assert_eq!(rule, hosts::HEALTHY_MOVED);
+    assert!(
+        moves.iter().any(|&n| n > 0),
+        "{moves:?}: {}",
+        mutant.summary()
+    );
+    assert!(mutant.planted, "the any-hold mutant changed the run");
+    assert_eq!(
+        hosts::expected(&mutant).rule(),
+        Some(rule),
+        "{}",
+        mutant.summary()
+    );
+}
+
+/// NoEpochReuse at the driver: a restart activates its session only from its own acknowledged bump.
+/// Under plant `RoleReadActivation` (code 59) a restart of s3 on H3 whose role read returned logs an activation at
+/// the tenure that read named, the one the record held ahead of the restart's bump and the boot activated, and the
+/// one-owner check fails the run by its reactivation rule. H3 crashes and returns under an outage of its store
+/// requests: each incarnation whose role read fails logs nothing, and the first one whose role read returns logs
+/// the one planted activation, beside the boot's at that tenure. The plant appends that entry to the driver's
+/// activation log once the incarnation returned and starts no session, so it shows the check that judges such an
+/// activation, not a session the sequence would open. Sibling: the same crash, return and outage with no plant
+/// passes the one-owner check (`a_restart_that_ends_in_a_rerun_exit_runs_again_and_serves_after_the_outage`).
+#[test]
+fn an_activation_from_the_role_read_fails_the_one_owner_rule() {
+    let planted = scripted(
+        &Config::host_loss(1).hostile(Plant::RoleReadActivation, 3),
+        return_under_an_outage(),
+    );
+    assert!(planted.planted);
+    let reruns = planted.hosts.refused_reruns;
+    assert!(reruns >= 10, "one rerun a round over the outage: {reruns}");
+    let by_h3: Vec<_> = (planted.evidence.activations.iter())
+        .filter(|(shard, _, host)| shard.get() == 4 && host.get() == H3)
+        .map(|(_, tenure, _)| *tenure)
+        .collect();
+    let boot = by_h3[0];
+    let at_boot = by_h3.iter().filter(|tenure| **tenure == boot).count();
+    assert_eq!(
+        (at_boot, by_h3.len()),
+        (2, 3),
+        "the boot's activation, the one the returned role read logged, and the restart's own: {by_h3:?}"
+    );
+    let reactivated = "one tenure activated twice";
+    assert_eq!(
+        planted.verdicts.one_owner.rule(),
+        Some(reactivated),
+        "{}",
+        planted.summary()
+    );
+}
+
+/// The `RoleReadActivation` plant logs only at a tenure a role read named for an owner. s3's shard record names H3
+/// owner while s3's volume record reads retired, so H3's role read returns `Role::Retired`, which names no tenure:
+/// the restart ends `Exit::Retired`, the plant logs no activation and the run does not read planted.
+#[test]
+fn a_role_read_that_names_no_owner_tenure_logs_no_planted_activation() {
+    use crate::failover::records::{Record, VolumeRecord, VolumeState};
+    use crate::storage::store::{Key, Outcome, Store, Write};
+    let config = Config::host_loss(1).hostile(Plant::RoleReadActivation, 3);
+    let mut draws = Draws::record(config.root);
+    let mut fleet = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS).expect("a recorded topology");
+    fleet.start_hosts();
+    let _inline = Inline::set();
+    let member = fleet.cells[3].placement.owner;
+    assert_eq!(fleet.record_now(3).owner.get(), H3);
+    let key = Key::Volume(fleet.cells[3].placement.volume);
+    let item = (fleet.store.0.borrow().current(&key).cloned()).expect("a stored volume record");
+    let mut volume = VolumeRecord::decode(&item.value).expect("a volume record");
+    volume.state = VolumeState::Retired;
+    let write = Write::Exact {
+        expect: item.version,
+        value: volume.encode(),
+    };
+    let outcome = Store::write(&mut fleet.store.clone(), &key, &write);
+    assert!(matches!(outcome, Outcome::Committed(_)), "{outcome:?}");
+
+    let grounds = [Grounds::over(storage_shared(1, fleet.share_on(member)))];
+    let pools = [Pools::new(&grounds[0])];
+    let mut slots = Slots {
+        grounds: &grounds,
+        pools: &pools,
+        members: vec![member],
+        used: vec![false],
+    };
+    let mut live: Live<'_> = fleet.cells.iter().map(|_| None).collect();
+    let restarted = fleet.restart_by(&mut live, &mut slots, (3, false), member);
+    assert!(matches!(restarted, Ok(super::volumes::Restarted::Held)));
+    assert_eq!(fleet.cells[3].blockers, ["Retired"]);
+    assert_eq!(fleet.activations, []);
+    assert!(!fleet.planted);
+}
+
+/// The exit and phase table: a waiting phase holds no device. In the host-loss case every view period of
+/// each standby's wait ends `Exit::Stopped` and its fencer never connects (the standby-wait test checks the
+/// exits). Under plant `WaitDevice` (code 41) the wait of s4's standby starts its fencer's device before each period:
+/// the production wait returns that device with `Exit::Fault` before its first period, the fleet lists the exit, and
+/// the host scenario's check fails the run by its waiting-phase rule.
+#[test]
+fn a_wait_whose_fencer_holds_a_device_ends_fault_and_fails_the_waiting_phase_rule() {
+    let report = run(&Config::host_loss(1).hostile(Plant::WaitDevice, hosts::DUTY_CELL as u32));
+    let report = report.expect("a run inside the limits");
+    assert!(report.planted);
+    let exits = &report.shards[hosts::DUTY_CELL].wait_exits;
+    assert!(
+        !exits.is_empty() && exits.iter().all(|exit| exit.starts_with("Fault")),
+        "{exits:?}"
+    );
+    let rule = "a standby wait held a device";
+    assert_eq!(rule, hosts::WAIT_DEVICE);
+    assert_eq!(
+        hosts::expected(&report).rule(),
+        Some(rule),
+        "{}",
+        report.summary()
+    );
 }
 
 /// A restart whose bump's reply is unknown ends `Exit::Held`, and the process publishes the `Held` status with its

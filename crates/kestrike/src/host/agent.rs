@@ -838,28 +838,42 @@ impl Agent {
         // A process that died before its first status reached the agent leaves its role unreported.
         let unreported = (self.unreported.iter())
             .any(|&(.., since)| now.saturating_sub(since) > RESTART_GRACE_US);
-        !unreported
-            && !self.statuses.iter().any(|kept| {
-                let status = &kept.status;
-                let held = status.phase == Phase::Held
-                    || (status.ended == Some(Ended::Held) && status.phase != Phase::Serving);
-                let silent = now.saturating_sub(kept.at) > RESTART_GRACE_US
-                    && !matches!(status.phase, Phase::Parked | Phase::Closing);
-                (held || silent) && (self.standby_named).contains(&(status.shard, status.volume))
-            })
+        let quiet = |kept: &Received| {
+            let status = &kept.status;
+            let held = status.phase == Phase::Held
+                || (status.ended == Some(Ended::Held) && status.phase != Phase::Serving);
+            let silent = now.saturating_sub(kept.at) > RESTART_GRACE_US
+                && !matches!(status.phase, Phase::Parked | Phase::Closing);
+            held || silent
+        };
+        let named = |kept: &Received| {
+            (self.standby_named).contains(&(kept.status.shard, kept.status.volume))
+        };
+        let unhealthy = unreported || (self.statuses.iter()).any(|kept| quiet(kept) && named(kept));
+        #[cfg(test)]
+        let unhealthy = unhealthy || tests::any_hold(self.statuses.iter().any(quiet));
+        !unhealthy
     }
 
     fn keep(&mut self) {
+        let same = |kept: &Kept, nominated: &Nominated| {
+            kept.nominated.shard == nominated.shard
+                && kept.nominated.nomination.target == nominated.nomination.target
+        };
+        let published = self.watch.published();
         #[cfg(test)]
-        if tests::published_only() {
-            self.kept.clear();
-        }
-        for nominated in self.watch.published() {
-            let same = |kept: &Kept| {
-                kept.nominated.shard == nominated.shard
-                    && kept.nominated.nomination.target == nominated.nomination.target
+        {
+            // The mutant's clear changes the kept set when it drops a nomination the last tick did not publish or
+            // returns a sent one to unsent.
+            let rebuilt = |kept: &Kept| {
+                kept.sent_at.is_none() && published.iter().any(|nominated| same(kept, nominated))
             };
-            match self.kept.iter_mut().find(|kept| same(kept)) {
+            if tests::published_only(!self.kept.iter().all(rebuilt)) {
+                self.kept.clear();
+            }
+        }
+        for nominated in published {
+            match self.kept.iter_mut().find(|kept| same(kept, nominated)) {
                 Some(kept) => kept.nominated = *nominated,
                 None => self.kept.push(Kept {
                     nominated: *nominated,

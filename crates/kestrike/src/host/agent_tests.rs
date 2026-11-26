@@ -38,6 +38,15 @@ thread_local! {
     static UNREVALIDATED: Cell<bool> = const { Cell::new(false) };
     static PUBLISHED_ONLY: Cell<bool> = const { Cell::new(false) };
     static UNBOUND: Cell<bool> = const { Cell::new(false) };
+    static ANY_HOLD: Cell<bool> = const { Cell::new(false) };
+    static FIRED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The health rule's mutant: a held or silent process makes the host unhealthy whether or not its shard names a
+/// standby elsewhere. `quiet` is true when the health rule read the host healthy and one of its processes is held or
+/// silent. An armed mutant returns `quiet`, which turns that reading unhealthy, and then sets [`fired`].
+pub(super) fn any_hold(quiet: bool) -> bool {
+    fire(&ANY_HOLD, quiet)
 }
 
 pub(super) fn unbound() -> bool {
@@ -48,25 +57,60 @@ pub(super) fn unrevalidated() -> bool {
     UNREVALIDATED.with(Cell::get)
 }
 
-pub(super) fn published_only() -> bool {
-    PUBLISHED_ONLY.with(Cell::get)
+/// The nomination mutant: the agent keeps only the nominations the last tick published. `drops` is true when
+/// clearing the kept nominations ahead of that tick's publications changes them. An armed mutant returns `drops`,
+/// on which the agent clears them, and then sets [`fired`].
+pub(super) fn published_only(drops: bool) -> bool {
+    fire(&PUBLISHED_ONLY, drops)
+}
+
+/// Whether `plant` is armed and `changes` the agent's decision at its hook, which sets [`fired`].
+fn fire(plant: &'static std::thread::LocalKey<Cell<bool>>, changes: bool) -> bool {
+    let fires = changes && plant.with(Cell::get);
+    if fires {
+        FIRED.with(|fired| fired.set(true));
+    }
+    fires
+}
+
+/// Whether the `any-hold` or the `published-only` plant changed an agent's decision on this thread since the last
+/// [`arm`].
+pub(crate) fn fired() -> bool {
+    FIRED.with(Cell::get)
 }
 
 /// Whether any plant of [`planted`] is set on this thread.
 pub(crate) fn armed() -> bool {
-    unbound() || unrevalidated() || published_only()
+    [&UNBOUND, &UNREVALIDATED, &PUBLISHED_ONLY, &ANY_HOLD]
+        .into_iter()
+        .any(|plant| plant.with(Cell::get))
 }
 
-pub(crate) fn planted<R>(plant: &'static str, body: impl FnOnce() -> R) -> R {
-    let cell = match plant {
+/// Arms `plant` on this thread until [`disarm`] and clears [`fired`].
+pub(crate) fn arm(plant: &'static str) {
+    FIRED.with(|fired| fired.set(false));
+    cell_of(plant).with(|plant| plant.set(true));
+}
+
+/// Clears `plant` on this thread.
+pub(crate) fn disarm(plant: &'static str) {
+    cell_of(plant).with(|plant| plant.set(false));
+}
+
+fn cell_of(plant: &'static str) -> &'static std::thread::LocalKey<Cell<bool>> {
+    match plant {
         "unrevalidated" => &UNREVALIDATED,
         "published-only" => &PUBLISHED_ONLY,
         "unbound" => &UNBOUND,
+        "any-hold" => &ANY_HOLD,
         _ => panic!("no plant {plant}"),
-    };
-    cell.with(|plant| plant.set(true));
+    }
+}
+
+pub(crate) fn planted<R>(plant: &'static str, body: impl FnOnce() -> R) -> R {
+    arm(plant);
     let result = body();
-    cell.with(|plant| plant.set(false));
+    disarm(plant);
     result
 }
 
@@ -446,6 +490,112 @@ fn the_host_is_unhealthy_only_for_a_held_or_silent_process_whose_shard_has_a_sta
             "{phase:?} in the grace"
         );
     }
+}
+
+#[test]
+fn an_armed_agent_mutant_fires_only_on_a_decision_it_changes() {
+    let named = [record(1, OWN, Some(11))];
+    let unnamed = [record(1, OWN, None), record(2, 12, Some(11))];
+    let held = [status(1, Phase::Held)];
+    let serving = [status(1, Phase::Serving)];
+    let read = |plant, records: &[ShardRecord], statuses: &[Status]| {
+        planted(plant, || (health(records, statuses, H), fired()))
+    };
+    let (healthy, unhealthy) = (true, false);
+    assert_eq!(
+        read("any-hold", &unnamed, &serving),
+        (healthy, false),
+        "a serving process"
+    );
+    assert_eq!(
+        read("any-hold", &named, &held),
+        (unhealthy, false),
+        "the health rule's own reading"
+    );
+    assert_eq!(
+        read("any-hold", &unnamed, &held),
+        (unhealthy, true),
+        "a held process the mutant turns unhealthy"
+    );
+    let mixed = [
+        record(1, OWN, None),
+        record(2, 12, Some(11)),
+        record(3, OWN, Some(11)),
+    ];
+    let both = [status(1, Phase::Held), status(3, Phase::Held)];
+    assert_eq!(
+        read("any-hold", &mixed, &both),
+        (unhealthy, false),
+        "an unnamed hold ahead of a named one, which the health rule already reads unhealthy"
+    );
+    assert_eq!(
+        read("published-only", &named, &serving),
+        (healthy, false),
+        "a turn with an empty kept set"
+    );
+}
+
+/// The `published-only` mutant fires where its clear changes the kept nominations. A kept nomination that no
+/// standby process took, and that the detector publishes again under a new observation generation, is kept unsent
+/// with the mutant as without it. The mutant fires once the last tick published nothing and its clear drops the
+/// kept nomination.
+#[test]
+fn the_published_only_mutant_fires_only_when_its_clear_changes_the_kept_nominations() {
+    let records = [record(1, 11, Some(OWN))];
+    // No process of this host shows `Standby`, so the kept nomination stays unsent.
+    let (mut agent, first) = nominated(&records, &[]);
+    assert!(nominations(&first).is_empty());
+    let moved: Vec<_> = (placement().into_iter())
+        .map(|(h, p)| (h, if h == host(11) { Partition(4) } else { p }))
+        .collect();
+    let sync = Some(Synced {
+        records: &records,
+        placement: &moved,
+    });
+    let out = agent.turn(
+        50,
+        Inputs {
+            sync,
+            clock: clock(50),
+            ..Inputs::NONE
+        },
+    );
+    assert!(out.refused.is_empty(), "{:?}", out.refused);
+    let mut t = 60;
+    while agent.watch().census().nominations < 2 {
+        assert!(t <= 200, "the detector publishes the target again");
+        let votes = dead_votes(&agent);
+        at(&mut agent, t, &votes);
+        t += 10;
+    }
+    let kept = |agent: &Agent| -> Vec<_> {
+        (agent.kept.iter())
+            .map(|kept| (kept.nominated, kept.sent_at))
+            .collect()
+    };
+    let republished = kept(&agent);
+    assert_eq!(republished, [(agent.watch().published()[0], None)]);
+    let changed = planted("published-only", || {
+        agent.keep();
+        fired()
+    });
+    assert_eq!(
+        (changed, kept(&agent)),
+        (false, republished),
+        "the clear and the last tick's publication rebuild the same unsent nomination"
+    );
+    at(&mut agent, t, &[]);
+    assert!(agent.watch().published().is_empty());
+    assert_eq!(agent.kept.len(), 1);
+    let changed = planted("published-only", || {
+        agent.keep();
+        fired()
+    });
+    assert_eq!(
+        (changed, agent.kept.len()),
+        (true, 0),
+        "the clear drops a nomination the last tick did not publish"
+    );
 }
 
 #[test]

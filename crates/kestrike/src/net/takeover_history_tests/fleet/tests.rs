@@ -411,20 +411,20 @@ fn a_request_count_past_one_peers_allowance_is_refused_before_any_draw() {
 }
 
 #[test]
-fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_45_and_50_to_56() {
+fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_41_45_and_50_to_59() {
     let codes: Vec<u8> = Plant::ALL.iter().map(|plant| plant.code()).collect();
     assert_eq!(
         codes,
         [
             13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53, 54,
-            55, 56
+            55, 56, 57, 58, 59, 41
         ]
     );
     let identities: BTreeSet<String> = (Plant::ALL.iter())
         .map(|plant| Config::six(1).hostile(*plant, 0).identity())
         .chain([Config::six(1).identity()])
         .collect();
-    assert_eq!(identities.len(), 25);
+    assert_eq!(identities.len(), 29);
 }
 
 #[test]
@@ -623,6 +623,18 @@ fn a_hostile_profile_whose_plant_changes_nothing_earns_no_credit() {
     let same = run(&Config::six(1).hostile(Plant::WholeShare, alone)).unwrap();
     assert!(!same.planted, "one role's whole share is its legal share");
     assert_eq!(same.credit(), Verdict::Unrun(HOSTILE));
+
+    // An agent mutant takes effect at a host agent's turn, and only a host scenario takes those turns.
+    let idle = [Plant::EmitOnce, Plant::UnhealthyOnAnyHold].map(|plant| {
+        let idle = run(&Config::tiny(1).hostile(plant, 0)).unwrap();
+        (plant, idle.planted, idle.credit())
+    });
+    let unrun = Verdict::Unrun(HOSTILE);
+    let unchanged = [
+        (Plant::EmitOnce, false, unrun.clone()),
+        (Plant::UnhealthyOnAnyHold, false, unrun),
+    ];
+    assert_eq!(idle, unchanged);
 }
 
 fn failed(rule: Option<&'static str>, at: &str) -> Verdict {
@@ -1490,7 +1502,7 @@ fn a_run_refuses_an_armed_fault_control_by_name_and_restores_inline_recovery() {
     crate::storage::write_guard::arm(outer);
     assert!(refused.contains("the write guard is armed"), "{refused}");
 
-    for plant in ["unbound", "unrevalidated", "published-only"] {
+    for plant in ["unbound", "unrevalidated", "published-only", "any-hold"] {
         let refused = crate::host::agent::tests::planted(plant, || {
             message(&|| play(&config, || panic!("a draw preceded the agent plant check")))
         });
@@ -1511,7 +1523,7 @@ fn a_run_refuses_an_armed_fault_control_by_name_and_restores_inline_recovery() {
     let refused = message(&|| run_shared(&config));
     PLANT.with(|plant| plant.set(None));
     assert!(refused.contains("checkpoint::PLANT is armed"), "{refused}");
-    for plant in ["unbound", "unrevalidated", "published-only"] {
+    for plant in ["unbound", "unrevalidated", "published-only", "any-hold"] {
         let refused =
             crate::host::agent::tests::planted(plant, || message(&|| run_shared(&config)));
         assert!(

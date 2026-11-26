@@ -564,9 +564,19 @@ impl Fleet<'_> {
         let mut refusals = Refusals::default();
         let sources = (&mut local, &mut plane, &mut refusals);
         let cell = (&self.cells[at], of, pair);
-        let incarnation =
-            super::owners::incarnate(cell, self.round, ground.0, &mut client, sources);
+        let (incarnation, named) =
+            super::owners::incarnate_read(cell, self.round, ground.0, &mut client, sources);
         drop(client);
+        // The mutant logs an activation at the tenure the role read named for this host as owner, the tenure the
+        // record held ahead of this restart's bump. It appends that one entry to the log once the incarnation
+        // returned and starts no session. A role read that failed, or that returned a waiting or retired role,
+        // names no tenure.
+        if let Some(named) = named
+            && self.config.planted_at(super::Plant::RoleReadActivation, at)
+        {
+            self.activations.push((at, named, of.host));
+            self.planted = true;
+        }
         let (tenure, control, now) = match incarnation {
             // A tenure acquired under a record that named another owner is dropped unserved; its driver returned
             // every command, and the cell keeps its holder and its live tenure.

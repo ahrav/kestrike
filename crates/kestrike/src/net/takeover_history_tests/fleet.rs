@@ -217,10 +217,25 @@ pub(crate) enum Plant {
     /// In a host scenario every tenure of the host at the index publishes flat device and completion counters with
     /// one command pending, while the host stays healthy: the flat-progress gray owner.
     FlatProgress,
+    /// The host agents' detectors send each nomination once, at its publication, and re-send no kept nomination
+    /// (`host::agent`'s `published-only` mutant of NAMED-STANDBY). The plant ignores the profile's index.
+    EmitOnce,
+    /// The host agents' health rule reads a held or silent process unhealthy whether or not its shard names a
+    /// standby elsewhere (`host::agent`'s `any-hold` mutant of the host health rule). The plant ignores the
+    /// profile's index.
+    UnhealthyOnAnyHold,
+    /// The restart of the shard at the index records, in the activation log the one-owner check reads, an
+    /// activation at the tenure its role read named, the tenure the record held ahead of the restart's bump: the
+    /// activation-from-the-role-read mutant of NoEpochReuse at the driver's log. It appends the entry once the
+    /// incarnation returned and starts no session.
+    RoleReadActivation,
+    /// Each view period of the standby wait of the shard at the index starts its fencer's device before the period
+    /// runs: the mutant of the exit and phase table whose waiting phase holds a device.
+    WaitDevice,
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 24] = [
+    pub(crate) const ALL: [Self; 28] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -245,6 +260,10 @@ impl Plant {
         Self::StandbyExtraRead,
         Self::WaitUnpublished,
         Self::FlatProgress,
+        Self::EmitOnce,
+        Self::UnhealthyOnAnyHold,
+        Self::RoleReadActivation,
+        Self::WaitDevice,
     ];
 
     /// `Config::identity` encodes the hostile profile with the plant code.
@@ -274,6 +293,10 @@ impl Plant {
             Self::StandbyExtraRead => 54,
             Self::WaitUnpublished => 55,
             Self::FlatProgress => 56,
+            Self::EmitOnce => 57,
+            Self::UnhealthyOnAnyHold => 58,
+            Self::RoleReadActivation => 59,
+            Self::WaitDevice => 41,
         }
     }
 }
@@ -286,8 +309,9 @@ pub(crate) enum Profile {
     /// `NeighborRefusal` the index names the crashed shard whose episode sends the refused GET, and in a host
     /// scenario the lost host by member index, as it does for `WholeShare` and `UnchargedRead`. For `FlatProgress`
     /// the index names a host by member index, so an index past the last cell plants on a layout with that many
-    /// hosts. `NoCrashEpisode` and `WideCap` ignore the index, and any other plant with an index past the last cell
-    /// plants nothing. `Config::identity` encodes the index of every plant.
+    /// hosts. `NoCrashEpisode`, `WideCap`, `SettledWrite`, `AckOnUnknown`, `EmitOnce` and `UnhealthyOnAnyHold` ignore
+    /// the index, and any other plant with an index past the last cell plants nothing. `Config::identity` encodes
+    /// the index of every plant.
     Hostile(Plant, u32),
     /// A hostile profile whose episodes may break a premise of the fleet's rules; it plants nothing.
     Arm(Hostile),
@@ -1393,7 +1417,44 @@ fn play_within(
     refuse_armed_controls();
     let _inline = Inline::set();
     let _ack = AckOnUnknown::set(config.planted(Plant::AckOnUnknown));
+    let _agent = AgentPlant::set(config);
     Fleet::play(config, draws(), wait)
+}
+
+/// Arms the host agent mutant a run's plant names (`Plant::EmitOnce`, `Plant::UnhealthyOnAnyHold`) on the calling
+/// thread for the life of the value, and disarms it when dropped, an unwound run included.
+struct AgentPlant(Option<&'static str>);
+
+impl AgentPlant {
+    fn of(config: &Config) -> Option<&'static str> {
+        if config.planted(Plant::EmitOnce) {
+            Some("published-only")
+        } else if config.planted(Plant::UnhealthyOnAnyHold) {
+            Some("any-hold")
+        } else {
+            None
+        }
+    }
+
+    fn set(config: &Config) -> Self {
+        let plant = Self::of(config);
+        if let Some(plant) = plant {
+            crate::host::agent::tests::arm(plant);
+        }
+        Self(plant)
+    }
+
+    fn fired(config: &Config) -> bool {
+        Self::of(config).is_some() && crate::host::agent::tests::fired()
+    }
+}
+
+impl Drop for AgentPlant {
+    fn drop(&mut self) {
+        if let Some(plant) = self.0 {
+            crate::host::agent::tests::disarm(plant);
+        }
+    }
 }
 
 /// Sets `coverage::ACK_ON_UNKNOWN` on the calling thread for the life of the value when the run plants
@@ -2094,9 +2155,20 @@ struct Fleet<'c> {
     /// no tenure, or only the tenure an open loss took from it, the host loop runs on, so the agent's next witness
     /// reaches the wait; the agent sends one a window while the records name its target.
     retakes: std::collections::BTreeMap<usize, usize>,
+    /// The round `Fleet::retake` last recorded each cell's wait. `Fleet::unsent` reads it for the cells of
+    /// [`Fleet::retakes`] alone.
+    retaken: std::collections::BTreeMap<usize, u64>,
+    /// The round an agent last addressed each standby process a witness for each target, by the process's member
+    /// and its shard. `Fleet::unsent` reads the record's present target against [`Fleet::retaken`] at the host
+    /// loop's horizon.
+    witnessed:
+        std::collections::BTreeMap<(usize, u32), Vec<(crate::failover::retire::Target, u64)>>,
     /// Whether the host loop runs a due rerun of [`Fleet::refused`] ahead of a queued takeover in the same pass: the
     /// order of a held process's rerun and a standby's takeover that both became due in one round.
     rerun_first: bool,
+    /// The rounds since the hosts started after which an unsettled host scenario stops as stalled:
+    /// `hosts::HORIZON_ROUNDS`, or fewer in a control that expects the stall.
+    horizon: u64,
 }
 
 /// Each tenure's grounds and pools, by the member whose load takes them.
@@ -2235,7 +2307,10 @@ impl<'c> Fleet<'c> {
             recurred: std::collections::BTreeSet::new(),
             refused: std::collections::BTreeMap::new(),
             retakes: std::collections::BTreeMap::new(),
+            retaken: std::collections::BTreeMap::new(),
+            witnessed: std::collections::BTreeMap::new(),
             rerun_first: false,
+            horizon: hosts::HORIZON_ROUNDS,
             standby_extra: None,
         };
         fleet.seeded_volumes = fleet.commits(|key| matches!(key, Key::Volume(_)));
@@ -3526,11 +3601,13 @@ impl<'c> Fleet<'c> {
             crashes: self.crashes,
             rounds: self.round,
             reconciled: self.reconciled,
-            // The planted ack changes a run once a duty coverage write's reply is unknown.
+            // `AckOnUnknown` counts as planted from the first unknown reply to a duty coverage write, and an agent
+            // mutant from the first agent decision its hook changed.
             planted: self.planted
                 || (self.config.planted(Plant::AckOnUnknown)
                     && (self.duty_unknowns.borrow().iter())
-                        .any(|(key, _)| matches!(key, Key::Page(..)))),
+                        .any(|(key, _)| matches!(key, Key::Page(..))))
+                || AgentPlant::fired(self.config),
             decisions,
             tape,
             hosts: self.log.clone(),

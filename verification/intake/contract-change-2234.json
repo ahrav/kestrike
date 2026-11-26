@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2234",
+  "kind": "contract-change",
+  "pull_request": 2234,
+  "changed": "The new obligation record fleet-host-driver-keeps-no-epoch-reuse-one-exit-named-standby-and-the-health-rule, which states FP-HOST-02, FP-HOST-04, FP-HOST-05 and FP-HOST-09 of #255 as fleet evidence with the planted mutants RoleReadActivation (59), WaitDevice (41), EmitOnce (57) and UnhealthyOnAnyHold (58). In the record fleet-world-restarts-every-owner-warm-and-judges-six-fleet-checks the plant-code test takes the name that lists codes 41 and 57 to 59; its invariant is unchanged.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-host-driver-keeps-no-epoch-reuse-one-exit-named-standby-and-the-health-rule",
+    "reason": "Its invariant states the new contract: at the fleet's host driver a restart's session comes from its own acknowledged bump and an activation logged at the tenure a role read named fails the one-owner rule; every view period of a standby's wait ends Exit::Stopped with no device connected and a wait whose fencer holds a device fails the waiting-phase rule; a kept nomination is sent again each window until its target leaves the records; and a host reads unhealthy only for a held process whose shard names a standby elsewhere. Its LIMITS state that no listed run reaches the health rule's silent or unreported clause, that the silent clause's fleet witness is the HandoffEnded scenario of blotter pull request 2243, and that the unreported clause rests on host::agent's tests."
+  }
+}

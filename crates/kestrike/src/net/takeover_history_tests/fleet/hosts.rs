@@ -44,7 +44,7 @@ use crate::failover::zone_loop::status::Blocker;
 const H: u64 = ROUND_US;
 pub(crate) const REPORT_ROUNDS: u64 = 10;
 pub(crate) const TAIL_ROUNDS: u64 = 60;
-const HORIZON_ROUNDS: u64 = 4_000;
+pub(super) const HORIZON_ROUNDS: u64 = 4_000;
 const PAUSE_ROUNDS: u64 = 240;
 const DETECT_HOSTS: usize = 12;
 /// The attachment slots of every fleet instance.
@@ -836,6 +836,15 @@ pub(crate) const HOLD_LATCHED: &str = "witness hold-latched missing";
 pub(crate) const LATCHED_AT_CREATE: &str = "witness hold-latched-at-create missing";
 pub(crate) const HOLD_RELEASED: &str = "witness hold-released missing";
 pub(crate) const MOVED_TWICE: &str = "a shard on a stalled volume changed hands more than once";
+pub(crate) const HEALTHY_MOVED: &str = "a shard whose volume is healthy changed hands";
+pub(crate) const WAIT_DEVICE: &str = "a standby wait held a device";
+/// The name of a host loop's horizon stall that [`Fleet::unsent`] attributes to a standby's wait.
+pub(crate) const RESEND: &str =
+    "a kept nomination was not sent again while its target stayed in the records";
+/// The rounds without a witness after which [`Fleet::unsent`] names a waiting standby. The agents' window is one
+/// round, and in the host-loss case with a store timeout on a takeover the agents address the waiting standby a
+/// witness in four rounds of five, so the longest gap between two witnesses there is two rounds.
+pub(crate) const RESEND_WINDOWS: u64 = 16;
 pub(crate) const SECOND_VOLUME: &str = "a replacement receipt's create made a second volume";
 pub(crate) const UNPROVIDED: &str =
     "a replacement receipt records a volume the provider did not make for its token";
@@ -1141,6 +1150,28 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
     if let Some(&shard) = volumes.stalled.iter().find(|&&shard| moved(shard) > 1) {
         let at = format!("shard {shard} moved {} times", moved(shard));
         return Verdict::Fail(MOVED_TWICE, at);
+    }
+    // A waiting phase holds no device: a standby wait that ended `Exit::Fault` held one.
+    if let Some(shard) = (report.shards.iter()).position(|shard| {
+        shard
+            .wait_exits
+            .iter()
+            .any(|exit| exit.starts_with("Fault"))
+    }) {
+        return Verdict::Fail(WAIT_DEVICE, format!("shard {}", shard + 1));
+    }
+    // The host health rule: in a stall scenario no host fails, so only a shard of a stalled volume
+    // may change hands; a held process makes its host unhealthy only for a shard that names a standby elsewhere.
+    // A log with no stalled volume reads the scenario's stall witness missing instead.
+    let stall_only = matches!(
+        report.config.scenario,
+        Scenario::Stall | Scenario::Impaired | Scenario::ImpairedBrief
+    ) && !volumes.stalled.is_empty();
+    let shards = 1..=report.evidence.histories.len() as u32;
+    let healthy = |shard: &u32| !volumes.stalled.contains(shard) && !volumes.lost.contains(shard);
+    if stall_only && let Some(shard) = shards.filter(healthy).find(|&shard| moved(shard) > 0) {
+        let at = format!("shard {shard} moved {} times", moved(shard));
+        return Verdict::Fail(HEALTHY_MOVED, at);
     }
     if volumes.made > volumes.lost.len() {
         let at = format!("{} volumes for {} lost", volumes.made, volumes.lost.len());
@@ -1771,6 +1802,7 @@ impl<'c> Fleet<'c> {
                 continue;
             };
             self.log.addressed += 1;
+            self.witness(member, witness.shard.get(), witness.target);
             self.deliver(member, volume, witness, t);
         }
         if let Some(bytes) = report {
@@ -2463,8 +2495,13 @@ impl<'c> Fleet<'c> {
                     break;
                 }
             }
-            if since > HORIZON_ROUNDS {
-                return Err(self.stalled(None, "the host scenario's settle"));
+            if since > self.horizon {
+                // A standby that still waits to take its shard again, with no witness for `RESEND_WINDOWS` rounds,
+                // names the stall.
+                return Err(match self.unsent() {
+                    Some(at) => self.stalled(Some(at), RESEND),
+                    None => self.stalled(None, "the host scenario's settle"),
+                });
             }
             self.turn(live);
         }
@@ -2617,7 +2654,40 @@ impl<'c> Fleet<'c> {
         let host = self.topology.members[member].host;
         if record.standby == Some(host) && record.owner != host {
             self.retakes.insert(at, member);
+            self.retaken.insert(at, self.round);
         }
+    }
+
+    /// Records that an agent addressed `member`'s standby process of `shard` a witness for `target` this round.
+    pub(super) fn witness(
+        &mut self,
+        member: usize,
+        shard: u32,
+        target: crate::failover::retire::Target,
+    ) {
+        let seen = self.witnessed.entry((member, shard)).or_default();
+        match seen.iter_mut().find(|(of, _)| *of == target) {
+            Some(last) => last.1 = self.round,
+            None => seen.push((target, self.round)),
+        }
+    }
+
+    /// The first cell of [`Fleet::retakes`] whose standby has waited, with the record naming a target an agent
+    /// addressed it a witness for, for more than [`RESEND_WINDOWS`] rounds since the later of the last such witness
+    /// and the start of its wait. The fleet reads the witnesses the agents addressed: a nomination reached the standby, the
+    /// record still names its target, the standby still waits, and no witness followed in that many windows.
+    /// `Fleet::turn` alone advances the round, after the agents' turns, so each round that passes is one window in
+    /// which the agents turned. A standby that was never addressed a witness for the record's present target names
+    /// no cell, whatever witnesses for other targets it was addressed.
+    pub(super) fn unsent(&self) -> Option<usize> {
+        self.retakes.iter().find_map(|(&at, &member)| {
+            let since = *self.retaken.get(&at)?;
+            let shard = self.cells[at].placement.shard.get();
+            let present = crate::failover::retire::Target::of(&self.record_now(at));
+            let seen = self.witnessed.get(&(member, shard))?;
+            let &(_, last) = seen.iter().find(|(target, _)| *target == present)?;
+            (self.round.saturating_sub(last.max(since)) > RESEND_WINDOWS).then_some(at)
+        })
     }
 
     /// Whether a standby waits on a takeover still to run: some cell of [`Fleet::retakes`] has no tenure, or only
