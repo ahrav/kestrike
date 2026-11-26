@@ -143,7 +143,7 @@ class ReviewWorkflow(unittest.TestCase):
         return grants
 
     def test_review_uses_the_isolated_runner_for_same_repository_prs(self):
-        self.assertIn("    runs-on: [self-hosted, linux, x64, kestrike-review]", self.text)
+        self.assertIn("    runs-on: ubuntu-24.04\n", self.text)
         self.assertIn("    timeout-minutes: 30", self.text)
         self.assertEqual(
             " ".join(self.block_after("if: >-").split()),
@@ -155,10 +155,11 @@ class ReviewWorkflow(unittest.TestCase):
         self.assertNotIn("allowed_non_write_users:", self.text)
         self.assertNotIn("allowed_bots:", self.text)
 
-    def test_review_uses_its_runner_pool_without_a_shared_job_lock(self):
+    def test_review_runs_on_a_hosted_runner_without_a_shared_job_lock(self):
         job = self.text.split("\njobs:\n", 1)[1]
         self.assertNotRegex(job, r"(?m)^    concurrency:")
-        self.assertIn("runs-on: [self-hosted, linux, x64, kestrike-review]", job)
+        self.assertIn("runs-on: ubuntu-24.04\n", job)
+        self.assertNotIn("self-hosted", job)
 
     def test_model_and_action_remain_pinned(self):
         self.assertIn("--model claude-opus-5-5", self.text)

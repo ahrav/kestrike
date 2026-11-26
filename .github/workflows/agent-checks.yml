@@ -39,7 +39,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    runs-on: ubuntu-24.04
     # Receipt cases share a bounded worker pool; hardware fault scenarios run
     # on heavy events and changes to their inputs, with smoke checks on every event.
     timeout-minutes: 30
@@ -108,7 +108,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -121,7 +121,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -737,7 +737,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    runs-on: [self-hosted, linux, x64, kestrike-ci-heavy]
     timeout-minutes: 50
     env:
       EVIDENCE: ${{ github.workspace }}/evidence
@@ -1222,7 +1222,7 @@ jobs:
   rust-gate:
     if: always() && (github.event_name != 'pull_request' || !cancelled())
     needs: [comment-policy, lane-script, rust-format, preflight, workspace, rc11, barriers, campaigns, search, fuzz-smoke, long-run, search-nightly, verus, loom, miri, sweep, genmc, kani, tlc, quint, fuzz, asan, qemu, isa-x86-64, isa-aarch64, tag-compare-x86-64, tag-compare-aarch64]
-    runs-on: [self-hosted, linux, x64, "${{ (github.event_name == 'pull_request' || github.event_name == 'push') && 'kestrike-ci-fast' || 'kestrike-ci-heavy' }}"]
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       # A fork pull request checks nothing out and runs no lane, so the gate
