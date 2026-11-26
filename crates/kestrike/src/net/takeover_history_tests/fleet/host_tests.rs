@@ -796,6 +796,9 @@ fn the_nomination_queue_keeps_the_witness_a_link_inbox_keeps() {
     }
 }
 
+/// The one-owner controls of the host loss over its root-1 evidence: a second host's activation of s0's takeover
+/// tenure, as plant `TwinStart` logs it, fails by the twin-tenure rule, and the takeover's activation moved to H5
+/// by the unnamed-tenure rule. The scheduled case runs the live `TwinStart` plant ([`twin_start_on`]) on root 1.
 #[test]
 fn host_loss_controls_fail_one_owner_by_a_twin_start_and_a_moved_activation() {
     let config = Config::host_loss(1);
@@ -803,9 +806,12 @@ fn host_loss_controls_fail_one_owner_by_a_twin_start_and_a_moved_activation() {
     let unaltered = oracles::one_owner(&evidence.histories, &evidence.activations);
     assert_eq!(unaltered, Verdict::Pass);
 
-    let twin = hostile(config, Plant::TwinStart, 0);
-    assert_eq!(twin.hosts.twin_started, 1);
-    let rule = twin.verdicts.one_owner.rule();
+    let mut twinned = evidence.activations.clone();
+    let taken = (evidence.activations.iter())
+        .find(|(shard, _, host)| shard.get() == 1 && host.get() == H3)
+        .expect("s0's takeover activation");
+    twinned.push((taken.0, taken.1, Host::new(H5).unwrap()));
+    let rule = oracles::one_owner(&evidence.histories, &twinned).rule();
     assert_eq!(rule, Some("two hosts activated one tenure"));
 
     let mut moved = evidence.activations.clone();
@@ -838,22 +844,109 @@ fn a_host_loss_log_with_a_generation_raised_after_the_loss_fails_the_volume_chec
     assert_eq!(rule, Some(moved));
 }
 
+/// The host-share controls of the host loss over its root-1 evidence: a host with two roles whose share is built
+/// over one owner, as plant `WholeShare` builds it, fails by the roles rule, and that host's peak reads raised past
+/// twice its share, as plant `UnchargedRead` charges them, fail by the reads rule. The scheduled case runs the live
+/// plants ([`host_share_controls_on`]) on root 1.
 #[test]
 fn host_loss_controls_fail_the_host_share_by_its_roles_and_by_its_reads() {
-    let config = Config::host_loss(1);
-    assert_eq!(passing(&config).verdicts.within_share, Verdict::Pass);
-    let whole = hostile(config, Plant::WholeShare, 3);
-    let rule = whole.verdicts.within_share.rule();
+    let report = passing(&Config::host_loss(1));
+    assert_eq!(report.verdicts.within_share, Verdict::Pass);
+    let judged = |edit: &dyn Fn(&mut oracles::HostUse)| {
+        let mut used = report.evidence.host_use.clone();
+        assert_eq!(oracles::within_share(&used), Verdict::Pass);
+        let roles = used.iter_mut().find(|used| used.roles > 1);
+        edit(roles.expect("a host with two roles"));
+        oracles::within_share(&used).rule()
+    };
     let roles = "a host's roles exceed the owners its recovery share divides over";
-    assert_eq!(rule, Some(roles));
-    let uncharged = hostile(config, Plant::UnchargedRead, 3);
-    let rule = uncharged.verdicts.within_share.rule();
-    assert_eq!(rule, Some("a host's recovery reads passed twice its share"));
+    let whole = judged(&|used| used.shares.iter_mut().for_each(|share| share.owners = 1));
+    assert_eq!(whole, Some(roles));
+    let uncharged = judged(&|used| {
+        let most = used
+            .shares
+            .iter()
+            .map(|share| share.bytes)
+            .max()
+            .unwrap_or(0);
+        used.peak_bytes = most.saturating_mul(2) + 1;
+    });
+    assert_eq!(
+        uncharged,
+        Some("a host's recovery reads passed twice its share")
+    );
 }
 
+/// The live host-share and twin-start controls of the host loss on `root`.
+pub(super) fn host_share_controls_on(root: u64) {
+    let config = Config::host_loss(root);
+    let whole = hostile(config, Plant::WholeShare, 3);
+    assert_eq!(whole.verdicts.within_share.rule(), Some(oracles::ROLES));
+    let uncharged = hostile(config, Plant::UnchargedRead, 3);
+    assert_eq!(uncharged.verdicts.within_share.rule(), Some(oracles::READS));
+    twin_start_on(root);
+}
+
+/// The live `TwinStart` control on `root`: a second host starts s0's takeover tenure, and the one-owner check fails by
+/// the twin-tenure rule.
+fn twin_start_on(root: u64) {
+    let twin = hostile(Config::host_loss(root), Plant::TwinStart, 0);
+    assert_eq!(twin.hosts.twin_started, 1);
+    assert_eq!(twin.verdicts.one_owner.rule(), Some(oracles::TWIN_TENURE));
+}
+
+/// Fast witnesses of the host loss's retention, untouched-shard and removed-crash controls, each the root-1 report
+/// altered as its plant alters a run: s1's sweep after its takeover one object short (`RestoredEntryMiss`) fails the
+/// retained-set check, that sweep skipped (`SkippedSweep`) reads it `Unrun` and so the credit, one neighbour GET
+/// refused (`NeighborRefusal`) fails the untouched-shard check, and no host loss and no takeover (`NoCrashEpisode`)
+/// leaves the credit `Unrun` on the takeover witness. The scheduled case runs the live controls
+/// ([`host_loss_retention_controls_on`]) on root 1.
 #[test]
 fn host_loss_controls_fail_retention_and_untouched_shards_and_a_removed_crash_reads_unrun() {
-    let config = Config::host_loss(1);
+    let report = passing(&Config::host_loss(1));
+    let judged = |edit: &dyn Fn(&mut Report)| {
+        let mut report = report.clone();
+        edit(&mut report);
+        report.verdicts = report.judged();
+        report
+    };
+    assert_eq!(judged(&|_| {}).verdicts, report.verdicts);
+    fn last_sweep(report: &mut Report) -> &mut Option<(u32, u32)> {
+        let sweeps = &mut report.evidence.retention[1].sweeps;
+        sweeps.last_mut().expect("s1's sweeps")
+    }
+    let eligible = report.evidence.retention[1]
+        .sweeps
+        .last()
+        .expect("s1's sweeps");
+    let eligible = eligible.expect("s1's last sweep").0;
+    let missed = judged(&|report| *last_sweep(report) = Some((eligible, eligible - 1)));
+    let unserved = Verdict::Fail(
+        "a retained entry was not served its exact bytes at the recovered tenure",
+        format!("shard 2 served {} of {eligible}", eligible - 1),
+    );
+    assert_eq!(missed.verdicts.retained, unserved);
+    let skipped = judged(&|report| *last_sweep(report) = None);
+    let unswept = Verdict::Unrun("the retained-set sweep did not run");
+    assert_eq!(skipped.verdicts.retained, unswept);
+    assert_eq!(skipped.credit(), unswept);
+
+    let refused = judged(&|report| report.evidence.neighbour_gets[0].1 = false);
+    let rule = refused.verdicts.untouched.rule();
+    let unserved = "an untouched shard did not serve a request its object's bytes";
+    assert_eq!(rule, Some(unserved));
+
+    let none = judged(&|report| {
+        report.hosts.takeovers.clear();
+        report.hosts.host_losses = 0;
+        report.takeovers = 0;
+    });
+    assert_eq!(none.credit(), Verdict::Unrun("witness takeovers missing"));
+}
+
+/// The live retention, untouched-shard and removed-crash controls of the host loss on `root`.
+pub(super) fn host_loss_retention_controls_on(root: u64) {
+    let config = Config::host_loss(root);
     let missed = hostile(config, Plant::RestoredEntryMiss, 1);
     let unserved = Verdict::Fail(
         "a retained entry was not served its exact bytes at the recovered tenure",
@@ -2022,35 +2115,56 @@ fn a_rerun_queued_for_a_paused_host_waits_for_its_resume() {
     );
 }
 
-/// Controls of the untouched-shard rule's exact form: one extra read of s4's shard record
-/// through its duties' store during H0's loss fails it by the reads rule, and one rewrite of that record by the
-/// writes rule; the unplanted run passes.
+/// Fast witnesses of the untouched-shard rule's exact form, over H0's loss with the report altered: one extra read of
+/// s4's shard record through its duties' store fails it by the reads rule, and one rewrite of that record, with the
+/// read before it, by the writes rule; the unaltered run passes. The scheduled case runs the live controls ([`untouched_controls_on`]) on
+/// root 1.
 #[test]
 fn untouched_shard_controls_fail_by_one_extra_read_and_one_duty_write() {
     let reads = "an untouched shard's reads were other than one volume-record and one shard-record read a view period";
     let write = "an untouched shard's serving duties wrote its records";
+    let report = passing(&Config::host_loss(1));
+    let judged = |edit: fn(&mut oracles::Views)| {
+        let mut altered = report.clone();
+        let shard = hosts::DUTY_CELL as u32 + 1;
+        let watched = altered.evidence.watched.iter_mut();
+        let watch = watched.into_iter().find(|watch| watch.shard.get() == shard);
+        edit(&mut watch.expect("s4's watch").views);
+        altered.judged().untouched
+    };
+    assert_eq!(judged(|_| {}), Verdict::Pass);
+    assert_eq!(report.verdicts.untouched, Verdict::Pass);
+    assert_eq!(judged(|views| views.shard += 1).rule(), Some(reads));
+    // The `DutyRewrite` plant's rewrite reads the record before it writes it, as `Fleet::plant_views` counts both.
+    let rewritten = judged(|views| {
+        views.shard += 1;
+        views.writes += 1;
+    });
+    assert_eq!(rewritten.rule(), Some(write));
+}
+
+/// The live controls of the untouched-shard rule on `root`: one extra read of s4's shard record through its duties'
+/// store during H0's loss fails it by the reads rule, and one rewrite of that record by the writes rule; a plant
+/// index past the last cell plants nothing, a deposed tenure's slot of the live table included.
+pub(super) fn untouched_controls_on(root: u64) {
     let at = hosts::DUTY_CELL as u32;
-    let read = hostile(Config::host_loss(1), Plant::ExtraRead, at);
+    let read = hostile(Config::host_loss(root), Plant::ExtraRead, at);
     assert_eq!(
         read.verdicts.untouched.rule(),
-        Some(reads),
+        Some(oracles::VIEW_READS),
         "{}",
         read.summary()
     );
-    let wrote = hostile(Config::host_loss(1), Plant::DutyRewrite, at);
+    let wrote = hostile(Config::host_loss(root), Plant::DutyRewrite, at);
     assert_eq!(
         wrote.verdicts.untouched.rule(),
-        Some(write),
+        Some(oracles::VIEW_WRITE),
         "{}",
         wrote.summary()
     );
-    assert_eq!(
-        passing(&Config::host_loss(1)).verdicts.untouched,
-        Verdict::Pass
-    );
-    // A plant index past the last cell plants nothing, a deposed tenure's slot of the live table included.
     for plant in [Plant::ExtraRead, Plant::DutyRewrite] {
-        let past = run(&Config::owner_pause(1).hostile(plant, 6)).expect("a run inside the limits");
+        let past =
+            run(&Config::owner_pause(root).hostile(plant, 6)).expect("a run inside the limits");
         assert!(!past.planted, "{plant:?} past the cells");
     }
 }

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::failover::records::{Host, ShardRecord};
+use crate::failover::records::{Host, ShardRecord, VolumeId, VolumeRecord};
 use crate::net::ownership::Shard;
 use crate::oracle::Tenure;
 use crate::storage::HostShare;
@@ -687,3 +687,90 @@ pub(crate) const ALARM_UNSEALED: &str = "a report or status writer refused a due
 pub(crate) const ALARM_NOT_JUDGED: &str = "the scenario states no expected alarm set";
 pub(crate) const ALARM_PLANTED: &str = "a planted run's alarm set is not judged";
 pub(crate) const ALARM_INCOMPLETE: &str = "a scenario's alarm set was not judged";
+
+pub(crate) const UNCOMMITTED_PAIRS: &str = "a judgment read a volume record that differs from its committed version at the read's store version";
+
+/// One committed volume record's history: the volume and each committed version, oldest first with its store version.
+pub(crate) type VolumeHistory = (VolumeId, Vec<(u64, VolumeRecord)>);
+
+/// Every committed version of each volume record the store holds, by volume.
+pub(crate) type VolumeHistories = Vec<VolumeHistory>;
+
+/// One read of a volume record through `Fleet::volume_now` that a judgment's input took: the shard of the cell that
+/// read it, the volume whose key the cell read, the store version the read returned, and the record the caller
+/// received.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PairRead {
+    pub(crate) shard: u32,
+    pub(crate) volume: VolumeId,
+    pub(crate) version: u64,
+    pub(crate) record: VolumeRecord,
+}
+
+/// The committed versions of `volume`, oldest first with their store versions; empty when `histories` lacks it.
+pub(crate) fn versions_of(histories: &[VolumeHistory], volume: VolumeId) -> &[(u64, VolumeRecord)] {
+    let found = histories.iter().find(|(of, _)| *of == volume);
+    found.map_or(&[], |(_, versions)| versions.as_slice())
+}
+
+/// Binds `read` to the volume record's committed history: `Pass` when `histories` holds a committed version of
+/// `read.volume` at store version `read.version` equal to `read.record`, its pairs with their hosts and pins and its
+/// events included, and `Fail(UNCOMMITTED_PAIRS)` naming the shard, the volume and the version otherwise, a version
+/// the history lacks included. The check compares the read with the version it names, and says nothing of whether
+/// that version was current when the caller read it.
+pub(crate) fn pairs_committed(histories: &[VolumeHistory], read: &PairRead) -> Verdict {
+    let versions = versions_of(histories, read.volume);
+    let committed = versions
+        .iter()
+        .find(|(version, _)| *version == read.version);
+    if committed.is_some_and(|(_, record)| *record == read.record) {
+        return Verdict::Pass;
+    }
+    let at = format!(
+        "shard {} volume {} version {}",
+        read.shard,
+        read.volume.as_str(),
+        read.version
+    );
+    fail(UNCOMMITTED_PAIRS, at)
+}
+
+/// Whether a committed version of the volume record ends `host`'s live attach in place: the host's live attach entry
+/// in one version is its entry at the same sequence number with kind `Ended` in the next. A detach, a force detach,
+/// a direct `Gone` or a removed entry ends no attach here, and neither does the end of another host's entry.
+pub(crate) fn attach_ended(versions: &[(u64, VolumeRecord)], host: Host) -> bool {
+    versions.windows(2).any(|pair| {
+        let (before, after) = (&pair[0].1, &pair[1].1);
+        let seq = before.live(host);
+        seq.is_some()
+            && (after.events.iter()).any(|event| {
+                Some(event.seq) == seq
+                    && event.host == host
+                    && event.kind == crate::failover::records::EventKind::Ended
+            })
+    })
+}
+
+/// The most live attaches over the committed versions of `volume`, zero when the history lacks it.
+pub(crate) fn most_attached(histories: &[VolumeHistory], volume: VolumeId) -> usize {
+    let versions = versions_of(histories, volume).iter();
+    versions
+        .map(|(_, record)| record.live_hosts().count())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The first committed version of any volume record in `histories` that holds more than `cap` live attaches: its
+/// volume, its store version and its live-attach count.
+pub(crate) fn over_attached(
+    histories: &[VolumeHistory],
+    cap: usize,
+) -> Option<(VolumeId, u64, usize)> {
+    histories.iter().find_map(|(volume, versions)| {
+        let versions = versions
+            .iter()
+            .map(|(version, record)| (version, record.live_hosts().count()));
+        let mut over = versions.filter(|(_, live)| *live > cap);
+        over.next().map(|(version, live)| (*volume, *version, live))
+    })
+}

@@ -34,7 +34,7 @@ use crate::storage::warm_sim::share_of;
 use super::super::super::client::SessionState;
 use super::super::ROUND_US;
 use super::faults::{Action, Effect, Episode, Faults, Pattern, Trigger};
-use super::reconcile::{REPAIR_SETTLE_ROUNDS, Reclaim, ReconcilerActor, Repair, Status};
+use super::reconcile::{REPAIR_SETTLE_ROUNDS, ReconcilerActor, Repair, Status};
 use super::zones::ZONE_DOWN_ROUNDS;
 use super::{Fleet, Live, Plant, Purpose, Recovered, Slots, Stopped};
 use crate::failover::standbys::{Need, Zone};
@@ -1087,6 +1087,20 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
         let at = format!("shard {} holds {attached}", shard.get());
         return Verdict::Fail(OVER_ATTACHED, at);
     }
+    let evidence = &report.evidence;
+    let cap = crate::failover::records::MAX_ATTACHED;
+    if let Some((volume, version, live)) =
+        super::oracles::over_attached(&evidence.volume_histories, cap)
+    {
+        let at = format!("volume {} version {version} holds {live}", volume.as_str());
+        return Verdict::Fail(OVER_ATTACHED, at);
+    }
+    let reads = evidence.pair_reads.iter();
+    let unbound =
+        reads.map(|read| super::oracles::pairs_committed(&evidence.volume_histories, read));
+    if let Some(failed) = unbound.into_iter().find(|verdict| !verdict.passed()) {
+        return failed;
+    }
     if report.recon.unordered > 0 {
         let at = format!("{} requests", report.recon.unordered);
         return Verdict::Fail(UNRECORDED_ATTACH, at);
@@ -1390,7 +1404,13 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
         }
         Scenario::AttachClosed => {
             let shard = ATTACH_CELL as u32 + 1;
-            let ended = recon.reclaims.contains(&(shard, Reclaim::End));
+            let volume = report.shards[ATTACH_CELL].placement.volume;
+            let versions = super::oracles::versions_of(&report.evidence.volume_histories, volume);
+            // The host an `End` step of the loop named, with that host's attach ended in a committed version.
+            let ended = (recon.ended.iter()).any(|&(of, host)| {
+                let host = Host::new(host).expect("a logged host");
+                of == shard && super::oracles::attach_ended(versions, host)
+            });
             vec![(ended, ATTACH_CLOSED)]
         }
         Scenario::Foreign => vec![(blocked(Blocker::RetirementRequested) >= 1, RETIREMENT)],
@@ -1733,7 +1753,7 @@ impl<'c> Fleet<'c> {
             .filter(|peer| peer.zone == of.zone && peer.host != of.host)
             .map(|peer| peer.host)
             .collect();
-        let beat = |host: Host| BeatKey::derive(&host_key(host));
+        let beat = |host: Host| self.beat_keys[&host.get()];
         let probe = |host: Host| ProbeKey::derive(&host_key(host));
         Keys {
             own: beat(of.host),
@@ -1794,6 +1814,9 @@ impl<'c> Fleet<'c> {
         let probe_key = |host: Host| ProbeKey::derive(&host_key(host)).keyed();
         self.probe_keys = (self.topology.members.iter())
             .map(|of| (of.host.get(), probe_key(of.host)))
+            .collect();
+        self.beat_keys = (self.topology.members.iter())
+            .map(|of| (of.host.get(), BeatKey::derive(&host_key(of.host))))
             .collect();
         if self.config.scenario.repairs() {
             self.seed_census();
@@ -1860,10 +1883,6 @@ impl<'c> Fleet<'c> {
             false => Vec::new(),
         };
         let zone = self.topology.members[member].zone;
-        let peers: Vec<Host> = (self.topology.members.iter())
-            .filter(|of| of.zone == zone && of.host != self.hosts[member].host)
-            .map(|of| of.host)
-            .collect();
         let headroom = self.headroom(live, member);
         let round = self.round;
         let probe_keys = &self.probe_keys;
@@ -1892,19 +1911,6 @@ impl<'c> Fleet<'c> {
                 )
             })
             .count();
-        // The placed senders of the heartbeats that authenticate under their sender's key.
-        let senders: Vec<Host> = (heartbeats.iter())
-            .filter_map(|(_, bytes)| {
-                let key = |field: Host| {
-                    peers
-                        .contains(&field)
-                        .then(|| BeatKey::derive(&host_key(field)))
-                };
-                beat::decode(bytes, own, key)
-                    .ok()
-                    .map(|(header, _)| header.host)
-            })
-            .collect();
         let heartbeat_bytes: Vec<&[u8]> = heartbeats.iter().map(|(_, b)| b.as_slice()).collect();
         let probe_bytes: Vec<&[u8]> = probes.iter().map(|(_, b)| b.as_slice()).collect();
         let sync = resync.then_some(Synced {
@@ -1945,11 +1951,6 @@ impl<'c> Fleet<'c> {
             .gray
             .extend(gray.into_iter().map(|peer| (own_host, peer)));
         let nominated = watch.census().nominations.saturating_sub(published);
-        // An authenticated heartbeat from a placed peer whose roles the receiver's records omit is refused `Sender`
-        // at the detector's row lookup; every other `Sender` refusal counts against the run.
-        let untracked = (senders.iter())
-            .filter(|sender| watch.liveness(**sender).is_none())
-            .count();
         if !healthy {
             for cell in self.cells.iter().filter(|cell| cell.holder == member) {
                 self.log.exempt.insert(cell.placement.shard.get());
@@ -1970,7 +1971,31 @@ impl<'c> Fleet<'c> {
                 _ => self.log.refused += 1,
             }
         }
-        self.log.refused += count_u32(sender_refused.saturating_sub(untracked));
+        // An authenticated heartbeat from a placed peer whose roles the receiver's records omit is refused `Sender`
+        // at the detector's row lookup; every other `Sender` refusal counts against the run. The heartbeats are
+        // authenticated again here only on a turn that refused a sender.
+        if sender_refused > 0 {
+            let peers: Vec<Host> = (self.topology.members.iter())
+                .filter(|of| of.zone == zone && of.host != own)
+                .map(|of| of.host)
+                .collect();
+            let beat_keys = &self.beat_keys;
+            let watch = self.hosts[member]
+                .agent
+                .as_ref()
+                .expect("a running host's agent")
+                .watch();
+            let untracked = (heartbeats.iter())
+                .filter_map(|(_, bytes)| {
+                    let key = |field: Host| peers.contains(&field).then(|| beat_keys[&field.get()]);
+                    beat::decode(bytes, own, key)
+                        .ok()
+                        .map(|(header, _)| header.host)
+                })
+                .filter(|sender| watch.liveness(*sender).is_none())
+                .count();
+            self.log.refused += count_u32(sender_refused.saturating_sub(untracked));
+        }
         for refusal in &out.probes_refused {
             match refusal {
                 ProbeError::Unrequested => {

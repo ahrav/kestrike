@@ -275,21 +275,35 @@ fn a_returning_host_whose_record_names_another_owner_waits_unnamed_and_serves_no
     six_owners_returned_warm(&report);
 }
 
-/// The deposed-owner guard of a returning restart, from a produced log: under plant
-/// `ForeignPreRead` (code 96) the returning restart of s2 reads its pre-read record with another host named owner while
-/// its incarnation acquires a tenure. `Fleet::restart_by` drops that tenure unserved, the zone log names the host
-/// deposed with the `Restarted` check, and the zone outcome fails DEPOSED_SERVED by name; s2 keeps no recovery by its
-/// returning owner, and its activations hold no tenure past the boot one.
+/// The deposed-owner guard's fast witness: the zone-loss run's log altered so that s2's returning host is named
+/// deposed with the `Restarted` check, as under plant `ForeignPreRead` (code 96), fails DEPOSED_SERVED by name. The
+/// scheduled case runs the live control ([`foreign_pre_read_on`]) on root 1.
 #[test]
-fn a_returning_restart_under_a_foreign_pre_read_drops_its_tenure_and_fails_deposed_served() {
+fn a_zone_log_naming_the_returning_host_deposed_fails_deposed_served() {
     let rule = "a deposed host served after its zone returned";
     assert_eq!(rule, hosts::DEPOSED_SERVED);
-    let report = run(&Config::zone_loss(1).hostile(Plant::ForeignPreRead, 2))
+    let report = passing(&Config::zone_loss(1));
+    assert_eq!(hosts::expected(&report), Verdict::Pass);
+    let mut deposed = report.clone();
+    let (_, host, ..) = *(report.zones.restarts.iter())
+        .find(|(shard, ..)| *shard == 3)
+        .expect("s2's returning restart");
+    let restarted = super::zones::RESTARTED.to_owned();
+    (deposed.zones.deposed).push((3, host, restarted, 0));
+    assert_eq!(hosts::expected(&deposed).rule(), Some(rule));
+}
+
+/// The live control on `root`: under plant `ForeignPreRead` the returning restart of s2 reads its pre-read record with
+/// another host named owner while its incarnation acquires a tenure. `Fleet::restart_by` drops that tenure unserved,
+/// the zone log names the host deposed with the `Restarted` check, and the zone outcome fails DEPOSED_SERVED by name;
+/// s2 keeps no recovery by its returning owner, and its activations hold no tenure past the boot one.
+fn foreign_pre_read_on(root: u64) {
+    let report = run(&Config::zone_loss(root).hostile(Plant::ForeignPreRead, 2))
         .expect("a run inside the limits");
     assert!(report.planted);
     assert_eq!(
         hosts::expected(&report).rule(),
-        Some(rule),
+        Some(hosts::DEPOSED_SERVED),
         "{}",
         report.summary()
     );
@@ -408,15 +422,39 @@ fn the_deposed_witness_accepts_a_waiting_role_and_a_deposed_refusal_alone() {
     }
 }
 
-/// Control of the fence-before-admission check: the log of one returning tenure's first admitted operation is moved
-/// ahead of its fence commits. The run fails by the check's rule naming the shard, with the six returning tenures
-/// judged, and the unplanted sibling passes.
+/// Control of the fence-before-admission check, over the zone-loss run's report: the stamp of s2's first returning
+/// tenure's first admitted operation altered to zero commits on every page, as plant `EarlyAdmission` writes it, fails
+/// the check by its rule naming the shard and the credit with it, and the unaltered run passes. The scheduled case
+/// runs the live plant ([`early_admission_live`]) on root 1.
 #[test]
 fn control_an_admission_logged_ahead_of_its_fence_fails_fence_before_admission() {
     let rule = "a tenure admitted an operation before its last coverage fence commit";
     let sibling = &loss_on_root_1();
     assert_eq!(sibling.verdicts.fenced, Some(Verdict::Pass));
     assert_eq!(sibling.credit(), Verdict::Pass);
+    let mut early = sibling.clone();
+    let returned = (sibling.zones.restarts.iter()).find(|(shard, ..)| *shard == 3);
+    let &(_, _, tenure, _) = returned.expect("s2's returning restart");
+    let admissions = early.evidence.admissions.iter_mut();
+    let mut stamped = admissions.filter(|of| of.shard.get() == 3 && of.tenure == tenure);
+    let admission = stamped
+        .next()
+        .expect("the returning tenure's first admission");
+    admission.pages.iter_mut().for_each(|count| *count = 0);
+    let at = format!("shard 3 tenure {tenure:?} {:?}", admission.admitted);
+    let fenced =
+        oracles::fenced_before_admission(&early.evidence.fences, &early.evidence.admissions);
+    let failed = Verdict::Fail(rule, at);
+    assert_eq!(fenced, failed.clone());
+    early.verdicts.fenced = Some(fenced);
+    assert_eq!(early.credit(), failed);
+}
+
+/// The live `EarlyAdmission` control on root 1: the log of one returning tenure's first admitted operation is
+/// moved ahead of its fence commits, and the run fails by the check's rule naming the shard, with the six returning
+/// tenures judged.
+fn early_admission_live() {
+    let rule = oracles::FENCE_ORDER;
     let config = Config::zone_loss(1).hostile(Plant::EarlyAdmission, 2);
     let report = run(&config).expect("a run inside the limits");
     assert!(report.planted);
@@ -811,12 +849,13 @@ fn a_run_is_refused_before_any_draw_when_its_planned_slots_pass_the_limit() {
 }
 
 /// The scheduled roots of the zone scenarios: the zone-loss case on root 2, whose decisions restart the six returning
-/// owners in another order than root 1's, the replay of root 1's zone-loss tape, and the no-fault sibling on root 2.
+/// owners in another order than root 1's, the replay of root 1's zone-loss tape, the no-fault sibling on root 2, and
+/// the live `ForeignPreRead` and `EarlyAdmission` controls on root 1.
 /// Each check that passes prints one line, and the last line counts them.
 #[test]
 #[ignore = "zone scenarios on their second root; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
 fn the_zone_scenarios_pass_on_their_scheduled_roots() {
-    let checks: [(&str, &dyn Fn()); 3] = [
+    let checks: [(&str, &dyn Fn()); 5] = [
         ("loss root 2", &|| {
             let second = passing(&Config::zone_loss(2));
             keeps_its_volumes_and_returns_fenced_and_warm(&second);
@@ -830,6 +869,8 @@ fn the_zone_scenarios_pass_on_their_scheduled_roots() {
         }),
         ("loss-replay root 1", &a_zone_run_replays_its_recording),
         ("settle root 2", &|| az_settles_with_no_fault_on(2)),
+        ("foreign-pre-read root 1", &|| foreign_pre_read_on(1)),
+        ("early-admission root 1", &early_admission_live),
     ];
     for (name, check) in checks {
         check();

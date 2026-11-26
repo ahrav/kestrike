@@ -464,7 +464,7 @@ fn a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create()
 }
 
 fn a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create_on(root: u64) {
-    let report = run(&Config::foreign(root)).expect("a run inside the limits");
+    let report = run_shared(&Config::foreign(root)).expect("a run inside the limits");
     assert!(report.planted);
     let volumes = report.evidence.volumes;
     let created = (volumes.flips, volumes.volume_writes, volumes.receipts);
@@ -499,11 +499,26 @@ fn a_foreign_registrant_raises_retirement_requested_with_no_flip_and_no_create_o
     assert!(park.periods > 0);
 }
 
-/// The retired-park control: with its parked process publishing no status, the retired s0 raises no
-/// `RetirementRequested`, and F5 fails it unsettled.
+/// The retired-park control's fast witness: the foreign-registrant run's report altered so that s0 enters no
+/// `RetirementRequested` and ends unserved with no blocker, as with its parked process publishing no status, fails F5
+/// unsettled. The scheduled case runs the live control ([`retired_park_unpublished_on`]) on root 1.
 #[test]
-fn a_retired_tenures_parked_process_that_publishes_nothing_leaves_s0_unsettled() {
-    let config = Config::foreign(1);
+fn a_foreign_registrant_report_whose_s0_ends_unserved_with_no_blocker_fails_f5_unsettled() {
+    let report = run_shared(&Config::foreign(1)).expect("a run inside the limits");
+    assert_eq!(blocked(&report, 1), Some(Blocker::RetirementRequested));
+    assert_eq!(rejudged(&report, |_| {}).1, Verdict::Pass);
+    let unpublished = rejudged(&report, |report| {
+        report.recon.blockers.retain(|(_, shard, ..)| *shard != 1);
+        unsettle(report, 1);
+    });
+    let unsettled = "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound";
+    assert_eq!(unpublished.1, Verdict::Fail(unsettled, "shard 1".into()));
+}
+
+/// The retired-park control on `root`: with its parked process publishing no status, the retired s0 raises no
+/// `RetirementRequested`, and F5 fails it unsettled.
+pub(super) fn retired_park_unpublished_on(root: u64) {
+    let config = Config::foreign(root);
     let mut draws = Draws::record(config.root);
     let seeded = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS);
     let mut fleet = seeded.expect("a recorded topology");
@@ -511,10 +526,9 @@ fn a_retired_tenures_parked_process_that_publishes_nothing_leaves_s0_unsettled()
     fleet.alarms.scripted = true;
     let report = fleet.play_script(draws).expect("a run inside the limits");
     assert_eq!(blocked(&report, 1), None);
-    let unsettled = "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound";
     assert_eq!(
         report.verdicts.settles,
-        Verdict::Fail(unsettled, "shard 1".into())
+        Verdict::Fail(oracles::UNSETTLED, "shard 1".into())
     );
 }
 
@@ -787,46 +801,76 @@ fn planted(config: Config, plant: Plant, at: u32) -> Report {
     report
 }
 
-/// The rule texts the census and settle controls fail by.
-struct ControlRules {
-    over_cap: &'static str,
-    uncovered: &'static str,
-    unsettled: &'static str,
-    unbacked: &'static str,
-}
-
-/// The rule texts as the oracles define them, for the scheduled case's root.
-const CONTROL_RULES: ControlRules = ControlRules {
-    over_cap: oracles::OVER_CAP,
-    uncovered: oracles::UNCOVERED,
-    unsettled: oracles::UNSETTLED,
-    unbacked: oracles::UNBACKED,
-};
-
-/// Controls of F4 and F5: a second reconciler under the cap plus one fails F4 by its first rule and a census that loses
-/// a covered entry by its second; skipping s0's `Standby` need, and a collected status that drops every blocker of s3,
-/// which ends the full-census run with no standby under `CensusFull`, fail F5 by its first rule; a `CensusFull` entered
-/// with no refusal fails F5 by its second. The scheduled case runs them on root 2 and runs the stranded-s5 control and
-/// the unplanted siblings ([`census_and_settle_siblings_on`]) on roots 1 and 2.
+/// Fast witnesses of the census and settle controls, each an altered copy of a passing root-1 report judged again
+/// by F4 and F5: a census version above the cap fails F4 by its first rule and an uncovered named standby by its
+/// second; s0 left with no standby and no blocker in the re-enrollment run, and s3 left so with its blockers removed
+/// in the full-census run, fail F5 by its first rule; a `CensusFull` entered with no refusal fails F5 by its second.
+/// The scheduled case runs the live controls ([`census_and_settle_controls_on`]) on roots 1 and 2, and the stranded-s5
+/// control and the unplanted siblings ([`census_and_settle_siblings_on`]) on roots 1 and 2.
 #[test]
 fn census_and_settle_controls_fail_f4_and_f5_by_name() {
-    let rules = ControlRules {
-        over_cap: "a zone's census lists more shards than its cap",
-        uncovered: "a shard record names a designated standby with no census entry",
-        unsettled: "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound",
-        unbacked: "a blocker was recorded with no typed refusal behind it",
-    };
-    census_and_settle_controls_on(1, &rules);
+    let over_cap = "a zone's census lists more shards than its cap";
+    let uncovered = "a shard record names a designated standby with no census entry";
+    let unsettled = "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound";
+    let unbacked = "a blocker was recorded with no typed refusal behind it";
+    let full = passing(&Config::census_full(1));
+    assert_eq!(rejudged(&full, |_| {}), (Verdict::Pass, Verdict::Pass));
+    let wide = rejudged(&full, |report| report.evidence.censuses.push(6));
+    assert_eq!(wide.0.rule(), Some(over_cap));
+
+    let reenrolled = passing(&Config::reenroll(1));
+    let stranded = rejudged(&reenrolled, |report| unsettle(report, 1));
+    assert_eq!(stranded.1, Verdict::Fail(unsettled, "shard 1".into()));
+
+    let silent = rejudged(&full, |report| {
+        report.recon.blockers.retain(|(_, shard, ..)| *shard != 4);
+        unsettle(report, 4);
+    });
+    assert_eq!(silent.1, Verdict::Fail(unsettled, "shard 4".into()));
+
+    let unbacked_entry = rejudged(&full, |report| {
+        let seq = (report.recon.refusals.iter().map(|(seq, ..)| *seq)).max();
+        let seq = seq.unwrap_or(0) + 1;
+        (report.recon.blockers).push((seq, 1, Blocker::CensusFull, None));
+    });
+    let at = "shard 1 CensusFull".to_owned();
+    assert_eq!(unbacked_entry.1, Verdict::Fail(unbacked, at));
+
+    let settled = passing(&Config::settle(1));
+    let unaltered = rejudged(&settled, |_| {});
+    assert_eq!(
+        (Some(unaltered.0), unaltered.1),
+        (
+            settled.verdicts.census.clone(),
+            settled.verdicts.settles.clone()
+        )
+    );
+    let dropped = rejudged(&settled, |report| report.recon.uncovered = Some((1, 1)));
+    assert_eq!(dropped.0.rule(), Some(uncovered));
 }
 
-/// The census and settle controls on `root`, each failing by its rule in `rules`.
-fn census_and_settle_controls_on(root: u64, rules: &ControlRules) {
-    let ControlRules {
-        over_cap: over,
-        uncovered,
-        unsettled,
-        unbacked,
-    } = *rules;
+/// F4 and F5 over `report` after `edit` altered a copy of it, judged as the run judges them ([`Report::judged`]).
+fn rejudged(report: &Report, edit: impl FnOnce(&mut Report)) -> (Verdict, Verdict) {
+    let mut report = report.clone();
+    edit(&mut report);
+    let verdicts = report.judged();
+    let census = verdicts.census.expect("a reconciler run's census verdict");
+    (census, verdicts.settles)
+}
+
+/// Ends `shard` in `report` unserved with no blocker, as a shard with no standby and no entered blocker ends.
+fn unsettle(report: &mut Report, shard: u32) {
+    let at = (report.evidence.settled.iter_mut()).find(|of| of.shard.get() == shard);
+    let settled = at.expect("the shard's settle state");
+    settled.served = false;
+    settled.blocker = None;
+}
+
+/// The census and settle controls on `root`, each failing by its rule.
+fn census_and_settle_controls_on(root: u64) {
+    use oracles::{
+        OVER_CAP as over, UNBACKED as unbacked, UNCOVERED as uncovered, UNSETTLED as unsettled,
+    };
     let wide = planted(Config::census_full(root), Plant::WideCap, 0);
     assert_eq!(wide.verdicts.census.unwrap().rule(), Some(over));
     assert!(wide.evidence.censuses.iter().any(|&len| len > 5));
@@ -852,10 +896,10 @@ fn census_and_settle_controls_on(root: u64, rules: &ControlRules) {
 }
 
 /// The unplanted census-full and re-enrollment runs pass F4 and F5 on `root`, and removing s5's enrollment steps in
-/// the full census, which strands s5 with no designation, fails F5 by its first rule (`rules.unsettled`). The scheduled
+/// the full census, which strands s5 with no designation, fails F5 by its first rule (`oracles::UNSETTLED`). The scheduled
 /// case runs this on roots 1 and 2; the fast tier's census-full and re-enrollment cases pass the same siblings on root
 /// 1.
-fn census_and_settle_siblings_on(root: u64, rules: &ControlRules) {
+fn census_and_settle_siblings_on(root: u64) {
     for sibling in [Config::census_full(root), Config::reenroll(root)] {
         let report = run_shared(&sibling).expect("a run inside the limits");
         assert_eq!(report.verdicts.census, Some(Verdict::Pass));
@@ -863,23 +907,27 @@ fn census_and_settle_siblings_on(root: u64, rules: &ControlRules) {
     }
     let stranded = planted(Config::census_full(root), Plant::DropNeed, 5);
     let judged = &stranded.verdicts.settles;
-    assert_eq!(judged, &Verdict::Fail(rules.unsettled, "shard 6".into()));
+    assert_eq!(judged, &Verdict::Fail(oracles::UNSETTLED, "shard 6".into()));
     assert!(!(stranded.recon.designations.iter()).any(|d| d.shard == 6));
 }
 
-/// Control: with s2's `Standby` need skipped after its standby host H5 is lost, s2 keeps serving beside a lost
-/// standby that its volume enrolls and the census lists, and F5 fails by its first rule.
+/// The dropped standby need's fast witness: the standby-loss run's report altered so that s2 ends with no running
+/// standby and no blocker, as with its `Standby` need skipped after its standby host H5 is lost, fails F5 by its first
+/// rule. The scheduled case runs the live control ([`standby_need_dropped_on`]) on roots 1 and 2.
 #[test]
-fn a_standby_need_dropped_after_the_standby_hosts_loss_fails_f5_by_its_first_rule() {
+fn a_standby_loss_report_whose_s2_ends_with_no_standby_and_no_blocker_fails_f5_by_its_first_rule() {
     let unsettled = "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound";
-    standby_need_dropped_on(1, unsettled);
+    let lost = passing(&Config::standby_loss(1));
+    let dropped = rejudged(&lost, |report| unsettle(report, 3));
+    assert_eq!(dropped.1, Verdict::Fail(unsettled, "shard 3".into()));
 }
 
-/// The dropped standby need's control on `root`, failing F5 by `unsettled`; the scheduled case runs root 2.
-fn standby_need_dropped_on(root: u64, unsettled: &'static str) {
+/// Control: with s2's `Standby` need skipped after its standby host H5 is lost, s2 keeps serving beside a lost
+/// standby that its volume enrolls and the census lists, and F5 fails by its first rule on `root`.
+fn standby_need_dropped_on(root: u64) {
     let lost = planted(Config::standby_loss(root), Plant::DropNeed, 2);
     let judged = &lost.verdicts.settles;
-    assert_eq!(judged, &Verdict::Fail(unsettled, "shard 3".into()));
+    assert_eq!(judged, &Verdict::Fail(oracles::UNSETTLED, "shard 3".into()));
 }
 
 /// Hand-built inputs reach every rule of F4 and F5 by name, and each oracle reads `Unrun` when its event never
@@ -1347,8 +1395,11 @@ fn a_replayed_forced_decision_holds_the_recorded_index() {
 
 /// The scheduled case runs the thirteen repair and host scenario tests on root 2 (nine in this module, three in
 /// `host_tests` and one in `tests`); the fast tier runs them on root 1. The scheduled case also runs the census and
-/// settle controls and the dropped standby need's control on root 2, the census and settle siblings with the
-/// stranded-s5 control on roots 1 and 2, the pinned runs on root 2, the planned handoff and its ended-target form on
+/// settle controls and the dropped standby need's control on roots 1 and 2, the census and settle siblings with the
+/// stranded-s5 control on roots 1 and 2, on root 1 the live planted controls whose fast tests judge altered reports
+/// (the retired park's unpublished status, the three handoff controls, the untouched-shard controls, the `WholeShare`
+/// controls of the reconciler runs, and the host loss's retention, host-share and twin-start controls), the pinned
+/// runs on root 2, the planned handoff and its ended-target form on
 /// root 2, on root 1 the unplanted siblings of three fast tests (the `EmitOnce` and role-read controls, and the actor
 /// decision's equal replay with its sibling) and the Held status in a host scenario, a whole test with no planted
 /// control, the two declared-hold cases with their controls on root 1, the four store-result cells of the serving
@@ -1362,7 +1413,7 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
     use super::hosts::Unknown;
     /// A scenario's name, the root it runs on and the check that runs it on a root.
     type Check = (&'static str, u64, fn(u64));
-    let checks: [Check; 29] = [
+    let checks: [Check; 39] = [
         (
             "settle",
             2,
@@ -1428,18 +1479,13 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
             2,
             super::tests::hosts_that_own_several_shards_in_two_zones_restart_them_warm_on,
         ),
-        ("census-and-settle-controls", 2, |root| {
-            census_and_settle_controls_on(root, &CONTROL_RULES)
-        }),
-        ("census-and-settle-siblings", 1, |root| {
-            census_and_settle_siblings_on(root, &CONTROL_RULES)
-        }),
-        ("census-and-settle-siblings", 2, |root| {
-            census_and_settle_siblings_on(root, &CONTROL_RULES)
-        }),
-        ("standby-need-dropped", 2, |root| {
-            standby_need_dropped_on(root, oracles::UNSETTLED)
-        }),
+        ("census-and-settle-controls", 1, census_and_settle_controls_on),
+        ("census-and-settle-controls", 2, census_and_settle_controls_on),
+        ("census-and-settle-siblings", 1, census_and_settle_siblings_on),
+        ("census-and-settle-siblings", 2, census_and_settle_siblings_on),
+        ("standby-need-dropped", 1, standby_need_dropped_on),
+        ("standby-need-dropped", 2, standby_need_dropped_on),
+        ("retired-park-unpublished", 1, retired_park_unpublished_on),
         ("pinned", 2, super::tests::pinned_runs_repeat_their_digests),
         ("takeover-unknown-committed", 1, |_| {
             host_tests::a_takeover_whose_swap_reply_is_unknown_recovers_on(true)
@@ -1452,6 +1498,25 @@ fn the_repair_and_host_scenarios_pass_on_their_scheduled_roots() {
             2,
             super::handoff_tests::a_transfer_to_an_ended_target_parks_it_and_the_designated_host_takes_the_shard_over_warm_on,
         ),
+        (
+            "handoff-target-unwaited",
+            1,
+            super::handoff_tests::target_unwaited_on,
+        ),
+        ("handoff-unscaled-grace", 1, super::handoff_tests::unscaled_grace_on),
+        (
+            "handoff-parked-withdraws",
+            1,
+            super::handoff_tests::parked_withdraws_on,
+        ),
+        ("untouched-controls", 1, host_tests::untouched_controls_on),
+        ("whole-share", 1, whole_share_on),
+        (
+            "host-loss-retention-controls",
+            1,
+            host_tests::host_loss_retention_controls_on,
+        ),
+        ("host-share-controls", 1, host_tests::host_share_controls_on),
         (
             "emit-once-sibling",
             1,
@@ -1553,17 +1618,55 @@ fn the_scheduled_row_lists_each_enrollment_crash_cell_the_fast_tier_leaves_out()
 }
 
 /// F6 in a reconciler scenario divides each recovery share over the shape's static roles bound and compares it with
-/// the most roles each host held: the re-enrollment run passes, and a share built over one owner fails by the roles
-/// rule on the standby that takes s3 over and on a fresh host that takes a shard over after a double loss.
+/// the most roles each host held: the re-enrollment run passes, and its evidence altered to a share built over one
+/// owner on the standby that takes s3 over, and the double loss's altered so on the fresh host its reconciler
+/// designated and that took its shard over, fail by the roles rule. The scheduled case runs the live `WholeShare` controls ([`whole_share_on`]) on root 1.
 #[test]
 fn a_reconciler_run_judges_the_host_share_over_the_roles_bound_and_the_peak_roles() {
     let roles = "a host's roles exceed the owners its recovery share divides over";
     let report = passing(&Config::reenroll(1));
     assert_eq!(report.verdicts.within_share, Verdict::Pass);
-    let whole = planted(Config::reenroll(1), Plant::WholeShare, 3);
-    assert_eq!(whole.verdicts.within_share.rule(), Some(roles));
-    let fresh = planted(Config::double_loss(1), Plant::WholeShare, 2);
-    assert_eq!(fresh.verdicts.within_share.rule(), Some(roles));
+    let whole = |report: &Report, at: usize| {
+        let recovered = report.shards[at].recoveries.last();
+        let host = recovered.expect("the shard's takeover").host;
+        let mut evidence = report.evidence.clone();
+        assert_eq!(oracles::within_share(&evidence.host_use), Verdict::Pass);
+        let used = (evidence.host_use.iter_mut()).find(|used| used.host == host);
+        let used = used.expect("the taking host's share");
+        used.shares.iter_mut().for_each(|share| share.owners = 1);
+        let judged = oracles::within_share(&evidence.host_use);
+        let Verdict::Fail(rule, location) = judged else {
+            panic!("{judged:?}");
+        };
+        let named = format!("host {} roles ", host.get());
+        assert!(location.starts_with(&named), "{location}");
+        rule
+    };
+    assert_eq!(whole(&report, 3), roles);
+    let double = passing(&Config::double_loss(1));
+    let fresh = (double.recon.designations.iter())
+        .find(|d| d.after_loss && d.repair == Repair::Need(Need::Fresh))
+        .expect("a fresh host's designation after the double loss");
+    let at = fresh.shard as usize - 1;
+    let recovered = double.shards[at]
+        .recoveries
+        .last()
+        .expect("the fresh host's load");
+    assert_eq!(
+        recovered.host.get(),
+        fresh.host,
+        "the designated fresh host took its shard over"
+    );
+    assert_eq!(whole(&double, at), roles);
+}
+
+/// The live `WholeShare` controls on `root`: a share built over one owner fails by the roles rule on the standby
+/// that takes s3 over and on a fresh host that takes a shard over after a double loss.
+fn whole_share_on(root: u64) {
+    let whole = planted(Config::reenroll(root), Plant::WholeShare, 3);
+    assert_eq!(whole.verdicts.within_share.rule(), Some(oracles::ROLES));
+    let fresh = planted(Config::double_loss(root), Plant::WholeShare, 2);
+    assert_eq!(fresh.verdicts.within_share.rule(), Some(oracles::ROLES));
 }
 
 /// `Reconciler::designate` reads the census after the shard record and writes the shard record on that read's

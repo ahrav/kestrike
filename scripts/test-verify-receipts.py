@@ -2407,7 +2407,8 @@ def expected(attempt="1"):
 select_fixture = load("test_select_tests", ROOT / "scripts/test-select-tests.py")
 REJUDGED_LANE = "search-nightly"
 MEMBER_LINE = "fleet: scheduled zone loss root 2: pass"
-WITNESS_LINE = "fleet: scheduled zone: 3 checks passed"
+WITNESS_LINE = next(line for line in select_fixture.ROW_LINES["fleet-scheduled-roots"]
+                    if line.startswith("fleet: scheduled zone: "))
 
 
 def qualified_evidence(evidence, lane, ran=None, drop=None):
@@ -2511,7 +2512,7 @@ class QualifiedRejudge(unittest.TestCase):
         return sorted({refusal["code"] for refusal in report["refusals"]})
 
     STALE = (("a missing member", MEMBER_LINE, "skipped members ['zone loss root 2']"),
-             ("a missing witness", WITNESS_LINE, "missing witness '^fleet: scheduled zone: 3 checks passed$'"))
+             ("a missing witness", WITNESS_LINE, f"missing witness '^{WITNESS_LINE}$'"))
 
     def test_the_honest_run_credits_on_each_path(self):
         evidence = self.evidence()

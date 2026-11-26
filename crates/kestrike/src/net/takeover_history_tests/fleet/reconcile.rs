@@ -268,7 +268,8 @@ pub(crate) struct SettlePhase {
 }
 
 /// Tuple fields, by position:
-/// `reclaims` (shard, phase); `refusals` (sequence, shard, outcome); `blockers` (sequence, shard, blocker, the
+/// `reclaims` (shard, phase); `ended` (shard, host) of each `End` step that advanced; `refusals` (sequence, shard,
+/// outcome); `blockers` (sequence, shard, blocker, the
 /// sequence of the refusal it names); `crash_writes` (count before, count at the crash) of the cut effect, in commits
 /// of the written key for a store write and in attachment-listing length for an attach request; `fulls` (shard,
 /// need, whether the zone double lists the owner running, census length) at the first `CensusFull` row of each need;
@@ -289,6 +290,7 @@ pub(crate) struct ReconLog {
     pub(crate) condition: u32,
     pub(crate) releases: u32,
     pub(crate) reclaims: Vec<(u32, Reclaim)>,
+    pub(crate) ended: Vec<(u32, u64)>,
     pub(crate) designations: Vec<Designation>,
     pub(crate) refusals: Vec<(u64, u32, Refused)>,
     pub(crate) blockers: Vec<(u64, u32, Blocker, Option<u64>)>,
@@ -1000,10 +1002,45 @@ impl Fleet<'_> {
         ShardRecord::decode(&item.expect("a stored shard record").value).expect("a shard record")
     }
 
+    /// Cell `at`'s volume record as the store holds it now, read without a store request. The read joins the
+    /// fleet's log of volume-record reads with the store version it returned, once for each distinct read. Under the
+    /// `UncommittedPairs` plant the first read of the planted cell's record that holds a pair returns, and logs, the
+    /// record without its last pair.
     pub(super) fn volume_now(&self, at: usize) -> VolumeRecord {
+        let (version, mut record) = self.volume_read(at);
+        if self.config.planted_at(Plant::UncommittedPairs, at)
+            && !self.uncommitted.get()
+            && record.pairs.pop().is_some()
+        {
+            self.uncommitted.set(true);
+        }
+        self.log_read(at, version, record)
+    }
+
+    /// Logs one read of cell `at`'s volume record and returns the record its caller receives: the cell's shard, the
+    /// volume whose key the cell reads, the store version the read returned and that record, once for each distinct
+    /// read.
+    pub(super) fn log_read(&self, at: usize, version: u64, record: VolumeRecord) -> VolumeRecord {
+        let read = super::oracles::PairRead {
+            shard: self.cells[at].placement.shard.get(),
+            volume: self.cells[at].placement.volume,
+            version,
+            record,
+        };
+        let mut reads = self.volume_reads.borrow_mut();
+        if !reads.contains(&read) {
+            reads.push(read.clone());
+        }
+        read.record
+    }
+
+    /// Cell `at`'s volume record and its store version as the store holds them now, read without a store request.
+    pub(super) fn volume_read(&self, at: usize) -> (u64, VolumeRecord) {
         let store = self.store.0.borrow();
         let item = store.current(&Key::Volume(self.cells[at].placement.volume));
-        VolumeRecord::decode(&item.expect("a stored volume record").value).expect("a volume record")
+        let item = item.expect("a stored volume record");
+        let record = VolumeRecord::decode(&item.value).expect("a volume record");
+        (item.version.get(), record)
     }
 
     pub(super) fn check_census(&mut self, r: usize) {
@@ -1643,8 +1680,9 @@ impl Fleet<'_> {
                     });
                 }
                 (Step::Release { .. }, Verdict::Advance) => self.recon.releases += 1,
-                (Step::End { .. }, Verdict::Advance) => {
+                (Step::End { host, .. }, Verdict::Advance) => {
                     self.recon.reclaims.push((shard.get(), Reclaim::End));
+                    self.recon.ended.push((shard.get(), host.get()));
                 }
                 (Step::Detach { .. }, Verdict::Advance) => {
                     self.recon.reclaims.push((shard.get(), Reclaim::Detach));

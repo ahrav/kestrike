@@ -5700,9 +5700,13 @@ pretty format to stdout only. Its nightly-only flags are refused as unknown.
     /// Every pinned fleet run's digest line, then the crash table's line over all its cells.
     fn fleet_pinned() -> Result<Vec<String>, String> {
         use crate::net::takeover_history_tests::fleet;
-        let mut lines = fleet::pinned_runs(None)?;
+        let mut lines = fleet::pinned_runs(None, fleet::run)?;
         let cells = fleet::reconcile::CrashCell::all();
-        lines.push(fleet::crash_table(fleet::CRASH_TABLE_ROOT, &cells)?);
+        lines.push(fleet::crash_table(
+            fleet::CRASH_TABLE_ROOT,
+            &cells,
+            fleet::run,
+        )?);
         Ok(lines)
     }
 
@@ -5787,7 +5791,7 @@ pretty format to stdout only. Its nightly-only flags are refused as unknown.
     #[ignore = "fleet owner crashes and warm restarts, 2 shapes on 16 roots each; the long-run lane runs it with --ignored"]
     fn fleet_runs_pass_on_roots_1_to_16() -> Result<(), String> {
         use crate::net::takeover_history_tests::fleet;
-        for line in fleet::roots(fleet::ROOTS)? {
+        for line in fleet::roots(fleet::ROOTS, fleet::run)? {
             println!("{line}");
         }
         Ok(())

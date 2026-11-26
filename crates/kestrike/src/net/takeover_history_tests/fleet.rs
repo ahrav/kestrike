@@ -270,10 +270,15 @@ pub(crate) enum Plant {
     /// The parked process of the shard at the index publishes a `Withdrawn` status with no volume entry in each
     /// report period while it parks.
     ParkedWithdraws,
+    /// The first read through `Fleet::volume_now` of the volume record of the shard at the index that holds a pair
+    /// returns to its caller, and logs, the record without its last pair, as a read of a write that never committed
+    /// would; a host or reconciler scenario fails it by `UNCOMMITTED_PAIRS`, and a restart run, which judges no
+    /// logged read, reads `Unrun` as every hostile run does.
+    UncommittedPairs,
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 35] = [
+    pub(crate) const ALL: [Self; 36] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -309,6 +314,7 @@ impl Plant {
         Self::ForeignPreRead,
         Self::ParkedCommand,
         Self::ParkedWithdraws,
+        Self::UncommittedPairs,
     ];
 
     /// `Config::identity` encodes the hostile profile with the plant code.
@@ -349,6 +355,7 @@ impl Plant {
             Self::ForeignPreRead => 96,
             Self::ParkedCommand => 119,
             Self::ParkedWithdraws => 118,
+            Self::UncommittedPairs => 97,
         }
     }
 }
@@ -848,7 +855,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v33";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v39-volumes";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1041,6 +1048,14 @@ pub(crate) struct FaultedDuty {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Evidence {
     pub(crate) histories: Vec<(crate::net::ownership::Shard, Vec<ShardRecord>)>,
+    /// Every committed version of each volume record the store holds, by volume, oldest first with its store
+    /// version: the store double keeps each version a volume-record write commits, and the report reads them without
+    /// a store request.
+    pub(crate) volume_histories: oracles::VolumeHistories,
+    /// Each distinct read of a cell's volume record through `Fleet::volume_now`, the reader of the judgments'
+    /// inputs, with the store version it returned and the record its caller received; `hosts::expected` binds each
+    /// to `volume_histories`. Reads through a store client, a role read or the stranded scan are not logged.
+    pub(crate) pair_reads: Vec<oracles::PairRead>,
     pub(crate) activations: Vec<(crate::net::ownership::Shard, Tenure, Host)>,
     pub(crate) volumes: Volumes,
     /// Each committed census version's entry count, zone by zone, and the entries the zones' censuses list when the
@@ -1053,7 +1068,8 @@ pub(crate) struct Evidence {
     pub(crate) admissions: Vec<oracles::Admission>,
     /// Each shard's settle state when the run ended.
     pub(crate) settled: Vec<oracles::Settled>,
-    /// Each shard's largest count of live attaches over its volume record's committed versions.
+    /// Each shard's largest count of live attaches over its volume record's committed versions, read from
+    /// `volume_histories`.
     pub(crate) attached: Vec<(crate::net::ownership::Shard, usize)>,
     /// What the injector lost, which fleet oracle F2 judges against.
     pub(crate) losses: oracles::Losses,
@@ -1073,9 +1089,25 @@ pub(crate) struct Evidence {
     pub(crate) standby_local: Vec<(crate::net::ownership::Shard, bool)>,
     /// Each shard's census slot host when the run ended, `None` with no slot or no census.
     pub(crate) slots: Vec<(crate::net::ownership::Shard, Option<Host>)>,
+    /// The untouched check's inputs: each watch outside an exempt shard, each judged GET to a serving shard during
+    /// another shard's recovery with whether it was served, and the count of those served inside the recovery.
+    pub(crate) watched: Vec<Watched>,
+    pub(crate) neighbour_gets: Vec<(crate::net::ownership::Shard, bool)>,
+    pub(crate) overlapped: usize,
+    /// The retained-set check's, the restart settle check's and the host-share check's inputs: each shard's
+    /// activations, sweeps and history judgment, each shard's state when the run ended, and each host's roles,
+    /// shares and peak reads.
+    pub(crate) retention: Vec<Retention>,
+    pub(crate) settle: Vec<Settle>,
+    pub(crate) host_use: Vec<HostUse>,
 }
 
 impl Report {
+    /// The verdicts of this report's evidence, judged again as the run judged them ([`judge`]).
+    pub(crate) fn judged(&self) -> Verdicts {
+        judge(&self.config, self.crashes, &self.evidence, &self.recon)
+    }
+
     /// The alarm oracle's verdict over the run's sealed reports and statuses (`alarms::verdict`), evaluated at the
     /// call. The credit leaves it out: the alarm tests judge it for each scenario.
     pub(crate) fn alarms(&self) -> Verdict {
@@ -1389,6 +1421,41 @@ pub(crate) enum Stopped {
 impl From<Refusal> for Stopped {
     fn from(refusal: Refusal) -> Self {
         Self::Choice(refusal)
+    }
+}
+
+/// The run's verdicts over its evidence, its reconcilers' log, its configuration and its crash count, as
+/// `Fleet::report` judges them: the settle verdict by F5 when reconcilers ran, by the withdrawn rule alone in a host
+/// scenario with none, and by the restart bound otherwise, the census verdict when reconcilers ran, and the fence
+/// verdict on a zoned layout. A control that alters a report's evidence judges the copy again here
+/// ([`Report::judged`]).
+fn judge(config: &Config, crashes: u32, evidence: &Evidence, recon: &ReconLog) -> Verdicts {
+    let repairs = !recon.incarnations.is_empty();
+    let cap = usize::from(config.shape.cap);
+    Verdicts {
+        one_owner: oracles::one_owner(&evidence.histories, &evidence.activations),
+        keeps_volume: oracles::keeps_volume(
+            &evidence.histories,
+            evidence.volumes,
+            crashes,
+            &evidence.losses,
+        ),
+        retained: oracles::retained(&evidence.retention),
+        settles: match (config.scenario.hosted(), repairs) {
+            (_, true) => oracles::settled(&evidence.settled, recon),
+            (true, false) => oracles::unsettled(&evidence.settle),
+            (false, false) => oracles::settles(&evidence.settle, SETTLE_ROUNDS, crashes),
+        },
+        within_share: oracles::within_share(&evidence.host_use),
+        untouched: oracles::untouched(
+            &evidence.watched,
+            &evidence.neighbour_gets,
+            evidence.overlapped,
+        ),
+        census: repairs
+            .then(|| oracles::census(&evidence.censuses, (cap, config.shape.zones), recon)),
+        fenced: (config.zoned())
+            .then(|| oracles::fenced_before_admission(&evidence.fences, &evidence.admissions)),
     }
 }
 
@@ -2204,6 +2271,10 @@ struct Fleet<'c> {
     crashes: u32,
     reconciled: Reconciled,
     planted: bool,
+    /// Each distinct read of a cell's volume record through [`Fleet::volume_now`], and whether the
+    /// `UncommittedPairs` plant altered one of them.
+    volume_reads: std::cell::RefCell<Vec<oracles::PairRead>>,
+    uncommitted: std::cell::Cell<bool>,
     /// The volume-record commits in the store once every cell is seeded.
     seeded_volumes: usize,
     hosts: Vec<HostActor>,
@@ -2219,6 +2290,8 @@ struct Fleet<'c> {
     readings: std::collections::BTreeMap<(u64, u64, u64), (bool, bool)>,
     /// Each host's prepared probe key, by host, which the fleet opens probe replies under.
     probe_keys: std::collections::BTreeMap<u64, crate::failover::detect::probe::Keyed>,
+    /// Each host's heartbeat key, by host, which the fleet authenticates heartbeats under.
+    beat_keys: std::collections::BTreeMap<u64, crate::failover::detect::beat::BeatKey>,
     losses: Vec<Loss>,
     host_start: u64,
     reader: crate::failover::report::Reader,
@@ -2479,6 +2552,8 @@ impl<'c> Fleet<'c> {
             crashes: 0,
             reconciled: Reconciled::default(),
             planted: false,
+            volume_reads: std::cell::RefCell::new(Vec::new()),
+            uncommitted: std::cell::Cell::new(false),
             seeded_volumes: 0,
             hosts: Vec::new(),
             faults,
@@ -2486,6 +2561,7 @@ impl<'c> Fleet<'c> {
             nominated: VecDeque::new(),
             readings: std::collections::BTreeMap::new(),
             probe_keys: std::collections::BTreeMap::new(),
+            beat_keys: std::collections::BTreeMap::new(),
             losses: Vec::new(),
             host_start: 0,
             reader: crate::failover::report::Reader::default(),
@@ -3832,6 +3908,9 @@ impl<'c> Fleet<'c> {
         let histories: Vec<_> = (self.cells.iter())
             .map(|cell| (cell.placement.shard, cell.history(&self.store)))
             .collect();
+        let volume_histories = self.volume_histories();
+        let attached = self.attached(&volume_histories);
+        let standby_local = self.standby_local();
         let activations: Vec<_> = (self.activations.iter())
             .map(|&(at, tenure, host)| (self.cells[at].placement.shard, tenure, host))
             .collect();
@@ -3845,7 +3924,6 @@ impl<'c> Fleet<'c> {
                 judged: cell.judged(),
             })
             .collect();
-        let hosted = self.config.scenario.hosted();
         let settle: Vec<Settle> = (self.cells.iter().zip(live).zip(&histories))
             .map(|((cell, serving), (_, history))| {
                 let record = history.last().expect("a stored shard record");
@@ -3863,7 +3941,7 @@ impl<'c> Fleet<'c> {
                 }
             })
             .collect();
-        let hosts = self.host_use();
+        let host_use = self.host_use();
         let fences = match self.config.zoned() {
             true => self.page_fences(),
             false => Vec::new(),
@@ -3877,7 +3955,6 @@ impl<'c> Fleet<'c> {
             })
             .sum();
         let censuses = self.census_versions();
-        let cap = usize::from(self.config.shape.cap);
         let settled: Vec<oracles::Settled> = match self.repairs() {
             true => (0..self.cells.len())
                 .map(|at| self.settled_at(live, at))
@@ -3903,7 +3980,7 @@ impl<'c> Fleet<'c> {
                 !self.log.exempt.contains(&shard)
             })
             .collect();
-        let requests: Vec<_> = (judged.iter())
+        let neighbour_gets: Vec<_> = (judged.iter())
             .map(|settled| (self.cells[settled.at].placement.shard, settled.served))
             .collect();
         let overlapped = (judged.iter())
@@ -3914,35 +3991,66 @@ impl<'c> Fleet<'c> {
             rows.filter(|settled| settled.at == at && settled.served)
                 .count() as u32
         };
+        let mut evidence = Evidence {
+            histories,
+            volume_histories,
+            pair_reads: Vec::new(),
+            activations,
+            volumes: self.volumes(),
+            censuses,
+            census_entries: (1..=self.config.shape.zones)
+                .filter_map(|zone| self.census_now(crate::failover::standbys::Zone(zone)))
+                .map(|census| census.len())
+                .sum(),
+            fences,
+            admissions: self.admissions.clone(),
+            settled,
+            attached,
+            losses: self.losses(),
+            replaced: self.replaced(),
+            receipts: (0..self.cells.len())
+                .map(|at| self.receipt_now(at))
+                .collect(),
+            listed: self.listed(),
+            requests: self.requests(),
+            standby_local,
+            slots: (0..self.cells.len())
+                .map(|at| {
+                    let shard = self.cells[at].placement.shard;
+                    let census = self.census_now(self.zone_of(at));
+                    (
+                        shard,
+                        census.and_then(|c| c.slot(shard)).map(|slot| slot.host),
+                    )
+                })
+                .collect(),
+            watched,
+            neighbour_gets,
+            overlapped,
+            retention,
+            settle,
+            host_use,
+        };
+        // The read log is copied after the last `volume_now` call of the report, the reads above included.
+        evidence.pair_reads = self.volume_reads.borrow().clone();
+        let recon = {
+            let mut recon = self.recon.clone();
+            recon.incarnations = self
+                .reconcilers
+                .iter()
+                .map(|actor| actor.incarnation)
+                .collect();
+            recon
+        };
+        let verdicts = judge(self.config, self.crashes, &evidence, &recon);
         Report {
             identity: self.config.identity(),
             config: *self.config,
-            verdicts: Verdicts {
-                one_owner: oracles::one_owner(&histories, &activations),
-                keeps_volume: oracles::keeps_volume(
-                    &histories,
-                    self.volumes(),
-                    self.crashes,
-                    &self.losses(),
-                ),
-                retained: oracles::retained(&retention),
-                settles: match (hosted, self.repairs()) {
-                    (_, true) => oracles::settled(&settled, &self.recon),
-                    (true, false) => oracles::unsettled(&settle),
-                    (false, false) => oracles::settles(&settle, SETTLE_ROUNDS, self.crashes),
-                },
-                within_share: oracles::within_share(&hosts),
-                untouched: oracles::untouched(&watched, &requests, overlapped),
-                census: (self.repairs()).then(|| {
-                    oracles::census(&censuses, (cap, self.config.shape.zones), &self.recon)
-                }),
-                fenced: (self.config.zoned())
-                    .then(|| oracles::fenced_before_admission(&fences, &self.admissions)),
-            },
-            takeovers: (histories.iter())
+            verdicts,
+            takeovers: (evidence.histories.iter())
                 .map(|(_, history)| owner_changes(history))
                 .sum(),
-            shards: (self.cells.iter().enumerate().zip(&histories))
+            shards: (self.cells.iter().enumerate().zip(&evidence.histories))
                 .map(|((at, cell), (_, history))| ShardReport {
                     placement: cell.placement,
                     owner: cell.owner,
@@ -3972,6 +4080,7 @@ impl<'c> Fleet<'c> {
             // `AckOnUnknown` counts as planted from the first unknown reply to a duty coverage write, and an agent
             // mutant from the first agent decision its hook changed.
             planted: self.planted
+                || self.uncommitted.get()
                 || (self.config.planted(Plant::AckOnUnknown)
                     && (self.duty_unknowns.borrow().iter())
                         .any(|(key, _)| matches!(key, Key::Page(..))))
@@ -3980,47 +4089,8 @@ impl<'c> Fleet<'c> {
             actor_turns: self.actor_turns,
             tape,
             hosts: self.log.clone(),
-            evidence: Evidence {
-                histories,
-                activations,
-                volumes: self.volumes(),
-                censuses,
-                census_entries: (1..=self.config.shape.zones)
-                    .filter_map(|zone| self.census_now(crate::failover::standbys::Zone(zone)))
-                    .map(|census| census.len())
-                    .sum(),
-                fences,
-                admissions: self.admissions.clone(),
-                settled,
-                attached: self.attached(),
-                losses: self.losses(),
-                replaced: self.replaced(),
-                receipts: (0..self.cells.len())
-                    .map(|at| self.receipt_now(at))
-                    .collect(),
-                listed: self.listed(),
-                requests: self.requests(),
-                standby_local: self.standby_local(),
-                slots: (0..self.cells.len())
-                    .map(|at| {
-                        let shard = self.cells[at].placement.shard;
-                        let census = self.census_now(self.zone_of(at));
-                        (
-                            shard,
-                            census.and_then(|c| c.slot(shard)).map(|slot| slot.host),
-                        )
-                    })
-                    .collect(),
-            },
-            recon: {
-                let mut recon = self.recon.clone();
-                recon.incarnations = self
-                    .reconcilers
-                    .iter()
-                    .map(|actor| actor.incarnation)
-                    .collect();
-                recon
-            },
+            evidence,
+            recon,
             volumes: volumes::VolumeLog {
                 stranded: self.stranded(),
                 ..self.volumes.clone()
@@ -4110,16 +4180,37 @@ impl<'c> Fleet<'c> {
             .collect()
     }
 
-    fn attached(&self) -> Vec<(crate::net::ownership::Shard, usize)> {
-        let store = self.store.0.borrow();
+    fn attached(
+        &self,
+        histories: &oracles::VolumeHistories,
+    ) -> Vec<(crate::net::ownership::Shard, usize)> {
         (self.cells.iter())
             .map(|cell| {
-                let versions = store.versions(&Key::Volume(cell.placement.volume)).iter();
-                let attached = versions.map(|item| {
-                    let record = VolumeRecord::decode(&item.value).expect("a stored volume record");
-                    record.live_hosts().count()
+                let most = oracles::most_attached(histories, cell.placement.volume);
+                (cell.placement.shard, most)
+            })
+            .collect()
+    }
+
+    /// Every committed version of each volume record the store holds, by volume, oldest first with its store
+    /// version, read without a store request.
+    fn volume_histories(&self) -> oracles::VolumeHistories {
+        let store = self.store.0.borrow();
+        let volumes = (store.keys()).filter_map(|key| match key {
+            Key::Volume(volume) => Some(*volume),
+            _ => None,
+        });
+        let volumes: Vec<_> = volumes.collect();
+        (volumes.into_iter())
+            .map(|volume| {
+                let versions = store.versions(&Key::Volume(volume)).iter();
+                let versions = versions.map(|item| {
+                    let record =
+                        VolumeRecord::decode(&item.value).expect("a volume record that decodes");
+                    assert_eq!(record.volume, volume, "a volume record under its key");
+                    (item.version.get(), record)
                 });
-                (cell.placement.shard, attached.max().unwrap_or(0))
+                (volume, versions.collect())
             })
             .collect()
     }
@@ -4540,14 +4631,19 @@ pub(crate) const PINNED: [Pinned; 6] = [
     ("host-loss", Config::host_loss, 2),
 ];
 
-/// Runs `config` and replays its recording; returns the report when the run earns credit and its replay is equal.
+/// What a run of a configuration returns: [`run`] itself, or [`run_shared`], which returns a copy of the test
+/// process's one run of it.
+pub(crate) type Runner = fn(&Config) -> Result<Report, Stopped>;
+
+/// Runs `config` through `first` and replays its recording afresh; returns the report when the run earns credit and
+/// its replay is equal.
 ///
 /// # Errors
 ///
 /// The run's report lines when it earns no credit, and the replay's result when it differs from the run.
-fn credited_replay(name: &str, config: &Config) -> Result<Report, String> {
+fn credited_replay(name: &str, config: &Config, first: Runner) -> Result<Report, String> {
     let root = config.root;
-    let report = run(config).map_err(|stopped| format!("{name} root {root}: {stopped:?}"))?;
+    let report = first(config).map_err(|stopped| format!("{name} root {root}: {stopped:?}"))?;
     if !report.credit().passed() {
         return Err(report.lines().join("\n"));
     }
@@ -4556,20 +4652,20 @@ fn credited_replay(name: &str, config: &Config) -> Result<Report, String> {
     Ok(report)
 }
 
-/// Runs and replays each pinned configuration on root `only`, or every pinned configuration when `only` is `None`, and
-/// returns one digest line per run. The fast tier runs root 1, the scheduled tier root 2, and the worker every one.
+/// Runs each pinned configuration through `first` and replays it, on root `only`, or every pinned configuration when
+/// `only` is `None`, and returns one digest line per run. The fast tier runs root 1, the scheduled tier root 2, and the worker every one.
 ///
 /// # Errors
 ///
 /// The pin's name and root with the `Stopped` value when a run returns no report, the run's report lines when
 /// it earns no credit, and the replay's result when it differs from the run.
-pub(crate) fn pinned_runs(only: Option<u64>) -> Result<Vec<String>, String> {
+pub(crate) fn pinned_runs(only: Option<u64>, first: Runner) -> Result<Vec<String>, String> {
     let mut lines = Vec::new();
     for (name, config, root) in PINNED
         .into_iter()
         .filter(|pin| only.is_none_or(|at| at == pin.2))
     {
-        let report = credited_replay(name, &config(root))?;
+        let report = credited_replay(name, &config(root), first)?;
         lines.push(format!(
             "fleet: pinned {name} root {root}: credit pass; digest {}",
             report.digest()
@@ -4589,16 +4685,21 @@ fn alike(name: &str, report: &Report, replayed: &Result<Report, Stopped>) -> Res
 /// The root of the crash table's pinned line.
 pub(crate) const CRASH_TABLE_ROOT: u64 = 1;
 
-/// Runs and replays each of `cells` on `root` in order, and returns one digest line over the cells' digests. The
+/// Runs each of `cells` on `root` through `first` and replays it, in order, and returns one digest line over the
+/// cells' digests. The
 /// worker's pinned lines pass every cell of the crash table.
 ///
 /// # Errors
 ///
 /// As [`pinned_runs`], for the first cell that earns no credit or replays to another report.
-pub(crate) fn crash_table(root: u64, cells: &[reconcile::CrashCell]) -> Result<String, String> {
+pub(crate) fn crash_table(
+    root: u64,
+    cells: &[reconcile::CrashCell],
+    first: Runner,
+) -> Result<String, String> {
     let mut digests = Sha256::new();
     for &cell in cells {
-        let report = credited_replay(&cell.name(), &Config::crash(root, cell))?;
+        let report = credited_replay(&cell.name(), &Config::crash(root, cell), first)?;
         digests.update(report.digest());
     }
     let digest = hex(&digests.finalize());
@@ -4607,23 +4708,26 @@ pub(crate) fn crash_table(root: u64, cells: &[reconcile::CrashCell]) -> Result<S
     ))
 }
 
-/// Runs both shapes on `roots` and returns each run's summary, then one line with the run count and the slowest
+/// Runs both shapes on `roots` through `first` and returns each run's summary, then one line with the run count and the slowest
 /// recovery after a crash, the recoveries [`SETTLE_ROUNDS`] bounds.
 ///
 /// # Errors
 ///
 /// The root with the `Stopped` value when a run returns no report, and the run's report lines when it earns no
 /// credit. Credit refuses an owner change and a recovery past the settle bound.
-pub(crate) fn roots(roots: std::ops::RangeInclusive<u64>) -> Result<Vec<String>, String> {
+pub(crate) fn roots(
+    roots: std::ops::RangeInclusive<u64>,
+    first: Runner,
+) -> Result<Vec<String>, String> {
     let shapes = [Config::six, Config::dense].into_iter();
-    sweep(shapes.flat_map(|config| roots.clone().map(config)))
+    sweep(shapes.flat_map(|config| roots.clone().map(config)), first)
 }
 
-fn sweep(configs: impl Iterator<Item = Config>) -> Result<Vec<String>, String> {
+fn sweep(configs: impl Iterator<Item = Config>, first: Runner) -> Result<Vec<String>, String> {
     let (mut lines, mut slowest) = (Vec::new(), 0);
     for config in configs {
         let root = config.root;
-        let report = run(&config).map_err(|stopped| format!("root {root}: {stopped:?}"))?;
+        let report = first(&config).map_err(|stopped| format!("root {root}: {stopped:?}"))?;
         let rounds = (report.shards.iter())
             .flat_map(|shard| shard.recoveries.iter())
             .filter(|recovered| recovered.after_crash)

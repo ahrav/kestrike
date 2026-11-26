@@ -111,15 +111,30 @@ pub(super) fn an_admitted_transfer_s_target_reads_its_role_and_serves_through_it
     report
 }
 
+/// The unwaited target's fast witness: the planned handoff's report altered so that the target reads no role change,
+/// as a target whose wait stops at the transfer reads none, leaves the target-lineage witness `Unrun`. The scheduled
+/// case runs the live control ([`target_unwaited_on`]) on root 1.
 #[test]
-fn control_a_target_whose_wait_stops_at_the_transfer_never_serves_through_its_lineage_arm() {
-    let config = Config::handoff(1).hostile(Plant::TargetUnwaited, HANDOFF_CELL as u32);
-    let report = run_shared(&config).expect("a run inside the limits");
-    assert!(report.planted);
+fn a_handoff_report_with_no_role_change_of_its_target_reads_the_lineage_witness_unrun() {
+    let report = run_shared(&Config::handoff(1)).expect("a run inside the limits");
+    assert_eq!(hosts::expected(&report), Verdict::Pass);
+    let mut unwaited = report.clone();
+    (unwaited.hosts.role_changes).retain(|&(_, shard, _)| shard != S6);
     assert_eq!(
         hosts::TARGET_SERVED,
         "witness target-lineage-served missing"
     );
+    assert_eq!(
+        hosts::expected(&unwaited),
+        Verdict::Unrun(hosts::TARGET_SERVED)
+    );
+}
+
+/// The live control on `root`: a target whose wait stops at the transfer never serves through its lineage arm.
+pub(super) fn target_unwaited_on(root: u64) {
+    let config = Config::handoff(root).hostile(Plant::TargetUnwaited, HANDOFF_CELL as u32);
+    let report = run_shared(&config).expect("a run inside the limits");
+    assert!(report.planted);
     assert_eq!(
         hosts::expected(&report),
         Verdict::Unrun(hosts::TARGET_SERVED),
@@ -232,9 +247,30 @@ fn control_a_restart_that_reports_after_its_ended_refusal_fails_the_parked_devic
     }
 }
 
+/// The unscaled grace's fast witness: the ended-target handoff's report altered so that s6 ends unserved with no
+/// blocker, as with every agent left at its unscaled restart grace, fails F5 by its first rule. The scheduled case
+/// runs the live control ([`unscaled_grace_on`]) on root 1.
 #[test]
-fn control_a_parked_target_whose_health_bit_never_drops_leaves_its_shard_unsettled() {
-    let config = Config::handoff_ended(1).hostile(Plant::UnscaledGrace, HANDOFF_CELL as u32);
+fn an_ended_handoff_report_whose_shard_ends_unserved_with_no_blocker_fails_f5_unsettled() {
+    let report = run_shared(&Config::handoff_ended(1)).expect("a run inside the limits");
+    let judged = |report: &Report| report.judged().settles;
+    assert_eq!(judged(&report), Verdict::Pass);
+    let mut stranded = report.clone();
+    let settled = (stranded.evidence.settled.iter_mut()).find(|of| of.shard.get() == S6);
+    let settled = settled.expect("s6's settle state");
+    (settled.served, settled.blocker) = (false, None);
+    assert_eq!(
+        judged(&stranded),
+        Verdict::Fail(
+            "a shard reached neither a serving owner with an enrolled standby nor a named blocker within the settle bound",
+            format!("shard {S6}")
+        )
+    );
+}
+
+/// The live control on `root`: a parked target whose health bit never drops leaves its shard unsettled.
+pub(super) fn unscaled_grace_on(root: u64) {
+    let config = Config::handoff_ended(root).hostile(Plant::UnscaledGrace, HANDOFF_CELL as u32);
     let report = run_shared(&config).expect("a run inside the limits");
     assert!(report.planted);
     assert!(handed(&report).ended);
@@ -280,10 +316,28 @@ fn control_a_parked_process_that_publishes_a_status_fails_the_parked_status_rule
     }
 }
 
+/// The entryless withdrawn status's fast witness: the ended-target handoff's report altered so that the parked H1
+/// published one status, as a parked process that publishes an entryless withdrawn status does, fails the
+/// parked-status rule. The scheduled case runs the live control ([`parked_withdraws_on`]) on root 1.
 #[test]
-fn control_a_parked_process_that_publishes_an_entryless_withdrawn_status_fails_the_parked_status_rule()
- {
-    let config = Config::handoff_ended(1).hostile(Plant::ParkedWithdraws, HANDOFF_CELL as u32);
+fn an_ended_handoff_report_listing_a_status_of_the_parked_host_fails_the_parked_status_rule() {
+    let report = run_shared(&Config::handoff_ended(1)).expect("a run inside the limits");
+    assert_eq!(hosts::expected(&report), Verdict::Pass);
+    let mut published = report.clone();
+    (published.hosts.parked_published).push((report.rounds, H1, S6));
+    match hosts::expected(&published) {
+        Verdict::Fail(rule, at) => {
+            assert_eq!(rule, "a parked process published a status");
+            assert!(at.starts_with(&format!("shard {S6} host {H1}")), "{at}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The live control on `root`: a parked process that publishes an entryless withdrawn status fails the parked-status
+/// rule.
+pub(super) fn parked_withdraws_on(root: u64) {
+    let config = Config::handoff_ended(root).hostile(Plant::ParkedWithdraws, HANDOFF_CELL as u32);
     let report = run_shared(&config).expect("a run inside the limits");
     assert!(report.planted, "{}", report.summary());
     match hosts::expected(&report) {

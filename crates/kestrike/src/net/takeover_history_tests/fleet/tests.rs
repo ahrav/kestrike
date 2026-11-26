@@ -418,21 +418,21 @@ fn a_request_count_past_one_peers_allowance_is_refused_before_any_draw() {
 }
 
 #[test]
-fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_to_45_50_to_59_95_96_118_and_119()
-{
+fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_to_45_50_to_59_95_to_97_118_and_119()
+ {
     let codes: Vec<u8> = Plant::ALL.iter().map(|plant| plant.code()).collect();
     assert_eq!(
         codes,
         [
             13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 95, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53,
-            54, 55, 56, 57, 58, 59, 41, 42, 43, 44, 96, 119, 118
+            54, 55, 56, 57, 58, 59, 41, 42, 43, 44, 96, 119, 118, 97
         ]
     );
     let identities: BTreeSet<String> = (Plant::ALL.iter())
         .map(|plant| Config::six(1).hostile(*plant, 0).identity())
         .chain([Config::six(1).identity()])
         .collect();
-    assert_eq!(identities.len(), 36);
+    assert_eq!(identities.len(), 37);
 }
 
 #[test]
@@ -487,9 +487,151 @@ fn verdict<'r>(report: &'r Report, name: &str) -> &'r Verdict {
     found.expect("a named verdict").1
 }
 
+/// Fast witnesses of the hostile profiles over the legal six-host run on root 1, each its evidence altered as the
+/// plant alters a run and judged again by its named check, with the credit naming the failure: a second owner of
+/// one of s2's attempts (`TwinTenure`), a generation change with no volume lost (`LossEvidence`), a sweep of s2's
+/// restored set one object short (`RestoredEntryMiss`), s2 ended unserved with no blocker (`SilentBlocker`), a share
+/// built over one owner on a host with two roles (`WholeShare`), one GET of s2 refused (`NeighborRefusal`), no crash
+/// episode (`NoCrashEpisode`) and a skipped sweep (`SkippedSweep`). The scheduled case runs the live profiles
+/// ([`hostile_profiles_on`]) on root 1.
 #[test]
-fn every_hostile_profile_fails_or_reads_unrun_through_its_named_check() {
+fn each_hostile_profiles_alteration_of_the_legal_report_fails_or_reads_unrun_through_its_named_check()
+ {
+    /// One alteration of the legal run's report.
+    type Edit<'e> = &'e dyn Fn(&mut Report);
     let legal = passing(&Config::six(1));
+    let judged = |edit: &dyn Fn(&mut Report)| {
+        let mut report = legal.clone();
+        edit(&mut report);
+        report.verdicts = report.judged();
+        report
+    };
+    assert_eq!(judged(&|_| {}).verdicts, legal.verdicts);
+    let s2 = 2;
+    let last = *legal.evidence.histories[s2].1.last().expect("s2's record");
+    let other = (legal.shards.iter())
+        .map(|shard| shard.owner)
+        .find(|host| *host != last.owner)
+        .expect("another owner");
+    let shared = (legal.shards.iter())
+        .position(|shard| shard.recoveries[0].share.owners > 1)
+        .expect("a host with two roles");
+    let host = legal.shards[shared].owner;
+    let roles = legal.shards[shared].recoveries[0].share.owners;
+    let attempt = (last.generation.get(), last.attempts);
+    let twin = move |report: &mut Report| {
+        let twin = ShardRecord {
+            owner: other,
+            ..last
+        };
+        report.evidence.histories[s2].1.push(twin);
+    };
+    let moved = move |report: &mut Report| {
+        let moved = ShardRecord {
+            generation: crate::net::ownership::ShardGeneration::new(last.generation.get() + 1)
+                .expect("a generation"),
+            ..last
+        };
+        report.evidence.histories[s2].1.push(moved);
+    };
+    let short = |report: &mut Report| {
+        let sweeps = &mut report.evidence.retention[s2].sweeps;
+        let (eligible, _) = sweeps[1].expect("s2's sweep after its crash");
+        sweeps[1] = Some((eligible, eligible - 1));
+    };
+    let silent = |report: &mut Report| {
+        let settle = &mut report.evidence.settle[s2];
+        (settle.serving, settle.blockers) = (false, 0);
+    };
+    let whole = move |report: &mut Report| {
+        let used = (report.evidence.host_use.iter_mut()).find(|used| used.host == host);
+        let used = used.expect("the host's share");
+        used.shares.iter_mut().for_each(|share| share.owners = 1);
+    };
+    let refused = |report: &mut Report| {
+        let shard = FIRST_GET_OF_SHARD_3;
+        let gets = report.evidence.neighbour_gets.iter_mut();
+        let get = gets.into_iter().find(|(of, _)| of.get() == shard);
+        get.expect("a GET of the shard").1 = false;
+    };
+    let eligible = legal.evidence.retention[s2].sweeps[1]
+        .expect("s2's sweep")
+        .0;
+    let failing: [(Edit, &str, &str, String); 6] = [
+        (
+            &twin,
+            "one owner per tenure",
+            "two hosts own one attempt of a shard",
+            format!("shard 3 attempt {attempt:?}"),
+        ),
+        (
+            &moved,
+            "volume kept",
+            "a generation or an active volume changed with no volume lost",
+            "shard 3".to_string(),
+        ),
+        (
+            &short,
+            "retained set",
+            "a retained entry was not served its exact bytes at the recovered tenure",
+            format!("shard 3 served {} of {eligible}", eligible - 1),
+        ),
+        (
+            &silent,
+            "settle or blocker",
+            "a shard neither serves with a standby nor reports a blocker",
+            "shard 3".to_string(),
+        ),
+        (
+            &whole,
+            "host share",
+            "a host's roles exceed the owners its recovery share divides over",
+            format!("host {} roles {roles} owners 1", host.get()),
+        ),
+        (
+            &refused,
+            "untouched shards",
+            "an untouched shard did not serve a request its object's bytes",
+            format!("shard {FIRST_GET_OF_SHARD_3}"),
+        ),
+    ];
+    for (edit, name, rule, location) in failing {
+        let report = judged(edit);
+        let failed = Verdict::Fail(rule, location);
+        assert_eq!(verdict(&report, name), &failed, "{name}");
+        assert_eq!(report.credit(), failed, "{name}");
+    }
+
+    let uncrashed = |report: &mut Report| {
+        report.crashes = 0;
+        report.evidence.neighbour_gets.clear();
+    };
+    let skipped = |report: &mut Report| report.evidence.retention[0].sweeps[1] = None;
+    let unrun: [(Edit, &str, &str); 4] = [
+        (&uncrashed, "volume kept", "no crash episode ran"),
+        (&uncrashed, "settle or blocker", "no crash episode ran"),
+        (
+            &uncrashed,
+            "untouched shards",
+            "no request reached an untouched shard during a recovery",
+        ),
+        (
+            &skipped,
+            "retained set",
+            "the retained-set sweep did not run",
+        ),
+    ];
+    for (edit, name, why) in unrun {
+        let report = judged(edit);
+        assert_eq!(verdict(&report, name), &Verdict::Unrun(why), "{name}");
+        assert!(matches!(report.credit(), Verdict::Unrun(_)), "{name}");
+    }
+}
+
+/// The live hostile profiles on `root`: each plant fails or reads `Unrun` through its named check, and the credit and
+/// the summary name it.
+pub(super) fn hostile_profiles_on(root: u64) {
+    let legal = passing(&Config::six(root));
     let shared = (legal.shards.iter())
         .position(|shard| shard.recoveries[0].share.owners > 1)
         .expect("a host with two roles");
@@ -533,7 +675,7 @@ fn every_hostile_profile_fails_or_reads_unrun_through_its_named_check() {
         ),
     ];
     for (plant, at, name, rule, location) in failing {
-        let report = run(&Config::six(1).hostile(plant, at)).unwrap();
+        let report = run(&Config::six(root).hostile(plant, at)).unwrap();
         assert!(report.planted, "{plant:?} took effect");
         let failed = Verdict::Fail(rule, location);
         assert_eq!(verdict(&report, name), &failed, "{plant:?}");
@@ -553,8 +695,9 @@ fn every_hostile_profile_fails_or_reads_unrun_through_its_named_check() {
         }
     }
 
-    let report = run(&Config::six(1).hostile(Plant::NeighborRefusal, 2)).unwrap();
+    let report = run(&Config::six(root).hostile(Plant::NeighborRefusal, 2)).unwrap();
     assert!(report.planted);
+    assert!(report.summary().ends_with("; plant NeighborRefusal at 2"));
     let short: Vec<(u32, u32)> = (report.shards.iter())
         .map(|shard| (shard.neighbour.offered, shard.neighbour.served))
         .collect();
@@ -592,10 +735,16 @@ fn every_hostile_profile_fails_or_reads_unrun_through_its_named_check() {
         ),
     ];
     for (plant, name, why) in unrun {
-        let report = run(&Config::six(1).hostile(plant, 0)).unwrap();
+        // The three NoCrashEpisode checks read one run of the process.
+        let report = run_shared(&Config::six(root).hostile(plant, 0)).unwrap();
         assert!(report.planted, "{plant:?} took effect");
         assert_eq!(verdict(&report, name), &Verdict::Unrun(why), "{plant:?}");
         assert!(matches!(report.credit(), Verdict::Unrun(_)));
+        assert!(
+            report
+                .summary()
+                .ends_with(&format!("; plant {plant:?} at 0"))
+        );
     }
 }
 
@@ -1630,7 +1779,8 @@ fn each_placement_takes_a_least_loaded_owner_and_a_standby_outside_its_partition
 fn the_pinned_runs_pass_and_the_root_sweep_prints_one_line_a_run() {
     let cells = super::reconcile::CrashCell::all();
     pinned_runs_repeat_their_digests(1);
-    let table = crash_table(CRASH_TABLE_ROOT, &cells[..1]).expect("a credited crash cell");
+    let table =
+        crash_table(CRASH_TABLE_ROOT, &cells[..1], run_shared).expect("a credited crash cell");
     let digest = Sha256::digest(run(&Config::crash(1, cells[0])).unwrap().digest());
     let line = format!(
         "fleet: pinned crash-table root 1: credit pass; digest {}",
@@ -1640,7 +1790,7 @@ fn the_pinned_runs_pass_and_the_root_sweep_prints_one_line_a_run() {
         table, line,
         "the crash table's digest hashes its cells' digests in order"
     );
-    let lines = roots(1..=1).expect("root 1 passes");
+    let lines = roots(1..=1, run_shared).expect("root 1 passes");
     assert_eq!(lines.len(), 3);
     let settle = lines[2]
         .strip_prefix("fleet: roots: 2 runs passed, 0 takeovers, settle at most ")
@@ -1653,10 +1803,10 @@ fn the_pinned_runs_pass_and_the_root_sweep_prints_one_line_a_run() {
     );
 }
 
-/// Runs and replays the pinned runs on `root`, then runs each again and asserts the same digest line. The fast tier
-/// checks root 1 and the scheduled tier root 2.
+/// Takes each pinned run on `root` from the test process's shared runs ([`run_shared`]) and replays it, then runs
+/// each afresh and asserts the same digest line. The fast tier checks root 1 and the scheduled tier root 2.
 pub(super) fn pinned_runs_repeat_their_digests(root: u64) {
-    let pinned = pinned_runs(Some(root)).expect("the pinned runs pass and replay");
+    let pinned = pinned_runs(Some(root), run_shared).expect("the pinned runs pass and replay");
     let on_root: Vec<_> = PINNED.into_iter().filter(|(.., at)| *at == root).collect();
     assert_eq!(pinned.len(), on_root.len());
     assert!(!pinned.is_empty(), "root {root} holds pinned runs");
@@ -1670,25 +1820,28 @@ pub(super) fn pinned_runs_repeat_their_digests(root: u64) {
 #[test]
 fn a_run_with_no_credit_or_no_report_stops_the_pinned_case_and_the_root_sweep() {
     let hostile = Config::six(1).hostile(Plant::TwinTenure, 2);
-    let lines = run(&hostile).unwrap().lines().join("\n");
+    let lines = run_shared(&hostile).unwrap().lines().join("\n");
     assert!(
         lines.contains("credit FAIL [two hosts own one attempt of a shard]"),
         "{lines}"
     );
     assert_eq!(
-        credited_replay("six", &hostile).map(|report| report.digest()),
+        credited_replay("six", &hostile, run_shared).map(|report| report.digest()),
         Err(lines.clone())
     );
-    assert_eq!(sweep([Config::six(1), hostile].into_iter()), Err(lines));
+    assert_eq!(
+        sweep([Config::six(1), hostile].into_iter(), run_shared),
+        Err(lines)
+    );
 
     let mut wide = Config::six(1);
     wide.shape.shards = 33;
     let refused = "root 1: Shape(Shards(33))";
     assert_eq!(
-        credited_replay("six", &wide).map(|report| report.digest()),
+        credited_replay("six", &wide, run).map(|report| report.digest()),
         Err(format!("six {refused}"))
     );
-    assert_eq!(sweep([wide].into_iter()), Err(refused.into()));
+    assert_eq!(sweep([wide].into_iter(), run), Err(refused.into()));
 
     let report = passing(&Config::six(1));
     assert_eq!(alike("six", &report, &Ok(report.clone())), Ok(()));
@@ -1914,12 +2067,13 @@ fn a_fresh_marker_the_record_no_longer_bears_out_holds_no_host_loop_open() {
 /// The fast tier's further roots and replays, each check printing one line and the last line counting them: the
 /// six-host restart on roots 2 and 3, the host loss in several roles on root 2, the host loss run again, replayed with
 /// its digest and run with one request on root 3, the two-reconciler and owner-and-standby repair runs replayed with a
-/// short tape on root 1, and the impaired volume's replay with its short tape on root 1.
+/// short tape on root 1, the impaired volume's replay with its short tape on root 1, and the live hostile profiles on
+/// root 1.
 #[test]
 #[ignore = "the restart run on roots 2 and 3, the host loss on root 2, and the host-loss, repair and volume replays and short tapes; the search-nightly lane's row fleet-scheduled-roots runs it with --ignored"]
 fn the_restart_host_loss_and_replay_checks_pass_on_their_scheduled_roots() {
     type Check = (&'static str, u64, fn(u64));
-    let checks: [Check; 6] = [
+    let checks: [Check; 7] = [
         ("restarts-six", 2, six_hosts_restart_six_shards_warm_with_no_takeover_on),
         ("restarts-six", 3, six_hosts_restart_six_shards_warm_with_no_takeover_on),
         (
@@ -1940,6 +2094,7 @@ fn the_restart_host_loss_and_replay_checks_pass_on_their_scheduled_roots() {
         ("impaired-replay", 1, |root| {
             super::volume_tests::replays_and_refuses_a_short_tape(&Config::impaired(root))
         }),
+        ("hostile-profiles", 1, hostile_profiles_on),
     ];
     for (name, root, check) in checks {
         check(root);
@@ -1949,4 +2104,332 @@ fn the_restart_host_loss_and_replay_checks_pass_on_their_scheduled_roots() {
         "fleet: scheduled roots-and-replays: {} checks passed",
         checks.len()
     );
+}
+
+/// The evidence's volume-record histories hold each committed version of every volume record with its store version,
+/// and only those: an exact write and a timed-out write that committed each add a version, while a timed-out write
+/// that did not commit, a write the store acknowledged without applying it and a write at a stale version add none.
+#[test]
+fn the_volume_histories_hold_every_committed_volume_record_write_and_no_other() {
+    use crate::storage::store::sim::Arm;
+    let config = Config::settle(1);
+    let fleet = seeded(&config);
+    let volume = fleet.cells[0].placement.volume;
+    let key = Key::Volume(volume);
+    let history = |fleet: &Fleet<'_>| {
+        let histories = fleet.volume_histories();
+        let versions = histories.iter().find(|(of, _)| *of == volume);
+        versions.expect("the cell's volume history").1.clone()
+    };
+    let seeded = history(&fleet);
+    let stored = fleet.store.0.borrow().versions(&key).len();
+    assert_eq!(seeded.len(), stored);
+    let volumes = (fleet.store.0.borrow().keys())
+        .filter(|key| matches!(key, Key::Volume(_)))
+        .count();
+    assert_eq!(
+        fleet.volume_histories().len(),
+        volumes,
+        "every volume record"
+    );
+    let (version, record) = seeded.last().cloned().expect("the seeded version");
+    let mut store = fleet.store.clone();
+    let mut fewer = record.clone();
+    fewer.pairs.pop().expect("a seeded pair");
+    let exact = |expect: u64, value: &VolumeRecord| Write::Exact {
+        expect: crate::storage::store::Version::new(expect).expect("a version"),
+        value: value.encode(),
+    };
+    let written = Store::write(&mut store, &key, &exact(version, &fewer));
+    assert!(matches!(written, Outcome::Committed(_)), "{written:?}");
+    fleet.store.schedule(Arm::Timeout { commit: true });
+    let timed_out = Store::write(&mut store, &key, &exact(version + 1, &record));
+    assert_eq!(timed_out, Outcome::Unknown);
+    fleet.store.schedule(Arm::Timeout { commit: false });
+    let lost = Store::write(&mut store, &key, &exact(version + 2, &fewer));
+    assert_eq!(lost, Outcome::Unknown);
+    fleet.store.schedule(Arm::LostWrite);
+    let unapplied = Store::write(&mut store, &key, &exact(version + 2, &fewer));
+    assert!(matches!(unapplied, Outcome::Committed(_)), "{unapplied:?}");
+    let stale = Store::write(&mut store, &key, &exact(version, &fewer));
+    assert!(!matches!(stale, Outcome::Committed(_)), "{stale:?}");
+    let after = history(&fleet);
+    let added: Vec<(u64, VolumeRecord)> = after[seeded.len()..].to_vec();
+    assert_eq!(added, [(version + 1, fewer), (version + 2, record)]);
+    assert_eq!(after[..seeded.len()], seeded[..]);
+}
+
+/// `pairs_committed` passes a read whose version the volume's history holds with exactly the read's record, and fails
+/// `UNCOMMITTED_PAIRS` by name for the same record at another version, a version the history lacks, another volume,
+/// a pair missing, the pairs in another order, one pair's host changed, one pair's pin moved and one event's kind
+/// changed with the pairs kept.
+#[test]
+fn a_volume_record_read_binds_to_its_committed_version_and_fails_on_any_other() {
+    use crate::failover::records::EventKind;
+    let rule = "a judgment read a volume record that differs from its committed version at the read's store version";
+    assert_eq!(oracles::UNCOMMITTED_PAIRS, rule);
+    let config = Config::settle(1);
+    let fleet = seeded(&config);
+    let (version, record) = fleet.volume_read(0);
+    assert!(record.pairs.len() >= 2, "two recorded pairs");
+    let mut fewer = record.clone();
+    fewer.pairs.pop();
+    let volume = record.volume;
+    let histories: oracles::VolumeHistories = vec![(
+        volume,
+        vec![(version, record.clone()), (version + 1, fewer.clone())],
+    )];
+    let read = |version: u64, record: &VolumeRecord| oracles::PairRead {
+        shard: 1,
+        volume,
+        version,
+        record: record.clone(),
+    };
+    let judged = |read: &oracles::PairRead| oracles::pairs_committed(&histories, read);
+    assert_eq!(judged(&read(version, &record)), Verdict::Pass);
+    assert_eq!(judged(&read(version + 1, &fewer)), Verdict::Pass);
+    let at = format!("shard 1 volume {} version {}", volume.as_str(), version + 1);
+    assert_eq!(judged(&read(version + 1, &record)), Verdict::Fail(rule, at));
+    assert_eq!(judged(&read(version + 2, &fewer)).rule(), Some(rule));
+    assert_eq!(
+        judged(&read(version, &fewer)).rule(),
+        Some(rule),
+        "a pair missing"
+    );
+    let other = crate::failover::records::VolumeId::new("vol-0f000000000000bbb").unwrap();
+    let elsewhere = oracles::PairRead {
+        volume: other,
+        ..read(version, &record)
+    };
+    assert_eq!(judged(&elsewhere).rule(), Some(rule));
+    /// One named alteration of the committed record.
+    type Edit = (&'static str, fn(&mut VolumeRecord));
+    let edits: [Edit; 4] = [
+        ("pairs reordered", |record| record.pairs.reverse()),
+        ("a host changed", |record| {
+            record.pairs[0].host = Host::new(record.pairs[0].host.get() + 100).unwrap();
+        }),
+        ("a pin moved", |record| record.pairs[0].attach += 1),
+        ("an event's kind changed", |record| {
+            let event = record
+                .events
+                .iter_mut()
+                .find(|event| event.kind == EventKind::Attach);
+            event.expect("a live attach").kind = EventKind::Ended;
+        }),
+    ];
+    for (name, edit) in edits {
+        let mut altered = record.clone();
+        edit(&mut altered);
+        assert_eq!(altered.pairs.len(), record.pairs.len(), "{name}");
+        assert_eq!(
+            judged(&read(version, &altered)).rule(),
+            Some(rule),
+            "{name}"
+        );
+    }
+}
+
+/// A logged read names the volume key its cell read, so a read of s0's record that returns another volume's
+/// committed record at the same store version fails `UNCOMMITTED_PAIRS` under s0's volume. Under its own volume
+/// that record binds, which is the premise.
+#[test]
+fn a_read_that_returns_another_volumes_committed_record_fails_under_the_volume_its_cell_read() {
+    let rule = "a judgment read a volume record that differs from its committed version at the read's store version";
+    let config = Config::settle(1);
+    let fleet = seeded(&config);
+    let histories = fleet.volume_histories();
+    let (version, own) = fleet.volume_read(0);
+    let others = (1..fleet.cells.len()).map(|at| fleet.volume_read(at));
+    let (_, other) = others
+        .into_iter()
+        .find(|(read, record)| *read == version && record.volume != own.volume)
+        .expect("another volume's record at the same store version");
+    let elsewhere = oracles::PairRead {
+        shard: 1,
+        volume: other.volume,
+        version,
+        record: other.clone(),
+    };
+    assert_eq!(
+        oracles::pairs_committed(&histories, &elsewhere),
+        Verdict::Pass,
+        "premise: the other volume committed the record at this version"
+    );
+
+    assert_eq!(fleet.log_read(0, version, other.clone()), other);
+    let reads = fleet.volume_reads.borrow();
+    let logged = reads.last().expect("the logged read");
+    let at = format!("shard 1 volume {} version {version}", own.volume.as_str());
+    assert_eq!(
+        oracles::pairs_committed(&histories, logged),
+        Verdict::Fail(rule, at)
+    );
+    assert_eq!(logged.volume, own.volume, "the volume the cell read");
+}
+
+/// A reconciler run binds every volume-record read its judgments took through `Fleet::volume_now` to a committed
+/// version: the no-fault settle run logs reads of every cell's volume record and passes. Control: under
+/// `UncommittedPairs` (code 97) the first read of s0's volume record returns the record without its last pair to the
+/// judgment that asked for it and logs that record, and the host scenario's outcomes fail `UNCOMMITTED_PAIRS` naming
+/// s0's volume, as does the credit.
+#[test]
+fn a_volume_record_read_that_no_committed_version_holds_fails_the_scenario_by_name() {
+    let rule = "a judgment read a volume record that differs from its committed version at the read's store version";
+    let settled = passing(&Config::settle(1));
+    let evidence = &settled.evidence;
+    let read: BTreeSet<u32> = evidence.pair_reads.iter().map(|read| read.shard).collect();
+    let shards: BTreeSet<u32> = settled
+        .shards
+        .iter()
+        .map(|s| s.placement.shard.get())
+        .collect();
+    assert_eq!(read, shards, "a read of each cell's volume record");
+    for read in &evidence.pair_reads {
+        let bound = oracles::pairs_committed(&evidence.volume_histories, read);
+        assert_eq!(bound, Verdict::Pass, "{read:?}");
+    }
+    let planted = run(&Config::settle(1).hostile(Plant::UncommittedPairs, 0)).unwrap();
+    assert!(planted.planted);
+    let volume = settled.shards[0].placement.volume;
+    let altered = (planted.evidence.pair_reads.iter())
+        .find(|read| read.shard == 1)
+        .expect("s0's first read");
+    let versions = oracles::versions_of(&planted.evidence.volume_histories, volume);
+    let committed = versions
+        .iter()
+        .find(|(version, _)| *version == altered.version);
+    let committed = &committed.expect("the read's committed version").1;
+    assert_eq!(altered.record.pairs.len() + 1, committed.pairs.len());
+    match hosts::expected(&planted) {
+        Verdict::Fail(failed, at) => {
+            assert_eq!(failed, rule);
+            let named = format!("shard 1 volume {} version ", volume.as_str());
+            assert!(at.starts_with(&named), "{at}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(planted.credit().rule(), Some(rule));
+}
+
+/// The volume-record cap is judged over every committed version of every volume record: the attach-closed run
+/// passes it, and its evidence altered to hold, for a volume no shard names, a version with a fourth live attach
+/// fails `OVER_ATTACHED` naming that volume and version, while every shard's own peak stays at three.
+#[test]
+fn a_fourth_live_attach_on_any_committed_volume_version_fails_the_attach_cap() {
+    use crate::failover::records::{AttachmentEvent, EventKind, MAX_ATTACHED};
+    let closed = passing(&Config::attach_closed(1));
+    assert_eq!(hosts::expected(&closed), Verdict::Pass);
+    let mut crowded = closed.clone();
+    let most = (closed.evidence.volume_histories.iter())
+        .flat_map(|(_, versions)| versions.iter())
+        .max_by_key(|(_, record)| record.live_hosts().count())
+        .expect("a committed volume version");
+    let (_, mut record) = most.clone();
+    assert_eq!(record.live_hosts().count(), MAX_ATTACHED);
+    let spare = crate::failover::records::VolumeId::new("vol-0f000000000000bbb").unwrap();
+    record.volume = spare;
+    let template = *(record.events.iter())
+        .find(|event| event.kind == EventKind::Attach)
+        .unwrap();
+    record.events.push(AttachmentEvent {
+        seq: record.next,
+        host: Host::new(9_999).unwrap(),
+        ..template
+    });
+    record.next += 1;
+    assert_eq!(record.live_hosts().count(), MAX_ATTACHED + 1);
+    crowded
+        .evidence
+        .volume_histories
+        .push((spare, vec![(1, record)]));
+    assert!(
+        crowded
+            .evidence
+            .attached
+            .iter()
+            .all(|(_, peak)| *peak <= MAX_ATTACHED)
+    );
+    let at = format!("volume {} version 1 holds 4", spare.as_str());
+    assert_eq!(
+        hosts::expected(&crowded),
+        Verdict::Fail(hosts::OVER_ATTACHED, at)
+    );
+}
+
+/// The attach-closed witness binds the committed end to a host an `End` step of the loop named for the shard: s2's
+/// history cut at the version that ends the attach, with the ended entry given in every version to a host no `End`
+/// step names, reads the witness `Unrun`, though the log holds the shard's `End` steps and a committed version ends
+/// an attach in place.
+#[test]
+fn the_attach_closed_witness_needs_the_committed_end_of_a_host_the_loop_ended() {
+    use crate::failover::records::EventKind;
+    let closed = passing(&Config::attach_closed(1));
+    assert_eq!(hosts::expected(&closed), Verdict::Pass);
+    let volume = closed.shards[hosts::ATTACH_CELL].placement.volume;
+    let at = (closed.evidence.volume_histories.iter()).position(|(of, _)| *of == volume);
+    let at = at.expect("s2's volume history");
+    let mut foreign = closed.clone();
+    let versions = &mut foreign.evidence.volume_histories[at].1;
+    let ended = |record: &VolumeRecord| {
+        let mut events = record.events.iter();
+        events.position(|event| event.kind == EventKind::Ended)
+    };
+    let ending = (versions.iter()).position(|(_, record)| ended(record).is_some());
+    let ending = ending.expect("the version that ends the attach");
+    versions.truncate(ending + 1);
+    let reclaimed = ended(&versions[ending].1).expect("the ended entry");
+    let (host, seq) = {
+        let event = &versions[ending].1.events[reclaimed];
+        (event.host, event.seq)
+    };
+    assert_eq!(versions[ending - 1].1.live(host), Some(seq));
+    let stranger = Host::new(9_999).unwrap();
+    for (_, record) in versions.iter_mut() {
+        let own = record.events.iter_mut().filter(|event| event.host == host);
+        own.for_each(|event| event.host = stranger);
+    }
+    assert_eq!(versions[ending - 1].1.live(stranger), Some(seq));
+    assert_eq!(versions[ending].1.live(stranger), None);
+    // The reads of the versions the edit changed would fail their binding first; the edit judges the witness alone.
+    foreign.evidence.pair_reads.clear();
+    let unrun = Verdict::Unrun("witness attach-ended missing");
+    assert_eq!(hosts::expected(&foreign), unrun);
+}
+
+/// The attach-closed witness reads the committed history of s2's volume: the run's history ends a live attach in
+/// place, the same versions with that entry detached, force-detached or gone instead end none, and
+/// the report altered to that history up to the version before the one that ends it reads the witness `Unrun`,
+/// though the loop's log still holds its `End` step.
+#[test]
+fn the_attach_closed_witness_needs_a_committed_version_that_ends_the_attach() {
+    let closed = passing(&Config::attach_closed(1));
+    assert_eq!(hosts::expected(&closed), Verdict::Pass);
+    let volume = closed.shards[hosts::ATTACH_CELL].placement.volume;
+    let at = (closed.evidence.volume_histories.iter()).position(|(of, _)| *of == volume);
+    let at = at.expect("s2's volume history");
+    let shard = hosts::ATTACH_CELL as u32 + 1;
+    let ended = (closed.recon.ended.iter()).find(|(of, _)| *of == shard);
+    let host = Host::new(ended.expect("the loop's End step for s2").1).unwrap();
+    let histories = &closed.evidence.volume_histories;
+    assert!(oracles::attach_ended(&histories[at].1, host));
+    let mut unended = closed.clone();
+    let versions = &mut unended.evidence.volume_histories[at].1;
+    let first = (1..=versions.len()).find(|&len| oracles::attach_ended(&versions[..len], host));
+    let ending = first.expect("the version that ends the attach") - 1;
+    // The ending version with the entry detached, force-detached or gone in place of ended ends no attach.
+    use crate::failover::records::EventKind;
+    for kind in [EventKind::Detach, EventKind::Force, EventKind::Gone] {
+        let mut other = versions[..=ending].to_vec();
+        let ended =
+            (other[ending].1.events.iter_mut()).filter(|event| event.kind == EventKind::Ended);
+        ended.for_each(|event| event.kind = kind);
+        assert!(!oracles::attach_ended(&other, host), "{kind:?}");
+    }
+    versions.truncate(ending);
+    assert!(!oracles::attach_ended(versions, host));
+    // The reads of the versions the edit removed would fail their binding first; the edit judges the witness alone.
+    unended.evidence.pair_reads.clear();
+    let unrun = Verdict::Unrun("witness attach-ended missing");
+    assert_eq!(hosts::expected(&unended), unrun);
 }

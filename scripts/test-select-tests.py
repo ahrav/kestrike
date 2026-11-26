@@ -228,8 +228,9 @@ ROW_LINES = {
           for boundary in ("replacement", "createopen", "createissued", "createcreated", "recordattach", "addspare", "flip")
           for ending in ("acknowledged", "committed", "lost")),
         "fleet: scheduled volume: 11 checks and 21 crash cells passed",
-        *(f"fleet: scheduled zone {check}: pass" for check in ("loss root 2", "loss-replay root 1", "settle root 2")),
-        "fleet: scheduled zone: 3 checks passed",
+        *(f"fleet: scheduled zone {check}: pass" for check in ("loss root 2", "loss-replay root 1", "settle root 2",
+                                                                      "foreign-pre-read root 1", "early-admission root 1")),
+        "fleet: scheduled zone: 5 checks passed",
         *(f"fleet: scheduled repair-and-host {check} root 2: pass"
           for check in ("settle", "reenroll", "standby-loss", "double-loss", "partition-repair", "census-full", "attach-cap", "foreign",
                         "racing", "partition-loss", "false-suspicion", "deposed-owner", "dense",
@@ -238,10 +239,14 @@ ROW_LINES = {
           for check in ("unknown-confirm-committed", "unknown-confirm-lost", "unknown-reserve-committed", "unknown-reserve-lost",
                         "unknown-page-committed", "unknown-page-lost", "regressed-reads")),
         *(f"fleet: scheduled repair-and-host {check}: pass"
-          for check in ("census-and-settle-siblings root 1", "census-and-settle-siblings root 2",
-                        "standby-need-dropped root 2", "pinned root 2", "unknown-confirm-committed root 1",
+          for check in ("census-and-settle-controls root 1", "census-and-settle-siblings root 1",
+                        "census-and-settle-siblings root 2", "standby-need-dropped root 1",
+                        "standby-need-dropped root 2", "retired-park-unpublished root 1", "pinned root 2", "unknown-confirm-committed root 1",
                         "unknown-reserve-committed root 1", "unknown-reserve-lost root 1", "unknown-page-lost root 1",
                         "takeover-unknown-committed root 1", "handoff root 2", "handoff-ended root 2",
+                        "handoff-target-unwaited root 1", "handoff-unscaled-grace root 1",
+                        "handoff-parked-withdraws root 1", "untouched-controls root 1", "whole-share root 1",
+                        "host-loss-retention-controls root 1", "host-share-controls root 1",
                         "emit-once-sibling root 1", "role-read-sibling root 1", "held-status root 1",
                         "actor-replay-siblings root 1", "declared-two-held root 1", "declared-two-held-control root 1",
                         "declared-three root 1", "declared-three-control root 1")),
@@ -250,11 +255,11 @@ ROW_LINES = {
           for index, call in enumerate(("reserve", "record", "attach", "enroll", "designate"))
           for at, ending in enumerate(("acknowledged", "committed", "lost"))
           if not (at == index % 3 and (kind == "fresh") == (index % 2 == 1))),
-        "fleet: scheduled repair-and-host: 40 checks and 25 crash cells passed",
+        "fleet: scheduled repair-and-host: 50 checks and 25 crash cells passed",
         *(f"fleet: scheduled roots-and-replays {check}: pass"
           for check in ("restarts-six root 2", "restarts-six root 3", "host-loss root 2", "host-loss-replay root 3",
-                        "repair-replay root 1", "impaired-replay root 1")),
-        "fleet: scheduled roots-and-replays: 6 checks passed",
+                        "repair-replay root 1", "impaired-replay root 1", "hostile-profiles root 1")),
+        "fleet: scheduled roots-and-replays: 7 checks passed",
         *(f"fleet: scheduled alarms-{scenario} root 1: pass"
           for scenario in ("host-loss", "partition-loss", "partition-loss-at", "false-suspicion", "owner-pause", "owner-isolation", "page-regressed", "record-regressed", "settle", "tiny-settle", "az-settle", "reenroll", "standby-loss", "standby-silent", "double-loss", "partition-repair", "partition-repair-at", "census-full", "past-target", "attach-survivor", "attach-closed", "foreign", "racing", "slot-moved", "handoff", "handoff-ended", "zone-loss", "zone-impaired", "zone-deposed")),
         *(f"fleet: scheduled alarms-unknown-{write}-{ending} root 1: pass"
@@ -1830,7 +1835,7 @@ class SelectTests(unittest.TestCase):
         rows = INVENTORY["qualified"]["search-nightly"]["rows"]
         others = [line for row in rows if row["id"] != "fleet-scheduled-roots" for line in ROW_LINES[row["id"]]]
         scheduled = ROW_LINES["fleet-scheduled-roots"]
-        self.assertEqual(len(scheduled), 179)
+        self.assertEqual(len(scheduled), 192)
         witnesses = next(row for row in rows if row["id"] == "fleet-scheduled-roots")["witnesses"]
         code, report, blocked = self.blocked("search-nightly", lines=others + scheduled)
         self.assertEqual((code, blocked), (0, {}), report)
@@ -1844,15 +1849,15 @@ class SelectTests(unittest.TestCase):
             ("a skipped zone check", [line for line in scheduled if " zone loss-replay " not in line], "skipped members ['zone loss-replay root 1']"),
             ("a skipped repair check", [line for line in scheduled if " census-full " not in line],
              "skipped members ['repair-and-host census-full root 2']"),
-            ("a short zone count", [line.replace("zone: 3 checks", "zone: 2 checks") for line in scheduled], f"missing witness {witnesses[1]!r}"),
+            ("a short zone count", [line.replace("zone: 5 checks", "zone: 4 checks") for line in scheduled], f"missing witness {witnesses[1]!r}"),
             ("a skipped enrollment cell", [line for line in scheduled if " fresh-designate-committed " not in line],
              "skipped members ['repair-and-host fresh-designate-committed root 1']"),
-            ("a short repair count", [line.replace("host: 40 checks", "host: 39 checks") for line in scheduled],
+            ("a short repair count", [line.replace("host: 50 checks", "host: 49 checks") for line in scheduled],
              f"missing witness {witnesses[2]!r}"),
             ("a skipped declared-hold control", [line for line in scheduled if " declared-three-control " not in line],
              "skipped members ['repair-and-host declared-three-control root 1']"),
             ("a short roots-and-replays count",
-             [line.replace("roots-and-replays: 6 checks", "roots-and-replays: 5 checks") for line in scheduled],
+             [line.replace("roots-and-replays: 7 checks", "roots-and-replays: 6 checks") for line in scheduled],
              f"missing witness {witnesses[3]!r}"),
             ("a skipped alarm set", [line for line in scheduled if " alarms-census-full " not in line],
              "skipped members ['alarms-census-full root 1']"),

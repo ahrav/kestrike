@@ -1,0 +1,12 @@
+{
+  "id": "contract-change-2294",
+  "kind": "contract-change",
+  "pull_request": 2294,
+  "changed": "One new record, fleet-evidence-binds-each-volume-record-read-to-a-committed-version (the evidence's volume-record histories, the binding of each Fleet::volume_now read to its committed version, the attach cap over every committed volume version and the attach-closed witness's in-place End). The invariants of fleet-zone-repair-and-host-scenarios-pass-on-their-second-root (5 zone checks, was 3; 50 repair-and-host checks and 25 crash cells, was 40; 80 member lines, was 68) and fleet-restart-host-loss-and-replay-checks-pass-on-their-scheduled-roots (7 checks, was 6) gain the live root-1 planted controls whose workspace tests now judge altered root-1 reports; the workspace records that name those controls state in their LIMITS that the live plant runs only in search-nightly.",
+  "property_action": {
+    "action": "added",
+    "place": "obligation",
+    "reference": "fleet-evidence-binds-each-volume-record-read-to-a-committed-version",
+    "reason": "The fleet's judgments must read the volume record the store committed at the version their read returned; the new record states that binding, its plant UncommittedPairs (code 97) and its limits. The scheduled records' counts move with the live planted controls that left the workspace job, each of which keeps a workspace test over an altered root-1 report."
+  }
+}
