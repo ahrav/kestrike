@@ -1,1 +1,2 @@
 Scratch file of a reviewer-trigger test. The pull request that carries it is closed unmerged.
+Second line, pushed by the owner login.
