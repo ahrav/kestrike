@@ -1789,9 +1789,9 @@ records with `"outcome": "timeout"`, without a class:
   native AArch64 Linux machine and has no fallback registration. The barrier
   job is disabled with no coverage credit until this runner is provisioned.
 
-Reviews use `kestrike-review` on Hetzner. Keep the three build roles on
-separate registrations. Each registration takes one job at a time; there is no
-shared job-level lock. Preserve legacy labels while old jobs drain, then
+Reviews run on a GitHub-hosted `ubuntu-24.04` runner, one fresh machine per
+review. Keep the three build roles on separate registrations. Each
+registration takes one job at a time; there is no shared job-level lock. Preserve legacy labels while old jobs drain, then
 retire them after verifying that no queued workflow needs them. Cancel no
 other runs to complete the transition. Adding labels does not create capacity.
 

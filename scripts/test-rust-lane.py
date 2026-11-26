@@ -4448,7 +4448,7 @@ class EventPolicy(unittest.TestCase):
                             expected = "kestrike-ci-fast"
                     self.assertEqual(label, expected)
         review = (ROOT / ".github/workflows/claude-code-review.yml").read_text()
-        self.assertIn("runs-on: [self-hosted, linux, x64, kestrike-review]", review)
+        self.assertIn("runs-on: ubuntu-24.04\n", review)
         self.assertNotRegex(review, r"kestrike-(?:ci|vm)")
 
     def test_nightly_verus_preserves_proof_deadlines_and_evidence(self):
