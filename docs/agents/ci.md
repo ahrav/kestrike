@@ -12,7 +12,7 @@ Pull requests and pushes to `main` run, in dependency order:
    lane cancellation tests, and pinned stable rustfmt over every tracked Rust
    file, including the Verus, GenMC, and fuzz sources outside the workspace.
 2. The small RC11 checker after step 1. Native preflight starts independently
-   on the build runners, so a busy fast runner does not leave them idle.
+   on the build runners.
 3. The workspace after native preflight: format, check, clippy, the ordinary
    test suite, the atomic-site census self-test
    `scripts/test-classify-atomics.py`, which runs
@@ -422,7 +422,7 @@ when the step's test selection or the nightly pin changes.
 The Rust gate requires every selected lane except the advisory ASan lane to
 succeed and checks that unselected heavy lanes are skipped on pull requests and
 pushes. It runs after failed dependencies, but a cancelled pull-request run does
-not queue a gate job on the fast runner. A cancelled pull-request run provides
+not queue a gate job. A cancelled pull-request run provides
 no passing gate or successful receipt aggregation: its gate job is skipped.
 GitHub reports a skipped job as a successful required status check, so the
 merge rule in [Concurrency](#concurrency) reads the run's conclusion, and a
@@ -1761,12 +1761,11 @@ records with `"outcome": "timeout"`, without a class:
 
 ## Runner roles
 
-- `kestrike-ci-fast` (Hetzner): pull-request and push comment policy, lane
-  scripts, rustfmt, RC11, and the Rust gate.
+- GitHub-hosted `ubuntu-24.04`: comment policy, lane scripts, rustfmt, RC11
+  and the Rust gate on every event, and reviews, one fresh machine per job.
 - `kestrike-vm-build`: pull-request and push preflight, workspace, campaigns,
   search, and fuzz-smoke on the two registrations of the first Linux VM. The
-  legacy label `kestrike-ci-build` stays on Linux and Hetzner while old jobs
-  drain; new builds select only the Linux VM and queue while it is offline.
+  legacy label `kestrike-ci-build` stays on Linux while old jobs drain; new builds select only the Linux VM and queue while it is offline.
 - `kestrike-ci-heavy`: every schedule and manual job, including prerequisites
   and the Rust gate, on the two registrations of the second Linux VM, plus the
   pending x86-64 tag comparison once activated. Jobs queue while Linux is
@@ -1789,9 +1788,8 @@ records with `"outcome": "timeout"`, without a class:
   native AArch64 Linux machine and has no fallback registration. The barrier
   job is disabled with no coverage credit until this runner is provisioned.
 
-Reviews run on a GitHub-hosted `ubuntu-24.04` runner, one fresh machine per
-review. Keep the three build roles on separate registrations. Each
-registration takes one job at a time; there is no shared job-level lock. Preserve legacy labels while old jobs drain, then
+Keep the build roles on separate registrations. Each registration takes one
+job at a time; there is no shared job-level lock. Preserve legacy labels while old jobs drain, then
 retire them after verifying that no queued workflow needs them. Cancel no
 other runs to complete the transition. Adding labels does not create capacity.
 
@@ -1821,10 +1819,8 @@ eight workers and a 4 GiB Java heap within the same limits. Measure TLC,
 Quint, and Kani against their deadlines under these limits before activating
 routing.
 
-Hetzner keeps the root-owned aggregate limit of six CPUs and 12 GiB across all
-runner services; each service keeps its 11 GiB memory-high threshold, 12 GiB
-maximum, and six-CPU cap. Separate registrations reserve job slots without
-guaranteeing resource fairness.
+Separate registrations reserve job slots without guaranteeing resource
+fairness.
 
 Keep personal homes, data, model credentials, and Tailscale state out of the
 VMs. Restrict guest networking from the host, home LAN, and Tailscale; allow
@@ -1833,18 +1829,16 @@ Keep fork pull-request workflows disabled and preserve the same-repository
 event guards. Labels alone do not isolate untrusted code.
 
 Every x64 registration that runs preflight, workspace, heavy, hardware, or FIS
-jobs, Hetzner's included, needs the portable SPDK install at
+jobs needs the portable SPDK install at
 `/opt/spdk-v25.05.1-x86-64-v2`, built as `crates/spdk-sys/src/lib.rs`
 describes; the AArch64
 barrier job and the arm64 hardware leg keep the native install under `/usr/local`. Build native
-dependencies inside the guests for their architecture; reuse no host-native
-binaries from Hetzner. `crates/spdk-sys/native/install.sh` is the one writer
+dependencies inside the guests for their architecture. `crates/spdk-sys/native/install.sh` is the one writer
 of an install record's lineage, and the `spdk-sys` build script, the native
 lanes, and the envelope and receipt scripts verify it. Provision the install
 before a registration takes jobs; the first job that reads it fails otherwise.
 
-Before activating routing, verify that all four Linux registrations and the
-Hetzner registrations are online, native preflight succeeds on the new runners,
+Before activating routing, verify that all four Linux registrations are online, native preflight succeeds on the new runners,
 and concurrent short, build, and nightly work respects the resource and network
 limits. Verify actual GitHub runner assignment and the required workflow result
 before claiming the migration complete.

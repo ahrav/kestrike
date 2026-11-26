@@ -2,7 +2,6 @@ self-hosted-runner:
   labels:
     - kestrike-native
     - kestrike-ci
-    - kestrike-ci-fast
     - kestrike-ci-build
     - kestrike-vm-build
     - kestrike-ci-heavy

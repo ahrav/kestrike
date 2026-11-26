@@ -63,6 +63,8 @@ AARCH64 = {"barriers": "[self-hosted, linux, arm64, kestrike-aarch64-native]",
            "tag-compare-aarch64": "[self-hosted, linux, arm64, kestrike-aarch64-native]"}
 # Jobs that run on a dedicated host rather than the shared pool: the hardware and FIS hosts, and the native
 # x86-64 host whose CPU carries every feature the x86-64 architecture qualification lane declares.
+# Jobs that run on a GitHub-hosted runner on every event.
+HOSTED = {"comment-policy", "lane-script", "rust-format", "rc11", "rust-gate"}
 DEDICATED = {"hardware": '[self-hosted, linux, "${{ matrix.arch }}", kestrike-hardware]',
              "fis": "[self-hosted, linux, x64, kestrike-fis]",
              "isa-x86-64": "[self-hosted, linux, x64, kestrike-isa-x86-64]"}
@@ -462,6 +464,10 @@ class LaneCancellation(unittest.TestCase):
             with self.subTest(job=name):
                 if name in AARCH64 or name in DEDICATED:
                     self.assertIn(f"    runs-on: {(AARCH64 | DEDICATED)[name]}\n", body)
+                    continue
+                if name in HOSTED:
+                    self.assertIn("    runs-on: ubuntu-24.04\n", body)
+                    self.assertNotIn("self-hosted", body)
                     continue
                 self.assertRegex(body, r'(?m)^    runs-on: \[self-hosted, linux, x64, (?:kestrike-ci-heavy|"\$\{\{ .+ \}\}")\]$')
         for name in ("comment-policy", "lane-script", "rust-format", "preflight", *CHECKER_LANES):
@@ -4426,6 +4432,9 @@ class EventPolicy(unittest.TestCase):
             if name in AARCH64 or name in DEDICATED:
                 self.assertIn(f"    runs-on: {(AARCH64 | DEDICATED)[name]}\n", body)
                 continue
+            if name in HOSTED:
+                self.assertIn("    runs-on: ubuntu-24.04\n", body)
+                continue
             selector = matched(r'(?m)^    runs-on: \[self-hosted, linux, x64, (.+)\]$', body).group(1)
             for event in ("pull_request", "push", "schedule", "workflow_dispatch"):
                 with self.subTest(lane=name, event=event):
@@ -4441,11 +4450,9 @@ class EventPolicy(unittest.TestCase):
                     else:
                         label = selector
                     expected = "kestrike-ci-heavy"
-                    if event in {"pull_request", "push"}:
-                        if name in {"preflight", "workspace", "campaigns", "search", "fuzz-smoke"}:
-                            expected = "kestrike-vm-build"
-                        elif name in self.FAST | {"rust-gate"}:
-                            expected = "kestrike-ci-fast"
+                    if event in {"pull_request", "push"} and name in {"preflight", "workspace", "campaigns", "search",
+                                                                        "fuzz-smoke"}:
+                        expected = "kestrike-vm-build"
                     self.assertEqual(label, expected)
         review = (ROOT / ".github/workflows/claude-code-review.yml").read_text()
         self.assertIn("runs-on: ubuntu-24.04\n", review)
