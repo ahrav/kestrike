@@ -7,7 +7,8 @@
 //! comparison covers the rounds until then.
 //!
 //! The fleet queues each shard a returning host held when it stopped, and the run's decisions select the order of
-//! the restart attempts. A host whose shard record names another owner refuses and serves nothing. A restart that
+//! the restart attempts. A host whose shard record names another owner reads its role unnamed or standby, waits and
+//! serves nothing, and a tenure acquired under a pre-read record naming another owner is dropped unserved. A restart that
 //! returns bumps the attempt, loads warm and sweeps its retained set, and the tenure then acknowledges one FILL and
 //! one INVALIDATE.
 //!
@@ -240,12 +241,12 @@ impl Fleet<'_> {
         Ok(Some(self.returns.remove(picked?)))
     }
 
-    /// `member`'s restart of cell `at` after its return. A tenure that served then acknowledges one FILL of a new
-    /// object and one INVALIDATE of its second checkpoint object. A restart whose incarnation queued its next one
-    /// ([`Fleet::queue_rerun`]) or holds (`Exit::Held`) leaves the return open, and [`Fleet::rerun_refused`] runs
-    /// the next incarnation through this restart again: after a held restart, and after a failed role read under a
-    /// record that names another owner, which the zone log lists with the read's error until the next incarnation's
-    /// role read lists the role it waits in.
+    /// `member`'s restart of cell `at` after its return. Its rise carries the return, and once it serves
+    /// [`Fleet::restart_served`] logs it. A restart whose incarnation queued its next one ([`Fleet::queue_rerun`])
+    /// or holds (`Exit::Held`) leaves the return open, and [`Fleet::rerun_refused`] runs the next incarnation
+    /// through this restart again: after a held restart, and after a failed role read under a record that names
+    /// another owner, which the zone log lists with the read's error until the next incarnation's role read lists
+    /// the role it waits in.
     pub(super) fn restart_returned<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -254,15 +255,14 @@ impl Fleet<'_> {
     ) -> Result<(), Stopped> {
         let shard = self.cells[at].placement.shard.get();
         let host = self.topology.members[member].host.get();
-        let (tenure, from) = match self.restart_by(live, slots, (at, true), member)? {
-            Restarted::Served { tenure, from } => (tenure, from),
+        match self.restart_by(live, slots, (at, true, true), member)? {
+            Restarted::Rising => {}
             Restarted::Deposed { check, attempts } => {
                 let check = check.unwrap_or_else(|| RESTARTED.to_owned());
                 (self.zone_log.deposed).push((shard, host, check, attempts));
                 if self.refused.contains_key(&(at, member)) {
                     self.returning.insert((at, member));
                 }
-                return Ok(());
             }
             Restarted::Held => {
                 if self.refused.contains_key(&(at, member)) {
@@ -272,13 +272,26 @@ impl Fleet<'_> {
                     // return stays open from then.
                     self.held_returns.insert((at, member));
                 }
-                return Ok(());
             }
-        };
+        }
+        Ok(())
+    }
+
+    /// Logs `member`'s returning restart of cell `at`, whose tenure `tenure` served after a restart from the record's
+    /// attempt count `from`. The tenure then acknowledges one FILL of a new object and one INVALIDATE of its second
+    /// checkpoint object.
+    pub(super) fn restart_served(
+        &mut self,
+        live: &mut Live<'_>,
+        at: usize,
+        member: usize,
+        (tenure, from): (Tenure, u32),
+    ) {
+        let shard = self.cells[at].placement.shard.get();
+        let host = self.topology.members[member].host.get();
         self.zone_log.restarts.push((shard, host, tenure, from));
         let fill = self.config.shape.objects + 2;
         self.zone_log.acknowledged += u32::from(self.acknowledge(live, at, (fill, 2)));
-        Ok(())
     }
 
     /// Logs the rounds since the return once no restart is queued and every shard of the returned zone serves with a

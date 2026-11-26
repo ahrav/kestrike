@@ -4,9 +4,10 @@
 //! tenure's Reports read one table. `host::serve::start_up_with_nonce`, the steps of `start_up` under the boot nonce
 //! the fleet scripts from the cell's count of tenures served, starts the tenure `recover` returns, and each of its
 //! owner turns in the round loop is one `host::serve::turn_up` until the bring-up reads `Live` or ends short of it.
-//! A blank volume's format ID is the one `turn_up` draws from the operating system. Bring-ups run one at a time: the
-//! fleet steps a rising owner's turns to the end of its bring-up before it starts the next recovery, and the host's
-//! other tenures serve in those rounds.
+//! A blank volume's format ID is the one `turn_up` draws from the operating system. In a host scenario a rising
+//! tenure joins the fleet's bring-ups in progress ([`Rise`]) and the host loop goes on with its queued work, so a
+//! second recovery of the same host starts while the first loads and the round loop steps both loads in each round.
+//! Each bring-up's recovery is accounted once its client session is active.
 
 use std::cell::{Cell as Slot, RefCell};
 use std::rc::Rc;
@@ -274,22 +275,25 @@ pub(super) enum Stood<'w> {
 /// One view period of the wait of the owner process of `of`, issuing as `pair`, for `cell` at fleet round `round`:
 /// `host::stand_by` over `client` and `local`, whose `period` passes at each call and sets the stop flag on its
 /// second. The wait publishes its status to a cell of this period that no agent takes: `Fleet::statuses` builds the
-/// status the host's agent turns over.
-/// The period reads `witness` at the time it carries, and the takeover it starts runs through a fencer over the host's device double on the arena and clock of
-/// `grounds`. Its connect records whether the shard record already names `of`'s host owner with no standby, read
-/// from `store` with no request, and once `host::stand_by` returns the period asserts that every device call
-/// followed the committed takeover (CAS-BEFORE-DEVICE) and that no takeover unwound. Under `early`, the fencer
-/// starts the device before the period runs and before any takeover write. With a witness that early call fails
-/// the assertion. With no witness the wait returns the device with `Exit::Fault` before its first period, and the
-/// period skips the assertion for that exit.
+/// status the host's agent turns over. The period reads `witness` at the time it carries, and the takeover it starts
+/// runs through a fencer over the host's device double on the arena and clock of `grounds`. Its connect records
+/// whether the shard record already names `of`'s host owner with no standby, read from `store` with no request, and,
+/// with `acked`, whether the period's own last write of the shard record had an acknowledged `Committed` reply;
+/// `client` then writes through an [`AckLogged`] store over that log, and a period with no witness passes `None`,
+/// under which any device call fails the assertion. Once `host::stand_by` returns the period asserts that every
+/// device call followed the committed takeover (CAS-BEFORE-DEVICE, [`follows`]) and that no takeover unwound. Under
+/// `early`, the fencer starts the device before the period runs and before any takeover write. With a witness that
+/// early call fails the assertion. With no witness the wait returns the device with `Exit::Fault` before its first
+/// period, and the period skips the assertion for that exit.
 pub(super) fn stand_by<'w, S, L>(
     (cell, of, pair): (&Cell, Member, Pair),
     (round, store): (u64, &crate::storage::store::sim::Shared),
     grounds: &'w Grounds,
     (client, local): (&mut Client<S, L>, &Stored),
-    (witness, early): (
+    (witness, early, acked): (
         Option<(crate::failover::detect::host::Revalidated, u64)>,
         bool,
+        Option<&Acked>,
     ),
     persist: impl FnMut(crate::failover::identity::Key) -> Result<LocalRecord, AdmissionError>,
 ) -> Stood<'w>
@@ -325,7 +329,9 @@ where
                 .filter(|record| record.shard == shard)
                 .map(|record| (record.owner, record.standby))
         };
-        if met != Some((host, None)) {
+        // A period with no write log takes no witness, so a device call it makes follows no takeover of its own.
+        let own = acked.is_some_and(|acked| acked.last_acknowledged(shard));
+        if !follows(met, host, own) {
             early_call.set(Some(met));
         }
         let (disk, control) = device(cell, pair);
@@ -381,7 +387,7 @@ where
         assert_eq!(
             early_call.get(),
             None,
-            "the first device call follows the committed takeover"
+            "the first device call follows its own acknowledged takeover write"
         );
     }
     let control = connected.into_inner();
@@ -408,7 +414,54 @@ where
     }
 }
 
+/// A bring-up in progress in a host scenario: the tenure `tenure` of cell `at` rising since round `since` from
+/// `source`, whose client session the fleet opens once the bring-up reads `Live` (`opened`), and what the host loop
+/// does once the session is active (`then`). A rise whose cell no longer holds its tenure ends with no recovery.
+pub(super) struct Rise {
+    pub(super) at: usize,
+    pub(super) tenure: Tenure,
+    /// The member whose process started the rise: the cell's holder when the rise was queued.
+    pub(super) member: usize,
+    /// The round the rise's present phase started: its bring-up, then its client session.
+    pub(super) since: u64,
+    pub(super) source: Source,
+    pub(super) opened: bool,
+    /// The round after the turn in which the bootstrap first read ended ([`Fleet::note_rises`]).
+    pub(super) booted_at: Option<u64>,
+    /// The round after the turn in which the opened session first read active ([`Fleet::note_rises`]).
+    pub(super) active_at: Option<u64>,
+    pub(super) then: Then,
+}
+
+/// What the host loop does once a rise's client session is active, or once the rise ended with no tenure.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Then {
+    /// `member`'s takeover of a shard lost at round `lost_at`; `lineage` when the next incarnation after its refused
+    /// takeover restarted through the lineage arm.
+    TakeOver {
+        member: usize,
+        lost_at: u64,
+        lineage: bool,
+    },
+    /// `member`'s restart, whose recovery counts its rounds from `lost_at` and arms the loss plants when
+    /// `after_loss`; `lineage` when it restarted through the lineage arm, `from` the record's attempt count read just
+    /// before it, and `returned` when it is a returning host's restart.
+    Restart {
+        member: usize,
+        lost_at: u64,
+        after_loss: bool,
+        lineage: bool,
+        from: u32,
+        returned: bool,
+    },
+    /// The owner's fresh activation on a replacement volume, after the loss at round `lost_at`.
+    Fresh { lost_at: u64 },
+}
+
 impl Fleet<'_> {
+    /// Starts the tenure `recover` returned through `host::serve::start_up` and puts it into `live[at]` with its
+    /// bring-up rising, emitting its `Fenced` step. Returns the tenure, or `None` when the bring-up ended before the
+    /// owner's first poll, which is the cell's blocker.
     pub(super) fn rise<'w>(
         &mut self,
         live: &mut Live<'w>,
@@ -419,8 +472,7 @@ impl Fleet<'_> {
             SimControl,
             Rc<Slot<u64>>,
         ),
-        source: Source,
-    ) -> Result<Option<Tenure>, Stopped> {
+    ) -> Option<Tenure> {
         let gate = HostGate::qualified();
         let (client_end, owner_end, net) = network(64, 8384, 21, [Faults::default(); 2]);
         let attachment = host::Attachment {
@@ -458,7 +510,7 @@ impl Fleet<'_> {
             Ok(owner) => owner,
             Err(unbrought) => {
                 cell.refuse(format!("{:?}", unbrought.exit), false);
-                return Ok(None);
+                return None;
             }
         };
         let target = owner.tenure().target();
@@ -476,7 +528,223 @@ impl Fleet<'_> {
             (client_end, net),
         );
         serving.rising = Some(target);
-        self.serve_opened(live, at, serving, source)
+        live[at] = Some(serving);
+        Some(tenure)
+    }
+
+    /// Joins `tenure`'s bring-up on cell `at`, which [`Fleet::rise`] started, to the bring-ups in progress; `None`
+    /// runs `then` at once with no tenure, as a bring-up that ended before its first poll.
+    pub(super) fn queue_rise(
+        &mut self,
+        live: &mut Live<'_>,
+        at: usize,
+        (tenure, source): (Option<Tenure>, Source),
+        then: Then,
+    ) -> Result<(), Stopped> {
+        let Some(tenure) = tenure else {
+            return self.risen(live, at, None, then, self.round);
+        };
+        let member = self.cells[at].holder;
+        // Two takeover loads of one host: each rise names the member that started it, so a cell another member
+        // has since taken, and a restart's load, lend no overlap.
+        let takes = |then: &Then| matches!(then, Then::TakeOver { .. });
+        let beside = takes(&then)
+            && (self.rises.iter())
+                .any(|rise| rise.member == member && rise.at != at && takes(&rise.then));
+        self.log.overlapped += u32::from(beside);
+        self.rises.push(Rise {
+            at,
+            tenure,
+            member,
+            since: self.round,
+            source,
+            opened: false,
+            booted_at: None,
+            active_at: None,
+            then,
+        });
+        Ok(())
+    }
+
+    /// Stamps each rise whose present phase has ended with the present round, once: a bootstrap that left its
+    /// initializing states, and an opened client session that reads active. `Fleet::turn` calls it after each
+    /// round, so a phase that ends while the host loop sweeps another recovery keeps the round it ended in.
+    pub(super) fn note_rises(&mut self, live: &Live<'_>) {
+        for rise in &mut self.rises {
+            let held = live[rise.at].as_ref();
+            let Some(serving) = held.filter(|serving| serving.tenure == rise.tenure) else {
+                continue;
+            };
+            if !rise.opened {
+                let booted = serving.rising.is_none() && !serving.owner.readiness().initializing();
+                if booted && rise.booted_at.is_none() {
+                    rise.booted_at = Some(self.round);
+                }
+            } else if rise.active_at.is_none()
+                && serving.client.state() == crate::net::client::SessionState::Active
+            {
+                rise.active_at = Some(self.round);
+            }
+        }
+    }
+
+    /// The cells whose takeover's warm load is in progress, in the order the loads started.
+    pub(super) fn takeover_loads(&self) -> impl Iterator<Item = usize> + '_ {
+        (self.rises.iter())
+            .filter(|rise| matches!(rise.then, Then::TakeOver { .. }))
+            .map(|rise| rise.at)
+    }
+
+    /// Whether a bring-up of cell `at` is in progress.
+    pub(super) fn rising_at(&self, at: usize) -> bool {
+        self.rises.iter().any(|rise| rise.at == at)
+    }
+
+    /// Advances each bring-up in progress, in the order they started: one whose bootstrap left its initializing
+    /// states activates its load and opens its client session (`Fleet::opened`), and one whose session is active, or
+    /// that ended short, runs its `then`. A rise whose cell no longer holds its tenure (a crash or a takeover dropped
+    /// it) runs its `then` with no tenure.
+    ///
+    /// # Errors
+    ///
+    /// `Stopped::Stalled` naming the shard and the phase when a phase is still pending `Fleet::wait` rounds after it
+    /// started, or ended later than that, the bound of a synchronous bring-up (`Fleet::turns_while`); a phase is
+    /// judged by the round it ended in, however late this look. Also whatever a `then`'s sweep stops with.
+    pub(super) fn step_rises(&mut self, live: &mut Live<'_>) -> Result<(), Stopped> {
+        let mut index = 0;
+        while index < self.rises.len() {
+            let Rise {
+                at,
+                tenure,
+                since,
+                source,
+                opened,
+                booted_at,
+                active_at,
+                then,
+                ..
+            } = self.rises[index];
+            let held = live[at].as_ref().filter(|serving| serving.tenure == tenure);
+            let Some(serving) = held else {
+                self.rises.remove(index);
+                self.risen(live, at, None, then, self.round)?;
+                continue;
+            };
+            let wait = u64::from(self.wait);
+            let late = self.round - since >= wait;
+            if !opened {
+                if serving.rising.is_some() || serving.owner.readiness().initializing() {
+                    if late {
+                        return Err(self.stalled(Some(at), "the bootstrap"));
+                    }
+                    index += 1;
+                    continue;
+                }
+                if booted_at.unwrap_or(self.round) - since > wait {
+                    return Err(self.stalled(Some(at), "the bootstrap"));
+                }
+                if !self.opened(live, at, source) {
+                    self.rises.remove(index);
+                    self.risen(live, at, None, then, self.round)?;
+                    continue;
+                }
+                (self.rises[index].opened, self.rises[index].since) = (true, self.round);
+                index += 1;
+                continue;
+            }
+            if serving.client.state() != crate::net::client::SessionState::Active {
+                if late {
+                    return Err(self.stalled(Some(at), "the client session"));
+                }
+                index += 1;
+                continue;
+            }
+            // The recovery ends in the round its session became active, which a sweep ahead of it leaves behind.
+            let active = active_at.unwrap_or(self.round);
+            if active - since > wait {
+                return Err(self.stalled(Some(at), "the client session"));
+            }
+            self.rises.remove(index);
+            self.risen(live, at, Some(tenure), then, active)?;
+        }
+        Ok(())
+    }
+
+    /// What the host loop does once cell `at`'s bring-up ended: with the tenure whose session opened, its recovery's
+    /// sweep and accounting, the recovery's rounds ending at `active`, the round its session became active; with
+    /// none, the hosts' reread of the record alone. The zone's hosts reread the record once the bring-up ended, as
+    /// they did when the host loop waited for it.
+    fn risen(
+        &mut self,
+        live: &mut Live<'_>,
+        at: usize,
+        tenure: Option<Tenure>,
+        then: Then,
+        active: u64,
+    ) -> Result<(), Stopped> {
+        self.reread_hosts(at);
+        let Some(tenure) = tenure else {
+            return Ok(());
+        };
+        match then {
+            Then::TakeOver {
+                member,
+                lost_at,
+                lineage,
+            } => {
+                if self.config.planted_at(super::Plant::TwinStart, at) {
+                    let attempts = u32::try_from(tenure.a / 2 - 1).expect("an attempt count");
+                    let session = crate::storage::session_at(tenure.g, attempts);
+                    assert_eq!(super::tenure_of(session.get()), tenure);
+                    let _twin = crate::storage::ServingAuthority::fixture_under(session);
+                    let owner = self.cells[at].placement.owner;
+                    let other = (0..self.topology.members.len())
+                        .find(|&other| other != member && other != owner)
+                        .expect("a third host");
+                    (self.activations).push((at, tenure, self.topology.members[other].host));
+                    self.log.twin_started += 1;
+                    self.planted = true;
+                }
+                if lineage {
+                    let shard = self.cells[at].placement.shard.get();
+                    let host = self.topology.members[member].host.get();
+                    let round = self.round - self.host_start;
+                    self.volumes.arm.push((shard, host, round));
+                }
+                let rounds = active - lost_at;
+                self.recovered(live, at, tenure, rounds, (true, true))
+            }
+            Then::Restart {
+                member,
+                lost_at,
+                after_loss,
+                lineage,
+                from,
+                returned,
+            } => {
+                // The guard reads the owner's present state, as `failover::zone_loop::plan` does: a member that
+                // serves holds at no device step.
+                self.cells[at].device_holds.remove(&member);
+                let shard = self.cells[at].placement.shard.get();
+                let host = self.topology.members[member].host.get();
+                if lineage {
+                    let round = self.round - self.host_start;
+                    self.volumes.arm.push((shard, host, round));
+                }
+                self.unhold(at);
+                let rounds = active - lost_at;
+                self.recovered(live, at, tenure, rounds, (after_loss, after_loss))?;
+                if returned {
+                    self.restart_served(live, at, member, (tenure, from));
+                }
+                Ok(())
+            }
+            Then::Fresh { lost_at } => {
+                self.volumes.cold.push(self.cells[at].placement.shard.get());
+                self.unhold(at);
+                self.recovered(live, at, tenure, active - lost_at, (true, true))
+            }
+        }
     }
 }
 
@@ -538,6 +806,68 @@ fn reads_standby(host: Host, volume: &VolumeRecord, shard: &ShardRecord) -> bool
 /// The first value a read of each key returned, by key.
 pub(super) type Returned =
     std::collections::BTreeMap<crate::storage::store::Key, crate::storage::store::Item>;
+
+/// Whether a device call that met `met`, the shard record's owner and standby (`None` for no decodable record of the
+/// shard), follows the committed takeover of `host`: the record names `host` owner with no standby, and `own`, the
+/// takeover period's last write of the shard record had an acknowledged `Committed` reply. A takeover write whose
+/// reply was unknown leaves the record naming `host` when it committed, and no device call may follow it. `own`
+/// reads the store's reply alone: a `Committed` reply that the client then refuses, at its watermark log, reads as
+/// acknowledged here, and the client's own refusal ends the takeover before any device call.
+pub(super) fn follows(met: Option<(Host, Option<Host>)>, host: Host, own: bool) -> bool {
+    met == Some((host, None)) && own
+}
+
+/// The shard-record writes a takeover period's store client made, each with whether its reply was an acknowledged
+/// `Committed`, in order.
+#[derive(Default)]
+pub(crate) struct Acked(RefCell<Vec<(crate::net::ownership::Shard, bool)>>);
+
+impl Acked {
+    /// The shard-record writes the period issued, whatever their replies.
+    pub(super) fn writes(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    /// Whether the last write of `shard`'s record had an acknowledged `Committed` reply.
+    pub(super) fn last_acknowledged(&self, shard: crate::net::ownership::Shard) -> bool {
+        let writes = self.0.borrow();
+        let last = writes.iter().rev().find(|(of, _)| *of == shard);
+        last.is_some_and(|(_, acknowledged)| *acknowledged)
+    }
+}
+
+/// A store that logs each shard-record write's reply into an [`Acked`] log, which a takeover period's client makes
+/// its compare-and-swap through.
+pub(crate) struct AckLogged<'a, S> {
+    pub(crate) inner: S,
+    pub(crate) log: &'a Acked,
+}
+
+impl<S: Store> Store for AckLogged<'_, S> {
+    fn read(
+        &mut self,
+        key: &crate::storage::store::Key,
+    ) -> Result<Option<crate::storage::store::Item>, crate::storage::store::Unavailable> {
+        self.inner.read(key)
+    }
+
+    fn write(
+        &mut self,
+        key: &crate::storage::store::Key,
+        write: &crate::storage::store::Write,
+    ) -> crate::storage::store::Outcome {
+        let outcome = self.inner.write(key, write);
+        if let crate::storage::store::Key::Shard(shard) = key {
+            let committed = matches!(outcome, crate::storage::store::Outcome::Committed(_));
+            self.log.0.borrow_mut().push((*shard, committed));
+        }
+        outcome
+    }
+
+    fn namespace(&self) -> crate::failover::records::Namespace {
+        self.inner.namespace()
+    }
+}
 
 /// A store that keeps the first value a read of each key returned. A standby wait's client reads through it above
 /// the fault layer, so it holds the replies that client received, and a period's role read is its first read of each
@@ -741,7 +1071,7 @@ impl Fleet<'_> {
                     (self.round, &self.store),
                     grounds,
                     (&mut client, &local),
-                    (None, early),
+                    (None, early, None),
                     refused,
                 )
             });
@@ -865,7 +1195,7 @@ impl Fleet<'_> {
                     (self.round, &self.store),
                     grounds,
                     (&mut client, &local),
-                    (None, false),
+                    (None, false, None),
                     persist,
                 )
             });

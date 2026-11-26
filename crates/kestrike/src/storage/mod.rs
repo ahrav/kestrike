@@ -966,6 +966,10 @@ pub(crate) use recovery::capture_tests::{
 pub(crate) use recovery::capture_trace::{CaptureOracle, CaptureTrace, TraceEvent};
 #[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
 pub(crate) use recovery::checkpoint::SlotLoad;
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
+pub(crate) use recovery::io_share::IGNORE as IGNORE_SHARE;
+#[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]
+pub(crate) use recovery::io_share::NO_RESERVE as NO_RESERVE_SHARE;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 pub(crate) use recovery::suffix::SuffixBacklog;
 #[cfg(all(test, target_os = "linux", target_pointer_width = "64"))]

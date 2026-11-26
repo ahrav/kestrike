@@ -1,10 +1,13 @@
 //! Each host runs the production `host::agent::Agent`. Once a round the agent reads the host's process statuses and
 //! the heartbeats and probe messages [`HostLinks`] carried to it, and every `REPORT_ROUNDS` rounds it seals a report.
 //! The agent revalidates each nomination its detector published and addresses the witness to the named shard's
-//! standby process. The fleet queues the witness with the agent turn's time, the time the process reads it at. One
-//! view period of `host::stand_by` reads its role, accepts the witness at that time and runs the takeover to its end
-//! or refusal in one turn. The new tenure then loads warm over later turns, and at the load's start each other shard its host serves is
-//! offered one GET, so the host log counts the GETs a loading host's shards serve while the load runs.
+//! standby process. The fleet queues the witness with the agent turn's time; the host loop takes it from the queue
+//! once that round has ended, and the process reads it on its own host's clock one round earlier than the loop's
+//! round, so a witness taken at once reads in the round it arrived and one that waited reads a round later for each
+//! round it waited. One view period of `host::stand_by` reads its role, accepts or lets lapse the witness at that time
+//! and runs the takeover to its end or refusal in one turn. The new tenure then loads warm over later turns beside
+//! the host's other bring-ups in progress (`Fleet::rises`), and at the load's start each other shard its host serves
+//! is offered one GET, so the host log counts the GETs a loading host's shards serve while the load runs.
 //!
 //! [`HostLinks`]: super::faults::HostLinks
 
@@ -20,9 +23,6 @@ use crate::failover::loss::Phase;
 use crate::failover::records::{self, Host, ShardRecord, VolumeId};
 use crate::failover::report::Phase as OwnerPhase;
 use crate::failover::report::{self, BuildIdentity, Gauge};
-use crate::failover::restart::tests as restart_tests;
-use crate::failover::takeover::Takeover;
-use crate::failover::takeover::tests::holder_on;
 use crate::host::HostGate;
 use crate::host::agent::{Agent, HostSample, Inputs as AgentInputs, Keys, Synced};
 use crate::host::link::{Inbound, Status as LinkStatus};
@@ -697,6 +697,12 @@ pub(crate) struct HostLog {
     pub(crate) repair_demands: u32,
     pub(crate) host_losses: u32,
     pub(crate) lapsed: u32,
+    /// Periods that took a lapsed witness and still started a takeover, issued a device command or wrote the shard
+    /// record; [`LAPSED_ACTED`] fails on any.
+    pub(crate) lapsed_acted: u32,
+    /// Takeover loads that started while another takeover load of the same member was in progress, so the round
+    /// loop stepped both loads of that host in the same rounds.
+    pub(crate) overlapped: u32,
     /// The reruns of an ended tenure that found no free tenure slot on their host and ran no incarnation.
     pub(crate) unslotted: u32,
     /// The reruns that ran no incarnation when their turn came: a serving tenure's rerun whose shard record named
@@ -821,6 +827,10 @@ pub(crate) const DUTY_ACKNOWLEDGED: &str = "witness duty-acknowledged missing";
 pub(crate) const UNKNOWN_REPORTED: &str = "witness unknown-store-result-reported missing";
 pub(crate) const REGRESSION_WITHDRAWN: &str = "witness regression-withdrawn missing";
 pub(crate) const REGRESSION_REPORTED: &str = "witness regression-alarm-reported missing";
+pub(crate) const REGRESSION_RERAN: &str = "witness regression-rerun missing";
+pub(crate) const TORN_KEPT: &str =
+    "a torn-down owner kept its custody past the teardown's patience";
+pub(crate) const UNSLOTTED: &str = "a rerun found no free tenure slot on its host";
 pub(crate) const TAKEOVER_HOSTS: &str = "witness takeover-hosts missing";
 pub(crate) const TWO_LOADS: &str = "witness two-loads-on-one-host missing";
 pub(crate) const BESIDE_SERVICE: &str = "witness load-while-serving-own-shard missing";
@@ -875,6 +885,8 @@ pub(crate) const HOLD_RELEASED: &str = "witness hold-released missing";
 pub(crate) const MOVED_TWICE: &str = "a shard on a stalled volume changed hands more than once";
 pub(crate) const HEALTHY_MOVED: &str = "a shard whose volume is healthy changed hands";
 pub(crate) const WAIT_DEVICE: &str = "a standby wait held a device";
+pub(crate) const LAPSED_ACTED: &str =
+    "a standby's period acted on a witness that had lapsed when the period took it";
 /// The name of a host loop's horizon stall that [`Fleet::unsent`] attributes to a standby's wait.
 pub(crate) const RESEND: &str =
     "a kept nomination was not sent again while its target stayed in the records";
@@ -1003,33 +1015,34 @@ pub(crate) fn unscripted_exit(report: &super::Report) -> Option<super::Verdict> 
     let faulted = report.duties.faulted.as_ref().map(|faulted| faulted.tenure);
     let withdrawn = crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn);
     let shard = DUTY_SHARD;
-    let last = |at: u32| {
-        let (_, history) = (report.evidence.histories.iter()).find(|(of, _)| of.get() == at)?;
-        let record = history.last()?;
-        Some((record.generation.get(), u64::from(record.attempts) * 2))
-    };
-    let (at, tenure, exit) = report.duties.exits.iter().find(|(at, tenure, exit)| {
-        let regression =
-            regressed && *at == shard && Some(*tenure) == faulted && *exit == withdrawn;
-        let foreign = report.config.scenario == Scenario::Foreign
-            && *at == 1
-            && matches!(exit, crate::host::Exit::Retire(_));
-        let handed = *exit == crate::host::Exit::Stopped
-            && (report.hosts.handoffs.iter()).any(|handed| {
-                handed.shard == *at
-                    && handed.tenure == *tenure
-                    && handed.committed
-                    && handed.exit == Some(crate::host::Exit::Stopped)
-            });
-        let scripted = regression || foreign || handed;
-        let deposition = matches!(
-            exit,
-            crate::host::Exit::Deposed
-                | crate::host::Exit::Rerun(crate::host::Rerun::RecordedHolder)
-        );
-        let superseded = deposition && last(*at).is_some_and(|named| (tenure.g, tenure.a) < named);
-        !superseded && !scripted
-    })?;
+    let (at, tenure, exit, _) = report
+        .duties
+        .exits
+        .iter()
+        .find(|(at, tenure, exit, named)| {
+            let regression =
+                regressed && *at == shard && Some(*tenure) == faulted && *exit == withdrawn;
+            let foreign = report.config.scenario == Scenario::Foreign
+                && *at == 1
+                && matches!(exit, crate::host::Exit::Retire(_));
+            let handed = *exit == crate::host::Exit::Stopped
+                && (report.hosts.handoffs.iter()).any(|handed| {
+                    handed.shard == *at
+                        && handed.tenure == *tenure
+                        && handed.committed
+                        && handed.exit == Some(crate::host::Exit::Stopped)
+                });
+            let scripted = regression || foreign || handed;
+            let deposition = matches!(
+                exit,
+                crate::host::Exit::Deposed
+                    | crate::host::Exit::Rerun(crate::host::Rerun::RecordedHolder)
+            );
+            // A deposition is the scenario's when the record already named a later tenure as this one closed; a later
+            // write, such as the same host's rerun after the exit, excuses nothing.
+            let superseded = deposition && (tenure.g, tenure.a) < *named;
+            !superseded && !scripted
+        })?;
     let at = format!("shard {at} tenure {tenure:?} exit {exit:?}");
     Some(super::Verdict::Fail(DUTY_EXIT, at))
 }
@@ -1132,7 +1145,7 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
     if let Some(faulted) = &report.duties.faulted {
         let shard = DUTY_SHARD;
         let ended = (report.duties.exits.iter())
-            .any(|(at, tenure, _)| *at == shard && *tenure == faulted.tenure);
+            .any(|(at, tenure, ..)| *at == shard && *tenure == faulted.tenure);
         let unknown = matches!(scenario, Scenario::StoreUnknown(_));
         if unknown && (ended || faulted.recoveries != 1) {
             let at = format!(
@@ -1229,6 +1242,15 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
             .any(|exit| exit.starts_with("Fault"))
     }) {
         return Verdict::Fail(WAIT_DEVICE, format!("shard {}", shard + 1));
+    }
+    if let Some((shard, tenure, _)) = report.duties.torn.iter().find(|(.., shut)| !shut) {
+        return Verdict::Fail(TORN_KEPT, format!("shard {shard} tenure {tenure:?}"));
+    }
+    if log.unslotted > 0 {
+        return Verdict::Fail(UNSLOTTED, format!("{} reruns", log.unslotted));
+    }
+    if log.lapsed_acted > 0 {
+        return Verdict::Fail(LAPSED_ACTED, format!("{} periods", log.lapsed_acted));
     }
     // The host health rule: in a stall scenario no host fails, so only a shard of a stalled volume
     // may change hands; a held process makes its host unhealthy only for a shard that names a standby elsewhere.
@@ -1433,7 +1455,7 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
             let reported =
                 |of: &dyn Fn(&SealedStore) -> bool| log.sealed_stores(host, shard).any(of);
             let cause = crate::failover::serving::Cause::Regression;
-            let regressed = report.duties.exits.iter().any(|(at, tenure, exit)| {
+            let regressed = report.duties.exits.iter().any(|(at, tenure, exit, _)| {
                 *at == shard
                     && faulted.is_some_and(|f| f.tenure == *tenure && f.withdrawal == Some(cause))
                     && *exit == crate::host::Exit::Rerun(crate::host::Rerun::Withdrawn)
@@ -1452,10 +1474,32 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
                 f.taken && f.timed_out == faulted_write && (f.stale_served || !stale)
             });
             let mut witnesses = vec![(taken.len() >= 3, TAKEOVERS), (fault, DUTY_FAULT)];
+            // The withdrawn tenure's owner shut down at its teardown, and the same host's next incarnation recovered
+            // the shard at the next attempt and swept it whole.
+            let reran = faulted.is_some_and(|f| {
+                let next = super::Tenure {
+                    a: f.tenure.a + 2,
+                    ..f.tenure
+                };
+                let recoveries = &report.shards[DUTY_CELL].recoveries;
+                let host = recoveries.first().map(|first| first.host);
+                report.duties.torn.contains(&(shard, f.tenure, true))
+                    && recoveries.iter().any(|recovery| {
+                        recovery.tenure == next
+                            && Some(recovery.host) == host
+                            && recovery
+                                .sweep
+                                .is_some_and(|(of, served)| of > 0 && of == served)
+                    })
+            });
             match scenario {
-                Scenario::PageRegressed => witnesses.push((regressed, REGRESSION_WITHDRAWN)),
+                Scenario::PageRegressed => {
+                    witnesses.push((regressed, REGRESSION_WITHDRAWN));
+                    witnesses.push((reran, REGRESSION_RERAN));
+                }
                 Scenario::RecordRegressed => {
                     witnesses.push((regressed, REGRESSION_WITHDRAWN));
+                    witnesses.push((reran, REGRESSION_RERAN));
                     let alarmed =
                         reported(&|store| store.watermark == report::Watermark::Regression);
                     witnesses.push((alarmed, REGRESSION_REPORTED));
@@ -1472,7 +1516,8 @@ pub(crate) fn expected(report: &super::Report) -> super::Verdict {
         Scenario::HostLoss => vec![
             (taken.len() >= 3, TAKEOVERS),
             (hosts.len() >= 2, TAKEOVER_HOSTS),
-            (twice, TWO_LOADS),
+            // Two takeovers of one host whose loads the round loop stepped in the same rounds.
+            (twice && log.overlapped >= 1, TWO_LOADS),
             (
                 log.loads_beside_service >= 1 && log.served_beside_load >= 1,
                 BESIDE_SERVICE,
@@ -2039,9 +2084,9 @@ impl<'c> Fleet<'c> {
     /// - recovery: the volumes whose recovery holds a slot, of one slot: each cell whose restart or takeover on the
     ///   host holds with a next step of hold or restart (the holds of [`Fleet::holds`] that the enroll-back plant
     ///   leaves visible, the ones [`Fleet::statuses`] publishes as `Held`, counted by [`report::recovering`]), and
-    ///   the cell whose load runs on the host from its bring-up until its client session is active
-    ///   (`Fleet::recovering`). A held cell the host serves is no hold, so the load and the holds never name one
-    ///   volume twice.
+    ///   the cells whose load runs on the host from its bring-up until its client session is active (`Fleet::rises`,
+    ///   and `Fleet::recovering` for the synchronous bring-up before the hosts start). A held cell the host serves
+    ///   is no hold, so the load and the holds never name one volume twice.
     pub(super) fn headroom(&self, live: &Live<'_>, member: usize, now: u64) -> report::Headroom {
         let host = self.hosts[member].host;
         let serves = |at: usize| self.cells[at].holder == member && live[at].is_some();
@@ -2058,17 +2103,21 @@ impl<'c> Fleet<'c> {
         let roles = (records.iter())
             .filter(|record| record.owner == host || record.standby == Some(host))
             .count() as u64;
-        let loading = self.recovering.filter(|&at| {
-            let active =
-                |serving: &super::Serving<'_>| serving.client.state() == SessionState::Active;
+        let active = |serving: &super::Serving<'_>| serving.client.state() == SessionState::Active;
+        let loads = |at: usize| {
             self.cells[at].holder == member && live[at].as_ref().is_some_and(|s| !active(s))
-        });
+        };
+        let rising = self.rises.iter().map(|rise| rise.at);
+        let loading = (self.recovering.into_iter())
+            .chain(rising)
+            .filter(|&at| loads(at));
+        let loading = loading.count() as u64;
         let held: Vec<report::RecoveryStatus> = (self.holds(live, member))
             .filter(|&(_, _, hidden)| !hidden)
             .map(|(_, held, _)| held.status(now))
             .collect();
         let recovering = report::recovering(held.iter().map(|status| Some((status, false))))
-            .map(|holds| holds.saturating_add(u64::from(loading.is_some())));
+            .map(|holds| holds.saturating_add(loading));
         let inputs = report::HeadroomInputs {
             attached: report::attached(
                 mappings.iter().map(Some),
@@ -2446,6 +2495,8 @@ impl<'c> Fleet<'c> {
     ) -> Result<Vec<usize>, Stopped> {
         self.drain(live)?;
         let mut lost = Vec::new();
+        // A tenure whose bring-up is in progress has not served, so its close counts no withdrawal.
+        let rising: Vec<usize> = self.rises.iter().map(|rise| rise.at).collect();
         for (at, (cell, serving)) in self.cells.iter_mut().zip(live.iter_mut()).enumerate() {
             if cell.holder != member {
                 continue;
@@ -2453,7 +2504,7 @@ impl<'c> Fleet<'c> {
             if up == Up::Down
                 && let Some(serving) = serving.take()
             {
-                cell.close(&serving, true);
+                cell.close(&serving, !rising.contains(&at));
             }
             cell.lost_at = Some(self.round);
             lost.push(at);
@@ -2512,7 +2563,8 @@ impl<'c> Fleet<'c> {
                 // A tenure whose serving duties ended at an exit serves through no loss.
                 let serving =
                     (live[at].as_ref()).is_some_and(|serving| serving.duty_exit.is_none());
-                serving && self.hosts[holder].up == Up::Running && !lost.contains(&at)
+                let rising = self.rising_at(at);
+                serving && !rising && self.hosts[holder].up == Up::Running && !lost.contains(&at)
             })
             .map(|at| self.sample(at))
             .collect();
@@ -2556,8 +2608,10 @@ impl<'c> Fleet<'c> {
     fn neighbour_gets(&mut self, live: &mut Live<'_>) {
         for loss in 0..self.losses.len() {
             let since = self.round - self.losses[loss].round;
-            let (now, later): (Vec<_>, Vec<_>) =
-                (self.losses[loss].episode.due.drain(..)).partition(|due| due.round <= since);
+            // A GET due to a shard whose bring-up is in progress waits until that shard serves.
+            let rises = &self.rises;
+            let (now, later): (Vec<_>, Vec<_>) = (self.losses[loss].episode.due.drain(..))
+                .partition(|due| due.round <= since && rises.iter().all(|rise| rise.at != due.at));
             self.losses[loss].episode.due = later;
             for super::Due { at: other, n, .. } in now {
                 if live[other].is_none() {
@@ -2580,7 +2634,8 @@ impl<'c> Fleet<'c> {
             });
             let recovered = loss.ends.reached(self.round, moved)
                 && loss.episode.due.is_empty()
-                && (loss.lost.iter()).all(|&at| live[at].is_some() && self.stepping(at))
+                && (loss.lost.iter())
+                    .all(|&at| live[at].is_some() && self.stepping(at) && !self.rising_at(at))
                 && (!loss.lost.is_empty() || self.flights.is_empty());
             if recovered || ended {
                 self.watch(live, &loss.episode);
@@ -2613,6 +2668,7 @@ impl<'c> Fleet<'c> {
     ) -> Result<(), Stopped> {
         loop {
             self.free_unparked(slots);
+            self.step_rises(live)?;
             self.episodes(live, slots)?;
             if let Some(refusal) = self.draw_refusal.take() {
                 return Err(Stopped::Choice(refusal));
@@ -2623,7 +2679,28 @@ impl<'c> Fleet<'c> {
                 self.rerun_refused(live, slots, due)?;
                 continue;
             }
-            if let Some((member, volume, witness, at)) = self.nominated.pop_front() {
+            if let Some((held, since)) = self.held_witness
+                && let Some((rounds, _)) = self.witness_hold
+                && self.round >= since + rounds
+            {
+                // The held witness's period runs with the hold still set, which tells it from every other period.
+                self.held_witness = None;
+                let (member, volume, witness, at) = held;
+                let taken = self.take_over(live, slots, member, (volume, witness, at));
+                self.witness_hold = None;
+                taken?;
+                continue;
+            }
+            // The held witness has left the inbox: its period read it and has yet to read its clock. The witnesses
+            // the agent delivers meanwhile queue as new entries, and the stalled process reads none of them until
+            // the held one's period ends.
+            let holding = self.held_witness.is_some();
+            if !holding && let Some(entry) = self.nominated.pop_front() {
+                if self.witness_hold.is_some() {
+                    self.held_witness = Some((entry, self.round));
+                    continue;
+                }
+                let (member, volume, witness, at) = entry;
                 self.take_over(live, slots, member, (volume, witness, at))?;
                 continue;
             }
@@ -2666,6 +2743,7 @@ impl<'c> Fleet<'c> {
                 && !due
                 && settled
                 && !rerun
+                && self.rises.is_empty()
                 && !waits
                 && !self.refused_first()
                 && !self.fresh_first()
@@ -2909,16 +2987,21 @@ impl<'c> Fleet<'c> {
     }
 
     /// Whether a fresh activation refused for the first time still waits for its retry's turn: a cell whose
-    /// activation stays due (`Cell::fresh_unread`) outside [`Fleet::recurred`], while the record's owner is the
-    /// member that began the activation and its host runs, as [`Fleet::fresh_due`] requires of a retry. The host
-    /// loop runs that turn before it ends; a retry that is refused again holds no run open.
-    fn fresh_first(&self) -> bool {
+    /// activation stays due (`Cell::fresh_unread`) outside [`Fleet::recurred`], while the record names the marker's
+    /// replacement active and its member, the cell's holder, owner, and that host runs, as [`Fleet::fresh_due`]
+    /// requires of a retry. The host loop runs that turn before it ends; a retry that is refused again, and a
+    /// marker the record no longer bears out, hold no run open.
+    pub(super) fn fresh_first(&self) -> bool {
         (0..self.cells.len()).any(|at| {
             let cell = &self.cells[at];
-            cell.fresh_unread.is_some()
-                && !self.recurred.contains(&(at, cell.holder))
-                && self.member_of(self.record_now(at).owner) == Some(cell.holder)
-                && self.hosts[cell.holder].up == Up::Running
+            let record = self.record_now(at);
+            cell.fresh_unread.is_some_and(|(_, volume, member)| {
+                record.active == volume
+                    && member == cell.holder
+                    && self.member_of(record.owner) == Some(member)
+                    && !self.recurred.contains(&(at, member))
+                    && self.hosts[member].up == Up::Running
+            })
         })
     }
 
@@ -2955,17 +3038,24 @@ impl<'c> Fleet<'c> {
         }
         let of = self.topology.members[member];
         let cell = &self.cells[at];
-        let holder = holder_on(cell.placement.volume, of.host, of.instance);
         let shard = cell.placement.shard;
-        // The production takeover's own acceptance of the witness, read for the lapse count alone. The standby
-        // reads the witness at the agent turn's time: the fleet's queue holds a witness behind another takeover's
-        // load only because the fleet runs bring-ups one at a time.
-        let restart = restart_tests::restart_of(shard, holder);
-        let addressed = self.addressed(member, volume, witness.shard);
-        if !addressed || Takeover::nominated(restart, &witness, received).is_none() {
+        // The standby reads the witness on its own host's clock when its wait's period takes it from the inbox. The
+        // host loop takes a witness from the inbox once the round that delivered it has ended, so the clock credits
+        // that one round: a witness taken at once reads in the round it arrived, and one that waited behind other
+        // work reads a round later for each round it waited.
+        let consumed = (self.detector_now() + self.agent_phase(member))
+            .saturating_sub(H)
+            .max(received);
+        // The lapse reads the witness's own deadline at the consumption time, apart from the takeover's acceptance.
+        let fresh = consumed < witness.until_us;
+        if !self.addressed(member, volume, witness.shard) {
             self.log.lapsed += 1;
             return Ok(());
         }
+        // The planted defect of the lapsed-witness case: the held witness's period reads it at its send time.
+        let sent_clock =
+            self.witness_hold.is_some_and(|(_, sent)| sent) && self.held_witness.is_none();
+        let read_at = if sent_clock { received } else { consumed };
         let (pair, local) = cell.local_of(member).expect("the standby's local record");
         let table = std::rc::Rc::clone(&cell.world.reservation);
         let from = table.borrow().log.len();
@@ -2974,18 +3064,51 @@ impl<'c> Fleet<'c> {
         let early = self.config.planted_at(Plant::EarlyDevice, at);
         self.planted |= early;
         let ground = slots.take(member);
-        // The period's client keeps the records its role read returned, as a view period's does.
+        // The period's client keeps the records its role read returned, as a view period's does, and logs the reply
+        // of each shard-record write.
         let returned = std::rc::Rc::default();
-        let mut client = self.takeover_client(member, &returned);
+        let acked = super::owners::Acked::default();
+        let logged = super::owners::AckLogged {
+            inner: super::owners::Returning {
+                inner: Faulted {
+                    inner: self.store.clone(),
+                    actor: member as u32,
+                    faults: self.faults.store.clone(),
+                },
+                returned: std::rc::Rc::clone(&returned),
+            },
+            log: &acked,
+        };
+        let period_client = Client::open(logged, self.hosts[member].log.clone());
+        let mut period_client = period_client.expect("a host's store client");
         let persist = |_| Ok(local.0.clone().expect("the standby's local record"));
         let stood = super::owners::stand_by(
             (&self.cells[at], of, pair),
             (self.round, &self.store),
             ground.0,
-            (&mut client, &local),
-            (Some((witness, received)), early),
+            (&mut period_client, &local),
+            (Some((witness, read_at)), early, Some(&acked)),
             persist,
         );
+        drop(period_client);
+        if !fresh {
+            // A period acts on its witness when it returns a tenure or ends with a takeover's exit; a role-read
+            // rerun reads no witness. Any device command and any shard-record write the period issued, whatever its
+            // reply, counts too.
+            use crate::host::{Exit, Rerun};
+            let took = matches!(
+                &stood,
+                super::owners::Stood::Tenure(..)
+                    | super::owners::Stood::Ended(
+                        Exit::Rerun(Rerun::Takeover | Rerun::Unwound) | Exit::Held { .. },
+                        _
+                    )
+            );
+            let commands = super::owners::commands_since(&table, from).len();
+            self.log.lapsed += 1;
+            let wrote = acked.writes() > 0;
+            self.log.lapsed_acted += u32::from(took || commands > 0 || wrote);
+        }
         let attempt = |refused| Attempt {
             shard: shard.get(),
             host: of.host.get(),
@@ -3017,8 +3140,7 @@ impl<'c> Fleet<'c> {
                 let cell = (&self.cells[at], of, pair);
                 // The next incarnation opens its own store client over the host's durable watermark log: a takeover
                 // read that withdrew the ending incarnation's client withdraws none of the next one's.
-                drop(client);
-                client = self.takeover_client(member, &std::rc::Rc::default());
+                let mut client = self.takeover_client(member, &std::rc::Rc::default());
                 match super::owners::incarnate(cell, self.round, ground.0, &mut client, sources) {
                     super::owners::Incarnation::Tenure(tenure, control, now) => {
                         self.end_wait(at, member);
@@ -3074,15 +3196,20 @@ impl<'c> Fleet<'c> {
                 // `Rerun(Records)` end a period at its role read, before any takeover, and end the process; the
                 // production supervisor then runs the standby process again. The fleet logs the attempt and queues
                 // that next incarnation below. A takeover that unwound fails the period in `owners::stand_by`.
+                //
+                // A period whose witness lapsed starts no takeover, which the lapse rule judges, so it logs no
+                // attempt; its status ends or follows its role read as any period's does.
                 if exit != crate::host::Exit::Stopped {
                     self.end_wait(at, member);
-                    self.log
-                        .takeovers
-                        .push(attempt(Some(super::owners::blocker(&exit, refusal))));
+                    if fresh {
+                        self.log
+                            .takeovers
+                            .push(attempt(Some(super::owners::blocker(&exit, refusal))));
+                    }
                 } else {
                     // The wait goes on, and its status comes from the role read this period made.
                     self.publish_read(at, member, &returned);
-                    if self.record_now(at).owner != of.host {
+                    if fresh && self.record_now(at).owner != of.host {
                         self.log.takeovers.push(attempt(Some("Stopped".to_owned())));
                     }
                 }
@@ -3093,53 +3220,34 @@ impl<'c> Fleet<'c> {
                 return Ok(());
             }
         };
-        drop(client);
         if let Some(deposed) = live[at].take() {
             live.push(Some(deposed));
             self.deposed.push((at, self.cells[at].holder));
         }
-        let serving_own = (self.cells.iter().zip(live.iter())).any(|(cell, serving)| {
-            cell.holder == member && cell.placement.owner == member && serving.is_some()
-        });
+        let serving_own = self.serves_own(live, member);
         self.log.loads_beside_service += u32::from(serving_own);
         self.cells[at].holder = member;
         let lost_at = self.cells[at].lost_at.unwrap_or(self.round);
-        self.loading = Some(at);
         self.offer_beside(live, at);
-        let rose = self.rise(
-            live,
-            ground,
-            (at, pair),
-            (*tenure, control, now),
-            super::Source::Named,
-        );
-        self.loading = None;
-        let tenure = rose?;
-        if self.config.planted_at(Plant::TwinStart, at)
-            && let Some(tenure) = tenure
-        {
-            let attempts = u32::try_from(tenure.a / 2 - 1).expect("an attempt count");
-            let session = crate::storage::session_at(tenure.g, attempts);
-            assert_eq!(super::tenure_of(session.get()), tenure);
-            let _twin = crate::storage::ServingAuthority::fixture_under(session);
-            let owner = self.cells[at].placement.owner;
-            let other = (0..self.topology.members.len())
-                .find(|&other| other != member && other != owner)
-                .expect("a third host");
-            (self.activations).push((at, tenure, self.topology.members[other].host));
-            self.log.twin_started += 1;
-            self.planted = true;
-        }
-        let rounds = self.round - lost_at;
-        self.reread_hosts(at);
-        let Some(tenure) = tenure else {
-            return Ok(());
+        let risen = self.rise(live, ground, (at, pair), (*tenure, control, now));
+        let then = super::owners::Then::TakeOver {
+            member,
+            lost_at,
+            lineage,
         };
-        if lineage {
-            let round = self.round - self.host_start;
-            (self.volumes.arm).push((shard.get(), of.host.get(), round));
-        }
-        self.recovered(live, at, tenure, rounds, (true, true))
+        self.queue_rise(live, at, (risen, super::Source::Named), then)
+    }
+
+    /// Whether `member` holds a live tenure, its bring-up ended, of a shard its placement names it owner of: the
+    /// shards [`Fleet::offer_beside`] offers a GET while the member loads another.
+    pub(super) fn serves_own(&self, live: &Live<'_>, member: usize) -> bool {
+        (0..self.cells.len()).any(|at| {
+            let cell = &self.cells[at];
+            cell.holder == member
+                && cell.placement.owner == member
+                && live[at].is_some()
+                && !self.rising_at(at)
+        })
     }
 
     /// Offers one GET to each shard that the host loading cell `at` serves and that has no GET in flight, for the
@@ -3150,7 +3258,8 @@ impl<'c> Fleet<'c> {
         for other in 0..self.cells.len() {
             let cell = &self.cells[other];
             let idle = self.flights.iter().all(|flight| flight.at != other);
-            if other == at || cell.holder != member || live[other].is_none() || !idle {
+            let rising = self.rising_at(other);
+            if other == at || cell.holder != member || live[other].is_none() || !idle || rising {
                 continue;
             }
             let objects = 1..=self.config.shape.objects;
@@ -3167,11 +3276,22 @@ impl<'c> Fleet<'c> {
             self.send(live, other, n, purpose);
         }
     }
-    /// An unavailable or absent record keeps the host's last read of that record; any other read error stops the
-    /// run, since the fleet does not model the client's withdrawal on it.
+    /// `member`'s agent's view of cell `at`'s shard record, through a client whose requests the fleet counts as
+    /// record views (`Fleet::viewed`). An unavailable or absent record keeps the host's last read of that record; any
+    /// other read error stops the run, since the fleet does not model the client's withdrawal on it.
     pub(super) fn read_record(&mut self, member: usize, at: usize) {
         let shard = self.cells[at].placement.shard;
-        let read = self.client(member).read::<ShardRecord>(Key::Shard(shard));
+        let counted = Faulted {
+            inner: super::reconcile::Counted {
+                inner: self.store.clone(),
+                counts: self.viewed.clone(),
+            },
+            actor: member as u32,
+            faults: self.faults.store.clone(),
+        };
+        let mut client = Client::open(counted, self.hosts[member].log.clone());
+        let read = (client.as_mut().expect("a host's store client"))
+            .read::<ShardRecord>(Key::Shard(shard));
         let Some(read) = viewed(member, read) else {
             return;
         };
@@ -3239,6 +3359,8 @@ impl<'c> Fleet<'c> {
             Some((eligible, self.swept))
         };
         self.planted |= share.owners != self.divisor(member);
+        // Under the limiter-bypass plant every charge of this recovery fitted its share window.
+        self.planted |= self.config.planted(Plant::IgnoredShare);
         let host = self.topology.members[member].host;
         let load = peak_bytes.max(read_bytes);
         (self.cells[at].charges).push(super::Charge { host, share, load });

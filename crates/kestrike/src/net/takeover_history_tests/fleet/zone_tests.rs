@@ -275,6 +275,37 @@ fn a_returning_host_whose_record_names_another_owner_waits_unnamed_and_serves_no
     six_owners_returned_warm(&report);
 }
 
+/// The deposed-owner guard of a returning restart, from a produced log: under plant
+/// `ForeignPreRead` (code 96) the returning restart of s2 reads its pre-read record with another host named owner while
+/// its incarnation acquires a tenure. `Fleet::restart_by` drops that tenure unserved, the zone log names the host
+/// deposed with the `Restarted` check, and the zone outcome fails DEPOSED_SERVED by name; s2 keeps no recovery by its
+/// returning owner, and its activations hold no tenure past the boot one.
+#[test]
+fn a_returning_restart_under_a_foreign_pre_read_drops_its_tenure_and_fails_deposed_served() {
+    let rule = "a deposed host served after its zone returned";
+    assert_eq!(rule, hosts::DEPOSED_SERVED);
+    let report = run(&Config::zone_loss(1).hostile(Plant::ForeignPreRead, 2))
+        .expect("a run inside the limits");
+    assert!(report.planted);
+    assert_eq!(
+        hosts::expected(&report).rule(),
+        Some(rule),
+        "{}",
+        report.summary()
+    );
+    let deposed: Vec<_> = (report.zones.deposed.iter())
+        .map(|(shard, _, check, _)| (*shard, check.as_str()))
+        .collect();
+    assert_eq!(deposed, [(3, super::zones::RESTARTED)]);
+    let activated = (report.evidence.activations.iter()).filter(|(shard, ..)| shard.get() == 3);
+    assert_eq!(activated.count(), 1, "the boot tenure alone");
+    assert_eq!(
+        report.shards[2].recoveries.len(),
+        1,
+        "the boot recovery alone"
+    );
+}
+
 /// When the shard record names another owner, both role-read outcomes of the returning host leave the cell
 /// unblocked. `zones::deposed` accepts the logged check when the role read succeeds and rejects it when the read
 /// fails.

@@ -418,20 +418,21 @@ fn a_request_count_past_one_peers_allowance_is_refused_before_any_draw() {
 }
 
 #[test]
-fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_to_45_50_to_59_118_and_119() {
+fn fleet_plants_share_the_cycle_table_and_take_codes_13_to_26_40_to_45_50_to_59_95_96_118_and_119()
+{
     let codes: Vec<u8> = Plant::ALL.iter().map(|plant| plant.code()).collect();
     assert_eq!(
         codes,
         [
-            13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53, 54,
-            55, 56, 57, 58, 59, 41, 42, 43, 44, 119, 118
+            13, 14, 2, 15, 16, 17, 18, 19, 20, 21, 95, 22, 23, 24, 25, 26, 40, 45, 50, 51, 52, 53,
+            54, 55, 56, 57, 58, 59, 41, 42, 43, 44, 96, 119, 118
         ]
     );
     let identities: BTreeSet<String> = (Plant::ALL.iter())
         .map(|plant| Config::six(1).hostile(*plant, 0).identity())
         .chain([Config::six(1).identity()])
         .collect();
-    assert_eq!(identities.len(), 34);
+    assert_eq!(identities.len(), 36);
 }
 
 #[test]
@@ -1519,6 +1520,23 @@ fn a_run_refuses_an_armed_fault_control_by_name_and_restores_inline_recovery() {
         );
         assert!(!crate::host::agent::tests::armed(), "{plant} cleared");
     }
+    crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(true));
+    let refused = message(&|| run(&config));
+    crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(false));
+    assert!(
+        refused.contains("the recovery share's IGNORE is armed"),
+        "{refused}"
+    );
+    crate::storage::NO_RESERVE_SHARE.with(|unreserved| unreserved.set(true));
+    let refused = catch_unwind(AssertUnwindSafe(|| run(&config)));
+    crate::storage::NO_RESERVE_SHARE.with(|unreserved| unreserved.set(false));
+    let refused = refused.expect_err("a run under an armed NO_RESERVE");
+    let refused = *refused.downcast::<String>().expect("a formatted panic");
+    assert!(
+        refused.contains("the recovery share's NO_RESERVE is armed"),
+        "{refused}"
+    );
+
     assert!(run(&config).is_ok(), "an unarmed run is admitted");
 
     // A shared run refuses the caller's armed control on a warm cache as a cold run does.
@@ -1703,6 +1721,180 @@ fn the_inventory_rows_list_the_pinned_runs_and_the_swept_roots() {
         })
         .collect();
     assert_eq!(members("long-run", "fleet-roots"), swept);
+}
+
+/// The held-INVALIDATE settle's directed rows on a seeded cell: for each committed page
+/// value, whether `Cell::settle_held` credits the held INVALIDATE of object 1 under tenure `T`, by the warm loader's
+/// rule. A page version under `T`'s fence that holds an entry of the object's key, whatever the entry's interval,
+/// excludes it (version 0 is judged by its key); one that holds only another key's entry does not; one under
+/// another tenure's fence does not; a saturated version under `T`'s fence excludes every object on the page; a
+/// saturated version whose entry bytes do not decode is no evidence; and an entry held for another tenure stays
+/// unsettled.
+#[test]
+fn a_held_invalidate_settles_by_the_warm_loaders_exclusion_rule_on_each_directed_row() {
+    use crate::failover::records::CoveragePage;
+    use crate::storage::CacheVersion;
+    use crate::storage::page_coverage::{Interval, encode_entries};
+    const T: Tenure = Tenure { g: 3, a: 12 };
+    let interval =
+        |low, high| Interval::new(CacheVersion(low), CacheVersion(high)).expect("an interval");
+    // A key of the same page as object 1's, so a value holding it alone is a valid page that omits the object.
+    let other = |cell: &Cell| {
+        let page = cell.world.page_key(1);
+        (2..=cell.world.objects.len() as u8)
+            .find(|&m| cell.world.page_key(m) == page)
+            .map(object_key)
+    };
+    let settled = |row: &str, value: &dyn Fn(&Cell) -> CoveragePage, held_by: Tenure| {
+        let config = Config::host_loss(1);
+        let mut draws = Draws::record(config.root);
+        let fleet = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS).expect("a seeded fleet");
+        let mut cell = fleet.cells.into_iter().next().expect("a cell");
+        let page = cell.world.page_key(1);
+        let mut client = crate::storage::store_tests::client(&cell.world.records);
+        let read = client.read::<CoveragePage>(page).expect("a seeded page");
+        client
+            .replace(&read, value(&cell))
+            .expect("the page commits");
+        cell.unsettled.push((1, page, held_by));
+        let events = cell.world.events.len();
+        cell.settle_held(T);
+        let invalidated = cell.invalidated.contains(&1);
+        let logged = cell.world.events.len() - events;
+        assert_eq!(
+            usize::from(invalidated),
+            logged.min(1),
+            "{row}: an invalidation is logged"
+        );
+        (invalidated, cell.unsettled.len(), cell.invalidated.len())
+    };
+    let fence = |tenure: Tenure| (tenure.g << 32) | tenure.a;
+    let page = |tenure: Tenure, saturated, entries: Vec<u8>| CoveragePage {
+        fence: fence(tenure),
+        saturated,
+        entries,
+    };
+    let own_key = |low| {
+        move |_: &Cell| {
+            page(
+                T,
+                false,
+                encode_entries(&[(object_key(1), interval(low, low + 4))]),
+            )
+        }
+    };
+    assert_eq!(
+        settled("the key at version 0", &own_key(0), T),
+        (true, 0, 1)
+    );
+    assert_eq!(
+        settled("the key at versions 5 to 9", &own_key(5), T),
+        (true, 0, 1)
+    );
+    let others = |cell: &Cell| {
+        let key = other(cell).expect("a second object on object 1's page");
+        page(T, false, encode_entries(&[(key, interval(0, 4))]))
+    };
+    assert_eq!(settled("another key alone", &others, T), (false, 0, 0));
+    let foreign = |_: &Cell| {
+        let entries = encode_entries(&[(object_key(1), interval(0, 4))]);
+        page(Tenure { g: 3, a: 14 }, false, entries)
+    };
+    assert_eq!(
+        settled("another tenure's fence", &foreign, T),
+        (false, 0, 0)
+    );
+    let saturated = |_: &Cell| page(T, true, Vec::new());
+    let (credited, left, excluded) = settled("saturated", &saturated, T);
+    // Every object on object 1's page, and no other, leaves the retained set.
+    let on_page = {
+        let config = Config::host_loss(1);
+        let mut draws = Draws::record(config.root);
+        let fleet = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS).expect("a seeded fleet");
+        let cell = &fleet.cells[0];
+        let page = cell.page_key(1);
+        (cell.world.objects.iter())
+            .filter(|object| cell.page_key(object.n) == page)
+            .count()
+    };
+    assert_eq!((credited, left, excluded), (true, 0, on_page));
+    // A key of another page beside the object's key is a page the warm loader refuses.
+    let off_page = |cell: &Cell| {
+        let own = cell.page_key(1);
+        let off = (2..=cell.world.objects.len() as u8).find(|&m| cell.page_key(m) != own);
+        let off = object_key(off.expect("an object on another page"));
+        let entries = encode_entries(&[(object_key(1), interval(0, 4)), (off, interval(0, 4))]);
+        page(T, false, entries)
+    };
+    assert_eq!(
+        settled("a key of another page", &off_page, T),
+        (false, 0, 0)
+    );
+    let torn = |_: &Cell| page(T, true, vec![0xAB; 7]);
+    assert_eq!(settled("undecodable entries", &torn, T), (false, 0, 0));
+    let held = Tenure { g: 3, a: 10 };
+    assert_eq!(
+        settled("another tenure's hold", &own_key(0), held),
+        (false, 1, 0)
+    );
+}
+
+/// A fresh activation's retry is bound to the replacement it installed: after a failed role
+/// read over the replacement the record names active, for the member the record names owner, the activation retries
+/// from a later round; once the record names another volume active or another owner, the retry flag is no longer
+/// borne out and the replacement the record names installs as a first activation would.
+#[test]
+fn a_fresh_activation_retries_only_over_the_replacement_and_owner_it_installed() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let mut fleet = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS).expect("a seeded fleet");
+    let record = fleet.record_now(0);
+    let owner = fleet.member_of(record.owner).expect("the owner's member");
+    fleet.round = 5;
+    fleet.cells[0].fresh_unread = Some((4, record.active, owner));
+    assert!(
+        fleet.fresh_retries(0, &record),
+        "the installed replacement, a later round"
+    );
+    fleet.cells[0].fresh_unread = Some((5, record.active, owner));
+    assert!(
+        !fleet.fresh_retries(0, &record),
+        "the round of the failed read"
+    );
+    let other = fleet.cells[1].placement.volume;
+    fleet.cells[0].fresh_unread = Some((4, other, owner));
+    assert!(
+        !fleet.fresh_retries(0, &record),
+        "a later replacement is active"
+    );
+    fleet.cells[0].fresh_unread =
+        Some((4, record.active, (owner + 1) % fleet.topology.members.len()));
+    assert!(!fleet.fresh_retries(0, &record), "another owner");
+}
+
+/// The host loop waits for a first-refused fresh activation's retry only while that retry can still fall due
+/// (`Fleet::fresh_first`): the marker's replacement is the record's active volume and its member is the record's
+/// owner, as `Fleet::fresh_due` requires. A marker the record no longer bears out holds no host loop open.
+#[test]
+fn a_fresh_marker_the_record_no_longer_bears_out_holds_no_host_loop_open() {
+    let config = Config::host_loss(1);
+    let mut draws = Draws::record(config.root);
+    let mut fleet = Fleet::seeded(&config, &mut draws, WAIT_ROUNDS).expect("a seeded fleet");
+    fleet.start_hosts();
+    let record = fleet.record_now(0);
+    let owner = fleet.member_of(record.owner).expect("the owner's member");
+    assert_eq!(fleet.cells[0].holder, owner);
+    fleet.round = 5;
+    fleet.cells[0].fresh_unread = Some((4, record.active, owner));
+    assert!(fleet.fresh_first(), "a retry that can fall due");
+    let other = fleet.cells[1].placement.volume;
+    fleet.cells[0].fresh_unread = Some((4, other, owner));
+    assert!(!fleet.fresh_retries(0, &record));
+    assert!(!fleet.fresh_first(), "a later replacement is active");
+    let taker = (owner + 1) % fleet.topology.members.len();
+    fleet.cells[0].fresh_unread = Some((4, record.active, taker));
+    assert!(!fleet.fresh_retries(0, &record));
+    assert!(!fleet.fresh_first(), "the record names another owner");
 }
 
 /// The fast tier's further roots and replays, each check printing one line and the last line counting them: the

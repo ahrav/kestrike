@@ -277,12 +277,7 @@ pub(crate) fn fleet_verdict(verdicts: &[Verdict]) -> Verdict {
 
 const SILENT: &[&str] = &["host-silent", "shard-silent"];
 const FRESH: &[&str] = &["host-silent", "need-fresh", "shard-silent"];
-const ZONE_LOST: &[&str] = &[
-    "host-silent",
-    "need-fresh",
-    "producer-missing",
-    "shard-silent",
-];
+const ZONE_LOST: &[&str] = &["host-silent", "need-fresh", "shard-silent"];
 
 /// The rows each scenario's run fires on its fixture shape, by the scenario and, for a one-zone settle, the census
 /// cap of its shape; a hostile store or registrant profile admits its scenario's own episodes and changes no set.
@@ -297,8 +292,7 @@ const ZONE_LOST: &[&str] = &[
 /// A lost host reads silent on the zone's status (`host-silent`) and leaves its shards without a live owner while
 /// the loss lasts (`shard-silent`); a shard whose owner and standby are both lost needs a fresh host (`need-fresh`);
 /// three lost hosts of one zone bring every survivor to its self-suspicion threshold (`self-suspect-host` on the
-/// survivors' reports, `self-suspect-zone` on the status). A zone's stopped hosts publish no entry for their
-/// processes once they return until those processes run again (`producer-missing`). A census cap below the zone's
+/// survivors' reports, `self-suspect-zone` on the status). A census cap below the zone's
 /// shard count raises `census-cap-below-shards` and, with the census listing every slot it holds, `census-near-cap`.
 /// A standby-enrollment crash cell loses a standby's host alone (`host-silent`); a fresh-host cell loses owner and
 /// standby, and where the crash cuts a designation whose write landed the restarted loop reads the volume's attach
@@ -307,6 +301,14 @@ const ZONE_LOST: &[&str] = &[
 /// reads the foreign registrant and the retirement request, and the status rows its shard blocked; a zone loss under
 /// impaired evidence rows its shards blocked the same way. The regressed shard-record read puts the store
 /// regression watermark on the faulted tenure's entry.
+///
+/// The isolated owner's takeovers load at once, and the owner's deposed tenures withdraw while its records still name
+/// it owner, so its reports list no entry for those roles until the zone's hosts reread the shard records after each
+/// load ends (`producer-missing`, which rests on that reread, the harness's stand-in for the agents' record sync).
+///
+/// Where a lost host's takeovers or a returning zone's restarts load at once, no shard stays without a live owner and
+/// no returning host lists an owned role with no entry for the rows' windows: the reenroll, partition-repair, racing
+/// and slot-moved cases fire no `shard-silent`, and the zone cases no `producer-missing`.
 ///
 /// A planned handoff to a live, attached standby fires nothing. A handoff to a target whose attach ended parks the
 /// target, which publishes no status while it parks, so its host's reports list no entry for that process
@@ -333,12 +335,15 @@ pub(crate) fn expected(config: &super::Config) -> Expected {
         }
         Restarts | HostLoss | PartitionLoss | FalseSuspicion | OwnerPause | StoreUnknown(_)
         | PageRegressed => &[],
-        OwnerIsolation | PartitionLossAt => &["self-suspect-host"],
+        OwnerIsolation => &["producer-missing", "self-suspect-host"],
+        PartitionLossAt => &["self-suspect-host"],
         RecordRegressed => &["store-regression"],
         Settle if cap_below => &["census-cap-below-shards", "census-near-cap"],
         Settle => &[],
         StandbyLoss | StandbySilent => &["host-silent"],
-        Reenroll | PartitionRepair | AttachSurvivor | Racing => SILENT,
+        Reenroll => &["host-silent"],
+        PartitionRepair | Racing => &["host-silent"],
+        AttachSurvivor => SILENT,
         DoubleLoss => FRESH,
         Crash(cell) if !cell.fresh => &["host-silent"],
         Crash(cell) if cell.call == Call::Designate && cell.ending != Ending::Lost => {
@@ -372,17 +377,11 @@ pub(crate) fn expected(config: &super::Config) -> Expected {
             "retirement-requested",
             "shard-blocked",
         ],
-        SlotMoved => &["attach-closed", "host-silent", "shard-silent"],
+        SlotMoved => &["attach-closed", "host-silent"],
         Handoff => &[],
         HandoffEnded => &["need-fresh", "producer-missing", "shard-silent"],
         ZoneLoss | ZoneDeposed => ZONE_LOST,
-        ZoneImpaired => &[
-            "host-silent",
-            "need-fresh",
-            "producer-missing",
-            "shard-blocked",
-            "shard-silent",
-        ],
+        ZoneImpaired => &["host-silent", "need-fresh", "shard-blocked", "shard-silent"],
     };
     Expected::Rows(rows)
 }

@@ -1284,7 +1284,7 @@ impl Fleet<'_> {
         self.step_commits = total(self) - committed;
         let after = commits(self);
         for at in (0..self.cells.len()).filter(|&at| after[at] != before[at]) {
-            self.reread(at);
+            self.reread_hosts(at);
         }
         self.reconcilers[r].planned = survey.plan.steps.len();
         let status = survey.status;
@@ -1433,7 +1433,7 @@ impl Fleet<'_> {
         };
         let at = at as usize;
         let swept = |cell: &super::Cell| cell.recoveries.len() >= 2;
-        let taken = self.cells.get(at).is_some_and(swept) && self.loading.is_none();
+        let taken = self.cells.get(at).is_some_and(swept) && self.takeover_loads().next().is_none();
         if self.planted || !taken || !self.host_lost.contains(&at) {
             return;
         }
@@ -1728,14 +1728,8 @@ impl Fleet<'_> {
         self.volumes.retained += u32::from(blocker == Blocker::VolumeImpaired);
     }
 
-    pub(super) fn reread(&mut self, at: usize) {
-        let key = Key::Shard(self.cells[at].placement.shard);
-        let before = self.store.0.borrow().requests(&key);
-        self.reread_hosts(at);
-        let read = self.store.0.borrow().requests(&key) - before;
-        *self.tallied.borrow_mut().entry(key).or_default() += read;
-    }
-
+    /// Each running host of cell `at`'s zone reads the shard's record again, a record view
+    /// ([`Fleet::read_record`]), and resyncs its agent.
     pub(super) fn reread_hosts(&mut self, at: usize) {
         let zone = self.cells[at].placement.zone;
         for host in 0..self.hosts.len() {

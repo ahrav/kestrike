@@ -191,6 +191,10 @@ pub(crate) enum Plant {
     /// In a host scenario, the host at the index is charged twice its share and one byte more of device reads on
     /// each load, reads its storage never charged.
     UnchargedRead,
+    /// Every recovery charge of the run fits its share window: storage's limiter bypass (`recovery::io_share`'s
+    /// `IGNORE`, every charge fits) is armed on the run's thread. The plant applies to the whole run and ignores the
+    /// profile's index.
+    IgnoredShare,
     /// A second loop under the census cap plus one runs beside the first. The plant applies to the whole run and
     /// ignores the profile's index.
     WideCap,
@@ -256,6 +260,10 @@ pub(crate) enum Plant {
     /// The ended-target handoff of the shard at the index leaves every agent's restart grace at
     /// `RESTART_GRACE_US`, so the parked target's host reads healthy for the whole run.
     UnscaledGrace,
+    /// A returning restart of the shard at the index reads its pre-read record with another host named owner while
+    /// its incarnation acquires a tenure, so `Fleet::restart_by`'s deposed-owner guard drops the tenure; the zone
+    /// log then names a deposed host that acquired a tenure, which DEPOSED_SERVED fails.
+    ForeignPreRead,
     /// The restart of the shard at the index whose incarnation ended with a parking exit issues one extended Report
     /// through its host's device double before it parks, and its park issues one more in its first view period.
     ParkedCommand,
@@ -265,7 +273,7 @@ pub(crate) enum Plant {
 }
 
 impl Plant {
-    pub(crate) const ALL: [Self; 33] = [
+    pub(crate) const ALL: [Self; 35] = [
         Self::TwinTenure,
         Self::LossEvidence,
         Self::RestoredEntryMiss,
@@ -276,6 +284,7 @@ impl Plant {
         Self::SkippedSweep,
         Self::TwinStart,
         Self::UnchargedRead,
+        Self::IgnoredShare,
         Self::WideCap,
         Self::DropNeed,
         Self::UnbackedBlocker,
@@ -297,6 +306,7 @@ impl Plant {
         Self::TargetUnwaited,
         Self::ParkedPublishes,
         Self::UnscaledGrace,
+        Self::ForeignPreRead,
         Self::ParkedCommand,
         Self::ParkedWithdraws,
     ];
@@ -314,6 +324,7 @@ impl Plant {
             Self::SkippedSweep => 19,
             Self::TwinStart => 20,
             Self::UnchargedRead => 21,
+            Self::IgnoredShare => 95,
             Self::WideCap => 22,
             Self::DropNeed => 23,
             Self::UnbackedBlocker => 24,
@@ -335,6 +346,7 @@ impl Plant {
             Self::TargetUnwaited => 42,
             Self::ParkedPublishes => 43,
             Self::UnscaledGrace => 44,
+            Self::ForeignPreRead => 96,
             Self::ParkedCommand => 119,
             Self::ParkedWithdraws => 118,
         }
@@ -829,7 +841,7 @@ impl Config {
 }
 
 /// The format tag [`Config::identity`] hashes first.
-pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v31";
+pub(crate) const IDENTITY_TAG: &[u8] = b"fleet-v32";
 
 /// One tenure that restarted, loaded warm and opened its client session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -982,7 +994,9 @@ pub(crate) struct DutyLog {
     pub(crate) acknowledged: u32,
     pub(crate) reads: u64,
     pub(crate) writes: u64,
-    pub(crate) exits: Vec<(u32, Tenure, crate::host::Exit)>,
+    /// Each tenure whose serving duties ended at an exit, by shard, with that exit and the `(g, 2 * attempts)` the
+    /// shard record named when the tenure closed, read with no request.
+    pub(crate) exits: Vec<(u32, Tenure, crate::host::Exit, (u64, u64))>,
     /// The faulted boot tenure of a store-result scenario, as the run ended.
     pub(crate) faulted: Option<FaultedDuty>,
     /// Each tenure that `serve::teardown` closed, with its shard and whether the owner shut down with its parts
@@ -1182,7 +1196,7 @@ impl Report {
         if self.config.scenario.hosted() {
             let log = &self.hosts;
             lines.push(format!(
-                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} unslotted {} rerun-dropped {} refused-reruns {} gray-readings {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} handoffs {:?} parks {:?} role-changes {:?} boot {:?} fired {:?} arrivals {:?}",
+                "fleet: {id} hosts nominations {} addressed {} vetoes {} contested {} stale-replies {} unmatched-probes {} repair-demands {} host-losses {} lapsed {} lapsed-acted {} overlapped {} unslotted {} rerun-dropped {} refused-reruns {} gray-readings {} reports {} refused {} exempt {:?} loads-beside-service {} served-beside-load {} twins {} withdrawals {:?} unwithdrawn {} stale-hits {} headrooms {:?} stores {:?} takeovers {:?} handoffs {:?} parks {:?} role-changes {:?} boot {:?} fired {:?} arrivals {:?}",
                 log.nominations,
                 log.addressed,
                 log.vetoes,
@@ -1192,6 +1206,8 @@ impl Report {
                 log.repair_demands,
                 log.host_losses,
                 log.lapsed,
+                log.lapsed_acted,
+                log.overlapped,
                 log.unslotted,
                 log.rerun_dropped,
                 log.refused_reruns,
@@ -1479,6 +1495,7 @@ fn play_within(
     }
     refuse_armed_controls();
     let _inline = Inline::set();
+    let _share = IgnoredShare::set(config.planted(Plant::IgnoredShare));
     let _ack = AckOnUnknown::set(config.planted(Plant::AckOnUnknown));
     let _agent = AgentPlant::set(config);
     Fleet::play(config, draws(), wait)
@@ -1539,6 +1556,27 @@ impl Drop for AckOnUnknown {
     }
 }
 
+/// Arms storage's limiter bypass (every recovery charge fits) on the calling thread for the life of the value when
+/// `on`, and disarms it when dropped, an unwound run included.
+struct IgnoredShare(bool);
+
+impl IgnoredShare {
+    fn set(on: bool) -> Self {
+        if on {
+            crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(true));
+        }
+        Self(on)
+    }
+}
+
+impl Drop for IgnoredShare {
+    fn drop(&mut self) {
+        if self.0 {
+            crate::storage::IGNORE_SHARE.with(|ignore| ignore.set(false));
+        }
+    }
+}
+
 /// Panics by name when a thread-local test control that a fleet run would reach is armed on the calling thread.
 fn refuse_armed_controls() {
     let plant = crate::storage::checkpoint::PLANT.with(std::cell::Cell::get);
@@ -1555,6 +1593,13 @@ fn refuse_armed_controls() {
     let planted =
         ACK_ON_UNKNOWN.with(std::cell::Cell::get) || UNBOUND_REPLIES.with(std::cell::Cell::get);
     assert!(!planted, "a coverage plant is armed: {planted}");
+    let ignored = crate::storage::IGNORE_SHARE.with(std::cell::Cell::get);
+    assert!(!ignored, "the recovery share's IGNORE is armed: {ignored}");
+    let unreserved = crate::storage::NO_RESERVE_SHARE.with(std::cell::Cell::get);
+    assert!(
+        !unreserved,
+        "the recovery share's NO_RESERVE is armed: {unreserved}"
+    );
 }
 
 /// What a watch compares of a shard between two samples: its record's generation, attempts and owner, and its
@@ -1610,8 +1655,9 @@ struct Cell {
     reports: usize,
     /// The tenures that closed with their serving duties' open at `Opened`.
     duty_opened: u32,
-    /// Each closed tenure whose serving duties ended at an exit, with that exit, in close order.
-    duty_exits: Vec<(Tenure, crate::host::Exit)>,
+    /// Each closed tenure whose serving duties ended at an exit, with that exit and the `(g, 2 * attempts)` the shard
+    /// record named at the close, read with no request, in close order.
+    duty_exits: Vec<(Tenure, crate::host::Exit, (u64, u64))>,
     /// Each closed tenure whose serving turn read its recovery line.
     lines: Vec<Tenure>,
     /// The store requests the shard's standby sent to each of the shard's records over the view periods of its
@@ -1657,9 +1703,10 @@ struct Cell {
     /// Whether the cell runs a replacement volume, which retains nothing.
     cold: bool,
     fresh_refused: bool,
-    /// The round of a fresh activation whose role read failed or whose incarnation ended with an exit that names a
-    /// rerun; the activation retries from a later round.
-    fresh_unread: Option<u64>,
+    /// The round, the replacement volume and the owner member of a fresh activation whose role read failed or whose
+    /// incarnation ended with an exit that names a rerun; the activation retries from a later round while the record
+    /// still names that volume active and that member's host owner.
+    fresh_unread: Option<(u64, crate::failover::records::VolumeId, usize)>,
     /// Each host the loop's status first named in an enrollment of the shard, and whether the active volume held its
     /// live attach then.
     planned: Vec<(Host, bool)>,
@@ -1915,6 +1962,15 @@ impl Cell {
         }
     }
 
+    /// The shard's current record, read with no store request.
+    fn record_read(&self) -> ShardRecord {
+        let store = self.world.records.0.borrow();
+        let item = store
+            .current(&Key::Shard(self.placement.shard))
+            .expect("the shard's record");
+        self.decoded(item)
+    }
+
     /// Ends `serving`'s tenure in the cell's account: samples its device capture, counts a flip request its
     /// authority latched, settles the INVALIDATEs the tenure held and never acknowledged against the coverage pages
     /// committed under its fence, adds the Reports the volume's table logged since the tenure started and, when
@@ -1927,7 +1983,9 @@ impl Cell {
             .is_some_and(|d| d.open() == crate::host::duties::Open::Opened);
         self.duty_opened += u32::from(opened);
         if let Some(exit) = &serving.duty_exit {
-            self.duty_exits.push((serving.tenure, exit.clone()));
+            let record = self.record_read();
+            let named = (record.generation.get(), u64::from(record.attempts) * 2);
+            self.duty_exits.push((serving.tenure, exit.clone(), named));
         }
         if serving.recovery_line.is_some() {
             self.lines.push(serving.tenure);
@@ -1940,33 +1998,43 @@ impl Cell {
     }
 
     /// Resolves each INVALIDATE `tenure` held and never acknowledged. It took effect when a committed version of its
-    /// page, read with no store request, carries `tenure`'s own fence and either covers version 0 of the object's key
-    /// by an entry whose interval holds it, or is saturated, which excludes every key on the page. A later version,
-    /// such as a successor's fence, does not hide it. Each object such a version excludes leaves the retained set,
-    /// and the history records its invalidation; an INVALIDATE no version covers leaves its object retained.
+    /// page, read with no store request, carries `tenure`'s own fence, is a value the warm loader's coverage accepts
+    /// for that page (its entries decode and each names a key of the page), and either holds an entry of the
+    /// object's key or is saturated: the warm loader excludes version 0 of a key while any interval of the key is
+    /// held (`CoverageIndex::excludes`), and a saturated page excludes every key on it. A version the coverage
+    /// refuses is no evidence. A later version, such as a successor's fence, does not hide an earlier one. Each object
+    /// such a version excludes leaves the retained set, and the history records its invalidation; an INVALIDATE no
+    /// version covers leaves its object retained.
     fn settle_held(&mut self, tenure: Tenure) {
         use crate::failover::records::CoveragePage;
-        use crate::storage::page_coverage::decode_entries;
+        use crate::storage::page_coverage::{decode_entries, page_of};
         let (held, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.unsettled)
             .into_iter()
             .partition(|entry| entry.2 == tenure);
         self.unsettled = kept;
         let fence = (tenure.g << 32) | tenure.a;
-        let version = crate::storage::CacheVersion(0);
+        let pages = std::num::NonZeroU16::new(self.pages).expect("seeded coverage pages");
         for (n, page, _) in held {
+            let Key::Page(_, index) = page else {
+                continue;
+            };
             let (mut covered, mut saturated) = (false, false);
             {
                 let store = self.world.records.0.borrow();
                 for item in store.versions(&page) {
-                    let value = CoveragePage::decode(&item.value).expect("a stored coverage page");
-                    if value.fence != fence {
+                    let Ok(value) = CoveragePage::decode(&item.value) else {
+                        continue;
+                    };
+                    let entries = decode_entries(&value.entries);
+                    let on_page = entries.as_ref().is_some_and(|entries| {
+                        (entries.iter()).all(|(of, _)| page_of(of, pages) == index)
+                    });
+                    if value.fence != fence || !on_page {
                         continue;
                     }
                     saturated |= value.saturated;
-                    let entries = decode_entries(&value.entries).unwrap_or_default();
                     let key = object_key(n);
-                    covered |= (entries.iter())
-                        .any(|(of, interval)| *of == key && interval.contains(version));
+                    covered |= (entries.iter().flatten()).any(|(of, _)| *of == key);
                 }
             }
             let mut excluded = Vec::new();
@@ -1975,8 +2043,7 @@ impl Cell {
             }
             if saturated {
                 let on_page = (self.world.objects.iter()).map(|object| object.n);
-                let on_page: Vec<u8> = on_page.filter(|&m| self.page_key(m) == page).collect();
-                excluded.extend(on_page);
+                excluded.extend(on_page.filter(|&m| self.page_key(m) == page));
             }
             excluded.sort_unstable();
             excluded.dedup();
@@ -2147,8 +2214,12 @@ struct Fleet<'c> {
     draw_refusal: Option<Refusal>,
     /// The store requests of the reconcilers and of the hosts' enrollments, by key.
     tallied: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<Key, u64>>>,
-    /// The cell whose takeover's warm load is in progress.
-    loading: Option<usize>,
+    /// The record reads of the hosts' agents (`Fleet::read_record`): each host's reads of its zone's shard records at
+    /// its boot and resume and the zone's rereads after a load, by key, which the untouched-shard check counts apart
+    /// as record views.
+    viewed: std::rc::Rc<std::cell::RefCell<std::collections::BTreeMap<Key, u64>>>,
+    /// The bring-ups in progress in a host scenario, in the order they started ([`owners::Rise`]).
+    rises: Vec<owners::Rise>,
     /// The cells a later loss took while an earlier loss watched them; that loss's watch of them is dropped.
     released: BTreeSet<usize>,
     raced: reconcile::Raced,
@@ -2233,6 +2304,28 @@ struct Fleet<'c> {
     /// The rounds since the hosts started after which an unsettled host scenario stops as stalled:
     /// `hosts::HORIZON_ROUNDS`, or fewer in a control that expects the stall.
     horizon: u64,
+    /// In the lapsed-witness case, the rounds between the standby's read of the run's first witness out of its inbox
+    /// and its period's clock read, and whether that period reads the witness at its send time instead (the planted
+    /// defect). `host::stand_by`'s period drains the inbox (`Inbox::nomination`) and resolves its peers before it
+    /// reads the clock for `Takeover::nominated`, so a period that stalls there holds a witness the inbox has given
+    /// up, and a witness the agent sends meanwhile is a new inbox entry. The held witness's period runs ahead of the
+    /// inbox's other work once its rounds have passed.
+    witness_hold: Option<(u64, bool)>,
+    /// The kept-owner case's knob: every teardown after a `Rerun` or `Held` exit reads as one whose owner kept its
+    /// custody, as a teardown that ran past its patience does.
+    kept_owner: bool,
+    /// The held witness: the entry the standby's period read out of its inbox, and the round of that read. The
+    /// inbox holds no entry for its member and volume from then on, so `Fleet::deliver` queues a later witness
+    /// behind it and replaces nothing.
+    held_witness: Option<(
+        (
+            usize,
+            crate::failover::records::VolumeId,
+            crate::failover::detect::host::Revalidated,
+            u64,
+        ),
+        u64,
+    )>,
     /// The runnable-actor decisions [`Fleet::runnable`] recorded.
     actor_turns: u64,
     /// Whether [`Fleet::runnable`] records the round's runnable actors: true in every run but the replay control's
@@ -2371,7 +2464,8 @@ impl<'c> Fleet<'c> {
             draws: None,
             draw_refusal: None,
             tallied: Default::default(),
-            loading: None,
+            viewed: Default::default(),
+            rises: Vec::new(),
             released: BTreeSet::new(),
             raced: Default::default(),
             moved: Default::default(),
@@ -2402,6 +2496,9 @@ impl<'c> Fleet<'c> {
             witnessed: std::collections::BTreeMap::new(),
             rerun_first: false,
             horizon: hosts::HORIZON_ROUNDS,
+            witness_hold: None,
+            kept_owner: false,
+            held_witness: None,
             actor_turns: 0,
             record_actors: true,
             parks: Vec::new(),
@@ -2485,6 +2582,10 @@ impl<'c> Fleet<'c> {
             fleet.config.slots() as usize,
             "the checked slots"
         );
+        let returns = fleet.return_slots();
+        let planned = u32::try_from(members.len() + returns.len()).unwrap_or(u32::MAX);
+        bounds::tenures(planned).map_err(Stopped::Shape)?;
+        members.extend(returns);
         let grounds: Vec<Grounds> = (members.iter())
             .map(|&member| Grounds::over(storage_shared(1, fleet.share_on(member))))
             .collect();
@@ -2530,6 +2631,31 @@ impl<'c> Fleet<'c> {
         let decisions = draws.decisions();
         let tape = draws.finish()?;
         Ok(fleet.report(&live, decisions, tape))
+    }
+
+    /// The tenure slots a run's returning hosts restart over, outside `Config::slots`: for each crash whose script
+    /// heals it in a one-zone host run, one slot per role of each crashed host, the owner and standby roles its
+    /// placement gives it. A returning host restarts each shard whose record still names it owner, such as one whose
+    /// takeover's reply was unknown and did not commit, and a slot a crashed tenure held keeps that tenure's storage
+    /// state, so each restart takes a slot of its own. A two-zone run's slots already hold two per owned shard.
+    fn return_slots(&self) -> Vec<usize> {
+        if !self.config.scenario.hosted() || self.config.zoned() {
+            return Vec::new();
+        }
+        let healed = (self.faults.episodes.iter())
+            .filter(|episode| episode.action == faults::Action::Crash && episode.heal.is_some());
+        let crashed = healed.flat_map(|episode| episode.scope.iter().copied());
+        crashed
+            .filter(|&member| member < self.topology.members.len())
+            .flat_map(|member| {
+                let roles = (self.cells.iter())
+                    .filter(|cell| {
+                        cell.placement.owner == member || cell.placement.standby == member
+                    })
+                    .count();
+                std::iter::repeat_n(member, roles)
+            })
+            .collect()
     }
 
     /// Each serving tenure, in shard order, opens its suffix, publishes a FILL of a new object and acknowledges an
@@ -2830,6 +2956,7 @@ impl<'c> Fleet<'c> {
             self.withdraw(live);
         }
         self.round += 1;
+        self.note_rises(live);
         let recovered = match self.hosts.is_empty() {
             true => (self.recovering.and_then(|at| live[at].as_ref()))
                 .is_some_and(|serving| serving.client.state() == SessionState::Active),
@@ -2874,7 +3001,7 @@ impl<'c> Fleet<'c> {
         if at == hosts::DUTY_CELL && self.faulted.is_some_and(|(of, ..)| of == tenure) {
             self.faulted_withdrawal = withdrawn(serving.owner.authority_report());
         }
-        let shut = serving.tear_down(TEARDOWN_ROUNDS);
+        let shut = serving.tear_down(TEARDOWN_ROUNDS) && !self.kept_owner;
         let shard = self.cells[at].placement.shard.get();
         self.torn.push((shard, tenure, shut));
         shut
@@ -2906,7 +3033,10 @@ impl<'c> Fleet<'c> {
             .filter(|&at| live[at].as_ref().is_some_and(awaits_teardown))
             .collect();
         for at in ended {
-            if self.flights.iter().any(|flight| flight.at == at) || self.recovering == Some(at) {
+            if self.flights.iter().any(|flight| flight.at == at)
+                || self.recovering == Some(at)
+                || self.rising_at(at)
+            {
                 continue;
             }
             let serving = live[at].take().expect("the ended tenure");
@@ -2939,9 +3069,8 @@ impl<'c> Fleet<'c> {
                     inside: self.window,
                     beside: purpose == Purpose::Beside,
                 });
-                let beside = self.loading.is_some_and(|load| {
-                    load != at && self.cells[load].holder == self.cells[at].holder
-                });
+                let beside = (self.takeover_loads())
+                    .any(|load| load != at && self.cells[load].holder == self.cells[at].holder);
                 self.log.served_beside_load += u32::from(served && beside);
             }
         }
@@ -3164,13 +3293,12 @@ impl<'c> Fleet<'c> {
         let of = self.topology.members[member];
         let cell = (&self.cells[at], of, pair);
         match owners::incarnate(cell, self.round, ground.0, &mut client, sources) {
-            owners::Incarnation::Tenure(tenure, control, now) => self.rise(
-                live,
-                ground,
-                (at, pair),
-                (*tenure, control, now),
-                Source::Named,
-            ),
+            owners::Incarnation::Tenure(tenure, control, now) => {
+                match self.rise(live, ground, (at, pair), (*tenure, control, now)) {
+                    Some(_) => self.serve_opened(live, at, Source::Named),
+                    None => Ok(None),
+                }
+            }
             owners::Incarnation::Ended(exit, refusal) => {
                 let flip = matches!(exit, crate::host::Exit::Retire(_));
                 self.cells[at].refuse(owners::blocker(&exit, refusal), flip);
@@ -3187,24 +3315,38 @@ impl<'c> Fleet<'c> {
         }
     }
 
-    /// Runs `serving`'s bootstrap, activates its load from `source` and opens its client session. Returns the tenure
-    /// whose session opened; a load that did not open reports a blocker and returns `None` with `live[at]` empty.
-    fn serve_opened<'w>(
+    /// Runs the bootstrap of the tenure [`Fleet::rise`] put into `live[at]`, activates its load from `source` and opens
+    /// its client session, taking turns until each is done. Returns the tenure whose session opened; a load that did
+    /// not open reports a blocker and returns `None` with `live[at]` empty.
+    fn serve_opened(
         &mut self,
-        live: &mut Live<'w>,
+        live: &mut Live<'_>,
         at: usize,
-        serving: Serving<'w>,
         source: Source,
     ) -> Result<Option<Tenure>, Stopped> {
-        let tenure = serving.tenure;
-        let host = self.topology.members[self.cells[at].holder].host;
-        live[at] = Some(serving);
+        let tenure = live[at].as_ref().expect("the rising tenure").tenure;
         self.recovering = Some(at);
         self.turns_until(live, (at, "the bootstrap"), |serving| {
             serving.rising.is_none() && !serving.owner.readiness().initializing()
         })?;
+        if !self.opened(live, at, source) {
+            return Ok(None);
+        }
+        self.turns_until(live, (at, "the client session"), |serving| {
+            serving.client.state() == SessionState::Active
+        })?;
+        self.recovering = None;
+        Ok(Some(tenure))
+    }
+
+    /// Activates the load from `source` of cell `at`'s tenure, whose bootstrap left its initializing states, arms its
+    /// serving duties and asks for its client session. Returns whether the load opened; one that did not reports a
+    /// blocker and its charge, and leaves `live[at]` empty.
+    fn opened(&mut self, live: &mut Live<'_>, at: usize, source: Source) -> bool {
+        let host = self.topology.members[self.cells[at].holder].host;
         let cell = &mut self.cells[at];
         let serving = live[at].as_mut().expect("the recovered tenure");
+        let tenure = serving.tenure;
         let outcome = activate(&mut cell.world, serving, source);
         let short = match &serving.risen {
             Some(crate::host::serve::Rising::Short(exit)) => Some(exit.clone()),
@@ -3225,8 +3367,10 @@ impl<'c> Fleet<'c> {
             cell.blocked = true;
             live[at] = None;
             self.cells[at].charges.push(charge);
-            self.recovering = None;
-            return Ok(None);
+            if self.recovering == Some(at) {
+                self.recovering = None;
+            }
+            return false;
         }
         let holder = self.topology.members[cell.holder];
         let holder = holder_on(cell.placement.volume, holder.host, holder.instance);
@@ -3234,11 +3378,7 @@ impl<'c> Fleet<'c> {
         self.arm_duties(at, tenure);
         let serving = live[at].as_mut().expect("the recovered tenure");
         serving.client.session(serving.turn * ROUND_US);
-        self.turns_until(live, (at, "the client session"), |serving| {
-            serving.client.state() == SessionState::Active
-        })?;
-        self.recovering = None;
-        Ok(Some(tenure))
+        true
     }
 
     /// The volumes whose record reads `Active` while no shard record names them active or spare, read without a store
@@ -3447,8 +3587,9 @@ impl<'c> Fleet<'c> {
         )
     }
 
-    /// `hosts_requests` subtracts reconciler, enrollment, serving-duty, and local standby-wait requests from the
-    /// store's record-request count for cell `at`. `oracles::STANDBY_READS` checks the standby-wait budget.
+    /// `hosts_requests` subtracts reconciler, enrollment, host agent record-view, serving-duty, and local standby-wait
+    /// requests from the store's record-request count for cell `at`. `oracles::STANDBY_READS` checks the standby-wait
+    /// budget.
     fn hosts_requests(&self, at: usize) -> u64 {
         let cell = &self.cells[at];
         let tallied = self.tallied.borrow();
@@ -3456,6 +3597,12 @@ impl<'c> Fleet<'c> {
             .keys()
             .map(|key| tallied.get(&key).copied().unwrap_or(0))
             .sum();
+        let viewed: u64 = {
+            let viewed = self.viewed.borrow();
+            (cell.keys())
+                .map(|key| viewed.get(&key).copied().unwrap_or(0))
+                .sum()
+        };
         let waited: u64 = cell
             .keys()
             .map(|key| cell.waited.get(&key).copied().unwrap_or(0))
@@ -3463,6 +3610,7 @@ impl<'c> Fleet<'c> {
         let duty = self.duty_views(at);
         cell.requests(&self.store)
             - reconciled
+            - viewed
             - waited
             - duty.volume
             - duty.shard
@@ -3823,8 +3971,9 @@ impl<'c> Fleet<'c> {
                 let exits = (self.cells.iter())
                     .flat_map(|cell| {
                         let shard = cell.placement.shard.get();
-                        (cell.duty_exits.iter())
-                            .map(move |(tenure, exit)| (shard, *tenure, exit.clone()))
+                        (cell.duty_exits.iter()).map(move |(tenure, exit, named)| {
+                            (shard, *tenure, exit.clone(), *named)
+                        })
                     })
                     .collect();
                 DutyLog {

@@ -114,20 +114,19 @@ impl ReplaceCell {
 
 /// What a host's restart of a shard ended in.
 pub(super) enum Restarted {
-    /// The tenure loaded warm and swept; `from` is the shard record's attempt count read just before the restart.
-    Served {
-        tenure: crate::oracle::Tenure,
-        from: u32,
-    },
     /// The record read before the incarnation named another owner. `check` is the waiting role from the role read,
-    /// the blocker of a refusal, or the error of a failed role read; `None` when the incarnation acquired a tenure.
+    /// the blocker of a refusal, or the error of a failed role read; `None` when the incarnation acquired a tenure,
+    /// which is dropped unserved.
     /// `attempts` is that record's attempt count.
     Deposed {
         check: Option<String>,
         attempts: u32,
     },
-    /// The host was down, the restart held at a refusal, or the load did not open.
+    /// The host was down, or the restart held at a refusal.
     Held,
+    /// The tenure's bring-up joined the bring-ups in progress ([`super::owners::Rise`]); its recovery is accounted
+    /// once its client session is active.
+    Rising,
 }
 
 /// What a crash-table cell's step left when its crash ran.
@@ -301,7 +300,8 @@ impl Fleet<'_> {
             }
         }
         if let Some(serving) = live[at].take() {
-            self.cells[at].close(&serving, true);
+            let counted = !self.rising_at(at);
+            self.cells[at].close(&serving, counted);
         }
         let shard = self.cells[at].placement.shard;
         self.cells[at].device = device;
@@ -438,7 +438,8 @@ impl Fleet<'_> {
         if live[at].is_some() && self.cells[at].holder == member {
             return Ok(());
         }
-        self.restart_by(live, slots, (at, true), member).map(|_| ())
+        self.restart_by(live, slots, (at, true, false), member)
+            .map(|_| ())
     }
 
     /// The next incarnation of `member`'s process, whose tenure `tenure` of cell `at` ended at its exit in round
@@ -466,7 +467,7 @@ impl Fleet<'_> {
         }
         // The rerun's recovery counts its rounds from the round its tenure ended.
         self.cells[at].rerun_from = Some(ended);
-        let restarted = self.restart_by(live, slots, (at, false), member);
+        let restarted = self.restart_by(live, slots, (at, false, false), member);
         self.cells[at].rerun_from = None;
         restarted.map(|_| ())
     }
@@ -522,7 +523,7 @@ impl Fleet<'_> {
         let restarted = if returning {
             self.restart_returned(live, slots, (at, member))
         } else {
-            (self.restart_by(live, slots, (at, after_loss), member)).map(|_| ())
+            (self.restart_by(live, slots, (at, after_loss, false), member)).map(|_| ())
         };
         self.cells[at].rerun_from = None;
         restarted?;
@@ -547,12 +548,14 @@ impl Fleet<'_> {
     /// park reads another role or its host crashes, so the host has one slot fewer for a later incarnation
     /// meanwhile. Under [`super::Plant::ParkedCommand`] that incarnation first issues one extended Report through
     /// the host's device double. Every other ended incarnation gives its slot back. An exit that names a rerun and
-    /// a failed role read queue the next incarnation under either record ([`Fleet::queue_rerun`]).
+    /// a failed role read queue the next incarnation under either record ([`Fleet::queue_rerun`]). A tenure it
+    /// acquires rises ([`Restarted::Rising`]) with `after_loss` and `returned`, a returning host's restart, carried
+    /// to its accounting.
     pub(super) fn restart_by<'w>(
         &mut self,
         live: &mut Live<'w>,
         slots: &mut Slots<'w>,
-        (at, after_loss): (usize, bool),
+        (at, after_loss, returned): (usize, bool, bool),
         member: usize,
     ) -> Result<Restarted, Stopped> {
         if self.hosts[member].up != Up::Running {
@@ -561,7 +564,7 @@ impl Fleet<'_> {
         let of = self.topology.members[member];
         let cell = &self.cells[at];
         let (pair, local) = cell.local_of(member).expect("the owner's local record");
-        let before = self.record_now(at);
+        let mut before = self.record_now(at);
         let from = self.cells[at].world.reservation.borrow().log.len();
         let ground = slots.take(member);
         let mut client = self.client(member);
@@ -581,6 +584,12 @@ impl Fleet<'_> {
             && self.config.planted_at(super::Plant::RoleReadActivation, at)
         {
             self.activations.push((at, named, of.host));
+            self.planted = true;
+        }
+        let acquired = matches!(incarnation, super::owners::Incarnation::Tenure(..));
+        if acquired && after_loss && self.config.planted_at(super::Plant::ForeignPreRead, at) {
+            let other = (self.topology.members.iter()).find(|other| other.host != of.host);
+            before.owner = other.expect("another host").host;
             self.planted = true;
         }
         let (tenure, control, now) = match incarnation {
@@ -662,30 +671,17 @@ impl Fleet<'_> {
             .or(self.cells[at].lost_at)
             .unwrap_or(self.round);
         let lineage = tenure.lineage();
-        let tenure = self.rise(
-            live,
-            ground,
-            (at, pair),
-            (*tenure, control, now),
-            Source::Named,
-        )?;
-        self.reread_hosts(at);
-        let Some(tenure) = tenure else {
-            return Ok(Restarted::Held);
+        let risen = self.rise(live, ground, (at, pair), (*tenure, control, now));
+        let then = super::owners::Then::Restart {
+            member,
+            lost_at,
+            after_loss,
+            lineage,
+            from: before.attempts,
+            returned,
         };
-        // The guard reads the owner's present state, as `failover::zone_loop::plan` does: a member that serves holds
-        // at no device step.
-        self.cells[at].device_holds.remove(&member);
-        if lineage {
-            let shard = self.cells[at].placement.shard;
-            let round = self.round - self.host_start;
-            self.volumes.arm.push((shard.get(), of.host.get(), round));
-        }
-        self.unhold(at);
-        let rounds = self.round - lost_at;
-        self.recovered(live, at, tenure, rounds, (after_loss, after_loss))?;
-        let from = before.attempts;
-        Ok(Restarted::Served { tenure, from })
+        self.queue_rise(live, at, (risen, Source::Named), then)?;
+        Ok(Restarted::Rising)
     }
 
     /// Moves a live tenure of cell `at` that another member holds to the deposed slots, as `Fleet::take_over` does
@@ -702,7 +698,7 @@ impl Fleet<'_> {
     }
 
     /// Drops the held entry of cell `at`'s holder once its tenure serves.
-    fn unhold(&mut self, at: usize) {
+    pub(super) fn unhold(&mut self, at: usize) {
         let holder = self.cells[at].holder;
         self.cells[at].held.retain(|(of, _)| *of != holder);
     }
@@ -720,13 +716,29 @@ impl Fleet<'_> {
         (0..self.cells.len()).find(|&at| {
             let record = self.record_now(at);
             let owner = self.member_of(record.owner);
+            // An activation whose role read failed, or that ended with an exit that names a rerun, stays due over
+            // its installed replacement, from a later round.
             let cell = &self.cells[at];
-            let retry = (cell.fresh_unread).is_some_and(|round| self.round > round)
-                && owner == Some(cell.holder);
+            let retry = self.fresh_retries(at, &record) && owner == Some(cell.holder);
             let pending = record.active != cell.placement.volume
                 && !cell.fresh_refused
                 && record.attempts == 0;
             (pending || retry) && owner.is_some_and(|owner| self.hosts[owner].up == Up::Running)
+        })
+    }
+
+    /// Whether cell `at`'s fresh activation retries over its installed replacement: its role read failed, or its
+    /// incarnation ended with an exit that names a rerun, in an earlier round over the replacement that `record`
+    /// still names active, for the member `record` still names owner.
+    pub(super) fn fresh_retries(
+        &self,
+        at: usize,
+        record: &crate::failover::records::ShardRecord,
+    ) -> bool {
+        (self.cells[at].fresh_unread).is_some_and(|(round, volume, member)| {
+            self.round > round
+                && record.active == volume
+                && self.member_of(record.owner) == Some(member)
         })
     }
 
@@ -743,28 +755,36 @@ impl Fleet<'_> {
     ) -> Result<(), Stopped> {
         self.drain(live)?;
         // A replaced tenure whose `Rerun` or `Deposed` exit waited for a GET's outcome ends through `serve::teardown`,
-        // and each open loss drops its watch of the shard. The fresh activation is the shard's next process.
+        // and each open loss drops its watch of the shard. The fresh activation is the shard's next process. A
+        // tenure the activation drops during its bring-up closes uncounted.
         match live[at].take() {
             Some(serving) if super::awaits_teardown(&serving) => {
                 self.tear_down(at, serving);
                 self.release_watches(at);
             }
-            Some(serving) => self.cells[at].close(&serving, true),
+            Some(serving) => {
+                let counted = !self.rising_at(at);
+                self.cells[at].close(&serving, counted);
+            }
             None => {}
         }
         let record = self.record_now(at);
         let member = self.member_of(record.owner).expect("a running owner");
         let of = self.topology.members[member];
+        // A retry keeps the replacement's media, reservation table and local record. A flag the record no longer
+        // bears out, a later replacement or another owner, is dropped, and the replacement the record names installs
+        // as a first activation would.
+        let retry = self.fresh_retries(at, &record);
+        self.cells[at].fresh_unread = None;
         // A retry's refusal is one that recurred; a first activation's refusal holds the host loop for its retry's
         // turn (`Fleet::fresh_first`).
-        match self.cells[at].fresh_unread {
-            Some(_) => self.recurred.insert((at, member)),
-            None => self.recurred.remove(&(at, member)),
+        match retry {
+            true => self.recurred.insert((at, member)),
+            false => self.recurred.remove(&(at, member)),
         };
-        // A retry keeps the replacement's media, reservation table and local record.
-        let local = match self.cells[at].fresh_unread.take() {
-            Some(_) => (self.cells[at].local.0.clone()).expect("the replacement's local record"),
-            None => {
+        let local = match retry {
+            true => (self.cells[at].local.0.clone()).expect("the replacement's local record"),
+            false => {
                 let cell = &mut self.cells[at];
                 cell.placement.volume = record.active;
                 (cell.owner, cell.holder, cell.device) = (of.host, member, Device::Up);
@@ -810,7 +830,6 @@ impl Fleet<'_> {
             super::owners::incarnate(cell, self.round, ground.0, &mut client, sources)
         };
         drop(client);
-        let shard = self.cells[at].placement.shard.get();
         let (tenure, control, now) = match incarnation {
             super::owners::Incarnation::Tenure(tenure, control, now) => (tenure, control, now),
             // An exit that names a rerun keeps the activation due, as a failed role read does; any other exit ends
@@ -818,7 +837,7 @@ impl Fleet<'_> {
             super::owners::Incarnation::Ended(exit @ crate::host::Exit::Rerun(_), refusal) => {
                 slots.put_back(member, ground.0);
                 self.cells[at].refuse(super::owners::blocker(&exit, refusal), false);
-                self.cells[at].fresh_unread = Some(self.round);
+                self.cells[at].fresh_unread = Some((self.round, record.active, member));
                 return Ok(());
             }
             super::owners::Incarnation::Ended(exit, refusal) => {
@@ -837,26 +856,14 @@ impl Fleet<'_> {
             super::owners::Incarnation::Unread(error) => {
                 slots.put_back(member, ground.0);
                 self.cells[at].refuse(format!("{error:?}"), false);
-                self.cells[at].fresh_unread = Some(self.round);
+                self.cells[at].fresh_unread = Some((self.round, record.active, member));
                 return Ok(());
             }
         };
         let lost_at = self.cells[at].lost_at.unwrap_or(self.round);
-        let opened = self.rise(
-            live,
-            ground,
-            (at, local.pair()),
-            (*tenure, control, now),
-            Source::Cold,
-        )?;
-        self.reread_hosts(at);
-        if opened.is_none() {
-            return Ok(());
-        }
-        self.volumes.cold.push(shard);
-        self.unhold(at);
-        let tenure = opened.expect("the opened tenure");
-        self.recovered(live, at, tenure, self.round - lost_at, (true, true))
+        let risen = self.rise(live, ground, (at, local.pair()), (*tenure, control, now));
+        let then = super::owners::Then::Fresh { lost_at };
+        self.queue_rise(live, at, (risen, Source::Cold), then)
     }
 
     /// The replacement crash-table cell's effect: the `n`-th write of the lost shard's receipt, shard record or new

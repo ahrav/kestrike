@@ -650,9 +650,9 @@ fn control_a_host_loss_reported_as_volume_loss_fails_host_loss_keeps_volume_on(
     // The flip deposes s0's serving tenure in its own slot. Its `Deposed` exit ends as `serve` ends it: torn down
     // with its owner's parts returned.
     let exits = report.duties.exits.iter();
-    let deposed = exits.filter(|(.., exit)| *exit == crate::host::Exit::Deposed);
+    let deposed = exits.filter(|(_, _, exit, _)| *exit == crate::host::Exit::Deposed);
     let deposed: Vec<_> = deposed
-        .map(|&(shard, tenure, _)| (shard, tenure, true))
+        .map(|&(shard, tenure, ..)| (shard, tenure, true))
         .collect();
     assert_eq!(deposed.len(), 1, "{:?}", report.duties.exits);
     assert_eq!(report.duties.torn, deposed);
@@ -1242,13 +1242,21 @@ pub(super) fn a_held_owner_s_rerun_and_its_standby_s_takeover_race_on(rerun_firs
         match rerun_first {
             // H3's rerun read the record naming H0 and waited.
             false => assert_eq!(attempts, [(S3, H0, None)]),
+            // H0's period found the record past its witness's target and started no takeover, at each witness
+            // that reached it while H3's load ran, and issued no reservation command.
             true => {
-                assert_eq!(attempts, [(S3, H0, Some("Stopped"))]);
-                let commands = &report.hosts.takeovers[0].commands;
                 assert!(
-                    commands.is_empty(),
-                    "H0's reservation commands: {commands:?}"
+                    !attempts.is_empty()
+                        && attempts.iter().all(|a| *a == (S3, H0, Some("Stopped"))),
+                    "{attempts:?}"
                 );
+                for attempt in &report.hosts.takeovers {
+                    let commands = &attempt.commands;
+                    assert!(
+                        commands.is_empty(),
+                        "H0's reservation commands: {commands:?}"
+                    );
+                }
             }
         }
         // One write commits over the version both read, and none after it: the winner's swap or bump, and no second
