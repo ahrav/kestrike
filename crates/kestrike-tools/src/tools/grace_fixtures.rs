@@ -28,6 +28,8 @@ pub const SEEDS: [(&str, u64); 6] = [
     ("step_a", 0x6a01), ("step_b", 0x6a02), ("step_c", 0x6a03), ("step_d", 0x6a04), ("step_e", 0x6a05), ("step_f", 0x6a06),
 ];
 
+/// The first four recipes equal `RUNS` of `quint/grace_check.py`, which `quint/check.py` runs as checked
+/// runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 7] = [
     ("readerBeforePass", &[

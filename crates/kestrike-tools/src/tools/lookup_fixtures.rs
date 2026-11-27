@@ -28,6 +28,8 @@ pub const SEEDS: [(&str, u64); 6] = [
     ("step_a", 0x5e01), ("step_b", 0x5e02), ("step_c", 0x5e03), ("step_d", 0x5e04), ("step_e", 0x5e05), ("step_f", 0x5e06),
 ];
 
+/// The first three recipes equal `RUNS` of `quint/lookup_check.py`, which `quint/check.py` runs as checked
+/// runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 4] = [
     ("replaceUnderLease", &[

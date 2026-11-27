@@ -4,11 +4,15 @@
 //! level, from which a tool reads its inputs.
 
 pub mod args;
+pub mod classes;
 pub mod fixtures;
+pub mod git;
 pub mod json;
 pub mod ownership;
 pub mod paths;
 pub mod python;
+pub mod rust_text;
 pub mod shell;
+pub mod stream;
 pub mod text;
 pub mod tools;

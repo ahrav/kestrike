@@ -112,10 +112,10 @@ moving or renaming such a file, run `scripts/verify-receipts.py admit`
 yourself; CI runs the selection and reconciliation checks on every PR.
 
 Before those checks, each ref line with a comparison base runs
-`scripts/scan-weakened-tests.py --base BASE --head TIP`, the copy beside this
-script, since the scan reads Git objects and needs no worktree. Every nonzero
-scan exit is a failed check, and the worktree checks still run after it. A ref
-line with no comparison base prints that its scan was skipped.
+`bash scripts/tool.sh scan-weakened-tests --base BASE --head TIP`, the launcher
+beside this script, since the scan reads Git objects and needs no worktree.
+Every nonzero scan exit is a failed check, and the worktree checks still run
+after it. A ref line with no comparison base prints that its scan was skipped.
 
 The worktree checks run the pushed tip's own scripts, including a fetched
 commit pushed under a new name. A deleted ref needs no check. A ref line with
@@ -140,7 +140,7 @@ import tempfile
 from pathlib import Path
 
 ZERO = "0" * 40
-SCANNER = Path(__file__).with_name("scan-weakened-tests.py")
+LAUNCHER = Path(__file__).with_name("tool.sh")
 SELECTION_INPUTS = (
     "scripts/test-inventory.json", "scripts/test-registry.json",
     "scripts/select-tests.py", "scripts/test-select-tests.py",
@@ -452,11 +452,11 @@ def run_in_worktree(commit, commands):
 
 def scan(base, commit):
     """Run the weakened-test scanner over base..commit; return the failure, if any."""
-    command = ("python3", str(SCANNER), "--base", base, "--head", commit)
-    print(f"pre-push: {commit[:12]}: scan-weakened-tests.py --base {base[:12]}", file=sys.stderr)
+    command = ("bash", str(LAUNCHER), "scan-weakened-tests", "--base", base, "--head", commit)
+    print(f"pre-push: {commit[:12]}: tool.sh scan-weakened-tests --base {base[:12]}", file=sys.stderr)
     sys.stderr.flush()
     if subprocess.run(command, stdout=sys.stderr).returncode != 0:
-        return [f"scripts/scan-weakened-tests.py --base {base} --head {commit}"]
+        return [f"scripts/tool.sh scan-weakened-tests --base {base} --head {commit}"]
     return []
 
 
