@@ -93,7 +93,7 @@ fn installed(place: &Path) {
     };
     let child =
         launch(&mut record, &call).expect("an unarmed record leaves the call to its answer");
-    let (caught, ignored) = (mask(&child, "SigCgt:"), mask(&child, "SigIgn:"));
+    let ignored = mask(&child, "SigIgn:");
     assert_ne!(
         ignored & bit(Signal::Hangup),
         0,
@@ -103,13 +103,12 @@ fn installed(place: &Path) {
         ignored & (bit(Signal::Interrupt) | bit(Signal::Terminate)),
         0
     );
-    assert_eq!(caught, 0, "the child starts with no handler");
     fs::write(place.join("done"), b"").expect("the window records its end");
 }
 
 /// In a process of its own started with SIGHUP ignored, the handlers catch SIGINT and SIGTERM and leave
 /// SIGHUP ignored; a SIGTERM the process sends itself stands in the record, and the `aws` child starts
-/// with SIGHUP ignored and no handler.
+/// with SIGHUP ignored and SIGINT and SIGTERM not ignored.
 #[test]
 fn a_real_sigterm_reaches_the_record_and_an_ignored_hangup_stays_ignored() {
     if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {

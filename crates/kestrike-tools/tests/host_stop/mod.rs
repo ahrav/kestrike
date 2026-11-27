@@ -121,6 +121,7 @@ struct Observed {
     faults: Vec<Fault>,
     write_cap: Option<usize>,
     stall: bool,
+    overreport: bool,
     pause: Option<(&'static str, usize, PathBuf)>,
 }
 
@@ -189,7 +190,12 @@ impl Files for Observed {
         let taken = self
             .write_cap
             .map_or(bytes.len(), |cap| cap.min(bytes.len()));
-        Disk.write(file, &bytes[..taken])
+        let written = Disk.write(file, &bytes[..taken])?;
+        Ok(if self.overreport {
+            bytes.len() + 1
+        } else {
+            written
+        })
     }
 
     fn fsync(&self, file: &File) -> io::Result<()> {
@@ -249,7 +255,8 @@ fn start_window(name: &str, window: &str, place: &Path, prefix: &str) -> Command
         .args(["--exact", name, "--nocapture", "--test-threads", "1"])
         .env_clear()
         .env(ROLE, window)
-        .env(PLACE, place);
+        .env(PLACE, place)
+        .env("TMPDIR", std::env::temp_dir());
     command
 }
 

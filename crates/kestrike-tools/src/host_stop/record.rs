@@ -6,9 +6,10 @@
 //!
 //! - unarmed: the signal waits;
 //! - armed and not held: the read takes the signal, disarms the record and returns [`Interrupted`];
-//! - held, during a mark's write: the signal waits for the write's end; [`Record::holding`] then reads
-//!   the record when the write succeeds. On a failed write it ends the hold and leaves the signal
-//!   pending.
+//! - held, during a mark's write: the signal waits for the write's end. [`Record::holding`] reads the
+//!   record before the hold, so a signal that may raise ends the step before the write starts; it
+//!   reads the record again when the write succeeds, and on a failed write it ends the hold and leaves
+//!   the signal pending.
 
 use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -95,6 +96,8 @@ impl std::fmt::Display for Interrupted {
     }
 }
 
+impl std::error::Error for Interrupted {}
+
 /// A `Record` controls when a read can raise a stored signal.
 #[derive(Debug)]
 pub struct Record<'a> {
@@ -175,16 +178,19 @@ impl<'a> Record<'a> {
         self.held = false;
     }
 
-    /// Runs `write` held. A write that succeeds is followed by [`Record::release`]; a write that fails
-    /// ends the hold and returns its own error with the signal still stored.
+    /// Reads the record, then runs `write` held. A signal that may raise before the hold raises there
+    /// and `write` does not run. A write that succeeds is followed by [`Record::release`]; a write that
+    /// fails ends the hold and returns its own error with the signal still stored.
     ///
     /// # Errors
     ///
-    /// The outer error is a signal raised at the release after a successful write.
+    /// The outer error is a signal raised before the hold, or at the release after a successful
+    /// write. A `write` that panics leaves the record held.
     pub fn holding<T, E>(
         &mut self,
         write: impl FnOnce() -> Result<T, E>,
     ) -> Result<Result<T, E>, Interrupted> {
+        self.read()?;
         self.hold();
         match write() {
             Ok(value) => self.release().map(|()| Ok(value)),
@@ -227,8 +233,9 @@ fn ignored(signal: Signal) -> io::Result<bool> {
 }
 
 fn register(signal: Signal, delivered: &'static Delivered) -> io::Result<()> {
-    // SAFETY: the action makes one atomic compare-exchange on a value that lives to the process's end,
-    // which is async-signal-safe; it takes no lock and allocates nothing.
+    // SAFETY: the action makes one compare-exchange on a lock-free 32-bit atomic that lives to the
+    // process's end, which is async-signal-safe; it takes no lock, allocates nothing and cannot panic,
+    // since `Signal::number` is a total match and the exchange's result is dropped.
     unsafe { signal_hook::low_level::register(signal.number(), move || delivered.deliver(signal)) }
         .map(drop)
 }

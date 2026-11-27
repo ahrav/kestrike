@@ -168,13 +168,18 @@ fn a_signal_that_may_raise_ends_the_sleep_at_a_slice_end() {
     assert!(!record.is_armed());
 }
 
-/// The monotonic clock starts near zero at the seam's creation and never steps back; the wall clock
+/// Every `System` reads one monotonic clock, which never steps back; the wall clock
 /// reads the seconds since the epoch.
 #[test]
 fn the_clocks_read_monotonic_and_wall_seconds() {
     let seam = System::new();
     let first = seam.monotonic();
-    assert!((0.0..1.0).contains(&first), "{first}");
+    let other = System::new().monotonic();
+    assert!(first >= 0.0 && other >= first, "{first} {other}");
+    assert!(
+        other - first < 1.0,
+        "two values read one clock: {first} {other}"
+    );
     let mut last = first;
     for _ in 0..100 {
         let now = seam.monotonic();
@@ -191,4 +196,36 @@ fn the_clocks_read_monotonic_and_wall_seconds() {
         .expect("after the epoch")
         .as_secs_f64();
     assert!(before <= wall && wall <= after, "{before} {wall} {after}");
+}
+
+/// A signal that may raise when a write is about to be held raises before the write, which does not
+/// run; the record is then disarmed and not held. A record already held writes first and raises at
+/// the release.
+#[test]
+fn a_signal_that_may_raise_before_the_hold_raises_before_the_write() {
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    record.arm();
+    delivered.deliver(Signal::Terminate);
+    let mut ran = false;
+    let ended = record.holding(|| {
+        ran = true;
+        Ok::<_, io::Error>(())
+    });
+    assert!(matches!(ended, Err(Interrupted(Signal::Terminate))));
+    assert!(!ran, "the write does not run");
+    assert!(!record.is_armed() && !record.is_held());
+    record.arm();
+    record.hold();
+    delivered.deliver(Signal::Interrupt);
+    let mut wrote = false;
+    let held = record.holding(|| {
+        wrote = true;
+        Ok::<_, io::Error>(1)
+    });
+    assert!(matches!(held, Err(Interrupted(Signal::Interrupt))));
+    assert!(
+        wrote,
+        "an already held record writes, then raises at the release"
+    );
 }

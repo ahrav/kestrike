@@ -11,7 +11,10 @@
 //! The cut counts from the return of the spawn. The wait reads the child, both outputs and the
 //! [`Record`] at least once a [`SLICE`], and ends when the child has exited and both outputs have
 //! closed. At the cut, or at a read of the record that raises, the child alone gets SIGKILL and is
-//! reaped, with no bound on the reap, and the readers stop keeping the bytes they read.
+//! reaped, with no bound on the reap, and the readers stop keeping the bytes they read. The wait
+//! reads the record once more after it sees the child's end, so a signal that may raise during the
+//! last slice raises in place of the answer. After an early end a reader thread ends at its next read
+//! or at its pipe's close, so it outlives the call while a process the child left holds the pipe.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -46,16 +49,60 @@ pub struct Call<'a> {
     pub env: &'a [(OsString, OsString)],
 }
 
-/// A call whose outcome is unknown, with its sentence: `<two words> gave no answer: <reason>`, or
-/// `<two words> exited <code>: <tail>`, the two words the call's first two arguments, the code
-/// negative for a child a signal ended, and the tail the last 400 characters of the child's standard
-/// error stripped of Python's whitespace.
+/// A call whose outcome is unknown. `what` is the call's first two arguments joined by a space; its
+/// sentence is `<what> gave no answer: <reason>` or `<what> exited <code>: <tail>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CallFailed(String);
+pub struct CallFailed {
+    what: String,
+    failure: Failure,
+}
+
+/// How a call failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The call gave no answer, for the reason given: no `aws` on the `PATH`, a start, a read or a
+    /// wait that failed, output other than UTF-8, or the cut.
+    NoAnswer(String),
+    /// The child exited other than 0. `code` is negative for a child a signal ended, and `tail` is the
+    /// last 400 characters of its standard error, stripped of Python's whitespace.
+    Exited { code: i32, tail: String },
+}
+
+impl CallFailed {
+    /// A call of `argv` that gave no answer for `reason`.
+    pub fn no_answer(argv: &[&str], reason: impl fmt::Display) -> Self {
+        Self {
+            what: what(argv),
+            failure: Failure::NoAnswer(reason.to_string()),
+        }
+    }
+
+    /// A call of `argv` whose child exited with `code` and wrote `stderr`.
+    pub fn exited(argv: &[&str], code: i32, stderr: &str) -> Self {
+        Self {
+            what: what(argv),
+            failure: Failure::Exited {
+                code,
+                tail: tail(strip_str(stderr)).to_owned(),
+            },
+        }
+    }
+
+    pub fn what(&self) -> &str {
+        &self.what
+    }
+
+    pub fn failure(&self) -> &Failure {
+        &self.failure
+    }
+}
 
 impl fmt::Display for CallFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        match &self.failure {
+            Failure::NoAnswer(reason) => write!(f, "{} gave no answer: {reason}", self.what),
+            Failure::Exited { code, tail } => write!(f, "{} exited {code}: {tail}", self.what),
+        }
     }
 }
 
@@ -66,6 +113,29 @@ impl std::error::Error for CallFailed {}
 pub enum Ended {
     Failed(CallFailed),
     Interrupted(Interrupted),
+}
+
+impl fmt::Display for Ended {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Failed(failed) => failed.fmt(f),
+            Self::Interrupted(raised) => write!(f, "signal {raised}"),
+        }
+    }
+}
+
+impl std::error::Error for Ended {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Failed(failed) => Some(failed),
+            Self::Interrupted(raised) => Some(raised),
+        }
+    }
+}
+
+/// The first two arguments of a call, joined by a space.
+fn what(argv: &[&str]) -> String {
+    argv[..argv.len().min(2)].join(" ")
 }
 
 type Reader = JoinHandle<io::Result<Vec<u8>>>;
@@ -80,10 +150,8 @@ type Reader = JoinHandle<io::Result<Vec<u8>>>;
 /// `PATH`, a start, a reader thread, a wait or a read that fails, output other than UTF-8, the cut,
 /// or an exit other than 0.
 pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
-    let what = call.argv[..call.argv.len().min(2)].join(" ");
-    let no_answer = |reason: &dyn fmt::Display| {
-        Ended::Failed(CallFailed(format!("{what} gave no answer: {reason}")))
-    };
+    let no_answer =
+        |reason: &dyn fmt::Display| Ended::Failed(CallFailed::no_answer(call.argv, reason));
     record.read().map_err(Ended::Interrupted)?;
     let Some(program) = find(call.env) else {
         return Err(no_answer(&"no directory of PATH holds an executable aws"));
@@ -115,8 +183,7 @@ pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended>
     let stderr = joined(err).map_err(|error| no_answer(&error))?;
     let code = exit_code(status);
     if code != 0 {
-        let message = format!("{what} exited {code}: {}", tail(strip_str(&stderr)));
-        return Err(Ended::Failed(CallFailed(message)));
+        return Err(Ended::Failed(CallFailed::exited(call.argv, code, &stderr)));
     }
     Ok(stdout)
 }
@@ -198,14 +265,13 @@ fn wait(
                 }
             }
         }
-        if let Some(status) = status
-            && readers.iter().all(|reader| reader.is_finished())
-        {
-            return Ok(status);
-        }
+        let done = status.is_some() && readers.iter().all(|reader| reader.is_finished());
         if let Err(raised) = record.read() {
             stop(child, status, abandoned);
             return Err(Waited::Raised(raised));
+        }
+        if let (true, Some(status)) = (done, status) {
+            return Ok(status);
         }
         let left = left(end);
         if left.is_zero() {
@@ -288,3 +354,7 @@ fn exit_code(status: ExitStatus) -> i32 {
         .or_else(|| status.signal().map(|signal| -signal))
         .expect("a reaped child has an exit code or a signal")
 }
+
+#[cfg(test)]
+#[path = "launch_tests.rs"]
+mod tests;

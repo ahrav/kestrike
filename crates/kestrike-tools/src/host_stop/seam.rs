@@ -1,6 +1,7 @@
 //! The seam between a command and the system: the call, the wall clock, the monotonic clock and the
 //! sleep. [`System`] is the system's; a test implements [`Seam`] with its own clocks and calls.
 
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,7 +10,7 @@ use super::record::{Interrupted, Record, SLICE, left};
 
 /// The call, the two clocks and the sleep a command takes as one value.
 pub trait Seam {
-    /// Runs one `aws` call and returns its standard output.
+    /// Runs one `aws` call and returns its standard output as text.
     ///
     /// # Errors
     ///
@@ -31,7 +32,7 @@ pub trait Seam {
 }
 
 /// The system's seam: [`launch`], [`SystemTime`] and [`Instant`], which reads `CLOCK_MONOTONIC`. Its
-/// monotonic clock counts from the value's creation.
+/// monotonic clock counts from the first `System` the process makes, so every value reads one clock.
 #[derive(Clone, Copy, Debug)]
 pub struct System {
     origin: Instant,
@@ -39,8 +40,9 @@ pub struct System {
 
 impl System {
     pub fn new() -> Self {
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
         Self {
-            origin: Instant::now(),
+            origin: *ORIGIN.get_or_init(Instant::now),
         }
     }
 }

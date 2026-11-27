@@ -234,27 +234,28 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
         nth,
         errno: libc::EIO,
     };
+    let removal_sync = |nth| Fault {
+        step: "fsync_directory",
+        nth,
+        errno: libc::ENOSPC,
+    };
+    let kept = Fault {
+        step: "unlink",
+        nth: 1,
+        errno: libc::EACCES,
+    };
     for mark in MARKS {
         let name = file_name(mark);
-        let cases: [(&str, Vec<Fault>); 5] = [
+        let cases: [(&str, Vec<Fault>); 6] = [
             ("file sync", vec![file(2)]),
             ("directory sync", vec![directory_sync(1)]),
-            ("removal unsynced", vec![file(2), directory_sync(1)]),
+            ("removal unsynced", vec![file(2), removal_sync(1)]),
             (
                 "directory removal unsynced",
-                vec![directory_sync(1), directory_sync(2)],
+                vec![directory_sync(1), removal_sync(2)],
             ),
-            (
-                "stands",
-                vec![
-                    file(2),
-                    Fault {
-                        step: "unlink",
-                        nth: 1,
-                        errno: libc::EACCES,
-                    },
-                ],
-            ),
+            ("stands", vec![file(2), kept]),
+            ("directory stands", vec![directory_sync(1), kept]),
         ];
         for (case, faults) in cases {
             let directory = scratch.dir(&format!("{mark}-{}", case.replace(' ', "-")));
@@ -282,7 +283,7 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                 ) => {
                     assert_eq!(
                         (error.raw_os_error(), removal.raw_os_error()),
-                        (Some(libc::EIO), Some(libc::EIO))
+                        (Some(libc::EIO), Some(libc::ENOSPC))
                     );
                     assert_eq!(
                         sentence,
@@ -293,7 +294,7 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                     );
                     assert_eq!(listing(&directory), Vec::<String>::new());
                 }
-                ("stands", Unwritten::Stands { error, removal }) => {
+                ("stands" | "directory stands", Unwritten::Stands { error, removal }) => {
                     assert_eq!(
                         (error.raw_os_error(), removal.raw_os_error()),
                         (Some(libc::EIO), Some(libc::EACCES))
@@ -324,7 +325,7 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                 .map(|(at, _)| at)
                 .expect("the failed sync is logged");
             let after: Vec<_> = steps[at + 1..].to_vec();
-            let expected: &[&str] = if case == "stands" {
+            let expected: &[&str] = if case.ends_with("stands") {
                 &["unlink"]
             } else {
                 &["unlink", "fsync_directory"]
@@ -347,7 +348,8 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
     }
 }
 
-/// Writes that each take at most seven bytes still write every byte once, in order.
+/// Writes that each take at most seven bytes still write every byte once, in order. A write that
+/// reports more bytes than it was given ends the loop, and the write goes on to its sync and link.
 #[test]
 fn short_writes_leave_the_mark_whole() {
     let scratch = Scratch::new("marks-short");
@@ -375,6 +377,31 @@ fn short_writes_leave_the_mark_whole() {
             bytes_of(mark)
         );
     }
+    let directory = scratch.dir("over");
+    let files = Observed {
+        overreport: true,
+        ..Observed::default()
+    };
+    publish(
+        &files,
+        &directory,
+        OsStr::new("stop.json"),
+        &bytes_of("stop"),
+    )
+    .expect("the mark is written");
+    assert_eq!(
+        files
+            .steps()
+            .iter()
+            .filter(|step| **step == "write")
+            .count(),
+        1
+    );
+    assert_eq!(listing(&directory), ["stop.json"]);
+    assert_eq!(
+        fs::read(directory.join("stop.json")).expect("reads"),
+        bytes_of("stop")
+    );
 }
 
 /// The mark's directory opens without following a link: a link to a directory fails the open with

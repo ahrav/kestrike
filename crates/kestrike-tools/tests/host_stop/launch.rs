@@ -36,6 +36,19 @@ case "$HOST_STOP_MODE" in
   killed) printf 'dying\n' >&2; kill -KILL $$ ;;
   hang) exec /bin/sleep 600 ;;
   invalid) printf '\377' ;;
+  invalid-error) printf '\377' >&2; echo '{}' ;;
+  invalid-failed) printf '\377'; exit 254 ;;
+  flood|flood-failed)
+    /usr/bin/head -c 262144 /dev/zero | /usr/bin/tr '\0' x >&2
+    printf 'END\n' >&2
+    echo '{}'
+    [ "$HOST_STOP_MODE" = flood ] || exit 254 ;;
+  wide)
+    i=0
+    while [ $i -lt 500 ]; do printf '\303\251' >&2; i=$((i + 1)); done
+    printf 'a\r\nEND\n' >&2
+    exit 254 ;;
+  group) read -r stat < /proc/$$/stat; set -- $stat; printf '%s' "$5" ;;
   orphan) /bin/sleep 3 & echo '{}' ;;
   status) exec /bin/cat /proc/self/status ;;
 esac
@@ -270,6 +283,7 @@ fn a_child_whose_output_stays_open_is_cut() {
         message.starts_with("sts get-caller-identity gave no answer: "),
         "{message}"
     );
+    assert!(start.elapsed() >= cut, "the call waits to its cut");
     assert!(
         start.elapsed() < Duration::from_secs(3),
         "the call ends at its cut, not at the output's close"
@@ -379,6 +393,18 @@ fn no_aws_on_the_path_starts_no_process() {
     }
     let mut env = standin.env("echo");
     env.retain(|(name, _)| name != "PATH");
+    env.push((OsString::from("PATH"), joined(&[&empty])));
+    env.push((OsString::from("PATH"), joined(&[&standin.bin])));
+    let reply = launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(5), &env),
+    );
+    assert!(
+        reply.is_ok(),
+        "the last PATH of the environment is searched: {reply:?}"
+    );
+    let mut env = standin.env("echo");
+    env.retain(|(name, _)| name != "PATH");
     env.push((
         OsString::from("PATH"),
         joined(&[&empty, &plain, &named, &standin.bin]),
@@ -391,4 +417,86 @@ fn no_aws_on_the_path_starts_no_process() {
         reply.is_ok(),
         "the first executable aws on the PATH runs: {reply:?}"
     );
+}
+
+/// Both outputs are read at once: a child that writes 256 KiB to standard error before its reply
+/// answers, and when it fails, its call keeps the last 400 characters of that text.
+#[test]
+fn a_child_that_floods_standard_error_still_answers() {
+    let standin = Standin::new("launch-flood");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let env = standin.env("flood");
+    let reply = launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(20), &env),
+    );
+    assert_eq!(reply, Ok("{}\n".to_owned()));
+    let env = standin.env("flood-failed");
+    let message = failed(launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(20), &env),
+    ));
+    assert_eq!(
+        message,
+        format!("sts get-caller-identity exited 254: {}END", "x".repeat(397))
+    );
+}
+
+/// Both outputs decode as UTF-8 before the exit code is read: standard error other than UTF-8 fails
+/// a call that exited 0, and standard output other than UTF-8 makes a call that exited 254 give no
+/// answer.
+#[test]
+fn either_output_other_than_utf8_gives_no_answer_whatever_the_code() {
+    let standin = Standin::new("launch-utf8");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    for mode in ["invalid-error", "invalid-failed"] {
+        let env = standin.env(mode);
+        let message = failed(launch(
+            &mut record,
+            &call(&IDENTITY, true, Duration::from_secs(5), &env),
+        ));
+        assert!(
+            message.starts_with("sts get-caller-identity gave no answer: "),
+            "{mode}: {message}"
+        );
+    }
+}
+
+/// The tail of a failed call counts characters of the decoded text, whose `\r\n` reads as `\n`.
+#[test]
+fn the_tail_of_a_failed_call_counts_characters_after_newline_translation() {
+    let standin = Standin::new("launch-wide");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let env = standin.env("wide");
+    let message = failed(launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(5), &env),
+    ));
+    let text = format!("{}a\nEND", "\u{e9}".repeat(500));
+    let tail: String = text.chars().skip(text.chars().count() - 400).collect();
+    assert_eq!(
+        message,
+        format!("sts get-caller-identity exited 254: {tail}")
+    );
+}
+
+/// The child stays in the tool's process group.
+#[test]
+fn the_child_stays_in_the_process_group_of_the_tool() {
+    let standin = Standin::new("launch-group");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let env = standin.env("group");
+    let group = launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(5), &env),
+    )
+    .expect("the stand-in answers");
+    let own = fs::read_to_string("/proc/self/stat").expect("the status reads");
+    let after = own.rsplit_once(") ").expect("a stat line").1;
+    let own_group = after.split(' ').nth(2).expect("the process group");
+    assert_eq!(group, own_group);
 }
