@@ -1,3 +1,10 @@
+//! Traces of the reclaim model, `quint/reclaim.qnt`, for the replay against `Storage`.
+//!
+//! A directed trace follows one recipe of [`RECIPES`]; a seeded trace takes [`STEPS`] steps of the model's
+//! own `step` under the seed beside its name in [`SEEDS`]. Every trace records under `#meta.reclaim` its
+//! recipe, which is empty for a seeded trace, its seed, its number of steps and the model's digest, and the
+//! replay refuses a trace whose digest differs from the model's.
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
