@@ -70,7 +70,7 @@ impl Streams {
         if self.failed { 120 } else { code }
     }
 
-    /// `refuse` prints a stop that ends the run before the run directory and returns its exit code.
+    /// `refuse` prints a stop that ends the run without a report and returns its exit code.
     fn refuse(&mut self, stop: &Stop) -> u8 {
         if stop.is_fatal() {
             self.err(&text!(TOOL, ": ", stop.reason()));

@@ -121,8 +121,8 @@ ignored when the runner starts stays ignored, so a run under `nohup` outlives
 its terminal. The runner records the first handled signal and acts on it
 between steps and while it waits for a child; a signal that arrives while a
 process is being started is acted on once that process has started, and a
-later signal changes nothing. The runner then stops the supervised process group (the worktree add, the listing or the
-tool) with SIGTERM, then SIGKILL, removes the worktree, writes an incomplete
+later signal changes nothing. The runner then stops the supervised process
+group (the worktree add, the listing or the tool) with SIGTERM, then SIGKILL, removes the worktree, writes an incomplete
 report and exits 1. Each supervised process receives SIGTERM when the runner
 dies, so a runner stopped by SIGKILL also stops the tool; its worktree then
 stays in the run directory and registered until `git worktree remove --force

@@ -18,17 +18,20 @@ fn a_recorded_signal_kills_a_captured_child_and_returns_the_interruption() {
         ])
         .arg(&marker);
     let (stop, elapsed) = std::thread::scope(|scope| {
-        scope.spawn(|| {
+        let signaled = scope.spawn(|| {
             let start = Instant::now();
             while !marker.exists() && start.elapsed() < Duration::from_secs(30) {
                 std::thread::sleep(Duration::from_millis(5));
             }
             interrupt.record(libc::SIGTERM);
             interrupt.record(libc::SIGINT);
+            Instant::now()
         });
         let stop =
             capture(&mut command, &interrupt).expect_err("the recorded signal ends the capture");
-        (stop, Instant::now())
+        let returned = Instant::now();
+        let signaled = signaled.join().expect("the signalling thread ends");
+        (stop, returned.saturating_duration_since(signaled))
     });
     assert_eq!(
         interrupt.recorded(),
@@ -45,7 +48,10 @@ fn a_recorded_signal_kills_a_captured_child_and_returns_the_interruption() {
         !Path::new(&format!("/proc/{pid}")).exists(),
         "the child {pid} is killed and reaped"
     );
-    assert!(elapsed.elapsed() < Duration::from_secs(1));
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the capture returned {elapsed:?} after the signal"
+    );
 }
 
 #[test]
