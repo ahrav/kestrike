@@ -1,5 +1,5 @@
 //! An environment held as a value: the variables a child process is given, in order, which [`get`] reads
-//! and [`set`] changes without touching the process's own environment.
+//! and [`set`] and [`remove`] change without touching the process's own environment.
 
 use std::ffi::OsString;
 
@@ -18,6 +18,11 @@ pub fn get<'a>(environ: &'a Environ, name: &str) -> Option<&'a OsString> {
 pub fn set(environ: &mut Environ, name: &str, value: OsString) {
     environ.retain(|(key, _)| key != name);
     environ.push((OsString::from(name), value));
+}
+
+/// `remove` removes every variable named `name`, keeping the others in order.
+pub fn remove(environ: &mut Environ, name: &str) {
+    environ.retain(|(key, _)| key != name);
 }
 
 #[cfg(test)]

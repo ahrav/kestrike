@@ -6,14 +6,16 @@
 
 use std::collections::HashSet;
 
+use crate::environ::Environ;
+
 use super::tree::{entries, regular};
 use super::{Change, Class, Failure, Finding, Shown};
 
 pub const CASES: &str = "crates/kestrike-tools/tests";
 
 /// `cases` returns the id and the entry path of each case at `commit`, in tree order.
-fn cases(commit: &str) -> Result<Vec<(String, String)>, Failure> {
-    let listed = entries(commit, &[CASES], true)?;
+fn cases(environ: &Environ, commit: &str) -> Result<Vec<(String, String)>, Failure> {
+    let listed = entries(environ, commit, &[CASES], true)?;
     let single = listed
         .iter()
         .any(|(mode, path)| regular(mode) && *path == format!("{CASES}/tools.rs"));
@@ -52,9 +54,12 @@ fn cases(commit: &str) -> Result<Vec<(String, String)>, Failure> {
 
 /// `removed` returns a finding for each case at `base` whose id names no case at `head`. A case renamed to
 /// another id is the absence of its old id.
-pub fn removed(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
-    let present: HashSet<String> = cases(head)?.into_iter().map(|(id, _)| id).collect();
-    Ok(cases(base)?
+pub fn removed(environ: &Environ, base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
+    let present: HashSet<String> = cases(environ, head)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    Ok(cases(environ, base)?
         .into_iter()
         .filter(|(id, _)| !present.contains(id))
         .map(|(id, path)| Finding {

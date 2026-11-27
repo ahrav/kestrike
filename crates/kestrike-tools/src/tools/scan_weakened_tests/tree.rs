@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::environ::Environ;
 use crate::git::git_text;
 use crate::text::{Text, escaped};
 
@@ -15,6 +16,7 @@ use super::hunks::DIFF_BATCH;
 /// requested path that is a tree has its record whatever else the batch requests. A record that is not
 /// `<mode> <type> <id>`, a tab and a path is refused.
 pub fn entries(
+    environ: &Environ,
     commit: &str,
     paths: &[&str],
     recursive: bool,
@@ -25,7 +27,7 @@ pub fn entries(
     }
     args.extend(["--full-tree", commit, "--"]);
     args.extend(paths);
-    records(commit, &git_text(&args)?)
+    records(commit, &git_text(environ, &args)?)
 }
 
 /// `records` reads each NUL-ended record of `listed` as `(mode, path)`, the path being all of the record
@@ -61,11 +63,15 @@ pub fn regular(mode: &str) -> bool {
 /// other than `100644` and `100755` as `<path> at <short id> is not a file`, the path written through
 /// [`escaped`]. A path with no entry is an
 /// added or deleted file. It lists the paths in batches of the diff's size.
-pub fn files<'p>(commit: &str, paths: &[&'p str]) -> Result<Vec<&'p str>, Failure> {
+pub fn files<'p>(
+    environ: &Environ,
+    commit: &str,
+    paths: &[&'p str],
+) -> Result<Vec<&'p str>, Failure> {
     let mut modes = HashMap::new();
     for batch in paths.chunks(DIFF_BATCH) {
         modes.extend(
-            entries(commit, batch, false)?
+            entries(environ, commit, batch, false)?
                 .into_iter()
                 .map(|(mode, path)| (path, mode)),
         );

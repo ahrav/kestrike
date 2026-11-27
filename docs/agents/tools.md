@@ -76,7 +76,9 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
    script took from its own path. `NAMES` lists the names in ascending order of their bytes, whatever the
    module names.
 2. Put a function that two tools share in a library module, declared with one `pub mod` line in
-   `crates/kestrike-tools/src/lib.rs`, kept sorted.
+   `crates/kestrike-tools/src/lib.rs`, kept sorted. A tool or a library module may call another tool's public
+   entry, such as `scan_range` of `scan-weakened-tests`, which takes the Git environment and the report
+   stream as values.
 3. Declare a unit test file in its owner with `#[cfg(test)] #[path = "<m>_tests.rs"] mod tests;`. From a
    library module's `mod.rs` the path is `"../<m>_tests.rs"`. A tool's own files, its unit test files
    included, stand inside its directory: rustc reads a tool root through `#[path]` and resolves a `mod`
