@@ -276,7 +276,7 @@ fn join_separates_each_two_items() {
 
 /// `starts_with`, `ends_with` and `replace` match whole code points, a lone surrogate included, as
 /// `str.startswith`, `str.endswith` and `str.replace` do; an empty pattern leaves the text as it is, where
-/// `str.replace` writes the replacement between every two code points.
+/// `str.replace` writes the replacement before each code point and at the end.
 #[test]
 fn texts_match_and_replace_by_code_points() {
     let surrogate = text(&[0x61, 0xdc80, 0x62]);
@@ -301,4 +301,10 @@ fn texts_match_and_replace_by_code_points() {
     }
     let replaced = surrogate.replace(&text(&[0xdc80]), &Text::from("-"));
     assert_eq!(replaced, Text::from("a-b"));
+    let unencoded = OsStr::from_bytes(b"a\xff");
+    assert_eq!(crate::text::text!(unencoded, "/b"), {
+        let mut joined = Text::from_os(unencoded);
+        joined.push_str("/b");
+        joined
+    });
 }

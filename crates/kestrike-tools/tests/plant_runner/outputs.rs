@@ -340,9 +340,20 @@ fn an_archive_prints_its_four_pins_as_text() {
     for &(code, out, expected) in rows {
         let got = archive_pins(code, out, "the planted tree", err);
         match (got, expected) {
-            (Ok(pins), Ok(_)) => {
-                assert_eq!(pins.build(), &Text::from("b"), "{out:?}");
-                assert_eq!(format!("{pins:?}"), "Pins(['b', 'e', 'p', 't'])", "{out:?}");
+            (Ok(pins), Ok(object)) => {
+                let json::Value::Object(printed) = json::parse(object).expect("JSON") else {
+                    panic!("an object");
+                };
+                let pin = |name| match printed.get(name) {
+                    Some(Value::String(pin)) => pin.repr(),
+                    other => panic!("{name}: {other:?}"),
+                };
+                let named = ["build", "executable", "platform", "toolchain"].map(pin);
+                assert_eq!(format!("{pins:?}"), format!("Pins([{}])", named.join(", ")));
+                assert_eq!(
+                    Value::String(pins.build().clone()),
+                    *printed.get("build").expect("a build")
+                );
             }
             (Err(ending), Err(Some(reason))) => assert_eq!(ending.reason(), &Text::from(reason)),
             (Err(ending), Err(None)) => {
