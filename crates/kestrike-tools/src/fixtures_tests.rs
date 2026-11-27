@@ -1,9 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -22,10 +23,24 @@ const GATE: Model = Model {
     limit: Duration::from_secs(120),
 };
 
+/// `script` writes an executable script from a child `sh`, so this process never holds a descriptor open
+/// for writing on the file. A child that another test thread forks inherits every descriptor of this
+/// process until its exec, and an exec of a file such a descriptor holds open fails with `ETXTBSY`.
 fn script(path: &Path, text: &str) {
-    fs::write(path, text).expect("the stand-in is written");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .expect("the stand-in is executable");
+    let mut child = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("sh starts");
+    child
+        .stdin
+        .take()
+        .expect("the child's standard input is piped")
+        .write_all(text.as_bytes())
+        .expect("the script reaches the child");
+    let status = child.wait().expect("sh is reaped");
+    assert!(status.success(), "{}: {status}", path.display());
 }
 
 fn checkout() -> PathBuf {
@@ -174,89 +189,283 @@ fn a_step_count_of_usize_max_fails_the_state_count_check() {
     );
 }
 
-/// The model's digest comes from one read before the first trace, and each trace directory gets a fresh
-/// read of the model, so a model changed during a run gives the later traces the new text under the first
-/// digest.
-#[test]
-fn the_model_digest_is_read_once_and_each_copy_is_read_anew() {
-    let scratch = Scratch::new("model-race");
-    let top = scratch.0.join("top");
-    fs::create_dir_all(top.join("quint")).expect("the private top is made");
-    let model = top.join("quint/gate.qnt");
-    fs::write(&model, "module gate { val a = 1 }\n").expect("the model is written");
-    let quint = scratch.0.join("quint");
-    script(
-        &quint,
-        &format!(
-            "#!/bin/sh\nfor arg; do out=$arg; done\nprintf 'module gate {{ val b = 2 }}\\n' > '{}'\n\
-             printf '%s' '{{\"#meta\":{{\"format\":\"ITF\"}},\"states\":[{{}}]}}' > \"$out\"\n",
-            model.display()
-        ),
-    );
-    let output = scratch.0.join("out");
-    let outcome = generate(
-        &GATE,
-        &top,
-        quint.as_os_str(),
-        &output,
-        &[seeded("first", 0), seeded("second", 0)],
-        keep,
-    );
-    assert_eq!(outcome, Ok(()));
-    assert_eq!(
-        fs::read_to_string(output.join("second/gate.qnt")).expect("the copy reads"),
-        "module gate { val b = 2 }\n"
-    );
-    let digest: String = Sha256::digest(b"module gate { val a = 1 }\n")
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let written = fs::read_to_string(output.join("second.itf.json")).expect("the trace reads");
-    let Ok(Value::Object(data)) = parse(&written) else {
-        panic!("the trace is an object: {written}");
-    };
-    let Some(Value::Object(meta)) = data.get("#meta") else {
-        panic!("the trace has #meta: {written}");
-    };
-    let Some(Value::Object(record)) = meta.get("gate") else {
-        panic!("#meta holds the writer's record: {written}");
-    };
-    assert_eq!(
-        record.get("model_sha256"),
-        Some(&Value::String(digest.as_str().into()))
-    );
+/// The models of one writer of each style: `gate` with `Style::Format` and `grace` with `Style::Record`.
+fn models() -> [Model; 2] {
+    [tools::gate_fixtures::MODEL, tools::grace_fixtures::MODEL]
 }
 
-/// A Quint that exits 0 without writing leaves the file already at the trace path in place, and the writer
-/// reads that file as the trace and writes it again under its own record.
+/// `record` returns the writer's record under `#meta.<model>` of the trace at `file`.
+fn record(file: &Path, model: &str) -> crate::json::Object {
+    let written = fs::read_to_string(file).expect("the trace reads");
+    let Ok(Value::Object(mut data)) = parse(&written) else {
+        panic!("the trace is an object: {written}");
+    };
+    let Some(Value::Object(mut meta)) = data.remove("#meta") else {
+        panic!("the trace has #meta: {written}");
+    };
+    let Some(Value::Object(record)) = meta.remove(model) else {
+        panic!("#meta holds the writer's record: {written}");
+    };
+    record
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// A model file that the first trace's Quint run replaces leaves both traces with a copy of the text read
+/// before the first trace and that text's digest in `model_sha256`.
 #[test]
-fn a_file_left_at_the_trace_path_is_read_as_the_trace_when_quint_writes_none() {
-    let scratch = Scratch::new("leftover");
-    let quint = scratch.0.join("quint");
-    script(&quint, "#!/bin/sh\nexit 0\n");
-    let output = scratch.0.join("out");
-    fs::create_dir_all(&output).expect("the output directory is made");
-    fs::write(
-        output.join("first.itf.json"),
-        r##"{"#meta":{"format":"ITF","source":"old"},"states":[{"left":"over"}]}"##,
-    )
-    .expect("the leftover trace is written");
-    let outcome = generate(
-        &GATE,
-        &checkout(),
-        quint.as_os_str(),
-        &output,
-        &[seeded("first", 0)],
-        keep,
-    );
-    assert_eq!(outcome, Ok(()));
-    let written = fs::read_to_string(output.join("first.itf.json")).expect("the trace reads");
-    assert!(
-        written.starts_with(r##"{"#meta":{"format":"ITF","gate":{"model_sha256":""##)
-            && written.ends_with(
-                r#""seed":"0x1","steps":0}},"states":[{"left":"over"}]}
-"#
+fn the_model_digest_and_every_copy_come_from_one_read() {
+    for model in models() {
+        let name = model.name;
+        let scratch = Scratch::new("model-race");
+        let top = scratch.0.join("top");
+        fs::create_dir_all(top.join("quint")).expect("the private top is made");
+        let source = top.join(format!("quint/{name}.qnt"));
+        let first = format!("module {name} {{ val a = 1 }}\n");
+        fs::write(&source, &first).expect("the model is written");
+        let quint = scratch.0.join("quint");
+        script(
+            &quint,
+            &format!(
+                "#!/bin/sh\nfor arg; do out=$arg; done\nprintf 'module {name} {{ val b = 2 }}\\n' > '{}'\n\
+                 printf '%s' '{{\"#meta\":{{\"format\":\"ITF\"}},\"states\":[{{}}]}}' > \"$out\"\n",
+                source.display()
             ),
-        "{written}"
-    );
+        );
+        let output = scratch.0.join("out");
+        let outcome = generate(
+            &model,
+            &top,
+            quint.as_os_str(),
+            &output,
+            &[seeded("first", 0), seeded("second", 0)],
+            keep,
+        );
+        assert_eq!(outcome, Ok(()), "{name}");
+        assert_ne!(
+            fs::read_to_string(&source).expect("the model reads"),
+            first,
+            "{name}: the stand-in replaced the model"
+        );
+        for trace in ["first", "second"] {
+            let copy =
+                fs::read(output.join(format!("{trace}/{name}.qnt"))).expect("the copy reads");
+            assert_eq!(copy, first.as_bytes(), "{name}: the copy beside {trace}");
+            assert_eq!(
+                record(&output.join(format!("{trace}.itf.json")), name).get("model_sha256"),
+                Some(&Value::String(sha256(&copy).as_str().into())),
+                "{name}: the digest of {trace}"
+            );
+        }
+    }
+}
+
+/// A file at the trace path is removed before Quint starts, so a Quint that exits 0 without writing fails
+/// the run at the read of the trace, and the file is gone.
+#[test]
+fn a_file_left_at_the_trace_path_is_removed_and_a_quint_that_writes_none_fails_the_read() {
+    for model in models() {
+        let scratch = Scratch::new("leftover");
+        let quint = scratch.0.join("quint");
+        script(&quint, "#!/bin/sh\nexit 0\n");
+        let output = scratch.0.join("out");
+        fs::create_dir_all(&output).expect("the output directory is made");
+        let file = output.join("first.itf.json");
+        fs::write(
+            &file,
+            r##"{"#meta":{"format":"ITF","source":"old"},"states":[{"left":"over"}]}"##,
+        )
+        .expect("the leftover trace is written");
+        let outcome = generate(
+            &model,
+            &checkout(),
+            quint.as_os_str(),
+            &output,
+            &[seeded("first", 0)],
+            keep,
+        );
+        assert_eq!(
+            outcome,
+            Err(format!(
+                "{}: No such file or directory (os error 2)",
+                file.display()
+            )),
+            "{}",
+            model.name
+        );
+        assert!(!file.exists(), "{}", model.name);
+    }
+}
+
+/// A directory at the trace path ends the run with one line naming the path before Quint starts; the
+/// directory stays and the trace directory holds the model copy and `case.qnt`.
+#[test]
+fn a_directory_at_the_trace_path_ends_the_run_before_quint_starts() {
+    for model in models() {
+        let scratch = Scratch::new("trace-directory");
+        let quint = scratch.0.join("quint");
+        let started = scratch.0.join("started");
+        script(
+            &quint,
+            &format!("#!/bin/sh\ntouch '{}'\nexit 0\n", started.display()),
+        );
+        let output = scratch.0.join("out");
+        let file = output.join("first.itf.json");
+        fs::create_dir_all(file.join("inner")).expect("the directory is made");
+        let outcome = generate(
+            &model,
+            &checkout(),
+            quint.as_os_str(),
+            &output,
+            &[seeded("first", 0)],
+            keep,
+        );
+        assert_eq!(
+            outcome,
+            Err(format!("{}: Is a directory (os error 21)", file.display())),
+            "{}",
+            model.name
+        );
+        assert!(file.join("inner").is_dir(), "{}", model.name);
+        assert!(!started.exists(), "{}: Quint never starts", model.name);
+        assert!(output.join(format!("first/{}.qnt", model.name)).exists());
+        assert!(output.join("first/case.qnt").exists());
+    }
+}
+
+/// Quint receives `--out-itf ../<name>.itf.json` from the trace directory, so an output path holding `{seq}`,
+/// which the stand-in expands to `0` as Quint 0.33.0 does, keeps every trace under the path as given.
+#[test]
+fn an_output_path_with_a_sequence_template_holds_each_trace() {
+    for model in models() {
+        let scratch = Scratch::new("template");
+        let quint = scratch.0.join("quint");
+        let log = scratch.0.join("out-itf");
+        script(
+            &quint,
+            &format!(
+                "#!/bin/sh\nfor arg; do out=$arg; done\nprintf '%s\\n' \"$out\" >> '{}'\n\
+                 out=$(printf '%s' \"$out\" | sed 's/{{seq}}/0/g')\n\
+                 printf '%s' '{{\"#meta\":{{\"format\":\"ITF\"}},\"states\":[{{}}]}}' > \"$out\"\n",
+                log.display()
+            ),
+        );
+        let output = scratch.0.join("out{seq}");
+        let outcome = generate(
+            &model,
+            &checkout(),
+            quint.as_os_str(),
+            &output,
+            &[seeded("first", 0), seeded("second", 0)],
+            keep,
+        );
+        assert_eq!(outcome, Ok(()), "{}", model.name);
+        assert_eq!(
+            fs::read_to_string(&log).expect("the log reads"),
+            "../first.itf.json\n../second.itf.json\n",
+            "{}",
+            model.name
+        );
+        for trace in ["first", "second"] {
+            let file = output.join(format!("{trace}.itf.json"));
+            assert!(record(&file, model.name).get("model_sha256").is_some());
+        }
+        assert!(!scratch.0.join("out0").exists(), "{}", model.name);
+    }
+}
+
+/// The rewritten trace takes the permission bits of the file Quint wrote, and the trace directory holds the
+/// model copy and `case.qnt` alone once the rewrite is renamed over the trace.
+#[test]
+fn the_rewritten_trace_keeps_the_raw_files_permission_bits() {
+    for model in models() {
+        let scratch = Scratch::new("mode");
+        let quint = scratch.0.join("quint");
+        script(
+            &quint,
+            "#!/bin/sh\nfor arg; do out=$arg; done\n\
+             printf '%s' '{\"#meta\":{\"format\":\"ITF\"},\"states\":[{}]}' > \"$out\"\nchmod 640 \"$out\"\n",
+        );
+        let output = scratch.0.join("out");
+        let outcome = generate(
+            &model,
+            &checkout(),
+            quint.as_os_str(),
+            &output,
+            &[seeded("first", 0)],
+            keep,
+        );
+        assert_eq!(outcome, Ok(()), "{}", model.name);
+        let file = output.join("first.itf.json");
+        let mode = fs::metadata(&file)
+            .expect("the trace's metadata reads")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o640, "{}", model.name);
+        assert!(record(&file, model.name).get("model_sha256").is_some());
+        let mut entries: Vec<String> = fs::read_dir(output.join("first"))
+            .expect("the trace directory lists")
+            .map(|entry| {
+                let name = entry.expect("an entry lists").file_name();
+                name.into_string().expect("a UTF-8 name")
+            })
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            ["case.qnt".to_owned(), format!("{}.qnt", model.name)],
+            "{}",
+            model.name
+        );
+    }
+}
+
+/// An entry at the rewrite's new file `<output>/<name>/<name>.itf.json.new` ends the run with one line
+/// naming it; the entry stays, and the trace path holds Quint's bytes.
+#[test]
+fn an_entry_at_the_rewrites_new_file_ends_the_run_and_keeps_quints_trace() {
+    for model in models() {
+        let scratch = Scratch::new("staged");
+        let quint = scratch.0.join("quint");
+        let raw = r##"{"#meta":{"format":"ITF"},"states":[{}]}"##;
+        script(
+            &quint,
+            &format!(
+                "#!/bin/sh\nfor arg; do out=$arg; done\nprintf '%s' '{raw}' > \"$out\"\n\
+                 printf 'other' > first.itf.json.new\n"
+            ),
+        );
+        let output = scratch.0.join("out");
+        let outcome = generate(
+            &model,
+            &checkout(),
+            quint.as_os_str(),
+            &output,
+            &[seeded("first", 0), seeded("second", 0)],
+            keep,
+        );
+        let staged = output.join("first/first.itf.json.new");
+        assert_eq!(
+            outcome,
+            Err(format!("{}: File exists (os error 17)", staged.display())),
+            "{}",
+            model.name
+        );
+        assert_eq!(
+            fs::read_to_string(&staged).expect("the entry stays"),
+            "other"
+        );
+        assert_eq!(
+            fs::read_to_string(output.join("first.itf.json")).expect("Quint's trace stays"),
+            raw,
+            "{}",
+            model.name
+        );
+        assert!(!output.join("second").exists(), "{}", model.name);
+    }
 }

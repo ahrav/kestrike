@@ -1,13 +1,15 @@
 //! [`write`] reads a writer's command line and writes its traces as the module comment of `fixtures` states.
 //!
 //! The output is all or nothing for each trace up to the first failure: the traces before it are complete,
-//! and the failing one keeps Quint's own bytes when Quint wrote them.
+//! and the failing one keeps Quint's own bytes when Quint wrote them. A directory or an entry the writer
+//! cannot remove at a trace's path ends the run before Quint starts for that trace.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -201,22 +203,25 @@ pub(crate) fn generate(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
+    let copy = model_text(&bytes);
     for trace in traces {
-        let file = output.join(format!("{}.itf.json", trace.name));
+        let leaf = format!("{}.itf.json", trace.name);
+        let file = output.join(&leaf);
         let directory = output.join(&trace.name);
         create(&directory).map_err(at(&directory))?;
-        let text = read_text(&source).map_err(at(&source))?;
+        let text = copy.as_deref().map_err(at(&source))?;
         for (name, text) in [
-            (format!("{}.qnt", model.name), text.as_str()),
+            (format!("{}.qnt", model.name), text),
             ("case.qnt".to_owned(), &trace.case),
         ] {
             let path = directory.join(name);
             fs::write(&path, text).map_err(at(&path))?;
         }
-        let args = arguments(model, trace, &file);
+        clear(&file).map_err(at(&file))?;
+        let args = arguments(model, trace, &Path::new("..").join(&leaf));
         quint::run(quint, &args, &directory, model.style.stdout(), model.limit)
             .map_err(|failure| format!("{}: {failure}", trace.name))?;
-        let mut data = read_trace(&file)?;
+        let (mut data, mode) = read_trace(&file)?;
         let states = data
             .get("states")
             .ok_or_else(|| format!("{}: the trace has no key 'states'", file.display()))?;
@@ -253,7 +258,8 @@ pub(crate) fn generate(
             Value::Object(record(model.style, &digest, trace)),
         );
         data.insert("#meta", Value::Object(meta));
-        fs::write(&file, json::dump(&Value::Object(data))).map_err(at(&file))?;
+        let staged = directory.join(format!("{leaf}.new"));
+        replace(&file, &staged, mode, &json::dump(&Value::Object(data)))?;
     }
     Ok(())
 }
@@ -295,7 +301,8 @@ fn actions(recipe: &[&str]) -> Value {
     )
 }
 
-fn arguments(model: &Model, trace: &Trace, file: &Path) -> Vec<OsString> {
+/// `arguments` returns the `quint run` vector for `trace`, which writes the trace to `out`.
+fn arguments(model: &Model, trace: &Trace, out: &Path) -> Vec<OsString> {
     let main = format!("{}Case", model.name);
     let seed = format!("{:#x}", trace.seed);
     let steps = trace.steps.to_string();
@@ -324,7 +331,7 @@ fn arguments(model: &Model, trace: &Trace, file: &Path) -> Vec<OsString> {
         .chain(&last)
         .map(OsString::from)
         .collect();
-    args.push(file.as_os_str().to_owned());
+    args.push(out.as_os_str().to_owned());
     args
 }
 
@@ -341,22 +348,67 @@ fn create(directory: &Path) -> io::Result<()> {
     }
 }
 
-/// `read_text` reads `path` as UTF-8 and writes each `\r\n` and each lone `\r` as `\n`, the text a model
-/// copy holds.
-fn read_text(path: &Path) -> io::Result<String> {
-    Ok(fs::read_to_string(path)?
+/// `model_text` decodes the model's bytes as UTF-8 and writes each `\r\n` and each lone `\r` as `\n`, the
+/// text a model copy holds.
+fn model_text(bytes: &[u8]) -> io::Result<String> {
+    Ok(io::read_to_string(bytes)?
         .replace("\r\n", "\n")
         .replace('\r', "\n"))
 }
 
-fn read_trace(file: &Path) -> Result<Object, String> {
-    let bytes = fs::read(file).map_err(at(file))?;
+/// `clear` removes the entry at `file`, a symbolic link itself and not its target, and succeeds when no
+/// entry is there. A directory at `file` is refused with `EISDIR`.
+fn clear(file: &Path) -> io::Result<()> {
+    match fs::remove_file(file) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
+/// `read_trace` returns the trace at `file` with the permission bits of the file it read.
+fn read_trace(file: &Path) -> Result<(Object, u32), String> {
+    let mut opened = File::open(file).map_err(at(file))?;
+    let mode = opened.metadata().map_err(at(file))?.permissions().mode() & 0o7777;
+    let mut bytes = Vec::new();
+    opened.read_to_end(&mut bytes).map_err(at(file))?;
     let text = String::from_utf8(bytes).map_err(at(file))?;
     match json::parse(&text).map_err(at(file))? {
-        Value::Object(data) => Ok(data),
+        Value::Object(data) => Ok((data, mode)),
         _ => Err(format!(
             "{}: the trace is a JSON value other than an object",
             file.display()
         )),
     }
+}
+
+/// `replace` creates `staged`, which must be new, writes `text` to it, gives it the permission bits `mode`,
+/// syncs it and renames it over `file`, so `file` holds either its earlier bytes or the whole `text`. On a
+/// failure after the creation, `replace` removes `staged` and returns one line naming the path of the step
+/// that failed.
+fn replace(file: &Path, staged: &Path, mode: u32, text: &str) -> Result<(), String> {
+    let mut new = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(staged)
+        .map_err(at(staged))?;
+    let written = new
+        .write_all(text.as_bytes())
+        .and_then(|()| new.set_permissions(fs::Permissions::from_mode(mode)))
+        .and_then(|()| new.sync_all())
+        .map_err(|error| (staged, error));
+    drop(new);
+    let Err((path, error)) =
+        written.and_then(|()| fs::rename(staged, file).map_err(|error| (file, error)))
+    else {
+        return Ok(());
+    };
+    Err(match fs::remove_file(staged) {
+        Ok(()) => format!("{}: {error}", path.display()),
+        Err(removal) => format!(
+            "{}: {error}; removing {} failed: {removal}",
+            path.display(),
+            staged.display()
+        ),
+    })
 }
