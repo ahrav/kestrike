@@ -37,8 +37,8 @@ binder's release-scope mutant keeps the devices a release's raw record decodes
 to and hands the release both devices, so its violation is a restore write
 outside the record. Each binder invariant that a passing case defines in its
 instance module has a mutant case that must violate it. The replayed-run test checks that each
-run of the escrow, gate and marklog checkers is the recipe its committed replay trace records, and for escrow
-the trace's volume.
+run of the escrow, gate, marklog, grace, lookup, reclaim and register checkers is the recipe its committed
+replay trace records, and for escrow the trace's volume.
 """
 
 import dataclasses
@@ -861,7 +861,11 @@ class ReplayedRuns(unittest.TestCase):
         storage = ROOT / "crates/kestrike/src/storage"
         for model, checks, fixtures in (("escrow", check.escrow_checks, "builder_tests/escrow_replay_fixtures"),
                                         ("gate", check.gate_checks, "volume/gate_replay_fixtures"),
-                                        ("marklog", check.marklog_checks, "marklog_replay_fixtures")):
+                                        ("marklog", check.marklog_checks, "marklog_replay_fixtures"),
+                                        ("grace", check.grace_checks, "grace_replay_fixtures"),
+                                        ("lookup", check.lookup_checks, "lookup_replay_fixtures"),
+                                        ("reclaim", check.reclaim_checks, "reclaim_replay_fixtures"),
+                                        ("register", check.register_checks, "register_replay_fixtures")):
             self.assertTrue(checks.RUNS, model)
             for name, row in checks.RUNS.items():
                 with self.subTest(run=name):
