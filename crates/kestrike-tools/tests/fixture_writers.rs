@@ -1073,17 +1073,23 @@ fn an_interrupt_of_the_writer_ends_quint_and_the_writer() {
         ),
     );
     let output = scratch.0.join("out");
-    let mut writer = Command::new(BINARY)
-        .arg(top())
-        .args([
-            "gate_fixtures".as_ref(),
-            "--quint".as_ref(),
-            quint.as_os_str(),
-            "--output".as_ref(),
-            output.as_os_str(),
-        ])
-        .spawn()
-        .expect("the binary starts");
+    let mut command = Command::new(BINARY);
+    command.arg(top()).args([
+        "gate_fixtures".as_ref(),
+        "--quint".as_ref(),
+        quint.as_os_str(),
+        "--output".as_ref(),
+        output.as_os_str(),
+    ]);
+    // SAFETY: the closure runs in the forked child before exec and calls only `signal`, which is
+    // async-signal-safe; it gives the writer the default SIGINT disposition whatever this test inherited.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            Ok(())
+        });
+    }
+    let mut writer = command.spawn().expect("the binary starts");
     assert!(await_file(&started), "the stand-in starts");
     let child: libc::pid_t = fs::read_to_string(&started)
         .expect("the stand-in's pid reads")
