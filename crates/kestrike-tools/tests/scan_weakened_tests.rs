@@ -1157,6 +1157,19 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             vec![],
             "the id 'x.y'",
         ),
+        (
+            vec![(INVENTORY.to_owned(), r#"{"": {"seeds": 4}}"#.to_owned())],
+            vec![],
+            "the key '' under the root could name another path",
+        ),
+        (
+            vec![(
+                INVENTORY.to_owned(),
+                r#"{"a": {"": {"seeds": 4}}}"#.to_owned(),
+            )],
+            vec![],
+            "the key '' under a could name another path",
+        ),
         (vec![(INVENTORY.to_owned(), deep)], vec![], INVENTORY),
         (
             vec![(INVENTORY.to_owned(), String::new())],
@@ -1909,20 +1922,58 @@ fn an_inventory_scan_ignores_the_pathspec_environment() {
     }
 }
 
+/// A carriage return in a path is written `\r` in the report line, the step summary and the hint line, so
+/// the `::error::` after it starts no line that a runner reads as a workflow command. A backslash in the
+/// path stays as it is.
 #[test]
-fn a_carriage_return_in_a_path_keeps_the_path() {
+fn a_carriage_return_in_a_path_is_written_escaped() {
     let repo = Repo::new("carriage-return");
-    let path = "src/a\rb.rs";
+    let path = "src/a\r::error::b\\c.rs";
     repo.change(&[(path, "const SEEDS: u64 = 12;\n")]);
     let head = repo.change(&[(path, "const SEEDS: u64 = 11;\n")]);
-    let run = repo.scan_parent(&head);
-    let expected = format!("blocks budget-lowered:{path} SEEDS at line 1: 12 -> 11\n");
+    let summary = repo.temp.join("summary.md");
+    let summary_path = summary.to_str().expect("the path is UTF-8");
+    let base = format!("{head}^");
+    let run = repo.scan_env(
+        &["--base", &base, "--head", &head],
+        &[("GITHUB_STEP_SUMMARY", summary_path)],
+    );
+    let key = "budget-lowered:src/a\\r::error::b\\c.rs";
+    let line = format!("blocks {key} SEEDS at line 1: 12 -> 11\n");
     assert_eq!(
         (run.code, run.bytes.as_slice()),
-        (Some(1), expected.as_bytes()),
+        (Some(1), line.as_bytes()),
         "{}",
         run.stderr
     );
+    let parent = repo.git(&["rev-parse", &base]);
+    let range = format!("{}..{}", &parent[..12], &head[..12]);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "scan-weakened-tests: {key} blocks; acknowledge it with a commit-message line in {range}: \
+             Weakens-Test: {key}: <reason>\n"
+        )
+    );
+    let text = fs::read_to_string(&summary).expect("the summary reads");
+    assert_eq!(
+        text,
+        format!("Weakened-test scan of {range}:\n\n```text\n{line}```\n")
+    );
+}
+
+/// A line feed, U+007F and U+0085 in an inventory key are written as `repr` writes them, and U+00A0, which
+/// lies past U+009F, is written as it is.
+#[test]
+fn a_control_character_in_an_inventory_key_is_written_escaped() {
+    let repo = Repo::new("key-line-feed");
+    let key = r#"x\n\u007f\u0085\u00a0::error::y"#;
+    let base = repo.change(&[(INVENTORY, &format!(r#"{{"{key}": {{"seeds": 2}}}}"#))]);
+    let head = repo.change(&[(INVENTORY, &format!(r#"{{"{key}": {{"seeds": 1}}}}"#))]);
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    let line =
+        format!("blocks budget-lowered:{INVENTORY} x\\n\\x7f\\x85\u{a0}::error::y.seeds: 2 -> 1\n");
+    assert_eq!(run.outcome(), (Some(1), line.as_str()), "{}", run.stderr);
 }
 
 #[test]
@@ -2146,18 +2197,20 @@ fn changed_rust_files_share_one_diff_process_per_batch() {
     );
 }
 
+/// A path that Git quotes in its `diff --git` header makes the batch's headers differ from the expected ones,
+/// so each path of the batch is read in a diff of its own, and each later file keeps its own hunks.
 #[test]
-fn a_file_that_becomes_a_link_leaves_each_later_file_its_own_hunks() {
-    let repo = Repo::new("becomes-link");
+fn a_path_that_git_quotes_leaves_each_later_file_its_own_hunks() {
+    let repo = Repo::new("quoted-path");
     repo.change(&[
-        ("src/a.rs", "    b.max_branches = 10;\n"),
+        ("src/a\"q.rs", "    b.max_branches = 10;\n"),
         ("src/b.rs", "    b.max_branches = 10;\n"),
     ]);
-    repo.link("src/a.rs", "b.rs", "");
-    repo.write("src/b.rs", b"    b.max_branches = 9;\n");
-    repo.git(&["add", "src/b.rs"]);
-    repo.git(&["commit", "-q", "-m", "link"]);
-    let run = repo.scan(&["--base", "HEAD^", "--head", "HEAD"]);
+    let head = repo.change(&[
+        ("src/a\"q.rs", "    b.max_branches = 12;\n"),
+        ("src/b.rs", "    b.max_branches = 9;\n"),
+    ]);
+    let run = repo.scan_parent(&head);
     let expected = "blocks budget-lowered:src/b.rs max_branches at line 1: 10 -> 9\n";
     assert_eq!(run.outcome(), (Some(1), expected), "{}", run.stderr);
 }
@@ -2454,5 +2507,70 @@ fn a_summary_path_with_a_trailing_separator_names_its_file() {
     assert!(
         text.contains(&format!("blocks {KEY} second: not ignored -> #[ignore]\n")),
         "{text}"
+    );
+}
+
+/// A change under a directory that stands at the inventory's path at the base runs the inventory check, which
+/// refuses the directory as no file.
+#[test]
+fn a_change_under_an_inventory_directory_exits_two() {
+    let repo = Repo::new("inventory-directory");
+    let inner = format!("{INVENTORY}/x");
+    repo.git(&["rm", "-q", "--", INVENTORY]);
+    let base = repo.change(&[(&inner, "{}")]);
+    let head = repo.change(&[(&inner, r#"{"seeds": 1}"#)]);
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    let expected = format!(
+        "scan-weakened-tests: {INVENTORY} at {} is not a file\n",
+        &base[..12]
+    );
+    assert_eq!(run.stderr, expected);
+}
+
+/// A changed Rust path or timeout file whose entry at the base or the head is neither mode 100644 nor 100755
+/// is refused, naming that commit: a link whose target holds an ignored test stands where the scan would read
+/// the link's target path as Rust text.
+#[test]
+fn a_diffed_path_that_is_no_file_at_either_commit_exits_two() {
+    let repo = Repo::new("not-a-file");
+    let tests = test_fn("first") + &test_fn("second");
+    let file = repo.change(&[("tests/t.rs", &tests)]);
+    let ignored = tests.replace("#[test]\nfn second", "#[test]\n#[ignore]\nfn second");
+    repo.write("tests/ignored.txt", ignored.as_bytes());
+    repo.git(&["add", "tests/ignored.txt"]);
+    let link = repo.link("tests/t.rs", "ignored.txt", "link");
+    repo.reset(&link);
+    fs::remove_file(repo.repo.join("tests/t.rs")).expect("the link is removed");
+    let restored = repo.change(&[("tests/t.rs", &tests)]);
+    repo.reset(&repo.base);
+    let lane = repo.link("scripts/rust-lane.sh", "x", "lane link");
+    for (base, head, named, path) in [
+        (&file, &link, &link, "tests/t.rs"),
+        (&link, &restored, &link, "tests/t.rs"),
+        (&repo.base, &lane, &lane, "scripts/rust-lane.sh"),
+    ] {
+        let run = repo.scan(&["--base", base, "--head", head]);
+        assert_eq!(run.outcome(), (Some(2), ""), "{path}: {}", run.stderr);
+        let expected = format!(
+            "scan-weakened-tests: {path} at {} is not a file\n",
+            &named[..12]
+        );
+        assert_eq!(run.stderr, expected);
+    }
+}
+
+/// Git reads no replacement object: a replace ref that maps the head's tree to the base's leaves the scan
+/// reading the head's own tree, where an existing test gains an ignore.
+#[test]
+fn a_replace_ref_leaves_the_heads_own_tree_scanned() {
+    let repo = Repo::new("replace-ref");
+    let head = repo.ignore_second("ignore");
+    let tree = |rev: &str| repo.git(&["rev-parse", &format!("{rev}^{{tree}}")]);
+    repo.git(&["replace", &tree(&head), &tree(&repo.base)]);
+    assert_eq!(repo.git(&["diff", "--name-only", &repo.base, &head]), "");
+    assert_blocks(
+        &repo.scan_head(&head),
+        &format!("{KEY} second: not ignored -> #[ignore]"),
     );
 }

@@ -9,12 +9,13 @@ use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::git::{blob_texts, git, git_text, merge_base};
 use crate::json::Integer;
 use crate::stream::emit;
-use crate::text::strip_str;
+use crate::text::{push_repr, strip_str};
 
 use super::declarations::{conditions, declarations, plain};
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
+use super::tree::files;
 use super::{Change, Class, Failure, Finding, Shown};
 
 const TOOL: &str = super::NAME;
@@ -67,6 +68,15 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
             "a changed Rust path holds a newline, which the blob reader cannot name".to_owned(),
         ));
     }
+    let diffed: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
+        .collect();
+    if !diffed.is_empty() {
+        files(base, &diffed)?;
+        files(head, &diffed)?;
+    }
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])
@@ -76,11 +86,6 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
     } else {
         blob_texts(&specs)?
     };
-    let diffed: Vec<&str> = paths
-        .iter()
-        .copied()
-        .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
-        .collect();
     let diffs = path_hunks(base, head, &diffed)?;
     let hunks_of = |path: &str| {
         diffs
@@ -123,7 +128,11 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
             })?,
         );
     }
-    if paths.contains(&INVENTORY) {
+    let inventory = |path: &&str| {
+        path.strip_prefix(INVENTORY)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    if paths.iter().any(inventory) {
         let old = inventory_text(base)?;
         let new = inventory_text(head)?;
         push(INVENTORY, inventory_changes(&old, &new)?);
@@ -346,7 +355,22 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     report(&scanned).unwrap_or(STREAM_FAILED)
 }
 
-/// `report` returns `Err` when standard error cannot be written.
+/// `escaped` writes each code point U+0000 to U+001F and U+007F to U+009F of `text` as `repr` writes it and
+/// every other code point as it is, so a field of a report line starts no line of its own.
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for code in text.chars() {
+        if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {
+            push_repr(u32::from(code), &mut out);
+        } else {
+            out.push(code);
+        }
+    }
+    out
+}
+
+/// `report` writes each field of a line through [`escaped`]. It returns `Err` when standard error cannot be
+/// written.
 fn report(scanned: &Scan) -> Result<u8, io::Error> {
     let mut lines = String::new();
     let mut unacknowledged: Vec<String> = Vec::new();
@@ -358,10 +382,11 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             old,
             new,
         } = &found.change;
-        let line = format!("{key} {name}: {old} -> {new}");
+        let line = escaped(&format!("{key} {name}: {old} -> {new}"));
         if !class.blocks() {
             lines.push_str(&format!("reports {line}\n"));
         } else if let Some(reason) = scanned.reasons.get(&key) {
+            let reason = escaped(reason);
             lines.push_str(&format!("acknowledged {line} (Weakens-Test: {reason})\n"));
         } else {
             lines.push_str(&format!("blocks {line}\n"));
@@ -397,7 +422,7 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             }
         }
     }
-    for key in &unacknowledged {
+    for key in unacknowledged.iter().map(|key| escaped(key)) {
         complain(&format!(
             "{TOOL}: {key} blocks; acknowledge it with a commit-message line in {range}: \
              Weakens-Test: {key}: <reason>\n"

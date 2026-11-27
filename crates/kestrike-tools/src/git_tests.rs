@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::git::{GitError, batch_texts, git, label, merge_base};
+use crate::git::{GitError, batch_texts, blob_texts, git, label, merge_base};
 use crate::text::strip_str;
 
 fn specs(names: &[&str]) -> Vec<String> {
@@ -10,7 +10,7 @@ fn specs(names: &[&str]) -> Vec<String> {
 
 #[test]
 fn a_batch_reply_reads_each_blob_and_an_absent_name_as_empty_text() {
-    let reply = b"1111 blob 3\nabc\n2222 missing\nHEAD:a b.rs missing\n3333 tree 4\n\x01\x02\x03\x04\n4444 blob 0\n\n";
+    let reply = b"1111 blob 3\nabc\nHEAD:gone missing\nHEAD:a b.rs missing\n3333 tree 4\n\x01\x02\x03\x04\n4444 blob 0\n\n";
     let names = specs(&[
         "HEAD:x",
         "HEAD:gone",
@@ -20,13 +20,6 @@ fn a_batch_reply_reads_each_blob_and_an_absent_name_as_empty_text() {
     ]);
     let texts = batch_texts(reply, &names).expect("the reply reads");
     assert_eq!(texts, ["abc", "", "", "", ""]);
-}
-
-#[test]
-fn a_header_split_by_vertical_tab_or_form_feed_names_a_blob() {
-    let texts =
-        batch_texts(b"1111\x0bblob\x0c2\nhi\n", &specs(&["HEAD:x"])).expect("the reply reads");
-    assert_eq!(texts, ["hi"]);
 }
 
 #[test]
@@ -47,10 +40,52 @@ fn a_reply_that_ends_before_an_answer_is_truncated() {
     assert!(matches!(error, GitError::Truncated(_)), "{error:?}");
 }
 
+/// A reply is `<id> <type> <size>`, a line feed, `size` bytes and a line feed, or `<name> missing` for its own
+/// request's name. A body cut before its size or its line feed, a header of another form, a `missing` line for
+/// another name and bytes after the last reply are each the reader's truncation error, which names the request.
 #[test]
-fn a_size_past_the_reply_takes_the_rest_of_the_reply() {
-    let texts = batch_texts(b"1111 blob 99\nab", &specs(&["HEAD:a"])).expect("the reply reads");
-    assert_eq!(texts, ["ab"]);
+fn a_reply_of_another_form_is_truncated() {
+    for (reply, name) in [
+        (&b"1111 blob 99\nab"[..], "HEAD:a"),
+        (b"1111 blob 2\nab", "HEAD:a"),
+        (b"1111 blob 2\nabc\n", "HEAD:a"),
+        (b"1111 blob\nab\n", "HEAD:a"),
+        (b"1111\x0bblob\x0c2\nhi\n", "HEAD:a"),
+        (b"1111  blob 2\nhi\n", "HEAD:a"),
+        (b"1111 blob -2\nhi\n", "HEAD:a"),
+        (b"HEAD:b missing\n", "HEAD:a"),
+        (b"HEAD:a  missing\n", "HEAD:a"),
+    ] {
+        let error = batch_texts(reply, &specs(&[name])).expect_err("the reply is refused");
+        assert!(
+            matches!(error, GitError::Truncated(_)),
+            "{reply:?}: {error:?}"
+        );
+        assert!(error.to_string().contains(name), "{error}");
+    }
+    let error = batch_texts(b"HEAD:a missing\n1111 blob 1\nx\n", &specs(&["HEAD:a"]))
+        .expect_err("the reply goes on");
+    assert_eq!(
+        error.to_string(),
+        "git cat-file --batch: the reply goes on after its 1 answers"
+    );
+    let error =
+        batch_texts(b"1111 blob 99\nab", &specs(&["HEAD:a"])).expect_err("the body is short");
+    assert_eq!(
+        error.to_string(),
+        "git cat-file --batch: the reply ends before its answer for HEAD:a"
+    );
+}
+
+/// A name that holds a line feed would be two requests, so `blob_texts` refuses it before Git starts.
+#[test]
+fn a_name_that_holds_a_line_feed_is_refused_before_git_starts() {
+    let error = blob_texts(&specs(&["HEAD:a", "HEAD:a\nb"])).expect_err("the name is refused");
+    assert!(matches!(error, GitError::Name(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "git cat-file --batch: the name 'HEAD:a\\nb' holds a line feed"
+    );
 }
 
 #[test]

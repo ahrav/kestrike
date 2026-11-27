@@ -1,17 +1,18 @@
 //! An inventory scalar's path joins its keys with `.`; a list item that holds a string `id` takes `[id]`, any
-//! other item `[position]`. `flatten` rejects keys and string `id`s that match `ALIASING`. It also rejects
-//! all-digit string `id`s because `[id]` could denote a list position.
+//! other item `[position]`. `flatten` rejects empty keys, and keys and string `id`s that match `ALIASING`.
+//! It also rejects all-digit string `id`s because `[id]` could denote a list position.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::git::{blob_texts, git_text};
+use crate::git::blob_texts;
 use crate::json::{self, Value};
-use crate::text::{Text, words};
+use crate::text::Text;
 
 use super::digits::{integer, is_digits};
 use super::hunks::paired;
 use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
 use super::scan::short;
+use super::tree::files;
 use super::{Change, Class, Failure, Shown};
 
 pub const INVENTORY: &str = "scripts/test-inventory.json";
@@ -36,7 +37,7 @@ impl<'v> Document<'v> {
             Value::Object(object) => {
                 self.owners.insert(path.clone());
                 for (key, value) in object.iter() {
-                    if ALIASING.is_match(key.as_bytes()) {
+                    if key.is_empty() || ALIASING.is_match(key.as_bytes()) {
                         let under = if path.is_empty() {
                             "the root".to_owned()
                         } else {
@@ -114,7 +115,9 @@ fn count(value: Option<&Value>) -> Option<&json::Integer> {
 
 /// `inventory_changes` returns each inventory budget that fell or went absent and each timeout that rose. A
 /// budget counts as absent when its owner remains but loses the budget field, or when a string field in
-/// `TEXTS` loses the count or disappears from an owner that remains.
+/// `TEXTS` loses the count or disappears from an owner that remains. An integer budget or timeout whose new
+/// value is a scalar of another type, and a `TEXTS` field whose new value is a scalar other than a text, is
+/// refused.
 pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, Failure> {
     let old_value = parsed(old_text)?;
     let mut old = Document::default();
@@ -139,6 +142,22 @@ pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, 
             _ => None,
         };
         let name = path.to_string();
+        let same_type = match (before, after) {
+            (Value::Integer(_), Some(later)) if budget || timeout => {
+                matches!(later, Value::Integer(_))
+            }
+            (Value::String(_), Some(later)) if TEXTS.contains(&field) => {
+                matches!(later, Value::String(_))
+            }
+            _ => true,
+        };
+        if let (false, Some(later)) = (same_type, after) {
+            return Err(Failure::Refused(format!(
+                "{INVENTORY}: the value at {name} changes from {} to {}",
+                kind(before),
+                kind(later)
+            )));
+        }
         let shown = |integer: &json::Integer| Shown::Count(integer.clone());
         if budget
             && let Some(earlier) = earlier
@@ -181,6 +200,18 @@ pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, 
     Ok(found)
 }
 
+fn kind(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "an object",
+        Value::Array(_) => "a list",
+        Value::String(_) => "a text",
+        Value::Integer(_) => "an integer",
+        Value::Float(_) => "a float",
+        Value::Bool(_) => "a boolean",
+        Value::Null => "null",
+    }
+}
+
 fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, Failure> {
     let counts = |text: &'_ Text| {
         INVENTORY_TEXT_BUDGET
@@ -216,18 +247,13 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
     Ok(found)
 }
 
+/// `inventory_text` returns the inventory's text at `rev`, and an empty text where `rev` holds no entry at its
+/// path. An entry that is no file, and a file that is empty or unreadable, is refused.
 pub fn inventory_text(rev: &str) -> Result<String, Failure> {
-    let entry = git_text(&["ls-tree", "-z", "--full-tree", rev, "--", INVENTORY])?;
-    if entry.is_empty() {
+    if files(rev, &[INVENTORY])?.is_empty() {
         return Ok(String::new());
     }
     let short = short(rev);
-    let mode = words(&entry).next();
-    if !matches!(mode, Some("100644" | "100755")) {
-        return Err(Failure::Refused(format!(
-            "{INVENTORY} at {short} is not a file"
-        )));
-    }
     let text = blob_texts(&[format!("{rev}:{INVENTORY}")])?.remove(0);
     if text.is_empty() {
         return Err(Failure::Refused(format!(

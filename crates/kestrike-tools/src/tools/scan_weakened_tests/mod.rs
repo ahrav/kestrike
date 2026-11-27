@@ -8,6 +8,7 @@ mod hunks;
 mod inventory;
 mod patterns;
 mod scan;
+mod tree;
 
 #[cfg(test)]
 mod tests;

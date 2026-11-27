@@ -1,4 +1,6 @@
-//! These functions pass argument vectors to Git and read its standard output as strict UTF-8.
+//! These functions pass argument vectors to Git and read its standard output as strict UTF-8. Every Git
+//! child starts from [`command`], which sets `GIT_NO_REPLACE_OBJECTS=1`, so Git reads each object as the
+//! repository stores it and no `refs/replace` entry stands in for one.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -10,13 +12,25 @@ use crate::text::{Text, strip_str};
 const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
     ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_DIFF_OPTS"];
 
+/// A Git command that did not give its output. `Display` writes the line a tool prints after its own name.
 #[derive(Debug)]
 pub enum GitError {
+    /// Git did not start: `git: ` and the system's error.
     Start(io::Error),
+    /// Writing the names to `git cat-file --batch` failed with an error other than a closed pipe, or reading
+    /// a child's output or status failed: `git cat-file --batch: ` and the system's error.
     Io(io::Error),
+    /// Git exited with a failure: the command as `git <arguments>`, `: ` and Git's standard error with white
+    /// space stripped at both ends, otherwise as Git wrote it.
     Failed(String),
+    /// Git's output is not UTF-8: the decoder's message, after the command or the request's name where the
+    /// function names one.
     NotUtf8(String),
+    /// A reply of `git cat-file --batch` that ends before its framing does or has another form, naming the
+    /// request it answers.
     Truncated(String),
+    /// A name for `git cat-file --batch` that holds a line feed, which Git would read as two requests.
+    Name(String),
 }
 
 impl fmt::Display for GitError {
@@ -24,37 +38,52 @@ impl fmt::Display for GitError {
         match self {
             Self::Start(error) => write!(f, "git: {error}"),
             Self::Io(error) => write!(f, "git cat-file --batch: {error}"),
-            Self::Failed(text) | Self::NotUtf8(text) | Self::Truncated(text) => f.write_str(text),
+            Self::Failed(text) | Self::NotUtf8(text) | Self::Truncated(text) | Self::Name(text) => {
+                f.write_str(text)
+            }
         }
     }
 }
 
 impl std::error::Error for GitError {}
 
-/// `git` returns the standard output of `git args` in the caller's environment. Its [`GitError::NotUtf8`]
-/// holds the decoder's message verbatim.
+/// `command` is `git` in the caller's environment with `GIT_NO_REPLACE_OBJECTS=1` added.
+fn command() -> Command {
+    let mut command = Command::new("git");
+    command.env("GIT_NO_REPLACE_OBJECTS", "1");
+    command
+}
+
+/// `git` returns the standard output of `git args` in the caller's environment, which [`command`] extends.
+/// A failed command is [`GitError::Failed`], and its [`GitError::NotUtf8`] holds the decoder's message
+/// verbatim.
 pub fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
-    let output = captured(Command::new("git").args(args), args)?;
+    let output = captured(command().args(args), args)?;
     String::from_utf8(output).map_err(|error| GitError::NotUtf8(error.utf8_error().to_string()))
 }
 
+/// `git_text` returns the standard output of `git args` with `GIT_ICASE_PATHSPECS`, `GIT_GLOB_PATHSPECS` and
+/// `GIT_DIFF_OPTS` removed from the caller's environment, so a pathspec and a diff read as the arguments state.
+/// A failed command is [`GitError::Failed`], and output that is not UTF-8 is [`GitError::NotUtf8`] after the
+/// command.
 pub fn git_text<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
-    let mut command = Command::new("git");
-    command.args(args);
+    let mut git = command();
+    git.args(args);
     for name in PATHSPEC_AND_DIFF_VARIABLES {
-        command.env_remove(name);
+        git.env_remove(name);
     }
-    let output = captured(&mut command, args)?;
+    let output = captured(&mut git, args)?;
     String::from_utf8(output)
         .map_err(|error| GitError::NotUtf8(format!("{}: {}", label(args), error.utf8_error())))
 }
 
+/// `merge_base` returns the output of `git merge-base one other` with white space stripped at both ends, and
+/// `None` when Git exits 1 with no output, as it does for two commits that share no history. It removes
+/// nothing from the caller's environment. Any other failed exit is [`GitError::Failed`], and output that is
+/// not UTF-8 is [`GitError::NotUtf8`].
 pub fn merge_base(one: &str, other: &str) -> Result<Option<String>, GitError> {
     let args = ["merge-base", one, other];
-    let output = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(GitError::Start)?;
+    let output = command().args(args).output().map_err(GitError::Start)?;
     if output.status.code() == Some(1) && output.stdout.is_empty() {
         return Ok(None);
     }
@@ -66,9 +95,20 @@ pub fn merge_base(one: &str, other: &str) -> Result<Option<String>, GitError> {
     Ok(Some(strip_str(&found).to_owned()))
 }
 
+/// `blob_texts` returns the text of each `<rev>:<path>` name of `specs` in order, read by one
+/// `git cat-file --batch`: a blob's bytes, and an empty text for a name Git reports missing and for an object
+/// other than a blob. It removes nothing from the caller's environment. A name that holds a line feed is
+/// [`GitError::Name`] before Git starts. A failed exit is [`GitError::Failed`], a reply that leaves the batch
+/// framing is [`GitError::Truncated`], and a blob that is not UTF-8 is [`GitError::NotUtf8`] after its name.
 pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
+    if let Some(spec) = specs.iter().find(|spec| spec.contains('\n')) {
+        return Err(GitError::Name(format!(
+            "git cat-file --batch: the name {} holds a line feed",
+            Text::from(spec.as_str()).repr()
+        )));
+    }
     let input: String = specs.iter().map(|spec| format!("{spec}\n")).collect();
-    let mut child = Command::new("git")
+    let mut child = command()
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -97,44 +137,67 @@ pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
     batch_texts(&output.stdout, specs)
 }
 
+/// `batch_texts` reads one reply for each name of `specs`, in order: `<id> <type> <size>`, a line feed, `size`
+/// bytes and a line feed, or `<name> missing` and a line feed for that name. Bytes after the last reply are
+/// refused.
 pub(crate) fn batch_texts(data: &[u8], specs: &[String]) -> Result<Vec<String>, GitError> {
     let mut texts = Vec::with_capacity(specs.len());
-    let mut at = 0;
+    let mut rest = data;
     for spec in specs {
-        let end = data
-            .get(at..)
-            .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
-            .map(|offset| at + offset)
-            .ok_or_else(|| {
-                GitError::Truncated(format!(
-                    "git cat-file --batch: the reply ends before its answer for {spec}"
-                ))
-            })?;
-        let header: Vec<&[u8]> = data[at..end]
-            .split(|&byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c))
-            .filter(|word| !word.is_empty())
-            .collect();
-        at = end + 1;
-        let (kind, size) = match header.as_slice() {
-            [_, kind, size] if size.iter().all(u8::is_ascii_digit) => (*kind, *size),
-            _ => {
-                texts.push(String::new());
-                continue;
-            }
+        let ends = || {
+            GitError::Truncated(format!(
+                "git cat-file --batch: the reply ends before its answer for {spec}"
+            ))
         };
+        let other = || {
+            GitError::Truncated(format!(
+                "git cat-file --batch: the answer for {spec} has another form"
+            ))
+        };
+        let at = rest
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .ok_or_else(ends)?;
+        let (header, after) = (&rest[..at], &rest[at + 1..]);
+        if header == format!("{spec} missing").as_bytes() {
+            texts.push(String::new());
+            rest = after;
+            continue;
+        }
+        let fields: Vec<&[u8]> = header.split(|&byte| byte == b' ').collect();
+        let [id, kind, size] = fields.as_slice() else {
+            return Err(other());
+        };
+        if id.is_empty()
+            || kind.is_empty()
+            || size.is_empty()
+            || !size.iter().all(u8::is_ascii_digit)
+        {
+            return Err(other());
+        }
         let size = std::str::from_utf8(size)
             .expect("ASCII digits are UTF-8")
             .parse::<usize>()
-            .unwrap_or(usize::MAX);
-        let body = &data[at.min(data.len())..at.saturating_add(size).min(data.len())];
-        if kind == b"blob" {
+            .map_err(|_| ends())?;
+        let body = after.get(..size).ok_or_else(ends)?;
+        match after.get(size) {
+            Some(b'\n') => rest = &after[size + 1..],
+            Some(_) => return Err(other()),
+            None => return Err(ends()),
+        }
+        if *kind == b"blob" {
             let text = std::str::from_utf8(body)
                 .map_err(|error| GitError::NotUtf8(format!("{spec}: {error}")))?;
             texts.push(text.to_owned());
         } else {
             texts.push(String::new());
         }
-        at = at.saturating_add(size).saturating_add(1);
+    }
+    if !rest.is_empty() {
+        return Err(GitError::Truncated(format!(
+            "git cat-file --batch: the reply goes on after its {} answers",
+            specs.len()
+        )));
     }
     Ok(texts)
 }

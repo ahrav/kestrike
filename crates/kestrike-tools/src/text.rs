@@ -201,6 +201,11 @@ impl Text {
 
     /// `rpartition` returns the text before the last `separator` and the text after it, or an empty text and
     /// the whole text when `separator` is absent.
+    ///
+    /// # Panics
+    ///
+    /// `rpartition` panics if `separator` is not ASCII. A byte of 0x80 or more stands inside the encoding of a
+    /// code point, and an ASCII byte is a whole code point.
     pub fn rpartition(&self, separator: u8) -> (Self, Self) {
         assert!(separator.is_ascii(), "the separator is one ASCII byte");
         match self.0.iter().rposition(|&byte| byte == separator) {
