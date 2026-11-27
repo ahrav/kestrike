@@ -1,5 +1,6 @@
-//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, [`hexdigest`] for the SHA-256
-//! hex of bytes, and [`say`], which writes one line with its control characters and surrogates escaped.
+//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats and for JSON values,
+//! [`hexdigest`] for the SHA-256 hex of bytes, and [`say`], which writes one line with its control
+//! characters and surrogates escaped.
 
 use std::io::{self, Write};
 
@@ -180,6 +181,48 @@ pub fn hexdigest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// `repr` writes `value` as Python's `repr` writes the value `json.loads` gives for it: `None`, `True` and
+/// `False`, an integer's digits, [`repr_float`] of a float, [`Text::repr`] of a string, a list as `[a, b]`
+/// and an object as `{'k': v}` with its members in document order.
+pub fn repr(value: &Value) -> String {
+    let mut out = String::new();
+    push_value_repr(value, &mut out);
+    out
+}
+
+fn push_value_repr(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("None"),
+        Value::Bool(true) => out.push_str("True"),
+        Value::Bool(false) => out.push_str("False"),
+        Value::Integer(integer) => out.push_str(&integer.to_string()),
+        Value::Float(float) => out.push_str(&repr_float(*float)),
+        Value::String(text) => out.push_str(&text.repr()),
+        Value::Array(items) => {
+            out.push('[');
+            for (at, item) in items.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                push_value_repr(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(object) => {
+            out.push('{');
+            for (at, (key, member)) in object.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&key.repr());
+                out.push_str(": ");
+                push_value_repr(member, out);
+            }
+            out.push('}');
+        }
+    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,8 @@
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
 //! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
+//! [`parse_strict`] also refuses the three constants and a fractional number whose decimal value is not
+//! the shortest form of a finite double, so each float it reads stands for the decimal the text spells.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
 //! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
@@ -11,6 +13,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
+use crate::gameday::Decimal;
 use crate::python::repr_float;
 pub use crate::text::Text;
 
@@ -201,12 +204,12 @@ impl std::error::Error for Error {}
 /// [`MAX_DEPTH`], for an integer token of more than [`MAX_INTEGER_DIGITS`] digits, and when a
 /// non-whitespace byte follows the value. A successful parse can hold a non-finite float.
 pub fn parse(text: &str) -> Result<Value, Error> {
-    Reader::new(text, false)
+    Reader::new(text, false, false)
         .document()
         .map_err(|error| match error {
-            UniqueError::Syntax(error) => error,
-            UniqueError::Repeated(_) => {
-                unreachable!("a read that keeps repeated keys refuses none")
+            StrictError::Syntax(error) => error,
+            StrictError::Repeated(_) | StrictError::Number(_) => {
+                unreachable!("a read that keeps repeated keys and every number refuses neither")
             }
         })
 }
@@ -242,7 +245,74 @@ impl std::error::Error for UniqueError {}
 /// [`UniqueError::Syntax`]. So a repeat followed by trailing text is [`UniqueError::Repeated`], where
 /// [`parse`] refuses the trailing text.
 pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
-    Reader::new(text, true).document()
+    Reader::new(text, true, false)
+        .document()
+        .map_err(|error| match error {
+            StrictError::Syntax(error) => UniqueError::Syntax(error),
+            StrictError::Repeated(name) => UniqueError::Repeated(name),
+            StrictError::Number(_) => unreachable!("a read that keeps every number refuses none"),
+        })
+}
+
+/// A number that strict JSON refuses, holding the token as the text spells it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unnumber {
+    /// `NaN`, `Infinity` or `-Infinity`.
+    Constant(&'static str),
+    /// A token with a fraction or an exponent whose nearest double is infinite.
+    Range(String),
+    /// A token with a fraction or an exponent whose decimal value differs from the shortest form of its
+    /// nearest double, or whose exponent lies past the range [`Decimal::literal`] takes.
+    Digits(String),
+}
+
+/// A refusal of [`parse_strict`]: an error of [`parse`], an object that repeats the member `name`, or a
+/// number strict JSON refuses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StrictError {
+    Syntax(Error),
+    Repeated(Text),
+    Number(Unnumber),
+}
+
+/// The words of a refusal of a repeat and of a number: `an object repeats a key`, `the constant NaN is no
+/// number`, `the number 1e999 is beyond a double's range` and `the number 0.10000000000000001 holds more
+/// digits than a double carries`.
+impl fmt::Display for StrictError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax(error) => error.fmt(f),
+            Self::Repeated(_) => f.write_str("an object repeats a key"),
+            Self::Number(Unnumber::Constant(token)) => {
+                write!(f, "the constant {token} is no number")
+            }
+            Self::Number(Unnumber::Range(token)) => {
+                write!(f, "the number {token} is beyond a double's range")
+            }
+            Self::Number(Unnumber::Digits(token)) => {
+                write!(
+                    f,
+                    "the number {token} holds more digits than a double carries"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for StrictError {}
+
+/// `parse_strict` reads what [`parse_unique`] reads and refuses `NaN`, `Infinity`, `-Infinity`, and a
+/// number with a fraction or an exponent unless its decimal value is the shortest form of a finite double.
+/// A refused number reads as [`StrictError::Number`]; `1E2`, `0.1` and `-0.0` read as the floats they
+/// spell, and `-0` reads as the integer zero.
+///
+/// # Errors
+///
+/// The reader stops at the first refusal in document order. A number is judged where it stands and a
+/// repeated key when its object closes, so in `[{"k": 1, "k": 2}, NaN]` the repeat comes first and in
+/// `{"k": 1, "k": NaN}` the constant does.
+pub fn parse_strict(text: &str) -> Result<Value, StrictError> {
+    Reader::new(text, true, true).document()
 }
 
 struct Reader<'a> {
@@ -250,18 +320,21 @@ struct Reader<'a> {
     at: usize,
     /// Whether a repeated key ends the read.
     unique: bool,
+    /// Whether a number [`parse_strict`] refuses ends the read.
+    strict: bool,
 }
 
 impl<'a> Reader<'a> {
-    fn new(text: &'a str, unique: bool) -> Self {
+    fn new(text: &'a str, unique: bool, strict: bool) -> Self {
         Self {
             text: text.as_bytes(),
             at: 0,
             unique,
+            strict,
         }
     }
 
-    fn document(&mut self) -> Result<Value, UniqueError> {
+    fn document(&mut self) -> Result<Value, StrictError> {
         self.space();
         let value = self.value(0)?;
         self.space();
@@ -271,8 +344,8 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
-    fn error(&self, reason: &'static str) -> UniqueError {
-        UniqueError::Syntax(error_at(self.at, reason))
+    fn error(&self, reason: &'static str) -> StrictError {
+        StrictError::Syntax(error_at(self.at, reason))
     }
 
     fn peek(&self) -> Option<u8> {
@@ -305,7 +378,7 @@ impl<'a> Reader<'a> {
         self.at - start
     }
 
-    fn value(&mut self, depth: usize) -> Result<Value, UniqueError> {
+    fn value(&mut self, depth: usize) -> Result<Value, StrictError> {
         match self.peek() {
             Some(b'{') => self.object(depth + 1),
             Some(b'[') => self.array(depth + 1),
@@ -313,15 +386,22 @@ impl<'a> Reader<'a> {
             _ if self.literal(b"null") => Ok(Value::Null),
             _ if self.literal(b"true") => Ok(Value::Bool(true)),
             _ if self.literal(b"false") => Ok(Value::Bool(false)),
-            _ if self.literal(b"NaN") => Ok(Value::Float(f64::NAN)),
-            _ if self.literal(b"Infinity") => Ok(Value::Float(f64::INFINITY)),
-            _ if self.literal(b"-Infinity") => Ok(Value::Float(f64::NEG_INFINITY)),
+            _ if self.literal(b"NaN") => self.constant("NaN", f64::NAN),
+            _ if self.literal(b"Infinity") => self.constant("Infinity", f64::INFINITY),
+            _ if self.literal(b"-Infinity") => self.constant("-Infinity", f64::NEG_INFINITY),
             Some(b'-' | b'0'..=b'9') => self.number(),
             _ => Err(self.error("expected a value")),
         }
     }
 
-    fn nest(&mut self, depth: usize) -> Result<(), UniqueError> {
+    fn constant(&self, token: &'static str, value: f64) -> Result<Value, StrictError> {
+        if self.strict {
+            return Err(StrictError::Number(Unnumber::Constant(token)));
+        }
+        Ok(Value::Float(value))
+    }
+
+    fn nest(&mut self, depth: usize) -> Result<(), StrictError> {
         if depth > MAX_DEPTH {
             return Err(self.error("nesting deeper than the reader takes"));
         }
@@ -331,7 +411,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Consumes `,` and the whitespace after it, or `close`, and returns whether `close` ended the list.
-    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, UniqueError> {
+    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, StrictError> {
         match self.peek() {
             Some(b',') => {
                 self.at += 1;
@@ -346,7 +426,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn object(&mut self, depth: usize) -> Result<Value, UniqueError> {
+    fn object(&mut self, depth: usize) -> Result<Value, StrictError> {
         self.nest(depth)?;
         let mut object = Object::new();
         if self.peek() == Some(b'}') {
@@ -373,14 +453,14 @@ impl<'a> Reader<'a> {
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
-                    return Err(UniqueError::Repeated(name));
+                    return Err(StrictError::Repeated(name));
                 }
                 return Ok(Value::Object(object));
             }
         }
     }
 
-    fn array(&mut self, depth: usize) -> Result<Value, UniqueError> {
+    fn array(&mut self, depth: usize) -> Result<Value, StrictError> {
         self.nest(depth)?;
         let mut items = Vec::new();
         if self.peek() == Some(b']') {
@@ -396,7 +476,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn number(&mut self) -> Result<Value, UniqueError> {
+    fn number(&mut self) -> Result<Value, StrictError> {
         let start = self.at;
         let negative = self.peek() == Some(b'-');
         if negative {
@@ -428,10 +508,13 @@ impl<'a> Reader<'a> {
         let text = std::str::from_utf8(&self.text[start..self.at]).expect("a number is ASCII");
         if self.at > integer {
             let value = text.parse().expect("a JSON number parses as an f64");
+            if self.strict {
+                double(text, value).map_err(StrictError::Number)?;
+            }
             return Ok(Value::Float(value));
         }
         if integer - digits > MAX_INTEGER_DIGITS {
-            return Err(UniqueError::Syntax(error_at(
+            return Err(StrictError::Syntax(error_at(
                 start,
                 "an integer of more digits than the reader takes",
             )));
@@ -442,7 +525,7 @@ impl<'a> Reader<'a> {
         ))
     }
 
-    fn string(&mut self) -> Result<Text, UniqueError> {
+    fn string(&mut self) -> Result<Text, StrictError> {
         self.at += 1;
         let mut text = Text::new();
         loop {
@@ -475,7 +558,7 @@ impl<'a> Reader<'a> {
     }
 
     /// `self.at` must point to the byte after the backslash.
-    fn escape(&mut self) -> Result<u32, UniqueError> {
+    fn escape(&mut self) -> Result<u32, StrictError> {
         let escaped = match self.peek() {
             Some(b'u') => return self.unicode(),
             Some(b'"') => b'"',
@@ -495,7 +578,7 @@ impl<'a> Reader<'a> {
 
     /// `self.at` must point to the `u` of the first escape. A high surrogate joins an immediately following
     /// `\u` escape encoding a low surrogate; any other code unit stands alone.
-    fn unicode(&mut self) -> Result<u32, UniqueError> {
+    fn unicode(&mut self) -> Result<u32, StrictError> {
         let first = self.code_unit()?;
         if (0xd800..0xdc00).contains(&first) && self.rest_starts_with(b"\\u") {
             let mark = self.at;
@@ -509,7 +592,7 @@ impl<'a> Reader<'a> {
         Ok(first)
     }
 
-    fn code_unit(&mut self) -> Result<u32, UniqueError> {
+    fn code_unit(&mut self) -> Result<u32, StrictError> {
         let digits = self
             .text
             .get(self.at + 1..self.at + 5)
@@ -523,6 +606,18 @@ impl<'a> Reader<'a> {
         }
         self.at += 5;
         Ok(code)
+    }
+}
+
+/// `double` passes a token with a fraction or an exponent whose nearest double `value` is finite and has the
+/// token's decimal value as its shortest form.
+fn double(token: &str, value: f64) -> Result<(), Unnumber> {
+    if !value.is_finite() {
+        return Err(Unnumber::Range(token.to_owned()));
+    }
+    match Decimal::literal(token) {
+        Some(exact) if Decimal::from_float(value).as_ref() == Some(&exact) => Ok(()),
+        _ => Err(Unnumber::Digits(token.to_owned())),
     }
 }
 

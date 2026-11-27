@@ -1,0 +1,293 @@
+//! The package's check: its list bounds, read from the two Rust files that declare them, its schema, its
+//! windows and its kind; and the names its other files are read against.
+
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+use super::constants::{FLEET_BOUNDS, MAX_INTERVALS, OBSERVATION_FILES, WRITTEN_CLAUSES};
+use super::exact::{Decimal, exact};
+use super::layout::PACKAGE_SCHEMA;
+use super::read::{ReadError, read_file};
+use super::refusal::{Refusal, need, said};
+use super::schema::{Names, Scalar, Schema, conform, sorted};
+use crate::json::{Object, Value};
+use crate::text::Text;
+
+/// `FleetBounds` reads the list bounds of [`FLEET_BOUNDS`] from the tree at `top`, each at its first use,
+/// and holds each value read for the life of the value, so one command reads each declaration once. A
+/// refused read is not held: the next use reads the file again.
+#[derive(Debug)]
+pub struct FleetBounds {
+    top: PathBuf,
+    limit: u64,
+    read: RefCell<BTreeMap<(&'static str, &'static str), u64>>,
+}
+
+impl FleetBounds {
+    /// `new` reads the declarations under `top` with the file size limit `limit`; it returns `None` when
+    /// `top` holds a NUL byte, which no system call takes.
+    pub fn new(top: &Path, limit: u64) -> Option<Self> {
+        (!top.as_os_str().as_bytes().contains(&0)).then(|| Self {
+            top: top.to_path_buf(),
+            limit,
+            read: RefCell::new(BTreeMap::new()),
+        })
+    }
+
+    /// `fleet_bound` is the longest package list `field` may hold, one of `hosts`, `shards` and
+    /// `witness`.
+    ///
+    /// # Errors
+    ///
+    /// Each refusal of the read of the declaring file, as [`declared_bound`](Self::declared_bound)
+    /// states.
+    ///
+    /// # Panics
+    ///
+    /// When `field` is none of the three lists.
+    pub fn fleet_bound(&self, field: &str) -> Result<u64, Refusal> {
+        let (_, rel, name) = FLEET_BOUNDS
+            .iter()
+            .find(|(list, _, _)| *list == field)
+            .unwrap_or_else(|| panic!("{field} is a list of FLEET_BOUNDS"));
+        self.declared_bound(rel, name)
+    }
+
+    /// `declared_bound` is the value of the one line `pub const <name>: usize = <digits>;` of the Rust
+    /// file `rel`, with each CRLF read as LF as rustc reads it.
+    ///
+    /// # Errors
+    ///
+    /// Each refusal of [`read_file`] naming `rel`; `<rel> is not UTF-8: <reason>`;
+    /// ``<rel> declares <name> <n> times as `pub const <name>: usize = N;`, not once``; and
+    /// `<rel> declares <name> as a value past a 64-bit usize` for more than 20 digits or a value of at
+    /// least 2^64.
+    pub fn declared_bound(&self, rel: &'static str, name: &'static str) -> Result<u64, Refusal> {
+        if let Some(&bound) = self.read.borrow().get(&(rel, name)) {
+            return Ok(bound);
+        }
+        let what = Text::from(rel);
+        let data =
+            read_file(&self.top.join(rel), None, &what, self.limit, false).map_err(|error| {
+                match error {
+                    ReadError::Refused(refusal) => refusal,
+                    ReadError::Nul => {
+                        unreachable!("the top and the relative path hold no NUL byte")
+                    }
+                }
+            })?;
+        let data = crlf_as_lf(&data);
+        let text = std::str::from_utf8(&data)
+            .map_err(|error| Refusal::new(said!(rel, " is not UTF-8: ", error.to_string())))?;
+        let head = format!("pub const {name}: usize = ");
+        let found: Vec<&str> = text
+            .split('\n')
+            .filter_map(|line| line.strip_prefix(head.as_str())?.strip_suffix(';'))
+            .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+            .collect();
+        need(found.len() == 1, || {
+            said!(
+                rel,
+                " declares ",
+                name,
+                " ",
+                found.len().to_string(),
+                " times as `pub const ",
+                name,
+                ": usize = N;`, not once",
+            )
+        })?;
+        let bound = Some(found[0])
+            .filter(|digits| digits.len() <= 20)
+            .and_then(|digits| digits.parse::<u64>().ok())
+            .ok_or_else(|| {
+                Refusal::new(said!(
+                    rel,
+                    " declares ",
+                    name,
+                    " as a value past a 64-bit usize"
+                ))
+            })?;
+        self.read.borrow_mut().insert((rel, name), bound);
+        Ok(bound)
+    }
+}
+
+/// A list of names.
+const NAMES: Schema = Schema::List(&Schema::scalar(Scalar::Name));
+
+fn crlf_as_lf(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut at = 0;
+    while at < data.len() {
+        if data[at] == b'\r' && data.get(at + 1) == Some(&b'\n') {
+            at += 1;
+        }
+        out.push(data[at]);
+        at += 1;
+    }
+    out
+}
+
+/// `check_package` refuses a package object off its schema or its windows and returns the names its
+/// other files are read against: `host`, `shard`, `observation`, `budget` and `key`. A list longer than
+/// its bound is refused before any of its entries is checked.
+///
+/// # Errors
+///
+/// The first refusal in this order: a list past its bound, or the read of the bound; `hosts` or `shards`
+/// no list of names, empty or repeating a name; the package off [`PACKAGE_SCHEMA`]; a `note` that is no
+/// name; a repeated witness key; windows out of order; a run window that is no whole number of
+/// intervals from 1 to [`MAX_INTERVALS`]; a simulation with a clock error; a staging package that names
+/// an observation outside its world.
+pub fn check_package(p: &Object, bounds: &FleetBounds) -> Result<Names, Refusal> {
+    let null = Value::Null;
+    let field = |key: &str| p.get(key).unwrap_or(&null);
+    for (list, rel, name) in FLEET_BOUNDS {
+        if let Value::Array(items) = field(list) {
+            let bound = bounds.fleet_bound(list)?;
+            let count = u64::try_from(items.len()).expect("a length fits a u64");
+            need(count <= bound, || {
+                said!(
+                    "package.json ",
+                    list,
+                    " holds ",
+                    items.len().to_string(),
+                    " entries, more than the ",
+                    bound.to_string(),
+                    " that ",
+                    name,
+                    " of ",
+                    rel,
+                    " declares",
+                )
+            })?;
+        }
+    }
+    let empty = Names::new();
+    let mut names = Names::new();
+    for (list, kind) in [("hosts", "host"), ("shards", "shard")] {
+        let what = said!("package.json ", list);
+        conform(field(list), &NAMES, &what, &empty)?;
+        let items = array(field(list));
+        let distinct: BTreeSet<Text> = items.iter().filter_map(text).cloned().collect();
+        need(!items.is_empty() && distinct.len() == items.len(), || {
+            said!("package.json ", list, " is empty or repeats a name")
+        })?;
+        names.insert(kind, distinct);
+    }
+    names.insert(
+        "observation",
+        OBSERVATION_FILES
+            .iter()
+            .map(|(observation, _)| Text::from(*observation))
+            .collect(),
+    );
+    names.insert(
+        "budget",
+        WRITTEN_CLAUSES
+            .iter()
+            .filter_map(|(_, budget)| budget.map(Text::from))
+            .collect(),
+    );
+    let mut bare = p.clone();
+    bare.remove("note");
+    conform(
+        &Value::Object(bare),
+        &PACKAGE_SCHEMA,
+        &Text::from("package.json"),
+        &names,
+    )?;
+    let note = Value::String(Text::from("-"));
+    conform(
+        p.get("note").unwrap_or(&note),
+        &Schema::scalar(Scalar::Name),
+        &Text::from("package.json note"),
+        &names,
+    )?;
+    let witness = array(field("witness"));
+    let keys: BTreeSet<Text> = witness
+        .iter()
+        .filter_map(|entry| object(entry).get("key").and_then(text))
+        .cloned()
+        .collect();
+    need(keys.len() == witness.len(), || {
+        said!("package.json repeats a witness key")
+    })?;
+    names.insert("key", keys);
+    let at = |window: &str, end: &str| number(object(field(window)).get(end));
+    let (base_start, base_end) = (at("baseline", "start"), at("baseline", "end"));
+    let (run_start, run_end) = (at("run", "start"), at("run", "end"));
+    need(
+        base_start < base_end
+            && base_end <= run_end
+            && run_start <= base_end
+            && run_start < run_end,
+        || {
+            said!(
+                "the windows are empty, or the baseline window ends after the run window or before it starts"
+            )
+        },
+    )?;
+    let whole = (&run_end - &run_start)
+        .whole_quotient(&number(p.get("interval")), MAX_INTERVALS)
+        .is_some();
+    need(whole, || {
+        said!(
+            "the run window is not a whole number of origin intervals, from 1 to ",
+            MAX_INTERVALS.to_string(),
+        )
+    })?;
+    let staging = *field("kind") == Value::String(Text::from("staging"));
+    let zero = Decimal::from_integer(&crate::json::Integer::from(0_u64));
+    need(
+        staging || number(p.get("clock_error_seconds")) == zero,
+        || said!("a simulation package names a clock error other than 0"),
+    )?;
+    let outside = object(field("outside"));
+    let simulation = *field("kind") == Value::String(Text::from("simulation"));
+    need(simulation || outside.is_empty(), || {
+        said!(
+            "a staging package names ",
+            sorted(outside.iter().map(|(key, _)| key.clone())),
+            " as outside its world",
+        )
+    })?;
+    Ok(names)
+}
+
+fn text(value: &Value) -> Option<&Text> {
+    match value {
+        Value::String(text) => Some(text),
+        _ => None,
+    }
+}
+
+/// The items of a value the schema made a list.
+fn array(value: &Value) -> &[Value] {
+    match value {
+        Value::Array(items) => items,
+        _ => unreachable!("the schema made the value a list"),
+    }
+}
+
+/// A value the schema made an object.
+fn object(value: &Value) -> &Object {
+    match value {
+        Value::Object(object) => object,
+        _ => unreachable!("the schema made the value an object"),
+    }
+}
+
+/// The exact value of a number the schema checked.
+fn number(value: Option<&Value>) -> Decimal {
+    value
+        .and_then(exact)
+        .expect("the schema made the value a finite number")
+}
+
+#[cfg(test)]
+#[path = "package_tests.rs"]
+mod tests;

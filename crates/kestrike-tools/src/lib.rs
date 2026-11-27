@@ -7,6 +7,7 @@ pub mod args;
 pub mod classes;
 pub mod environ;
 pub mod fixtures;
+pub mod gameday;
 pub mod git;
 pub mod json;
 pub mod ownership;

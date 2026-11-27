@@ -268,3 +268,27 @@ fn int_refuses_a_surrogate_at_an_edge_and_a_string_of_spaces_naming_the_whole_te
         );
     }
 }
+
+#[test]
+fn repr_writes_a_json_value_as_python_writes_the_decoded_value() {
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("repr(json.loads('null'))", "null", "None"),
+        ("repr(json.loads('true'))", "true", "True"),
+        ("repr(json.loads('false'))", "false", "False"),
+        ("repr(json.loads('-12'))", "-12", "-12"),
+        ("repr(json.loads('0.1'))", "0.1", "0.1"),
+        ("repr(json.loads('1e16'))", "1e16", "1e+16"),
+        (r#"repr(json.loads('"it\'s"'))"#, r#""it's""#, r#""it's""#),
+        (r#"repr(json.loads('"a\\\\b\\n"'))"#, r#""a\\b\n""#, r"'a\\b\n'"),
+        (r#"repr(json.loads('"\\ud800"'))"#, r#""\ud800""#, r"'\ud800'"),
+        ("repr(json.loads('[]'))", "[]", "[]"),
+        ("repr(json.loads('{}'))", "{}", "{}"),
+        ("repr(json.loads('[1, [2.5, null]]'))", "[1, [2.5, null]]", "[1, [2.5, None]]"),
+        (r#"repr(json.loads('{"b": {"a": []}, "a": "x"}'))"#, r#"{"b": {"a": []}, "a": "x"}"#, "{'b': {'a': []}, 'a': 'x'}"),
+    ];
+    for &(expression, text, python) in rows {
+        let value = parse(text).expect("the row is JSON");
+        assert_eq!(python::repr(&value), python, "{expression}");
+    }
+}
