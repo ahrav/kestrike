@@ -6,6 +6,8 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
+use kestrike_tools::plants::Outcome;
+
 use super::repository::{
     Change, LIB, Repository, chmod, is_root, members, patch, record, replaced, write,
 };
@@ -41,6 +43,15 @@ fn each_file_must_be_a_regular_file() {
         (BOTH, &|r| {
             fs::remove_file(r.path(JSON)).expect("removed");
             fs::create_dir(r.path(JSON)).expect("made");
+        }),
+        (BOTH, &|r| {
+            let kept = r.scratch.join("kept.json");
+            fs::rename(r.path(JSON), &kept).expect("moved");
+            symlink(&kept, r.path(JSON)).expect("linked");
+        }),
+        (BOTH, &|r| {
+            fs::remove_file(r.path(PATCH)).expect("removed");
+            fs::create_dir(r.path(PATCH)).expect("made");
         }),
         (BOTH, &|r| {
             let kept = r.scratch.join("kept.patch");
@@ -242,6 +253,43 @@ fn each_field_rule_refuses_with_its_sentence() {
     let repository = Repository::new();
     repository.write(JSON, replaced("expected", &format!("[\"{long}\"]")));
     refused_with(&repository, &format!("alpha: {EXPECTED}"));
+    let repository = Repository::new();
+    repository.write(
+        JSON,
+        replaced("expected", &format!("[\"{}\"]", "x".repeat(242))),
+    );
+    refused_with(
+        &repository,
+        "the plant store differs from HEAD at verification/plants/alpha/plant.json; commit the plants first",
+    );
+}
+
+/// Each of the four causes, with evidence, is a miss cause the record takes, and the plant keeps it in the
+/// record's order.
+#[test]
+fn each_cause_with_evidence_is_taken() {
+    for cause in ["environment", "workload", "ordering", "property"] {
+        let repository = Repository::new();
+        let value = format!("{{\"evidence\": \"the log\", \"cause\": \"{cause}\"}}");
+        repository.write(JSON, replaced("miss_cause", &value));
+        repository.commit();
+        let Outcome::Run(inputs) = repository.prepare(&repository.call(&["--plant", "alpha"]))
+        else {
+            panic!("{cause} is taken");
+        };
+        let held = inputs.plants()[0].miss_cause().expect("a cause");
+        let members: Vec<String> = held
+            .iter()
+            .map(|(name, value)| format!("{name}={value:?}"))
+            .collect();
+        assert_eq!(
+            members,
+            [
+                "evidence=String('the log')".to_owned(),
+                format!("cause=String('{cause}')")
+            ]
+        );
+    }
 }
 
 /// Two rules broken at once give the first: the id's before the row's, the row's before the fix's.
@@ -259,7 +307,8 @@ fn the_first_broken_rule_is_named() {
 }
 
 /// A plant's name is its directory's name: it must not be the score's name, may hold at most 245 code
-/// points, must equal the record's id and be printable ASCII without edge spaces.
+/// points, must equal the record's id and be printable ASCII without edge spaces. The bound counts code
+/// points, so a name of 123 `é`, 246 bytes, passes it and is refused as no printable ASCII.
 #[test]
 fn the_directory_name_is_the_id() {
     let named = |name: &str| {
@@ -294,6 +343,9 @@ fn the_directory_name_is_the_id() {
              first"
         )
     );
+    let wide = "\u{e9}".repeat(123);
+    let (found, _) = named(&wide);
+    assert_eq!(found, format!("rejected: {wide}: {ID}"));
     for name in [" edge", "tab\there"] {
         let (found, _) = named(name);
         assert_eq!(found, format!("rejected: {name}: {ID}"));
@@ -325,8 +377,8 @@ fn numstat_error(repository: &Repository, text: &str) -> String {
 }
 
 /// A patch Git cannot parse is refused with Git's first line of error; one that changes other paths than
-/// its files, renames, changes a mode or creates a file of another mode is refused with its paths or its
-/// summary line.
+/// its files, renames, copies, deletes, changes a mode or creates a file of another mode than 100644 is
+/// refused with its paths or its summary line. A new file of mode 100644 changes contents alone.
 #[test]
 fn the_patch_changes_exactly_its_files_and_contents_alone() {
     for text in ["", "garbage\n"] {

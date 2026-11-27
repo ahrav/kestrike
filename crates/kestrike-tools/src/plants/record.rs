@@ -9,12 +9,12 @@ use std::path::Path;
 
 use super::files::{is_file, is_link, strerror};
 use super::git::{self, Done};
-use super::prepare::Stop;
+use super::stop::Stop;
 use super::store::{SCORE, STORE};
 use super::values::{argument, cause, count, keys, printable, profile_name, strings, text};
 use crate::environ::Environ;
 use crate::json::{self, Integer, Object, Value};
-use crate::text::{Text, is_space};
+use crate::text::{Text, is_space, strip_str};
 
 /// The most bytes `plant.json` or `plant.patch` holds.
 pub const RECORD_BOUND: usize = 1 << 20;
@@ -130,19 +130,16 @@ fn rejected(name: &Text, rule: impl Into<Text>) -> Stop {
     let mut reason = name.clone();
     reason.push_str(": ");
     reason.push_text(&rule.into());
-    Stop::Rejected(reason)
+    Stop::rejected(reason)
 }
 
 /// `bounded` reads `path` up to one byte past [`RECORD_BOUND`] and returns `None` when it holds more.
 fn bounded(name: &Text, path: &Path) -> Result<Option<Vec<u8>>, Stop> {
     let unreadable = |error: std::io::Error| {
-        let file = Text::from_os(path.file_name().unwrap_or_default());
-        let mut reason = name.clone();
-        reason.push_str(": ");
-        reason.push_text(&file);
+        let mut reason = Text::from_os(path.file_name().unwrap_or_default());
         reason.push_str(" is unreadable: ");
         reason.push_str(&strerror(&error));
-        Stop::Rejected(reason)
+        rejected(name, reason)
     };
     let mut data = Vec::new();
     File::open(path)
@@ -185,17 +182,8 @@ fn files_and_record(
 
 /// The ten field rules in the order they are judged, each with the sentence its refusal states.
 fn rules(name: &Text, record: &Object) -> [(bool, String); 10] {
-    let fix = field(record, "fix");
-    let id_names = matches!(field(record, "id"), Value::String(id) if id == name);
-    let fix_holds = matches!(fix, Value::Object(fix) if keys(fix, &["commit", "pull_request"])
-        && fix.get("pull_request").is_some_and(count)
-        && fix.get("commit").is_some_and(text));
-    let files = field(record, "files");
-    let nonempty = matches!(files, Value::Array(items) if !items.is_empty());
-    let expected = field(record, "expected");
-    let profiles = strings(expected)
-        && matches!(expected, Value::Array(items) if items.iter().all(profile_name));
-    let miss = field(record, "miss_cause");
+    let [fix, files, expected, miss] =
+        ["fix", "files", "expected", "miss_cause"].map(|key| field(record, key));
     [
         (
             *name != SCORE,
@@ -209,18 +197,22 @@ fn rules(name: &Text, record: &Object) -> [(bool, String); 10] {
             ),
         ),
         (
-            id_names && printable(name) && *name == name.strip(),
+            matches!(field(record, "id"), Value::String(id) if id == name)
+                && printable(name)
+                && *name == name.strip(),
             "id names the plant's directory in printable ASCII without edge spaces, so campaign takes \
              plant-<id>"
                 .to_owned(),
         ),
         (count(field(record, "row")), "row is a positive integer".to_owned()),
         (
-            fix_holds,
+            matches!(fix, Value::Object(fix) if keys(fix, &["commit", "pull_request"])
+                && fix.get("pull_request").is_some_and(count)
+                && fix.get("commit").is_some_and(text)),
             "fix holds a positive pull_request and a commit".to_owned(),
         ),
         (
-            strings(files) && nonempty,
+            strings(files) && matches!(files, Value::Array(items) if !items.is_empty()),
             "files is a nonempty list of paths".to_owned(),
         ),
         (
@@ -232,7 +224,8 @@ fn rules(name: &Text, record: &Object) -> [(bool, String); 10] {
             "proof holds no NUL and is UTF-8 text a process takes as an argument".to_owned(),
         ),
         (
-            profiles,
+            strings(expected)
+                && matches!(expected, Value::Array(items) if items.iter().all(profile_name)),
             "expected is a list of profile names campaign can take".to_owned(),
         ),
         (
@@ -256,28 +249,13 @@ fn lossy_lines(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
-fn strip(line: &str) -> &str {
-    line.trim_matches(|c: char| is_space(u32::from(c)))
-}
-
-fn joined(texts: &[&Text]) -> Text {
-    let mut out = Text::new();
-    for (at, text) in texts.iter().enumerate() {
-        if at > 0 {
-            out.push_str(", ");
-        }
-        out.push_text(text);
-    }
-    out
-}
-
 /// `patch_paths` checks the patch with `git apply --numstat` and `--summary`: it must change some path,
 /// exactly the record's files, and only file contents.
 fn patch_paths(
     env: &Environ,
     top: &Path,
     name: &Text,
-    files: Vec<&Text>,
+    mut files: Vec<&Text>,
     patch: &[u8],
 ) -> Result<(), Stop> {
     let args = |flag: &'static str| [OsStr::new("apply"), OsStr::new(flag)];
@@ -289,24 +267,22 @@ fn patch_paths(
         .collect();
     if stats.code != 0 || paths.is_empty() {
         let err = String::from_utf8_lossy(&stats.stderr).into_owned();
-        let lines = lossy_lines(strip(&err).as_bytes());
+        let lines = lossy_lines(strip_str(&err).as_bytes());
         let first = lines.first().map_or("it changes no path", String::as_str);
         return Err(rejected(name, format!("plant.patch is no patch: {first}")));
     }
     paths.sort();
-    let mut files = files;
     files.sort();
-    if paths.len() != files.len() || paths.iter().zip(&files).any(|(path, file)| path != *file) {
-        let paths: Vec<&Text> = paths.iter().collect();
+    if !paths.iter().eq(files.iter().copied()) {
         let mut reason = Text::from("plant.patch changes ");
-        reason.push_text(&joined(&paths));
+        reason.push_text(&Text::join(", ", &paths));
         reason.push_str(", and files names ");
-        reason.push_text(&joined(&files));
+        reason.push_text(&Text::join(", ", files.iter().copied()));
         return Err(rejected(name, reason));
     }
     let Done { stdout, .. } = git::bytes(env, top, &args("--summary"), patch).map_err(Stop::git)?;
     let lines = lossy_lines(&stdout);
-    let odd = lines.iter().map(|line| strip(line)).find(|line| {
+    let odd = lines.iter().map(|line| strip_str(line)).find(|line| {
         ODD.iter().any(|prefix| line.starts_with(prefix))
             || (line.starts_with("create mode ") && !line.starts_with("create mode 100644 "))
     });
@@ -373,9 +349,9 @@ fn committed(
         _ => None,
     };
     if blob.as_deref() != Some(data) {
-        return Err(Stop::Rejected(Text::from(format!(
+        return Err(Stop::rejected(format!(
             "the plant store differs from HEAD at {relative}; commit the plants first"
-        ))));
+        )));
     }
     Ok(())
 }

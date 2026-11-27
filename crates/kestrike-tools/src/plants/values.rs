@@ -5,7 +5,7 @@ use crate::json::{Integer, Value};
 use crate::text::Text;
 
 /// The causes a miss names.
-pub const CAUSES: [&str; 4] = ["environment", "workload", "ordering", "property"];
+pub(crate) const CAUSES: [&str; 4] = ["environment", "workload", "ordering", "property"];
 /// The longest profile name `campaign` takes, in code points.
 const PROFILE_BOUND: usize = 242;
 

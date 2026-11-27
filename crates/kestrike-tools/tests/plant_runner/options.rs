@@ -87,9 +87,10 @@ fn counts_read_as_python_reads_an_integer() {
     assert_eq!(options.runs(), &integer("300"));
 }
 
-/// Each refusal of the argument reader, as the parser of the script words it after `error: `.
+/// Each refusal of the argument reader reads `plant-runner: error: ` and the option's message: a count
+/// below its bound, a value no integer reads, a missing value, and an unknown or shortened option.
 #[test]
-fn the_reader_refuses_with_the_scripts_words() {
+fn the_reader_refuses_each_bad_value() {
     let repository = Repository::new();
     let long = "1".repeat(4301);
     let rows: &[(&[&str], String)] = &[

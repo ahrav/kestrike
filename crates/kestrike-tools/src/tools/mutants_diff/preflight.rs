@@ -271,17 +271,6 @@ fn host_machine(cargo: &OsStr, env: &Environ) -> Result<Text, Stop> {
     Ok(Text::from(machine))
 }
 
-fn listed(names: &[Text]) -> Text {
-    let mut joined = Text::new();
-    for (at, name) in names.iter().enumerate() {
-        if at > 0 {
-            joined.push_str(", ");
-        }
-        joined.push_text(name);
-    }
-    joined
-}
-
 /// `refuse_inherited` refuses a set Git repository or index variable and an inherited variable that
 /// changes the tool or the build profile.
 fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
@@ -293,7 +282,7 @@ fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
     if !set_names.is_empty() {
         return Err(Stop::rejected(text!(
             "unset ",
-            listed(&set_names),
+            Text::join(", ", &set_names),
             "; the runner uses the invoking checkout's repository"
         )));
     }
@@ -301,7 +290,7 @@ fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
     if !inherited.is_empty() {
         return Err(Stop::rejected(text!(
             "unset ",
-            listed(&inherited),
+            Text::join(", ", &inherited),
             "; the runner sets the tool's options and the build profile"
         )));
     }
@@ -324,7 +313,7 @@ fn private_artifacts(artifacts: Option<&OsStr>, top: &Path) -> Result<PathBuf, S
             .collect();
         return Err(Stop::rejected(text!(
             "another user owns or can write ",
-            listed(&shown),
+            Text::join(", ", &shown),
             ", where Cargo would read configuration; pass --artifacts under a directory only you control"
         )));
     }

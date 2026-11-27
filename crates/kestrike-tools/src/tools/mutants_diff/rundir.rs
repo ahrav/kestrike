@@ -25,10 +25,7 @@ pub(super) fn make_temp_dir(prefix: &str, parent: &Path) -> Result<PathBuf, Faul
         TempDirError::Random(error) => Fault::os(&error, None),
         TempDirError::Create(error) => Fault::os(error.error(), Some(error.path().as_os_str())),
         TempDirError::Exhausted => {
-            let exhausted = io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "no usable temporary directory name found",
-            );
+            let exhausted = io::Error::new(io::ErrorKind::AlreadyExists, error.to_string());
             Fault::os(&exhausted, None)
         }
     })

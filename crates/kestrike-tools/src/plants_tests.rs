@@ -1,7 +1,6 @@
-//! Each row's comment is the Python expression whose value the row asserts, from the record's value
-//! tests: `natural(value, least)` is `isinstance(value, int) and not isinstance(value, bool) and value >=
-//! least`, `count(value)` is `natural(value, 1)`, and `text(value)` is `isinstance(value, str) and
-//! value.strip() != ""`.
+//! The record's value tests: `natural` holds for a JSON integer of at least its bound, and a boolean or a
+//! float is none; `count` holds for a positive integer; `text` holds for a string with a code point outside
+//! the whitespace `str.isspace` takes.
 
 use crate::json::{Value, parse};
 use crate::plants::values::{count, natural, text};

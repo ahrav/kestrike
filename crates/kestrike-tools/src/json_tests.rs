@@ -246,10 +246,9 @@ fn the_digit_limit_counts_digits_and_leaves_floats_alone() {
     );
 }
 
-/// `json.loads(text, object_pairs_hook=unique)`, where `unique` raises `ValueError(f"repeated member
-/// {name}")` for the first name it meets twice, judges each object when it closes: a repeat inside a
-/// nested object comes first, a syntax error before the close comes first, and the name is the first of
-/// the object to repeat.
+/// A repeated key is refused when its object closes: a repeat in a nested object, and a syntax error
+/// before the close, come first, and the name refused is the first key of the object that repeats an
+/// earlier one.
 #[test]
 fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
     let rows: &[(&str, Result<(), &str>)] = &[

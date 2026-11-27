@@ -12,8 +12,7 @@ use crate::json::{Integer, Value};
 use crate::python;
 use crate::text::Text;
 
-/// The program name the argument reader's refusals carry.
-pub const TOOL: &str = "plant-runner";
+const TOOL: &str = "plant-runner";
 /// The least `--runs` a profile takes.
 pub const FLOOR: u64 = 300;
 const USAGE: &str = "usage: plant-runner [-h] [--work DIR] [--campaign PATH] [--workers N] [--runs N] \
@@ -33,7 +32,7 @@ options:
   --plant ID         run this plant only, and write a score over the selected plants; repeatable
 ";
 
-/// The options [`parse`] accepted, with each default filled in.
+/// The options of the command line, with each default filled in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     work: Option<OsString>,
@@ -130,7 +129,7 @@ fn floor(value: &Text) -> Result<(), String> {
 }
 
 /// `parse` reads `args` with the option table above and whole names alone.
-pub fn parse(args: &[OsString]) -> Parsed<Options> {
+pub(super) fn parse(args: &[OsString]) -> Parsed<Options> {
     let help = format!("{USAGE}\n\n{HELP}");
     let reader = Reader::new(TOOL, USAGE, &help, Prefixes::Refuse, &TABLE);
     reader.parse(args).map(|values| {

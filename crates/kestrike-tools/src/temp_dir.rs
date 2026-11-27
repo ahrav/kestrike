@@ -23,7 +23,7 @@ pub enum TempDirError {
     Random(io::Error),
     /// A `mkdir` failed with another error than a taken name; the path is the one attempted.
     Create(PathError),
-    /// [`NAME_ATTEMPTS`] names were drawn and each was taken.
+    /// 10,000 names were drawn and each was taken.
     Exhausted,
 }
 
@@ -70,7 +70,7 @@ fn random_letters(letters: &mut [u8]) -> io::Result<()> {
 /// # Errors
 ///
 /// The random bytes cannot be read, a `mkdir` fails with another error than a taken name, or
-/// [`NAME_ATTEMPTS`] names are all taken.
+/// 10,000 names are all taken.
 pub fn make_temp_dir(prefix: &str, parent: &Path) -> Result<PathBuf, TempDirError> {
     for _ in 0..NAME_ATTEMPTS {
         let mut letters = [0u8; NAME_LENGTH];

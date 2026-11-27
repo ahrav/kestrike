@@ -292,6 +292,18 @@ impl Text {
         lines
     }
 
+    /// `join` writes `items` in order with `separator` between each two.
+    pub fn join<'a>(separator: &str, items: impl IntoIterator<Item = &'a Text>) -> Self {
+        let mut joined = Self::new();
+        for (at, item) in items.into_iter().enumerate() {
+            if at > 0 {
+                joined.push_str(separator);
+            }
+            joined.push_text(item);
+        }
+        joined
+    }
+
     /// `repr` writes the text between single quotes, or between double quotes when it holds `'` and no `"`;
     /// it writes a backslash, a tab, a line feed and a carriage return as their backslash escapes, and each
     /// code point that the Unicode 13.0 data marks nonprintable as `\xXX`, `\uXXXX` or `\UXXXXXXXX`. An

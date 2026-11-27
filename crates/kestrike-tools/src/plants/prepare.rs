@@ -4,16 +4,19 @@
 //! The order: the command line; a set Git repository or index variable ([`REPOSITORY_VARIABLES`]); the
 //! invoking directory, which must lie in a Git checkout; the head commit; the plant store; the
 //! checkout's `Cargo.lock`; the `campaign` binary; and last the work directory, which is made, so a
-//! refusal leaves none. Every Git call runs in the given environment with `GIT_NO_REPLACE_OBJECTS=1`.
+//! refusal leaves no work directory; only the missing ancestors of `--work`, made just before it, can
+//! stay. Every Git call runs in the given environment with `GIT_NO_REPLACE_OBJECTS=1`.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::campaign::{campaign, lock};
-use super::git::{self, GitError};
+use super::campaign::campaign;
+use super::git;
+use super::lock::lock;
 use super::options::{Options, parse};
 use super::record::Plant;
+use super::stop::Stop;
 use super::store::{SCORE, STORE, load_plants};
 use super::work::work_directory;
 use crate::args::Parsed;
@@ -21,21 +24,6 @@ use crate::environ::{Environ, get, set};
 use crate::git::REPOSITORY_VARIABLES;
 use crate::paths;
 use crate::text::{Text, strip_str};
-
-/// Why the checks stopped: a refusal of the run's input, or a failure outside a plant.
-#[derive(Debug)]
-pub(crate) enum Stop {
-    Rejected(Text),
-    Failed(Text),
-}
-
-impl Stop {
-    /// `git` is the failure of a Git call that could not run, printed no UTF-8 text, or exited nonzero
-    /// where the call was checked.
-    pub(crate) fn git(error: GitError) -> Self {
-        Self::Failed(Text::from(error.to_string()))
-    }
-}
 
 /// The checked inputs of a run, each read once.
 #[derive(Debug)]
@@ -121,7 +109,8 @@ pub enum Outcome {
 }
 
 /// `prepare` checks a run's inputs: `args` after the tool's name, the environment `env` and the invoking
-/// directory `here`, an error when it could not be read.
+/// directory `here`, an absolute path or the error of reading it. Of a variable `env` names twice, the
+/// first is read and passed on.
 pub fn prepare(args: &[OsString], env: Environ, here: io::Result<PathBuf>) -> Outcome {
     let options = match parse(args) {
         Parsed::Run(options) => options,
@@ -135,48 +124,58 @@ pub fn prepare(args: &[OsString], env: Environ, here: io::Result<PathBuf>) -> Ou
     }
 }
 
-fn checked(options: Options, mut env: Environ, here: io::Result<PathBuf>) -> Result<Inputs, Stop> {
+/// `first_of_each` keeps the first variable of each name, the one a lookup of the name reads.
+fn first_of_each(env: Environ) -> Environ {
+    let mut kept: Environ = Vec::with_capacity(env.len());
+    for (name, value) in env {
+        if !kept.iter().any(|(seen, _)| *seen == name) {
+            kept.push((name, value));
+        }
+    }
+    kept
+}
+
+/// `rev_parse` runs `git rev-parse ARGS` in `dir` and returns its output stripped, or `refusal` when it
+/// exits nonzero.
+fn rev_parse(env: &Environ, dir: &Path, args: &[&str], refusal: &str) -> Result<String, Stop> {
+    let mut call = vec![OsStr::new("rev-parse")];
+    call.extend(args.iter().map(OsStr::new));
+    let done = git::text(env, dir, &call).map_err(Stop::git)?;
+    if done.code != 0 {
+        return Err(Stop::rejected(refusal));
+    }
+    Ok(strip_str(&done.stdout).to_owned())
+}
+
+fn checked(options: Options, env: Environ, here: io::Result<PathBuf>) -> Result<Inputs, Stop> {
+    let mut env = first_of_each(env);
     set(&mut env, "GIT_NO_REPLACE_OBJECTS", OsString::from("1"));
     let overrides: Vec<&str> = REPOSITORY_VARIABLES
         .into_iter()
         .filter(|name| get(&env, name).is_some())
         .collect();
     if !overrides.is_empty() {
-        return Err(Stop::Rejected(Text::from(format!(
+        return Err(Stop::rejected(format!(
             "{} would point the run's Git commands at another repository or index; unset them",
             overrides.join(", ")
-        ))));
+        )));
     }
-    let here = here.map_err(|error| {
-        Stop::Failed(Text::from(format!(
-            "the invoking directory cannot be read: {error}"
-        )))
-    })?;
-    let found = git::text(
+    let here = here
+        .map_err(|error| Stop::failed(format!("the invoking directory cannot be read: {error}")))?;
+    let found = rev_parse(
         &env,
         &here,
-        &["rev-parse", "--show-toplevel"].map(OsStr::new),
-    )
-    .map_err(Stop::git)?;
-    if found.code != 0 {
-        return Err(Stop::Rejected(Text::from(
-            "the invoking directory is outside a Git checkout",
-        )));
-    }
-    let top = paths::resolve(&here.join(strip_str(&found.stdout)))
-        .map_err(|error| Stop::Failed(Text::from(format!("the checkout's top: {error}"))))?;
-    let head = git::text(
+        &["--show-toplevel"],
+        "the invoking directory is outside a Git checkout",
+    )?;
+    let top = paths::resolve(&here.join(found))
+        .map_err(|error| Stop::failed(format!("the checkout's top: {error}")))?;
+    let head = rev_parse(
         &env,
         &top,
-        &["rev-parse", "--verify", "HEAD^{commit}"].map(OsStr::new),
-    )
-    .map_err(Stop::git)?;
-    if head.code != 0 {
-        return Err(Stop::Rejected(Text::from(
-            "the checkout names no HEAD commit",
-        )));
-    }
-    let head = strip_str(&head.stdout).to_owned();
+        &["--verify", "HEAD^{commit}"],
+        "the checkout names no HEAD commit",
+    )?;
     let plants = load_plants(&env, &top, &head, options.plants())?;
     let lock = lock(&top)?;
     let path = get(&env, "PATH").map(OsString::as_os_str);

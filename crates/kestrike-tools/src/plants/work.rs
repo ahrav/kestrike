@@ -12,7 +12,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-use super::prepare::Stop;
+use super::stop::Stop;
 use crate::ownership::{PathError, foreign_toolchain_paths, make_private, status};
 use crate::paths::{self, normalize};
 use crate::temp_dir::make_temp_dir;
@@ -28,13 +28,15 @@ fn absolute(here: &Path, path: &OsStr) -> PathBuf {
 }
 
 fn failed(error: &PathError) -> Stop {
-    Stop::Failed(Text::from(format!(
+    Stop::failed(format!(
         "an ancestor of the work directory cannot be read: {error}"
-    )))
+    ))
 }
 
-fn rejected(reason: String) -> Stop {
-    Stop::Rejected(Text::from(reason))
+/// Where the work directory goes: a path `--work` names, or a new name under the temporary directory.
+enum Target {
+    Named(PathBuf),
+    Temporary,
 }
 
 /// `work_directory` makes the run's work directory and returns its path.
@@ -50,28 +52,33 @@ pub(super) fn work_directory(
     here: &Path,
     top: &Path,
 ) -> Result<PathBuf, Stop> {
-    let chosen = work.map(|work| absolute(here, work));
-    let unresolved = match &chosen {
-        Some(chosen) => chosen.parent().unwrap_or(chosen).to_path_buf(),
-        None => match tmpdir.filter(|tmpdir| !tmpdir.is_empty()) {
+    let target = match work {
+        Some(work) => Target::Named(absolute(here, work)),
+        None => Target::Temporary,
+    };
+    let unresolved = match &target {
+        Target::Named(chosen) => chosen.parent().unwrap_or(chosen).to_path_buf(),
+        Target::Temporary => match tmpdir.filter(|tmpdir| !tmpdir.is_empty()) {
             Some(tmpdir) => absolute(here, tmpdir),
             None => PathBuf::from(DEFAULT_PARENT),
         },
     };
     let parent = paths::resolve(&unresolved).map_err(|error| {
-        rejected(format!(
+        Stop::rejected(format!(
             "the work directory's parent cannot be resolved: {error}"
         ))
     })?;
-    let place = match chosen.as_deref().and_then(Path::file_name) {
-        Some(name) => parent.join(name),
-        None => parent.clone(),
+    let place = match &target {
+        Target::Named(chosen) => chosen
+            .file_name()
+            .map_or_else(|| parent.clone(), |name| parent.join(name)),
+        Target::Temporary => parent.clone(),
     };
     if place.starts_with(top) {
-        return Err(Stop::Rejected(Text::from(format!(
-            "the work directory {} lies inside the checkout",
-            Text::from_os(place.as_os_str())
-        ))));
+        let mut reason = Text::from("the work directory ");
+        reason.push_text(&Text::from_os(place.as_os_str()));
+        reason.push_str(" lies inside the checkout");
+        return Err(Stop::rejected(reason));
     }
     let mut existing = &*parent;
     for ancestor in parent.ancestors() {
@@ -82,32 +89,32 @@ pub(super) fn work_directory(
     }
     let foreign = foreign_toolchain_paths(existing).map_err(|error| failed(&error))?;
     if !foreign.is_empty() {
-        let way = if chosen.is_none() {
-            "pass --work DIR or set TMPDIR, naming a directory only you control on xfs or journaled ext4"
-        } else {
-            "choose a work directory under a directory only you control"
+        let way = match target {
+            Target::Named(_) => "choose a work directory under a directory only you control",
+            Target::Temporary => {
+                "pass --work DIR or set TMPDIR, naming a directory only you control on xfs or \
+                 journaled ext4"
+            }
         };
-        let shown: Vec<String> = foreign
+        let shown: Vec<Text> = foreign
             .iter()
-            .map(|path| Text::from_os(path.as_os_str()).to_string())
+            .map(|path| Text::from_os(path.as_os_str()))
             .collect();
-        return Err(rejected(format!(
-            "another user owns or can write {}, and so can configure Cargo in the run's worktrees; {way}",
-            shown.join(", ")
-        )));
+        let mut reason = Text::from("another user owns or can write ");
+        reason.push_text(&Text::join(", ", &shown));
+        reason.push_str(", and so can configure Cargo in the run's worktrees; ");
+        reason.push_str(way);
+        return Err(Stop::rejected(reason));
     }
-    let made = if chosen.is_none() {
-        make_temp_dir(PREFIX, &parent).map_err(|error| error.to_string())
-    } else {
-        make_private(&parent)
-            .map_err(|error| error.to_string())
-            .and_then(|()| {
-                DirBuilder::new()
-                    .mode(0o700)
-                    .create(&place)
-                    .map_err(|error| PathError::new(&place, error).to_string())
-            })
-            .map(|()| place)
+    let made = match target {
+        Target::Temporary => make_temp_dir(PREFIX, &parent).map_err(|error| error.to_string()),
+        Target::Named(_) => match make_private(&parent) {
+            Err(error) => Err(error.to_string()),
+            Ok(()) => match DirBuilder::new().mode(0o700).create(&place) {
+                Err(error) => Err(PathError::new(&place, error).to_string()),
+                Ok(()) => Ok(place),
+            },
+        },
     };
-    made.map_err(|error| rejected(format!("the work directory: {error}")))
+    made.map_err(|error| Stop::rejected(format!("the work directory: {error}")))
 }

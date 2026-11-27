@@ -1,7 +1,8 @@
 //! The plant store `verification/plants/` of the checkout: every plant directory it holds, loaded and
 //! checked, and the store compared with the head commit.
 //!
-//! A store entry that is a directory, or a link to one, is a plant, selected or not; any other entry is
+//! The store's parent and the store are both tested for a link before either is refused. A store entry
+//! that is a directory, or a link to one, is a plant, selected or not; any other entry is
 //! passed over. Entries are taken in the order of their names' bytes. The store and its parent are real
 //! directories, since the run writes its score there. A path of `git status` under the store whose file
 //! name, leading dots removed, starts with `score.json` is the score or a staging file of one and no
@@ -13,8 +14,8 @@ use std::path::{Path, PathBuf};
 
 use super::files::{is_dir, is_link};
 use super::git;
-use super::prepare::Stop;
 use super::record::{Plant, load_plant};
+use super::stop::Stop;
 use crate::environ::Environ;
 use crate::ownership::PathError;
 use crate::text::Text;
@@ -26,26 +27,11 @@ pub const SCORE: &str = "score.json";
 
 /// `rejected` is the refusal whose reason is `pieces` in order.
 fn rejected(pieces: &[Text]) -> Stop {
-    let mut reason = Text::new();
-    for piece in pieces {
-        reason.push_text(piece);
-    }
-    Stop::Rejected(reason)
+    Stop::rejected(Text::join("", pieces))
 }
 
 fn shown(path: &Path) -> Text {
     Text::from_os(path.as_os_str())
-}
-
-fn joined(texts: &[Text]) -> Text {
-    let mut out = Text::new();
-    for (at, text) in texts.iter().enumerate() {
-        if at > 0 {
-            out.push_str(", ");
-        }
-        out.push_text(text);
-    }
-    out
 }
 
 /// `places` returns the store's plant directories in byte order of their names.
@@ -163,14 +149,17 @@ pub(super) fn load_plants(
         .parent()
         .expect("the store has a parent")
         .to_path_buf();
+    let mut linked = Vec::with_capacity(2);
     for path in [parent, directory.clone()] {
-        let linked = is_link(&path).map_err(|error| Stop::Failed(Text::from(error.to_string())))?;
-        if linked {
-            return Err(rejected(&[
-                shown(&path),
-                Text::from(" is a link; the plant store must be a directory of the checkout"),
-            ]));
+        if is_link(&path).map_err(|error| Stop::failed(error.to_string()))? {
+            linked.push(path);
         }
+    }
+    if let Some(first) = linked.first() {
+        return Err(rejected(&[
+            shown(first),
+            Text::from(" is a link; the plant store must be a directory of the checkout"),
+        ]));
     }
     let places = places(&directory)?;
     let mut plants = Vec::with_capacity(places.len());
@@ -189,12 +178,15 @@ pub(super) fn load_plants(
         .cloned()
         .collect();
     if !unknown.is_empty() {
-        return Err(rejected(&[Text::from("no plant named "), joined(&unknown)]));
+        return Err(rejected(&[
+            Text::from("no plant named "),
+            Text::join(", ", &unknown),
+        ]));
     }
     let differ = |paths: &[Text]| {
         rejected(&[
             Text::from("the plant store differs from HEAD at "),
-            joined(paths),
+            Text::join(", ", paths),
             Text::from("; commit the plants first"),
         ])
     };

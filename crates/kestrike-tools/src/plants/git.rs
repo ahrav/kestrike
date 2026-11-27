@@ -43,19 +43,22 @@ pub struct Done<T> {
 
 /// Why a call returned no [`Done`], or why a checked one failed.
 #[derive(Debug)]
-pub enum GitError {
-    /// Git could not be started, or its streams could not be read or written.
+pub enum CallError {
+    /// Git could not be started.
     Start(io::Error),
+    /// Git started, and writing its input, reading its output or waiting for it failed.
+    Io { step: Text, error: io::Error },
     /// A text call whose standard output or error is no UTF-8.
     NotUtf8 { step: Text },
     /// A checked call that exited with a code other than 0; `stderr` is its error output.
     Failed { step: Text, code: i32, stderr: Text },
 }
 
-impl fmt::Display for GitError {
+impl fmt::Display for CallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Start(error) => write!(f, "git cannot be started: {error}"),
+            Self::Io { step, error } => write!(f, "`git {step}`: {error}"),
             Self::NotUtf8 { step } => write!(f, "`git {step}` wrote output that is no UTF-8"),
             Self::Failed { step, code, .. } => write!(f, "`git {step}` exited {code}"),
         }
@@ -63,41 +66,22 @@ impl fmt::Display for GitError {
 }
 
 /// The `Display` text holds the I/O error's text, so the error reports no `source`.
-impl std::error::Error for GitError {}
+impl std::error::Error for CallError {}
 
 impl Done<String> {
-    /// `checked` returns the call when it exited 0 and [`GitError::Failed`] otherwise.
+    /// `checked` returns the call when it exited 0 and [`CallError::Failed`] otherwise.
     ///
     /// # Errors
     ///
     /// The call exited with another code than 0.
-    pub fn checked(self) -> Result<Self, GitError> {
+    pub fn checked(self) -> Result<Self, CallError> {
         if self.code == 0 {
             return Ok(self);
         }
-        Err(GitError::Failed {
+        Err(CallError::Failed {
             step: self.step,
             code: self.code,
             stderr: Text::from(self.stderr),
-        })
-    }
-}
-
-impl Done<Vec<u8>> {
-    /// `checked` returns the call when it exited 0 and [`GitError::Failed`] otherwise, with the error
-    /// output decoded as UTF-8 with each invalid sequence replaced by U+FFFD.
-    ///
-    /// # Errors
-    ///
-    /// The call exited with another code than 0.
-    pub fn checked(self) -> Result<Self, GitError> {
-        if self.code == 0 {
-            return Ok(self);
-        }
-        Err(GitError::Failed {
-            step: self.step,
-            code: self.code,
-            stderr: Text::from(String::from_utf8_lossy(&self.stderr).into_owned()),
         })
     }
 }
@@ -123,9 +107,11 @@ fn step(args: &[&OsStr]) -> Text {
 
 /// `code` is the exit code, or the negated number of the signal that ended the call.
 fn code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .unwrap_or_else(|| -status.signal().unwrap_or(0))
+    match (status.code(), status.signal()) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => -signal,
+        (None, None) => unreachable!("a waited child exited or a signal ended it"),
+    }
 }
 
 /// `newlines` reads `\r\n` and `\r` as `\n`.
@@ -143,15 +129,19 @@ fn newlines(text: String) -> String {
 /// # Errors
 ///
 /// Git cannot be started or waited for, or a stream is no UTF-8.
-pub fn text(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Done<String>, GitError> {
-    let output = command(env, dir, args)
+pub fn text(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Done<String>, CallError> {
+    let child = command(env, dir, args)
         .stdin(Stdio::inherit())
-        .output()
-        .map_err(GitError::Start)?;
+        .spawn()
+        .map_err(CallError::Start)?;
     let step = step(args);
+    let output = match child.wait_with_output() {
+        Ok(output) => output,
+        Err(error) => return Err(CallError::Io { step, error }),
+    };
     let decode = |bytes: Vec<u8>| String::from_utf8(bytes).map(newlines);
     let (Ok(stdout), Ok(stderr)) = (decode(output.stdout), decode(output.stderr)) else {
-        return Err(GitError::NotUtf8 { step });
+        return Err(CallError::NotUtf8 { step });
     };
     Ok(Done {
         step,
@@ -162,7 +152,8 @@ pub fn text(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Done<String>, 
 }
 
 /// `bytes` runs `git FIXED -C dir ARGS` in `env`, writes `input` to its standard input and returns its
-/// exit code and both streams as bytes, the input written as [`fed`] writes it.
+/// exit code and both streams as bytes. Git closing its input before reading all of it ends the write
+/// without an error.
 ///
 /// # Errors
 ///
@@ -172,14 +163,18 @@ pub fn bytes(
     dir: &Path,
     args: &[&OsStr],
     input: &[u8],
-) -> Result<Done<Vec<u8>>, GitError> {
+) -> Result<Done<Vec<u8>>, CallError> {
     let child = command(env, dir, args)
         .stdin(Stdio::piped())
         .spawn()
-        .map_err(GitError::Start)?;
-    let output = fed(child, input).map_err(GitError::Start)?;
+        .map_err(CallError::Start)?;
+    let step = step(args);
+    let output = match fed(child, input) {
+        Ok(output) => output,
+        Err(error) => return Err(CallError::Io { step, error }),
+    };
     Ok(Done {
-        step: step(args),
+        step,
         code: code(output.status),
         stdout: output.stdout,
         stderr: output.stderr,

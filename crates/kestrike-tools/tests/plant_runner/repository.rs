@@ -11,10 +11,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder};
+use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kestrike_tools::environ::{Environ, set};
@@ -142,6 +143,26 @@ pub fn chmod(path: &Path, mode: u32) {
         .unwrap_or_else(|error| panic!("chmod {}: {error}", path.display()));
 }
 
+/// `executable` writes `text` at `path` with mode 0755 through a child process, the one process that holds
+/// the file open for writing. `execve` refuses a file some process holds open for writing (`ETXTBSY`), and a
+/// child another test thread forks holds every descriptor of the test process until its own `execve`.
+pub fn executable(path: &Path, text: &str) {
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the writer starts");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's input is piped")
+        .write_all(text.as_bytes())
+        .expect("the text reaches the writer");
+    let status = writer.wait().expect("the writer ends");
+    assert!(status.success(), "{} is written: {status}", path.display());
+}
+
 /// `write` writes `contents` to `path`, making its parent first.
 pub fn write(path: &Path, contents: impl AsRef<[u8]>) {
     if let Some(parent) = path.parent() {
@@ -175,11 +196,20 @@ impl Repository {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(base).unwrap_or_else(|error| panic!("{}: {error}", base.display()));
         let base = base.canonicalize().expect("the scratch base resolves");
+        // Cargo makes its scratch directory under the caller's umask; the work directory's checks refuse
+        // one the group or others can write, so the fixture takes their write bits away.
+        let mode = fs::metadata(&base)
+            .expect("the scratch base stats")
+            .permissions()
+            .mode();
+        if mode & 0o022 != 0 {
+            chmod(&base, mode & 0o755);
+        }
         let shared = shared_directories(&base).expect("the scratch base's ancestors stat");
         assert!(
             shared.is_empty(),
-            "the checks refuse a work directory under {shared:?}, which another user can write; move \
-             CARGO_TARGET_TMPDIR under a private directory"
+            "the checks refuse a work directory under {shared:?}, which another user can write; \
+             make those directories private or move CARGO_TARGET_TMPDIR under a private directory"
         );
         let scratch = base.join(format!(
             "plants-{}-{}",
@@ -201,9 +231,7 @@ impl Repository {
             "[user]\n\tname = Fixture\n\temail = fixture@invalid\n[init]\n\tdefaultBranch = main\n\
              [commit]\n\tgpgSign = false\n",
         );
-        let campaign = bin.join("campaign");
-        write(&campaign, CAMPAIGN);
-        chmod(&campaign, 0o755);
+        executable(&bin.join("campaign"), CAMPAIGN);
         let mut path = bin.as_os_str().to_os_string();
         path.push(":");
         path.push(host_path());
@@ -247,13 +275,11 @@ impl Repository {
         let hooks = repository.scratch.join("hooks");
         private_dir(&hooks);
         for hook in HOOKS {
-            let script = hooks.join(hook);
             let ran = repository.scratch.join("hook-ran");
-            write(
-                &script,
-                format!("#!/bin/sh\necho {hook} >> '{}'\n", ran.display()),
+            executable(
+                &hooks.join(hook),
+                &format!("#!/bin/sh\necho {hook} >> '{}'\n", ran.display()),
             );
-            chmod(&script, 0o755);
         }
         repository.git(&["config", "core.hooksPath", hooks.to_str().expect("UTF-8")]);
         repository

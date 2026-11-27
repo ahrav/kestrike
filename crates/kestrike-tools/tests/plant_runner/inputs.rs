@@ -3,10 +3,9 @@
 //! outside a plant; and a run's checked inputs. Each refusal leaves no path made and `git status` as it
 //! was.
 
-use std::ffi::{CString, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
@@ -17,7 +16,8 @@ use kestrike_tools::python::hexdigest;
 use kestrike_tools::text::Text;
 
 use super::repository::{
-    CAMPAIGN, Call, Change, LOCK, Repository, chmod, is_root, patch, private_dir, shown, write,
+    CAMPAIGN, Call, Change, LOCK, Repository, chmod, executable, is_root, patch, private_dir,
+    shown, write,
 };
 
 const VARIABLES: [&str; 5] = [
@@ -116,9 +116,8 @@ fn cargo_lock_is_a_readable_regular_file() {
         }),
         ("a FIFO", &|r| {
             fs::remove_file(lock(r)).expect("removed");
-            let name = CString::new(lock(r).as_os_str().as_bytes()).expect("no NUL");
-            // SAFETY: `mkfifo` reads the NUL-terminated name, which `name` owns for the call.
-            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+            let made = std::process::Command::new("mkfifo").arg(lock(r)).status();
+            assert!(made.is_ok_and(|status| status.success()), "mkfifo runs");
         }),
     ];
     for (state, change) in rows {
@@ -177,7 +176,7 @@ fn campaign_names_a_file_the_user_may_execute() {
 }
 
 /// A found `campaign` is resolved through its links and hashed; `PATH`'s empty entry names the invoking
-/// directory.
+/// directory, and an entry whose file the user may not execute is passed over.
 #[test]
 fn campaign_is_resolved_and_hashed() {
     let repository = Repository::new();
@@ -191,6 +190,21 @@ fn campaign_is_resolved_and_hashed() {
         other => panic!("{:?} runs, not {other:?}", call.args),
     };
     let digest = hexdigest(CAMPAIGN.as_bytes());
+    let first = repository.scratch.join("first");
+    private_dir(&first);
+    write(&first.join("campaign"), "not executable\n");
+    chmod(&first.join("campaign"), 0o644);
+    let mut path = first.into_os_string();
+    path.push(":");
+    path.push(repository.bin.as_os_str());
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    let passed = runs(&repository.call(&[]).set("PATH", &path));
+    assert_eq!(
+        passed,
+        (campaign.clone(), digest.clone()),
+        "a file the user may not execute is passed over"
+    );
     assert_eq!(
         runs(&repository.call(&["--campaign", "linked"])),
         (campaign.clone(), digest.clone())
@@ -200,11 +214,19 @@ fn campaign_is_resolved_and_hashed() {
         (campaign, digest.clone())
     );
     let local = repository.path("campaign");
-    write(&local, "#!/bin/sh\nexit 1\n");
-    chmod(&local, 0o700);
+    executable(&local, "#!/bin/sh\nexit 1\n");
     let mut path = OsString::from(":");
     path.push(std::env::var_os("PATH").unwrap_or_default());
     let found = runs(&repository.call(&[]).set("PATH", &path));
+    let mut twice = repository.call(&[]);
+    twice
+        .env
+        .push((OsString::from("PATH"), OsString::from("/nonexistent")));
+    assert_eq!(
+        runs(&twice).0,
+        repository.bin.join("campaign"),
+        "the first of two PATH variables is read and passed to Git"
+    );
     assert_eq!(found, (local, hexdigest(b"#!/bin/sh\nexit 1\n")));
 }
 
@@ -226,8 +248,9 @@ fn shared(names: &str, way: &str) -> String {
 }
 
 /// The work directory must be new, outside the checkout, and under ancestors only this user or root owns
-/// and can write; `TMPDIR`, read from the invoking directory, or `/tmp` when it is unset or empty, holds
-/// the default one.
+/// and can write; `TMPDIR`, read as given from the invoking directory, or `/tmp` when it is unset or empty,
+/// holds the default one. A relative `TMPDIR` names a directory under the invoking directory, and the
+/// checks refuse it there. The `/tmp` rows run where another user can write `/tmp`.
 #[test]
 fn the_work_directory_is_new_private_and_outside_the_checkout() {
     let repository = Repository::new();
@@ -326,7 +349,7 @@ fn missing_ancestors_are_made_private_and_links_resolved() {
             .take_while(|made| made.starts_with(&repository.scratch))
         {
             let mode = fs::metadata(made).expect("made").permissions().mode();
-            assert_eq!(mode & 0o077, 0, "{}: {mode:o}", made.display());
+            assert_eq!(mode & 0o777, 0o700, "{}: {mode:o}", made.display());
         }
     }
 }
@@ -367,15 +390,13 @@ fn standin(repository: &Repository, when: &str, out: &str, code: u8) -> Call {
         .scratch
         .join(format!("standin{}", when.trim_start_matches('-')));
     private_dir(&dir);
-    let script = dir.join("git");
-    write(
-        &script,
-        format!(
+    executable(
+        &dir.join("git"),
+        &format!(
             "#!/bin/sh\nfor arg; do [ \"$arg\" = '{when}' ] && {{ printf '{out}'; exit {code}; }}; done\n\
              exec '{real}' \"$@\"\n"
         ),
     );
-    chmod(&script, 0o755);
     let mut path = dir.into_os_string();
     path.push(":");
     path.push(
@@ -390,8 +411,9 @@ fn standin(repository: &Repository, when: &str, out: &str, code: u8) -> Call {
     repository.call(&[]).set("PATH", path)
 }
 
-/// A checked `git status` that exits nonzero, Git output that is no UTF-8 and a Git that cannot start are
-/// failures outside a plant; a store `HEAD` cannot list is refused.
+/// A checked `git status` that exits nonzero, Git output that is no UTF-8 and a Git that cannot start,
+/// `PATH` empty included, are failures outside a plant; a store `HEAD` cannot list, and a patch whose
+/// `git apply --numstat` fails with no error output, are refused.
 #[test]
 fn git_failures_outside_a_plant() {
     let repository = Repository::new();
@@ -412,10 +434,71 @@ fn git_failures_outside_a_plant() {
             repository.call(&[]).set("PATH", &repository.bin),
             "failed: git cannot be started: No such file or directory (os error 2)".to_owned(),
         ),
+        (
+            repository.call(&[]).set("PATH", ""),
+            "failed: git cannot be started: No such file or directory (os error 2)".to_owned(),
+        ),
+        (
+            standin(&repository, "--numstat", "", 1),
+            "rejected: alpha: plant.patch is no patch: it changes no path".to_owned(),
+        ),
     ];
     for (call, expected) in rows {
         assert_eq!(repository.refused(&call), expected);
     }
+}
+
+/// A Git read of a plant that fails is taken as its answer: a `git cat-file` that exits nonzero reads as a
+/// store that differs from `HEAD`, and a `git apply --summary` that exits nonzero with no output passes the
+/// patch as changing contents alone.
+#[test]
+fn a_failed_read_of_a_plant_counts_as_its_answer() {
+    let repository = Repository::new();
+    assert_eq!(
+        repository.refused(&standin(&repository, "cat-file", "", 128)),
+        "rejected: the plant store differs from HEAD at verification/plants/alpha/plant.json; commit the \
+         plants first"
+    );
+    let Outcome::Run(inputs) = repository.prepare(&standin(&repository, "--summary", "", 128))
+    else {
+        panic!("a failed summary passes the patch");
+    };
+    assert_eq!(inputs.plants().len(), 2);
+}
+
+/// Of two faults at once the earlier check names its own: the store before `Cargo.lock`, and
+/// `Cargo.lock` before the `campaign` binary.
+#[test]
+fn the_store_comes_before_the_lock_and_the_lock_before_the_campaign() {
+    let repository = Repository::new();
+    repository.write("verification/plants/notes.txt", "notes\n");
+    fs::remove_file(repository.path("Cargo.lock")).expect("removed");
+    assert_eq!(
+        repository.refused(&repository.call(&["--campaign", "nothing"])),
+        "rejected: the plant store differs from HEAD at verification/plants/notes.txt; commit the plants \
+         first"
+    );
+    fs::remove_file(repository.path("verification/plants/notes.txt")).expect("removed");
+    assert_eq!(
+        repository.refused(&repository.call(&["--campaign", "nothing"])),
+        NO_LOCK
+    );
+}
+
+/// The checks read objects as their names hash: a replacement of `alpha`'s record in `refs/replace` changes
+/// nothing they compare.
+#[test]
+fn a_replaced_object_is_not_read() {
+    let repository = Repository::new();
+    let original = repository.git(&["rev-parse", "HEAD:verification/plants/alpha/plant.json"]);
+    let other = repository.scratch.join("other.json");
+    write(&other, "{}\n");
+    let replacement = repository.git(&["hash-object", "-w", other.to_str().expect("UTF-8")]);
+    repository.git(&["replace", original.trim(), replacement.trim()]);
+    let Outcome::Run(inputs) = repository.prepare(&repository.call(&[])) else {
+        panic!("the replacement is not read");
+    };
+    assert_eq!(inputs.plants().len(), 2);
 }
 
 /// A run's inputs: the resolved top from a directory below it through a link, the head commit, the
@@ -479,7 +562,8 @@ fn a_run_holds_every_checked_input() {
     let letters = name.strip_prefix("plant-runner-").expect("the prefix");
     assert_eq!(letters.len(), 8, "{name}");
     let mode = fs::metadata(work).expect("made").permissions().mode();
-    assert_eq!(mode & 0o077, 0, "{mode:o}");
+    assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    assert_eq!(repository.hooks_ran(), "", "the checks run no hook");
 }
 
 /// A parent of `--work` whose links loop cannot be resolved and is refused.

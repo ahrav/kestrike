@@ -3,8 +3,9 @@
 //! values, so no case changes the process's directory, environment, umask or signal dispositions; a Git
 //! command the fixture itself runs is a child process.
 //!
-//! An expected reason was recorded from the check of the same state on Python 3.9.25 under a UTF-8
-//! locale, apart from the places the pull request lists where the tool composes its own text.
+//! An expected reason holds the text a refusal composes from its words and values. Where the reason
+//! carries the text of another reader (the JSON reader's errors, an operating system error), it is that
+//! reader's text in this crate.
 #![cfg(target_os = "linux")]
 
 mod git_call;

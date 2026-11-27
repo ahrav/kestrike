@@ -222,3 +222,35 @@ fn plants_are_taken_in_byte_order() {
         .collect();
     assert_eq!(ids, ["Zulu", "a-1", "alpha", "beta"]);
 }
+
+/// With the parent and the store both links, the parent is named; both are tested before either is
+/// refused, so a store whose `lstat` fails beneath a linked parent is a failure outside a plant.
+#[test]
+fn both_links_are_tested_before_the_parent_is_named() {
+    let repository = Repository::new();
+    let (parent, store) = (
+        repository.path("verification"),
+        repository.path("verification/plants"),
+    );
+    let kept = repository.scratch.join("kept-plants");
+    fs::rename(&store, &kept).expect("moved");
+    symlink(&kept, &store).expect("linked");
+    let moved = repository.scratch.join("verification");
+    fs::rename(&parent, &moved).expect("moved");
+    symlink(&moved, &parent).expect("linked");
+    assert_eq!(
+        repository.refused(&repository.call(&[])),
+        format!(
+            "rejected: {} is a link; the plant store must be a directory of the checkout",
+            shown(&parent)
+        )
+    );
+    if is_root() {
+        return;
+    }
+    chmod(&moved, 0o000);
+    assert_eq!(
+        repository.refused(&repository.call(&[])),
+        format!("failed: {}: Permission denied (os error 13)", shown(&store))
+    );
+}
