@@ -1,7 +1,7 @@
 # The cargo-mutants scope of the kestrike package, read by every
 # `cargo mutants` run in the workspace: the whole-package oracle-strength
 # mutation discovery, which finds the mutants the history oracles reject, and
-# `scripts/mutants-diff.py`, which mutates the lines of one commit range and
+# `bash scripts/tool.sh mutants-diff`, which mutates the lines of one commit range and
 # requires the tool version that the next line pins.
 # Tool pin: cargo-mutants 27.1.0
 # The tool skips `#[cfg(test)]` items and `unsafe fn` bodies; a safe function

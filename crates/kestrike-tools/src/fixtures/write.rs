@@ -16,8 +16,6 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use super::args::{self, Parsed};
 use super::{case, quint};
 use crate::json::{self, Integer, Object, Value};
@@ -199,10 +197,7 @@ pub(crate) fn generate(
 ) -> Result<(), String> {
     let source = top.join("quint").join(format!("{}.qnt", model.name));
     let bytes = fs::read(&source).map_err(at(&source))?;
-    let digest: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let digest = crate::python::hexdigest(&bytes);
     // Every copy holds the model's bytes unchanged. A model that is not UTF-8 fails at the first trace, once
     // its directory exists.
     let copy = io::read_to_string(bytes.as_slice());

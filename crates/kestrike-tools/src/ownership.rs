@@ -30,7 +30,7 @@ pub const SHARED: u32 = 0o020 | 0o002;
 
 const MAX_LINKS: usize = 40;
 
-fn real_uid() -> u32 {
+pub(crate) fn real_uid() -> u32 {
     // SAFETY: `getuid` takes no argument, touches no memory of the caller and always succeeds.
     unsafe { libc::getuid() }
 }
@@ -193,9 +193,14 @@ fn ignored(error: &io::Error) -> bool {
     )
 }
 
-/// `status` returns `Ok(None)` for a path absent by [`ignored`] and for a path that holds a NUL byte, which
-/// names no file.
-fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
+/// `status` returns the `stat` of `path`, or `None` for a path absent by [`ignored`], the errors that make
+/// Python's `Path.exists` and `Path.is_file` false, and for a path that holds a NUL byte, which names no
+/// file.
+///
+/// # Errors
+///
+/// `stat` fails with another error.
+pub fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
     if path.as_os_str().as_bytes().contains(&0) {
         return Ok(None);
     }
