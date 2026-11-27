@@ -214,6 +214,7 @@ impl Repo {
         for (key, value) in [
             ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
             ("GIT_CONFIG_GLOBAL", global.into_os_string()),
+            ("GIT_CEILING_DIRECTORIES", temp.clone().into_os_string()),
             ("GIT_AUTHOR_NAME", OsString::from("t")),
             ("GIT_AUTHOR_EMAIL", OsString::from("t@example.com")),
             ("GIT_COMMITTER_NAME", OsString::from("t")),
@@ -2302,6 +2303,68 @@ fn a_full_standard_output_exits_120_before_the_summary_and_the_hints() {
         run.stderr,
         "scan-weakened-tests: standard output: No space left on device (os error 28)\n"
     );
+}
+
+/// `/dev/null` opened for reading alone refuses each write with `EBADF`.
+#[test]
+fn a_read_only_standard_stream_exits_120_before_the_summary_and_the_hints() {
+    let read_only = || fs::File::open("/dev/null").expect("/dev/null opens");
+    let refused = "scan-weakened-tests: standard output: Bad file descriptor (os error 9)\n";
+    let repo = Repo::new("read-only");
+    repo.ignore_second("ignore");
+    let summary = repo.temp.join("summary.md");
+    let path = summary.to_str().expect("the path is UTF-8");
+    let report = Run::from(
+        repo.tool(
+            &["--base", &repo.base],
+            &[("GITHUB_STEP_SUMMARY", path)],
+            None,
+        )
+        .stdout(read_only())
+        .output()
+        .expect("the tool starts"),
+    );
+    assert_eq!(report.code, Some(120), "{}", report.stderr);
+    assert!(!summary.exists());
+    assert_eq!(report.stderr, refused);
+    let refusal = repo
+        .tool(&[], &[], None)
+        .stderr(read_only())
+        .status()
+        .expect("the tool starts");
+    assert_eq!(refusal.code(), Some(120));
+    let help = Run::from(
+        repo.tool(&["--help"], &[], None)
+            .stdout(read_only())
+            .output()
+            .expect("the tool starts"),
+    );
+    assert_eq!((help.code, help.stderr.as_str()), (Some(120), refused));
+}
+
+/// Git stops repository discovery below the scratch directory.
+#[test]
+fn a_scratch_tree_without_its_git_directory_reaches_no_enclosing_repository() {
+    let repo = Repo::new("ceiling");
+    let outer = repo
+        .command("git")
+        .args(["init", "-q"])
+        .current_dir(&repo.temp)
+        .status()
+        .expect("git starts");
+    assert!(outer.success());
+    fs::remove_dir_all(repo.repo.join(".git")).expect("the case's .git is removed");
+    let found = repo
+        .command("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .expect("git starts");
+    assert!(
+        !found.status.success(),
+        "{}",
+        String::from_utf8_lossy(&found.stdout)
+    );
+    assert!(found.stdout.is_empty());
 }
 
 #[test]
