@@ -92,7 +92,6 @@ pub fn write(
     traces: &[Trace],
     rewrite: Rewrite,
 ) -> u8 {
-    quint::handle_interrupts();
     let options = match args::parse(model.tool, model.about, args) {
         Parsed::Run(options) => options,
         Parsed::Help(text) => {

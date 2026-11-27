@@ -28,12 +28,22 @@ const LOOP: i32 = 62;
 /// that `lstat` reports cannot be read, when links nest more than [`DEPTH`] deep, and when the lookup of
 /// the final path meets a link loop.
 pub fn resolve(path: &Path) -> io::Result<PathBuf> {
-    let (joined, _) = walk(
-        Vec::new(),
-        path.as_os_str().as_bytes(),
-        &mut HashMap::new(),
-        0,
-    )?;
+    let raw = path.as_os_str().as_bytes();
+    let mut parsed: Vec<u8> = if raw.starts_with(b"/") {
+        b"/".to_vec()
+    } else {
+        Vec::new()
+    };
+    for name in raw
+        .split(|&byte| byte == b'/')
+        .filter(|name| !name.is_empty() && *name != b".")
+    {
+        if !parsed.is_empty() && !parsed.ends_with(b"/") {
+            parsed.push(b'/');
+        }
+        parsed.extend_from_slice(name);
+    }
+    let (joined, _) = walk(Vec::new(), &parsed, &mut HashMap::new(), 0)?;
     let absolute = if joined.starts_with(b"/") {
         joined
     } else {
