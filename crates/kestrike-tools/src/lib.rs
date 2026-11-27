@@ -6,6 +6,7 @@
 pub mod args;
 pub mod classes;
 pub mod fixtures;
+pub mod genmc;
 pub mod git;
 pub mod json;
 pub mod orderings;
