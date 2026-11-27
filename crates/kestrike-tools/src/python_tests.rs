@@ -268,3 +268,78 @@ fn int_refuses_a_surrogate_at_an_edge_and_a_string_of_spaces_naming_the_whole_te
         );
     }
 }
+
+#[test]
+fn repr_and_str_write_values_as_python_writes_the_loaded_objects() {
+    let value = |text: &str| parse(text).expect("the value parses");
+    #[rustfmt::skip]
+    let rows: [(&str, &str, &str); 4] = [
+        (r#"{"a": [1, 2.5, true, null, "x'y"], "b": {}}"#,
+         r#"{'a': [1, 2.5, True, None, "x'y"], 'b': {}}"#, r#"{'a': [1, 2.5, True, None, "x'y"], 'b': {}}"#),
+        ("[]", "[]", "[]"),
+        (r#""\u00e9\n""#, "'\u{e9}\\n'", "\u{e9}\n"),
+        ("1e400", "inf", "inf"),
+    ];
+    for (text, repr, str_of) in rows {
+        assert_eq!(python::repr(&value(text)), repr, "{text}");
+        assert_eq!(python::str_of(&value(text)), str_of, "{text}");
+    }
+}
+
+#[test]
+fn equal_compares_numbers_by_value_and_objects_by_members() {
+    let value = |text: &str| parse(text).expect("the value parses");
+    #[rustfmt::skip]
+    let rows: [(&str, &str, bool); 8] = [
+        ("1", "1.0", true),
+        ("1.0", "true", true),
+        (r#"{"a": 1, "b": 2}"#, r#"{"b": 2, "a": 1.0}"#, true),
+        ("[1]", "[true]", true),
+        ("0", "false", true),
+        ("2", "2.5", false),
+        (r#"{"a": 1}"#, r#"{"a": 1, "b": 2}"#, false),
+        (r#""1""#, "1", false),
+    ];
+    for (left, right, equal) in rows {
+        assert_eq!(
+            python::equal(&value(left), &value(right)),
+            equal,
+            "{left} == {right}"
+        );
+    }
+    assert!(!python::equal(
+        &Value::Float(f64::NAN),
+        &Value::Float(f64::NAN)
+    ));
+}
+
+#[test]
+fn members_iterate_items_keys_and_code_points() {
+    let value = |text: &str| parse(text).expect("the value parses");
+    let text = |item: &str| Value::String(item.into());
+    assert_eq!(
+        python::members(&value("[1, 2]")),
+        Some(vec![value("1"), value("2")])
+    );
+    assert_eq!(
+        python::members(&value(r#"{"a": 1, "b": 2}"#)),
+        Some(vec![text("a"), text("b")])
+    );
+    assert_eq!(
+        python::members(&value(r#""ab""#)),
+        Some(vec![text("a"), text("b")])
+    );
+    assert_eq!(python::members(&value("1")), None);
+}
+
+#[test]
+fn decimal_reads_digits_of_any_script_up_to_the_limit() {
+    let digits = |text: &str| python::decimal(text).map(|integer| integer.to_string());
+    assert_eq!(digits("0042"), Ok("42".to_owned()));
+    assert_eq!(digits("\u{664}\u{662}"), Ok("42".to_owned()));
+    assert_eq!(digits("\u{1d7d7}"), Ok("9".to_owned()));
+    assert!(digits("").is_err());
+    assert!(digits("4a").is_err());
+    assert!(digits(&"1".repeat(4301)).is_err());
+    assert_eq!(digits(&"1".repeat(4300)).map(|text| text.len()), Ok(4300));
+}

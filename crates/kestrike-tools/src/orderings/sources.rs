@@ -113,7 +113,7 @@ fn pure(path: &str) -> String {
 }
 
 /// `name` joined to `base`; an absolute `name` replaces `base`.
-fn joined(base: &str, name: &str) -> String {
+pub fn joined(base: &str, name: &str) -> String {
     if name.starts_with('/') {
         pure(name)
     } else {

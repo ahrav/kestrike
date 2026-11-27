@@ -20,6 +20,9 @@ pub const MAX_DEPTH: usize = 1000;
 /// The most decimal digits an integer token of [`parse`] and an [`Integer`] hold.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
 
+/// The reason of the error for nesting past [`MAX_DEPTH`].
+pub const DEPTH_REASON: &str = "nesting deeper than the reader takes";
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Object(Object),
@@ -323,7 +326,7 @@ impl<'a> Reader<'a> {
 
     fn nest(&mut self, depth: usize) -> Result<(), UniqueError> {
         if depth > MAX_DEPTH {
-            return Err(self.error("nesting deeper than the reader takes"));
+            return Err(self.error(DEPTH_REASON));
         }
         self.at += 1;
         self.space();

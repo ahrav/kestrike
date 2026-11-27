@@ -7,6 +7,12 @@
 //! `\n`. [`walk`] lists every entry under a directory, hidden entries included, and enters each
 //! directory it meets that is no link. It passes over a directory it may not list.
 
+pub mod case;
+pub mod correspondence;
+pub mod evidence;
+pub mod refusal;
+pub mod transcription;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
