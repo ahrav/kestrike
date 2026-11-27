@@ -119,6 +119,18 @@ class ReviewWorkflow(unittest.TestCase):
         )
         return "\n".join(self.lines[start:end])
 
+    def action_inputs(self):
+        """Return the key lines of the `with:` mapping of the one step that uses the action."""
+        self.assertEqual(self.text.count("uses: anthropics/claude-code-action@"), 1)
+        step = self.step("anthropics/claude-code-action@").splitlines()
+        start = step.index("        with:")
+        end = next(
+            (i for i in range(start + 1, len(step))
+             if step[i].strip() and len(step[i]) - len(step[i].lstrip()) <= 8),
+            len(step),
+        )
+        return [line for line in step[start + 1:end] if re.match(r" {10}\S", line)]
+
     def job_env(self):
         return self.job_mapping("env:")
 
@@ -154,7 +166,12 @@ class ReviewWorkflow(unittest.TestCase):
             "github.event.pull_request.base.ref == github.event.repository.default_branch",
         )
         self.assertNotIn("allowed_non_write_users:", self.text)
-        self.assertNotIn("allowed_bots:", self.text)
+        admitted = "          allowed_bots: kestrike-swarm"
+        self.assertEqual(
+            ([line for line in self.lines if "allowed_bots" in line.lower()], self.action_inputs().count(admitted)),
+            ([admitted], 1),
+            "the pinned action's inputs name one GitHub App whose events start the review",
+        )
 
     def test_review_runs_on_a_hosted_runner_without_a_shared_job_lock(self):
         job = self.text.split("\njobs:\n", 1)[1]
