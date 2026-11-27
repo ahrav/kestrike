@@ -8,6 +8,7 @@ repository = "https://github.com/ahrav/kestrike"
 publish = false
 
 [dependencies]
+libc = "0.2.189"
 sha2 = "0.11.0"
 
 # The binary and the library would both get a unit-test target named

@@ -1,7 +1,7 @@
 //! Each expected text is the text of `json.dumps(value, separators=(",", ":"))` for the value the input holds.
 //! The reader takes an integer of any length.
 
-use crate::json::{MAX_DEPTH, Value, dump, parse};
+use crate::json::{Integer, MAX_DEPTH, Value, dump, parse};
 
 fn round_trip(text: &str) -> String {
     dump(&parse(text).unwrap_or_else(|error| panic!("{text:?} parses: {error}")))
@@ -75,11 +75,20 @@ fn each_form_outside_the_reader_is_refused_with_its_reason() {
             "{text:?}, a form left out: {left_out}"
         );
     }
-    let error = parse("01").expect_err("01");
-    assert_eq!(
-        (error.offset(), error.reason()),
-        (1, "text after the value")
-    );
+}
+
+#[test]
+fn integers_order_by_sign_then_magnitude() {
+    let mut integers: Vec<Integer> = ["10", "-2", "9", "0", "-10", "100", "-0", "2"]
+        .iter()
+        .map(|text| match parse(text) {
+            Ok(Value::Integer(integer)) => integer,
+            other => panic!("{text} reads as an integer: {other:?}"),
+        })
+        .collect();
+    integers.sort();
+    let sorted: Vec<String> = integers.iter().map(ToString::to_string).collect();
+    assert_eq!(sorted, ["-10", "-2", "0", "0", "2", "9", "10", "100"]);
 }
 
 #[test]

@@ -258,12 +258,6 @@ fn prefix_matches(arg: &[u8]) -> Vec<Match<'_>> {
                     string,
                     explicit: Some(&arg[2..]),
                 });
-            } else if string.starts_with(arg) {
-                matches.push(Match {
-                    action,
-                    string,
-                    explicit: None,
-                });
             }
         }
     }

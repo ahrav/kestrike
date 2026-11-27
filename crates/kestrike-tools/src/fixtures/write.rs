@@ -1,7 +1,13 @@
+//! [`write`] reads a writer's command line and writes its traces as the module comment of `fixtures` states.
+//!
+//! The output is all or nothing for each trace up to the first failure: the traces before it are complete,
+//! and the failing one keeps Quint's own bytes when Quint wrote them.
+
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Write};
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 use std::time::Duration;
 
@@ -39,7 +45,8 @@ impl Trace {
     ///
     /// # Panics
     ///
-    /// `Trace::new` panics if `meta` contains a key listed in `RECORD`.
+    /// `Trace::new` panics if `meta` contains one of the keys `model_sha256`, `seed`, `steps` and
+    /// `recipe`.
     pub fn new(
         name: String,
         seed: u64,
@@ -66,10 +73,6 @@ impl Trace {
         }
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
     pub fn recipe(&self) -> Option<&'static [&'static str]> {
         self.recipe
     }
@@ -89,14 +92,11 @@ pub fn write(
     traces: &[Trace],
     rewrite: Rewrite,
 ) -> u8 {
+    quint::handle_interrupts();
     let options = match args::parse(model.tool, model.about, args) {
         Parsed::Run(options) => options,
         Parsed::Help(text) => {
-            let mut stdout = io::stdout().lock();
-            return match stdout
-                .write_all(text.as_bytes())
-                .and_then(|()| stdout.flush())
-            {
+            return match emit(io::stdout().as_fd(), &text) {
                 Ok(()) => 0,
                 Err(error) => fail(model, &format!("standard output: {error}"), 120),
             };
@@ -130,10 +130,21 @@ fn fail(model: &Model, message: &str, code: u8) -> u8 {
     report(&format!("{}: {message}\n", model.tool), code)
 }
 
+/// `report` returns `code` once `text` is written to standard error, and 120 when the write fails.
 fn report(text: &str, code: u8) -> u8 {
-    match io::stderr().write_all(text.as_bytes()) {
+    match emit(io::stderr().as_fd(), text) {
         Ok(()) => code,
         Err(_) => 120,
+    }
+}
+
+/// `emit` writes `text` to a duplicate of `stream`, so a write error such as `EBADF` on a descriptor opened
+/// read-only reaches the caller. A closed `stream` takes the text without an error.
+fn emit(stream: BorrowedFd<'_>, text: &str) -> io::Result<()> {
+    match stream.try_clone_to_owned() {
+        Ok(owned) => File::from(owned).write_all(text.as_bytes()),
+        Err(error) if error.raw_os_error() == Some(libc::EBADF) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -180,7 +191,7 @@ pub(crate) fn generate(
             .ok_or_else(|| format!("{}: the trace has no key 'states'", file.display()))?;
         let count = python::len(states)
             .ok_or_else(|| format!("{}: 'states' has no length", file.display()))?;
-        if count != trace.steps + 1 {
+        if trace.steps.checked_add(1) != Some(count) {
             return Err(format!(
                 "{}: the trace stopped before its final action",
                 trace.name
@@ -197,6 +208,8 @@ pub(crate) fn generate(
                 file.display()
             )
         })?;
+        // Quint's other `#meta` fields record the time of the run, so the written trace replaces them with
+        // the writer's record, which depends on the model and the trace alone.
         let mut meta = Object::new();
         meta.insert("format", format);
         meta.insert(model.name, Value::Object(record(&digest, trace)));
@@ -274,6 +287,8 @@ fn create(directory: &Path) -> io::Result<()> {
     }
 }
 
+/// `read_text` reads `path` as UTF-8 and writes each `\r\n` and each lone `\r` as `\n`, the text a model
+/// copy holds.
 fn read_text(path: &Path) -> io::Result<String> {
     Ok(fs::read_to_string(path)?
         .replace("\r\n", "\n")
