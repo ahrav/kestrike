@@ -88,11 +88,20 @@ impl<T> Parsed<T> {
     }
 }
 
+/// Whether a unique prefix of a long name selects its row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefixes {
+    /// A unique prefix of a long name, as `--out` for `--output`, selects its row.
+    Select,
+    /// Only a whole name selects a row.
+    Refuse,
+}
+
 pub struct Reader<'a> {
     tool: &'a str,
     usage: &'a str,
     help: &'a str,
-    abbrev: bool,
+    prefixes: Prefixes,
     options: &'a [Opt],
 }
 
@@ -117,9 +126,9 @@ enum HelpRefusal<'a> {
 
 impl<'t> Reader<'t> {
     /// `tool` and `usage` open each refusal of code 2, which writes `usage`, a newline, then
-    /// `<tool>: error: <message>`; `help` is returned unchanged in [`Parsed::Help`]. When `abbrev` holds, a
-    /// unique prefix of a long name selects its row; an exact long name and the `-h` cluster rules apply
-    /// whatever `abbrev` says.
+    /// `<tool>: error: <message>`; `help` is returned unchanged in [`Parsed::Help`]. With
+    /// [`Prefixes::Select`], a unique prefix of a long name selects its row; an exact long name and the `-h`
+    /// cluster rules apply whatever `prefixes` says.
     ///
     /// # Panics
     ///
@@ -131,7 +140,7 @@ impl<'t> Reader<'t> {
         tool: &'t str,
         usage: &'t str,
         help: &'t str,
-        abbrev: bool,
+        prefixes: Prefixes,
         options: &'t [Opt],
     ) -> Self {
         let names: Vec<&str> = options
@@ -170,7 +179,7 @@ impl<'t> Reader<'t> {
             tool,
             usage,
             help,
-            abbrev,
+            prefixes,
             options,
         }
     }
@@ -348,7 +357,7 @@ impl<'t> Reader<'t> {
                 None => (arg, None),
             };
             for (option, string) in self.strings() {
-                if self.abbrev && string.starts_with(prefix) {
+                if self.prefixes == Prefixes::Select && string.starts_with(prefix) {
                     matches.push(Match {
                         option,
                         string,

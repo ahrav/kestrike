@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use crate::args::{Given, Kind, Opt, Parsed, Reader, any};
+use crate::args::{Given, Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::text::Text;
 
 fn given(value: &Text) -> Result<(), String> {
@@ -48,7 +48,13 @@ const OPTIONS: [Opt; 8] = [
 ];
 
 fn read(args: &[&str]) -> Parsed {
-    let reader = Reader::new("tool", "usage: tool [options]", "help\n", false, &OPTIONS);
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &OPTIONS,
+    );
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     reader.parse(&args)
 }
@@ -161,7 +167,13 @@ fn every_name_of_a_row_selects_its_value() {
     ];
     let parser = "p = argparse.ArgumentParser(prog='tool', allow_abbrev=False); \
         p.add_argument('--out', '--output', type=given)";
-    let reader = Reader::new("tool", "usage: tool [options]", "help\n", false, &NAMED);
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &NAMED,
+    );
     for args in [
         ["--output", "a", "--out", "b"],
         ["--out", "a", "--output", "b"],
@@ -200,7 +212,7 @@ const HELP: Opt = Opt {
 };
 
 fn table(options: &[Opt]) {
-    Reader::new("tool", "usage", "help\n", true, options);
+    Reader::new("tool", "usage", "help\n", Prefixes::Select, options);
 }
 
 #[test]
