@@ -67,6 +67,8 @@ fn random_letters(letters: &mut [u8]) -> io::Result<()> {
 /// `make_temp_dir` creates `parent/PREFIX` and eight random letters as a directory of mode 0700, drawing
 /// a new name while one is taken.
 ///
+/// `prefix` must be a file-name fragment without `/`.
+///
 /// # Errors
 ///
 /// The random bytes cannot be read, a `mkdir` fails with another error than a taken name, or

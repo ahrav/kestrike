@@ -186,7 +186,7 @@ impl From<PathError> for PrivateError {
 }
 
 /// `ignored` holds for the `stat` errors that make Python's `Path.exists` and `Path.is_dir` false.
-pub(crate) fn ignored(error: &io::Error) -> bool {
+fn ignored(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
         Some(libc::ENOENT | libc::ENOTDIR | libc::EBADF | libc::ELOOP)
@@ -209,6 +209,41 @@ pub fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
         Err(error) if ignored(&error) => Ok(None),
         Err(error) => Err(PathError::new(path, error)),
     }
+}
+
+/// `is_link` holds when `lstat` names a symbolic link; a path absent by [`ignored`] or holding a NUL byte is
+/// no link.
+///
+/// # Errors
+///
+/// `lstat` fails with another error.
+pub fn is_link(path: &Path) -> Result<bool, PathError> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(path) {
+        Ok(found) => Ok(found.file_type().is_symlink()),
+        Err(error) if ignored(&error) => Ok(false),
+        Err(error) => Err(PathError::new(path, error)),
+    }
+}
+
+/// `is_file` holds when [`status`] names a regular file.
+///
+/// # Errors
+///
+/// `stat` fails with an error outside [`ignored`].
+pub fn is_file(path: &Path) -> Result<bool, PathError> {
+    Ok(status(path)?.is_some_and(|found| found.is_file()))
+}
+
+/// `is_dir` holds when [`status`] names a directory.
+///
+/// # Errors
+///
+/// `stat` fails with an error outside [`ignored`].
+pub fn is_dir(path: &Path) -> Result<bool, PathError> {
+    Ok(status(path)?.is_some_and(|found| found.is_dir()))
 }
 
 /// `make_private` creates each member of `path`'s lineage for which `status` returns `Ok(None)`,

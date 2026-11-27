@@ -29,7 +29,9 @@ use crate::storage::store::{Client, Item, Key, Outcome, Store, Unavailable, Wate
 use crate::storage::store_tests::{client as store_client, shard};
 use crate::storage::test_platform::TestPlatform;
 use crate::storage::warm_sim::{object_key, storage as test_storage};
-use crate::storage::{CacheVersion, CpuSet, FillPublishError, Storage, WorkBudget, WritableFill};
+use crate::storage::{
+    CacheVersion, CaptureError, CpuSet, FillPublishError, Storage, WorkBudget, WritableFill,
+};
 
 const VIEW_US: u64 = TEST_VIEW_US;
 
@@ -1359,7 +1361,14 @@ fn a_threaded_lane_runs_the_whole_open_on_the_lane_thread() {
                 },
                 |owner, now| {
                     let exit = duties.turn(owner, now);
-                    opened.set(duties.open == Open::Opened && log_open(storage));
+                    opened.set(
+                        duties.open == Open::Opened
+                            && match storage.with_suffix(|log| log.is_open()) {
+                                Ok(open) => open,
+                                Err(CaptureError::Unavailable) => opened.get(),
+                                Err(error) => panic!("cannot observe suffix: {error:?}"),
+                            },
+                    );
                     exit
                 },
             );

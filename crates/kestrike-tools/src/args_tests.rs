@@ -308,12 +308,23 @@ fn repeated(args: &[&str]) -> Parsed {
 }
 
 /// `p.add_argument('--plant', action='append', default=[], type=given)` keeps each value in order, a repeat
-/// included, in both forms; each value meets the check; `get` reads the last.
+/// included, in both forms; each value meets the check; `get` reads the last. An option of one value
+/// given twice keeps the last alone.
 #[test]
 fn a_repeated_option_keeps_every_occurrence_in_order() {
-    let Parsed::Run(values) =
-        repeated(&["--plant", "b", "--base", "x", "--plant=a", "--plant", "b"])
-    else {
+    let Parsed::Run(values) = repeated(&[
+        "--plant",
+        "b",
+        "--base",
+        "w",
+        "--plant=a",
+        "--plant",
+        "b",
+        "--base",
+        "x",
+        "--plant",
+        "c",
+    ]) else {
         panic!("the arguments read");
     };
     let all: Vec<&OsStr> = values
@@ -321,8 +332,8 @@ fn a_repeated_option_keeps_every_occurrence_in_order() {
         .iter()
         .map(OsString::as_os_str)
         .collect();
-    assert_eq!(all, ["b", "a", "b"].map(OsStr::new));
-    assert_eq!(values.get("--plant"), Some(OsStr::new("b")));
+    assert_eq!(all, ["b", "a", "b", "c"].map(OsStr::new));
+    assert_eq!(values.get("--plant"), Some(OsStr::new("c")));
     let all: Vec<&OsStr> = values
         .all("--base")
         .iter()
@@ -335,6 +346,10 @@ fn a_repeated_option_keeps_every_occurrence_in_order() {
     assert!(none.all("--plant").is_empty());
     assert_eq!(
         repeated(&["--plant", "a", "--plant="]),
+        refused("argument --plant: a value")
+    );
+    assert_eq!(
+        repeated(&["--plant=", "--plant", "a"]),
         refused("argument --plant: a value")
     );
     assert_eq!(

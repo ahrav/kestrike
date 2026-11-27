@@ -5,10 +5,10 @@
 //! empty no binary is found. A hit is a path that exists, is no directory, and that the real user may
 //! execute.
 
-use std::ffi::{CString, OsStr, OsString};
+use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
 use std::io::{self, Read};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -17,16 +17,6 @@ use super::stop::Stop;
 use crate::ownership::PathError;
 use crate::paths;
 use crate::text::Text;
-
-/// `join` joins `name` to `directory` as a path: an empty directory leaves `name` alone.
-fn join(directory: &[u8], name: &[u8]) -> PathBuf {
-    let mut joined = directory.to_vec();
-    if !joined.is_empty() && !joined.ends_with(b"/") {
-        joined.push(b'/');
-    }
-    joined.extend_from_slice(name);
-    PathBuf::from(OsString::from_vec(joined))
-}
 
 /// `executable` holds for a path that exists, is no directory, and that the real user may execute.
 fn executable(path: &Path) -> bool {
@@ -49,9 +39,8 @@ fn which(value: &OsStr, path: Option<&OsStr>, here: &Path) -> Option<PathBuf> {
         return executable(&from_here(&given)).then_some(given);
     }
     let path = path.filter(|path| !path.is_empty())?;
-    path.as_bytes()
-        .split(|&byte| byte == b':')
-        .map(|entry| join(entry, value.as_bytes()))
+    std::env::split_paths(path)
+        .map(|entry| entry.join(value))
         .find(|candidate| executable(&from_here(candidate)))
 }
 

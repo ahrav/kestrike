@@ -20,7 +20,7 @@ use super::stop::{Fault, Stop};
 pub(super) use crate::environ::Environ;
 use crate::environ::{get, set};
 use crate::git::REPOSITORY_VARIABLES;
-use crate::ownership::{foreign_toolchain_paths, status};
+use crate::ownership::{self, foreign_toolchain_paths};
 use crate::paths;
 use crate::text::{Text, text};
 
@@ -69,11 +69,10 @@ fn join(directory: &OsStr, entry: &OsStr) -> OsString {
     OsString::from_vec(joined)
 }
 
-/// `is_file` holds for a path whose target is a regular file; [`status`] decides which errors read as no
-/// file.
+/// `is_file` holds for a path whose target is a regular file; [`ownership::status`] decides which errors
+/// read as no file.
 pub(super) fn is_file(path: &Path) -> Result<bool, Fault> {
-    status(path)
-        .map(|status| status.is_some_and(|status| status.is_file()))
+    ownership::is_file(path)
         .map_err(|error| Fault::os(error.error(), Some(error.path().as_os_str())))
 }
 

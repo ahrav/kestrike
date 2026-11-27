@@ -6,7 +6,9 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
+use kestrike_tools::json::Value;
 use kestrike_tools::plants::Outcome;
+use kestrike_tools::text::Text;
 
 use super::repository::{
     Change, LIB, Repository, chmod, is_root, members, patch, record, replaced, write,
@@ -278,15 +280,12 @@ fn each_cause_with_evidence_is_taken() {
             panic!("{cause} is taken");
         };
         let held = inputs.plants()[0].miss_cause().expect("a cause");
-        let members: Vec<String> = held
-            .iter()
-            .map(|(name, value)| format!("{name}={value:?}"))
-            .collect();
+        let members: Vec<&(Text, Value)> = held.iter().collect();
         assert_eq!(
             members,
             [
-                "evidence=String('the log')".to_owned(),
-                format!("cause=String('{cause}')")
+                &(Text::from("evidence"), Value::String(Text::from("the log"))),
+                &(Text::from("cause"), Value::String(Text::from(cause)))
             ]
         );
     }
@@ -295,15 +294,20 @@ fn each_cause_with_evidence_is_taken() {
 /// Two rules broken at once give the first: the id's before the row's, the row's before the fix's.
 #[test]
 fn the_first_broken_rule_is_named() {
-    let mut members = members("alpha", "src/lib.rs");
-    for (name, value) in &mut members {
-        match name.as_str() {
-            "id" => *value = "\"other\"".to_owned(),
-            "row" | "fix" => *value = "0".to_owned(),
-            _ => {}
+    let broken = |names: &[&str]| {
+        let mut members = members("alpha", "src/lib.rs");
+        for (name, value) in &mut members {
+            if names.contains(&name.as_str()) {
+                *value = if name == "id" { "\"other\"" } else { "0" }.to_owned();
+            }
         }
-    }
-    rows(&[(ID, &|r| r.write(JSON, record(&members)))]);
+        record(&members)
+    };
+    let (all, row_and_fix) = (broken(&["id", "row", "fix"]), broken(&["row", "fix"]));
+    rows(&[
+        (ID, &|r| r.write(JSON, &all)),
+        (ROW, &|r| r.write(JSON, &row_and_fix)),
+    ]);
 }
 
 /// A plant's name is its directory's name: it must not be the score's name, may hold at most 245 code
@@ -352,7 +356,7 @@ fn the_directory_name_is_the_id() {
     }
 }
 
-/// `stderr` is the first line of the error output of the host's `git apply --numstat` on `text`.
+/// `numstat_error` is the first line of the error output of the host's `git apply --numstat` on `text`.
 fn numstat_error(repository: &Repository, text: &str) -> String {
     let mut child = Command::new("git")
         .args(["apply", "--numstat"])
@@ -476,10 +480,35 @@ fn each_file_equals_the_regular_file_the_head_holds() {
     chmod(&repository.path(PATCH), 0o755);
     repository.commit();
     refused_with(&repository, &differs("plant.patch"));
-    assert!(
-        LIB.contains("    1"),
-        "the patch's context is the committed file"
-    );
+}
+
+/// With each edited file marked assume-unchanged, `git status` of the store prints nothing, so the
+/// comparison of the bytes with the head's blob alone refuses the edit.
+#[test]
+fn the_bytes_are_compared_with_the_head_whatever_the_index_says() {
+    let edits: [(&str, String); 2] = [
+        (JSON, replaced("restores", "\"another sentence\"")),
+        (PATCH, patch("src/lib.rs").replace("+    2", "+    3")),
+    ];
+    for (file, edited) in edits {
+        let repository = Repository::new();
+        repository.git(&["update-index", "--assume-unchanged", file]);
+        repository.write(file, edited);
+        let store = repository.git(&[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+            "--",
+            "verification/plants",
+        ]);
+        assert_eq!(store, "", "{file} is hidden from git status");
+        refused_with(
+            &repository,
+            &format!("the plant store differs from HEAD at {file}; commit the plants first"),
+        );
+    }
 }
 
 /// Every plant of the store is checked, selected or not: a malformed `beta` refuses a run that selects
@@ -495,4 +524,137 @@ fn an_unselected_plant_is_checked_too() {
         repository.refused(&repository.call(&["--plant", "alpha"])),
         format!("rejected: beta: {ROW}")
     );
+}
+
+/// `committed_run` commits the fixture's working tree and runs the checks with `args`, which must pass.
+fn committed_run(repository: &Repository, args: &[&str]) -> Box<kestrike_tools::plants::Inputs> {
+    repository.commit();
+    match repository.prepare(&repository.call(args)) {
+        Outcome::Run(inputs) => inputs,
+        other => panic!("{args:?} runs, not {other:?}"),
+    }
+}
+
+/// A list rule judges every item: a list with one good and one bad item is refused, and an empty
+/// `expected` is taken and handed on empty.
+#[test]
+fn a_list_rule_judges_every_item() {
+    rows(&[
+        (FILES, &|r| {
+            r.write(JSON, replaced("files", "[\"src/lib.rs\", \"\\u3000\"]"))
+        }),
+        (EXPECTED, &|r| {
+            r.write(JSON, replaced("expected", "[\"smoke\", \"a/b\"]"))
+        }),
+        (EXPECTED, &|r| {
+            r.write(JSON, replaced("expected", "[\"smoke\", \".\"]"))
+        }),
+        (EXPECTED, &|r| {
+            r.write(JSON, replaced("expected", "[\"smoke\", \"a\\u007f\"]"))
+        }),
+    ]);
+    let repository = Repository::new();
+    repository.write(JSON, replaced("expected", "[]"));
+    let inputs = committed_run(&repository, &["--plant", "alpha"]);
+    assert!(inputs.plants()[0].expected().is_empty());
+    let repository = Repository::new();
+    repository.write(JSON, replaced("expected", "[\" a~b \"]"));
+    let inputs = committed_run(&repository, &["--plant", "alpha"]);
+    assert_eq!(inputs.plants()[0].expected(), [&Text::from(" a~b ")]);
+}
+
+/// The patch's paths and the record's files are compared as sorted lists in both directions, and the
+/// refusal names each side sorted; a plant whose files are listed in another order than the patch's
+/// keeps the record's order.
+#[test]
+fn a_plant_of_two_files_compares_sorted_paths() {
+    let both = format!("{}{}", patch("src/lib.rs"), patch("src/util.rs"));
+    rows(&[
+        (
+            "plant.patch changes src/lib.rs, src/util.rs, and files names src/lib.rs",
+            &|r| r.write(PATCH, &both),
+        ),
+        (
+            "plant.patch changes src/lib.rs, and files names src/lib.rs, src/util.rs",
+            &|r| r.write(JSON, replaced("files", "[\"src/util.rs\", \"src/lib.rs\"]")),
+        ),
+    ]);
+    let repository = Repository::new();
+    repository.write(PATCH, &both);
+    repository.write(JSON, replaced("files", "[\"src/util.rs\", \"src/lib.rs\"]"));
+    let inputs = committed_run(&repository, &["--plant", "alpha"]);
+    let [alpha] = inputs.plants() else {
+        panic!("one plant is selected");
+    };
+    assert_eq!(
+        alpha.files(),
+        [&Text::from("src/util.rs"), &Text::from("src/lib.rs")]
+    );
+    assert_eq!(alpha.patch(), both.as_bytes());
+}
+
+/// The proof's rule takes any UTF-8 text without NUL: a proof outside ASCII and one longer than the
+/// kernel's 131,072-byte bound on one argument both pass the checks.
+#[test]
+fn the_proof_rule_bounds_no_length_and_no_script() {
+    for proof in ["suite::\u{e9}t\u{e9}".to_owned(), "x".repeat(1 << 17)] {
+        let repository = Repository::new();
+        repository.write(JSON, replaced("proof", &format!("\"{proof}\"")));
+        let inputs = committed_run(&repository, &["--plant", "alpha"]);
+        assert_eq!(inputs.plants()[0].proof(), &Text::from(proof.as_str()));
+    }
+}
+
+/// `git apply --numstat` quotes a path outside ASCII, and the quoted spelling is compared with the
+/// record's files, so a plant that changes `src/é.rs` is refused as changing another path.
+#[test]
+fn a_path_git_quotes_is_compared_as_quoted() {
+    let repository = Repository::new();
+    repository.git(&["config", "core.quotePath", "true"]);
+    repository.write("src/\u{e9}.rs", LIB);
+    repository.commit();
+    repository.write("src/\u{e9}.rs", LIB.replace("    1", "    2"));
+    let diff = repository.git(&["diff", "--", "src"]);
+    repository.write("src/\u{e9}.rs", LIB);
+    repository.write(PATCH, &diff);
+    repository.write(JSON, replaced("files", "[\"src/\\u00e9.rs\"]"));
+    repository.commit();
+    refused_with(
+        &repository,
+        "alpha: plant.patch changes \"src/\\303\\251.rs\", and files names src/\u{e9}.rs",
+    );
+}
+
+/// A `stat` of `plant.patch` that fails otherwise than as an absent file refuses the record with the
+/// words `plant.json is unreadable` and the error; a link to a name past the length bound fails that way
+/// for root too.
+#[test]
+fn a_failed_stat_of_the_patch_is_worded_as_the_record() {
+    let repository = Repository::new();
+    let patch_path = repository.path(PATCH);
+    fs::remove_file(&patch_path).expect("removed");
+    symlink("n".repeat(300), &patch_path).expect("linked");
+    refused_with(
+        &repository,
+        &format!(
+            "alpha: plant.json is unreadable: {}: File name too long (os error 36)",
+            super::repository::shown(&patch_path)
+        ),
+    );
+}
+
+/// The repeated-member refusal holds the member's name as decoded, a lone surrogate included.
+#[test]
+fn a_repeated_member_is_named_as_decoded() {
+    let repository = Repository::new();
+    let mut members = members("alpha", "src/lib.rs");
+    members.push(("\\ud800".to_owned(), "1".to_owned()));
+    members.push(("\\ud800".to_owned(), "2".to_owned()));
+    repository.write(JSON, record(&members));
+    let Outcome::Rejected(reason) = repository.prepare(&repository.call(&[])) else {
+        panic!("a repeated member is refused");
+    };
+    let mut expected = Text::from("alpha: plant.json is unreadable: repeated member ");
+    expected.push_code_point(0xd800).expect("a code point");
+    assert_eq!(reason, expected);
 }

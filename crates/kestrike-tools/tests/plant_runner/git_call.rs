@@ -223,3 +223,57 @@ fn the_call_runs_no_hook() {
         repository.hooks_ran()
     );
 }
+
+/// A name the environment gives twice reaches Git once, with its first value, the value
+/// `environ::get` reads, in both forms of the call.
+#[test]
+fn a_repeated_name_reaches_git_with_its_first_value() {
+    let repository = Repository::new();
+    let mut env = recorder(&repository);
+    env.push((OsString::from("PROBE"), OsString::from("first")));
+    env.push((OsString::from("PROBE"), OsString::from("second")));
+    for bytes in [false, true] {
+        let args = [OsStr::new("status")];
+        if bytes {
+            let _ = git::bytes(&env, &repository.top, &args, b"").expect("the call runs");
+        } else {
+            let _ = git::text(&env, &repository.top, &args).expect("the call runs");
+        }
+        let probes: Vec<OsString> = seen(&repository)
+            .into_iter()
+            .filter(|(name, _)| name == "PROBE")
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(probes, [OsString::from("first")], "bytes: {bytes}");
+    }
+}
+
+/// A variable whose name holds `=` after its first byte stops either form of the call before Git starts;
+/// a name whose one `=` is its first byte, as `std::env::vars_os` reads an entry `=A=B`, starts Git.
+#[test]
+fn a_name_holding_an_equals_sign_stops_the_call() {
+    let repository = Repository::new();
+    let mut env = recorder(&repository);
+    env.push((
+        OsString::from("GIT_INDEX_FILE=/elsewhere"),
+        OsString::from("x"),
+    ));
+    let args = [OsStr::new("status")];
+    for result in [
+        git::text(&env, &repository.top, &args).map(|_| ()),
+        git::bytes(&env, &repository.top, &args, b"").map(|_| ()),
+    ] {
+        let Err(CallError::Start(error)) = result else {
+            panic!("the call stops before Git starts");
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+    assert!(
+        !repository.scratch.join("recorder/args").exists(),
+        "no Git ran"
+    );
+    let mut env = recorder(&repository);
+    env.push((OsString::from("=A"), OsString::from("B")));
+    let done = git::text(&env, &repository.top, &args).expect("the call runs");
+    assert_eq!(done.code, 3, "the recorder ran");
+}

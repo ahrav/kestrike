@@ -11,11 +11,10 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-use super::files::{is_file, is_link};
 use super::values::{natural_integer, text};
 use super::verdict::NoVerdict;
 use crate::json::{self, Integer, Object, Value};
-use crate::ownership::status;
+use crate::ownership::{is_file, is_link, status};
 use crate::text::{Text, text};
 
 /// The classes of a suspect that can catch a plant;

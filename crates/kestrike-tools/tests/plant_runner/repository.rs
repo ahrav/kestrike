@@ -171,6 +171,26 @@ pub fn write(path: &Path, contents: impl AsRef<[u8]>) {
     fs::write(path, contents).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
+/// `claimed` makes a new directory `plants-PID-N` under `base`, mode 0700 whatever the umask, taking the
+/// next `N` while a name is taken, so the fixture never adopts or later removes a path it did not make.
+fn claimed(base: &Path) -> PathBuf {
+    loop {
+        let scratch = base.join(format!(
+            "plants-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        match DirBuilder::new().create(&scratch) {
+            Ok(()) => {
+                chmod(&scratch, 0o700);
+                return scratch;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("{}: {error}", scratch.display()),
+        }
+    }
+}
+
 /// `tree` lists every path under `root` but those under `skip`, in sorted order; a directory it cannot
 /// list ends its branch.
 fn tree(root: &Path, skip: &Path, found: &mut Vec<PathBuf>) {
@@ -196,27 +216,13 @@ impl Repository {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(base).unwrap_or_else(|error| panic!("{}: {error}", base.display()));
         let base = base.canonicalize().expect("the scratch base resolves");
-        // Cargo makes its scratch directory under the caller's umask; the work directory's checks refuse
-        // one the group or others can write, so the fixture takes their write bits away.
-        let mode = fs::metadata(&base)
-            .expect("the scratch base stats")
-            .permissions()
-            .mode();
-        if mode & 0o022 != 0 {
-            chmod(&base, mode & 0o755);
-        }
         let shared = shared_directories(&base).expect("the scratch base's ancestors stat");
         assert!(
             shared.is_empty(),
             "the checks refuse a work directory under {shared:?}, which another user can write; \
              make those directories private or move CARGO_TARGET_TMPDIR under a private directory"
         );
-        let scratch = base.join(format!(
-            "plants-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        private_dir(&scratch);
+        let scratch = claimed(&base);
         let (top, tmp, bin, home) = (
             scratch.join("checkout"),
             scratch.join("tmp"),
@@ -420,7 +426,7 @@ pub fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// `bytes` turns a path's bytes into text for an expected reason.
+/// `shown` turns a path's bytes into text for an expected reason.
 pub fn shown(path: &Path) -> String {
     String::from_utf8(path.as_os_str().as_bytes().to_vec()).expect("a fixture path is UTF-8")
 }

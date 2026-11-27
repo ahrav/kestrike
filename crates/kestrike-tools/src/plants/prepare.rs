@@ -109,8 +109,10 @@ pub enum Outcome {
 }
 
 /// `prepare` checks a run's inputs: `args` after the tool's name, the environment `env` and the invoking
-/// directory `here`, an absolute path or the error of reading it. Of a variable `env` names twice, the
-/// first is read and passed on.
+/// directory `here`, an absolute path or the error of reading it. A relative `--work`, `TMPDIR` or
+/// `--campaign` is joined to `here` as given before its `..` is read lexically, so a caller passes the
+/// physical path `std::env::current_dir` returns. Of a variable `env` names twice, the first is read and
+/// passed on.
 pub fn prepare(args: &[OsString], env: Environ, here: io::Result<PathBuf>) -> Outcome {
     let options = match parse(args) {
         Parsed::Run(options) => options,

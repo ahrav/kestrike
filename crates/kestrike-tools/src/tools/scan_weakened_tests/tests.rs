@@ -2,6 +2,7 @@ use super::digits::{integer, is_digits};
 use super::hunks::{Hunk, hunks, paired};
 use super::inventory::inventory_changes;
 use super::patterns::*;
+use super::tree::records;
 use super::{Failure, Shown};
 
 type Cases = &'static [(
@@ -341,13 +342,6 @@ fn an_id_is_digits_by_the_decimal_and_other_digit_code_points() {
 fn a_diff_yields_each_hunk_with_its_removed_lines_and_numbered_added_lines() {
     let lines = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n-a\n+b\n+c\n@@ -5 +6 @@\n-d\n\\ end\n";
     let found = hunks(lines.split('\n')).expect("the diff reads");
-    let hunk = |removed: &[&str], added: &[(u64, &str)]| Hunk {
-        removed: removed.iter().map(|text| (*text).to_owned()).collect(),
-        added: added
-            .iter()
-            .map(|&(number, text)| (number, text.to_owned()))
-            .collect(),
-    };
     assert_eq!(
         found,
         [hunk(&["a"], &[(1, "b"), (2, "c")]), hunk(&["d"], &[])]
@@ -390,15 +384,96 @@ fn an_inventory_reports_falls_absences_and_rises_in_document_order() {
     assert_eq!(Shown::absent().to_string(), "absent");
 }
 
+/// An integer budget or timeout whose new value is a text, a float, a boolean or null is refused, and so is a
+/// `bound` or `member` text whose new value is no text. A budget that was a boolean or a float, and a field
+/// outside the budgets, the timeouts and the texts, compares with no refusal whatever its new scalar: a new
+/// integer after a boolean is no finding, and an object or a list in place of a count or a text reads as its
+/// absence.
 #[test]
-fn a_boolean_or_a_float_is_no_inventory_count() {
-    let old = r#"{"seeds": true, "seconds": 2.0, "executions": 3}"#;
-    let new = r#"{"seeds": false, "seconds": 1.0, "executions": 2.5}"#;
-    assert!(
-        inventory_changes(old, new)
-            .expect("the inventories compare")
-            .is_empty()
+fn a_count_or_a_bound_text_that_changes_its_type_is_refused() {
+    for (field, old, new, kinds) in [
+        ("executions", "3", "2.5", "an integer to a float"),
+        ("seeds", "3", "\"3\"", "an integer to a text"),
+        ("seconds", "3", "true", "an integer to a boolean"),
+        ("deadline_seconds", "3", "null", "an integer to null"),
+        ("bound", "\"depth: 4\"", "4", "a text to an integer"),
+        ("member", "\"seeds 2\"", "false", "a text to a boolean"),
+    ] {
+        let old = format!(r#"{{"rows": [{{"id": "a", "{field}": {old}}}]}}"#);
+        let new = format!(r#"{{"rows": [{{"id": "a", "{field}": {new}}}]}}"#);
+        let error = inventory_changes(&old, &new).expect_err("the type changes");
+        assert!(matches!(error, Failure::Refused(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "scripts/test-inventory.json: the value at rows[a].{field} changes from {kinds}"
+            )
+        );
+    }
+    let error = inventory_changes(
+        r#"{"a\n::x": {"seeds": 4}}"#,
+        r#"{"a\n::x": {"seeds": "4"}}"#,
+    )
+    .expect_err("the type changes");
+    assert_eq!(
+        error.to_string(),
+        "scripts/test-inventory.json: the value at a\\n::x.seeds changes from an integer to a text"
     );
+    let old = r#"{"seeds": true, "seconds": 2.0, "executions": 3, "bound": "depth: 4"}"#;
+    let new = r#"{"seeds": 1, "seconds": 1, "executions": {"x": 1}, "bound": ["depth: 1"]}"#;
+    let found: Vec<String> = inventory_changes(old, new)
+        .expect("the inventories compare")
+        .into_iter()
+        .map(|change| format!("{}: {} -> {}", change.name, change.old, change.new))
+        .collect();
+    assert_eq!(
+        found,
+        ["executions: 3 -> absent", "bound depth: 4 -> absent"]
+    );
+    let old = r#"{"seeds": true, "seconds": 2.0, "name": 3, "label": "depth: 4"}"#;
+    let new = r#"{"seeds": false, "seconds": 1.0, "name": "3", "label": 4}"#;
+    assert_eq!(
+        inventory_changes(old, new).expect("the inventories compare"),
+        []
+    );
+}
+
+/// A record of `git ls-tree -z` is `<mode> <type> <id>`, a tab and a path, which keeps every byte after the
+/// first tab; a record with no tab, with two or four words, or with an empty word is refused, naming the
+/// commit's short id and the record.
+#[test]
+fn a_tree_record_of_another_form_is_refused() {
+    let commit = "0123456789abcdef";
+    assert_eq!(
+        records(
+            commit,
+            "100644 blob 1111\ta\tb.rs\x00040000 tree 2222\tc\x00"
+        )
+        .expect("the records read"),
+        [
+            ("100644".to_owned(), "a\tb.rs".to_owned()),
+            ("040000".to_owned(), "c".to_owned())
+        ]
+    );
+    for record in [
+        "100644 blob 1111 a.rs",
+        "100644 1111\ta.rs",
+        "100644 blob 1111 x\ta.rs",
+        "100644  blob 1111\ta.rs",
+        "100644\tblob 1111\ta.rs",
+        "",
+    ] {
+        let listed = format!("100644 blob 1111\tz.rs\0{record}\0");
+        let error = records(commit, &listed).expect_err("the record is refused");
+        assert!(matches!(error, Failure::Refused(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "git ls-tree at 0123456789ab: the record {} has another form",
+                crate::text::Text::from(record).repr()
+            )
+        );
+    }
 }
 
 #[test]
@@ -415,8 +490,49 @@ fn duplicate_keys_keep_the_last_value_at_the_first_place() {
 
 #[test]
 fn a_short_commit_name_takes_its_first_twelve_code_points() {
-    use super::scan::short;
+    use super::finding::short;
     assert_eq!(short("0123456789abcdef"), "0123456789ab");
     assert_eq!(short("\u{e9}".repeat(13).as_str()), "\u{e9}".repeat(12));
     assert_eq!(short("abc"), "abc");
+}
+
+fn hunk(removed: &[&str], added: &[(u64, &str)]) -> Hunk {
+    Hunk {
+        removed: removed.iter().map(|text| (*text).to_owned()).collect(),
+        added: added
+            .iter()
+            .map(|&(number, text)| (number, text.to_owned()))
+            .collect(),
+    }
+}
+
+/// A line that starts with `diff --git ` closes the open hunk, so the header lines of a second file section
+/// (a file that becomes a link) are neither removed nor added lines of the first section's last hunk.
+#[test]
+fn a_second_file_section_starts_no_line_of_the_first_sections_hunk() {
+    let lines = "diff --git a/x b/x\ndeleted file mode 100644\n--- a/x\n+++ /dev/null\n@@ -1 +0,0 @@\n-a\n\
+                 diff --git a/x b/x\nnew file mode 120000\n--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+y\n";
+    let found = hunks(lines.split('\n')).expect("the diff reads");
+    assert_eq!(found, [hunk(&["a"], &[]), hunk(&[], &[(1, "y")])]);
+}
+
+/// The diff Git writes for `src/assert!.rs` that becomes a link holds the path in its second section's
+/// `+++ b/src/assert!.rs` line; read as an added line it would count as an added assertion.
+#[test]
+fn a_path_that_holds_an_assertion_adds_no_assertion_when_it_becomes_a_link() {
+    let lines = "diff --git a/src/assert!.rs b/src/assert!.rs\ndeleted file mode 100644\nindex c2be321..0000000\n\
+                 --- a/src/assert!.rs\n+++ /dev/null\n@@ -1,4 +0,0 @@\n-#[test]\n-fn t() {\n-    assert!(true);\n-}\n\
+                 diff --git a/src/assert!.rs b/src/assert!.rs\nnew file mode 120000\nindex 0000000..ded5f29\n\
+                 --- /dev/null\n+++ b/src/assert!.rs\n@@ -0,0 +1 @@\n+other.rs\n\\ No newline at end of file\n";
+    let found = hunks(lines.split('\n')).expect("the diff reads");
+    let holds = |text: &String| ASSERT.is_match(text.as_bytes());
+    let removed = found
+        .iter()
+        .flat_map(|hunk| &hunk.removed)
+        .filter(|text| holds(text));
+    let added = found
+        .iter()
+        .flat_map(|hunk| &hunk.added)
+        .filter(|(_, text)| holds(text));
+    assert_eq!((removed.count(), added.count()), (1, 0));
 }

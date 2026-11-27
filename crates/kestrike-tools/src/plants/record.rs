@@ -7,14 +7,15 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use super::files::{is_file, is_link, strerror};
+use super::files::strerror;
 use super::git::{self, Done};
 use super::stop::Stop;
 use super::store::{SCORE, STORE};
 use super::values::{argument, cause, count, keys, printable, profile_name, strings, text};
 use crate::environ::Environ;
 use crate::json::{self, Integer, Object, Value};
-use crate::text::{Text, is_space, strip_str};
+use crate::ownership::{is_file, is_link};
+use crate::text::{Text, strip_str, words};
 
 /// The most bytes `plant.json` or `plant.patch` holds.
 pub const RECORD_BOUND: usize = 1 << 20;
@@ -176,7 +177,14 @@ fn files_and_record(
         ));
     };
     let document = std::str::from_utf8(&data).map_err(|error| unreadable(&error))?;
-    let value = json::parse_unique(document).map_err(|error| unreadable(&error))?;
+    let value = json::parse_unique(document).map_err(|error| match error {
+        json::UniqueError::Repeated(member) => {
+            let mut reason = Text::from("plant.json is unreadable: repeated member ");
+            reason.push_text(&member);
+            rejected(name, reason)
+        }
+        json::UniqueError::Syntax(error) => unreadable(&error),
+    })?;
     Ok((data, patch_bytes, value))
 }
 
@@ -250,7 +258,9 @@ fn lossy_lines(bytes: &[u8]) -> Vec<String> {
 }
 
 /// `patch_paths` checks the patch with `git apply --numstat` and `--summary`: it must change some path,
-/// exactly the record's files, and only file contents.
+/// exactly the record's files, and only file contents. A `--numstat` that exits nonzero refuses the patch
+/// with Git's first error line; the exit code of `--summary` is not read, so a summary that fails with no
+/// output passes the patch.
 fn patch_paths(
     env: &Environ,
     top: &Path,
@@ -295,28 +305,10 @@ fn patch_paths(
     Ok(())
 }
 
-/// `split_fields` splits `line` at runs of whitespace into at most `most` fields, the last holding the
-/// rest of the line from its first code point outside the whitespace, as Python's `str.split(None, most -
-/// 1)` does.
-fn split_fields(line: &str, most: usize) -> Vec<&str> {
-    let mut fields = Vec::new();
-    let mut rest = line.trim_start_matches(|c: char| is_space(u32::from(c)));
-    while !rest.is_empty() {
-        if fields.len() + 1 == most {
-            fields.push(rest);
-            break;
-        }
-        let end = rest
-            .find(|c: char| is_space(u32::from(c)))
-            .unwrap_or(rest.len());
-        fields.push(&rest[..end]);
-        rest = rest[end..].trim_start_matches(|c: char| is_space(u32::from(c)));
-    }
-    fields
-}
-
-/// `committed` refuses `data`, read at `relative` under the top, unless `head` holds those bytes there
-/// as a regular file of mode 100644.
+/// `committed` refuses `data`, read at `relative` under the top, unless the output of `git ls-tree`
+/// names a regular file of mode 100644 there and the output of `git cat-file blob` for its object equals
+/// `data`. Neither exit code is read: a failed read whose output differs reads as a difference from HEAD,
+/// and one whose output matches passes.
 fn committed(
     env: &Environ,
     top: &Path,
@@ -334,7 +326,7 @@ fn committed(
     let listed = git::text(env, top, &listing).map_err(Stop::git)?.stdout;
     let listed: Vec<&str> = listed.trim_end_matches('\0').split('\0').collect();
     let fields = match listed.as_slice() {
-        [only] if !only.is_empty() => split_fields(only, 4),
+        [only] if !only.is_empty() => words(only).take(4).collect(),
         _ => Vec::new(),
     };
     let blob = match fields.as_slice() {
