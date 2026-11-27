@@ -125,7 +125,6 @@ pub(crate) fn push_repr(code: u32, out: &mut String) {
     }
 }
 
-/// `escaped` keeps a field that holds embedded CR or LF characters on one output line.
 pub(crate) fn escaped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for code in text.chars() {

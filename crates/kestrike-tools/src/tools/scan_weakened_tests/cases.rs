@@ -6,22 +6,13 @@
 
 use std::collections::HashSet;
 
-use super::finding::short;
-use super::tree::{entries, modes, redirect, regular};
+use super::tree::{directory, entries, regular};
 use super::{Change, Class, Failure, Finding, Shown};
 
 pub const CASES: &str = "crates/kestrike-tools/tests";
 
-/// `cases` returns the id and the entry path of each case at `commit`, in tree order. It refuses a test
-/// directory that is a link or a submodule, or that lies under one, by [`modes`]: a checkout reads the cases
-/// through that entry.
+/// `cases` returns the id and the entry path of each case at `commit`, in tree order.
 fn cases(commit: &str) -> Result<Vec<(String, String)>, Failure> {
-    if let Some(kind) = redirect(modes(commit, &[CASES])?.get(CASES)) {
-        return Err(Failure::Refused(format!(
-            "{CASES} at {} is {kind}",
-            short(commit)
-        )));
-    }
     let listed = entries(commit, &[CASES], true)?;
     let single = listed
         .iter()
@@ -59,9 +50,15 @@ fn cases(commit: &str) -> Result<Vec<(String, String)>, Failure> {
     Ok(found)
 }
 
-/// `removed` returns a finding for each case at `base` whose id names no case at `head`. A case renamed to
-/// another id is the absence of its old id.
-pub fn removed(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
+/// `removed` checks `head` before `base`, even when `changed` is false. [`directory`] refuses `CASES` if the
+/// path or an ancestor is a link or a submodule. When `changed` is true, `removed` reports each `base` case
+/// whose id is absent at `head`, including the old id after a rename.
+pub fn removed(base: &str, head: &str, changed: bool) -> Result<Vec<Finding>, Failure> {
+    directory(head, CASES)?;
+    directory(base, CASES)?;
+    if !changed {
+        return Ok(Vec::new());
+    }
     let present: HashSet<String> = cases(head)?.into_iter().map(|(id, _)| id).collect();
     Ok(cases(base)?
         .into_iter()

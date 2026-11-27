@@ -11,7 +11,7 @@ use crate::json::Integer;
 use crate::stream::emit;
 use crate::text::{escaped, strip_str};
 
-use super::cases::removed;
+use super::cases::{CASES, removed};
 use super::declarations::{conditions, declarations, plain};
 use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
@@ -26,8 +26,6 @@ const HELP: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\
                     a Rust test or its budget.\n\noptional arguments:\n  -h, --help   show this help message \
                     and exit\n  --base BASE\n  --head HEAD\n";
 const TIMEOUT_FILES: [&str; 2] = [".github/workflows/agent-checks.yml", "scripts/rust-lane.sh"];
-/// The inputs the scan reads at fixed paths. Every range checks each of them at both commits.
-const FIXED: [&str; 3] = [INVENTORY, TIMEOUT_FILES[0], TIMEOUT_FILES[1]];
 const STREAM_FAILED: u8 = 120;
 
 const OPTIONS: [Opt; 3] = [
@@ -78,10 +76,14 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .copied()
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
-    // A diffed path or a fixed input that is no file, or that is absent under a link or a submodule, at either
-    // commit is refused here.
+    // `files` rejects a checked path at either commit if it names a non-file entry or is missing beneath a link
+    // or a submodule.
     let mut checked = diffed.clone();
-    checked.extend(FIXED.iter().filter(|path| !diffed.contains(path)));
+    for path in std::iter::once(INVENTORY).chain(TIMEOUT_FILES) {
+        if !checked.contains(&path) {
+            checked.push(path);
+        }
+    }
     files(base, &checked)?;
     files(head, &checked)?;
     let specs: Vec<String> = rust
@@ -146,7 +148,7 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         let new = inventory_text(head)?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
-    found.extend(removed(base, head)?);
+    found.extend(removed(base, head, paths.iter().any(within(CASES)))?);
     Ok(found)
 }
 

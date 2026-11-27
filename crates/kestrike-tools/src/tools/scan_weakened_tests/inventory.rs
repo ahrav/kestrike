@@ -245,7 +245,7 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
 }
 
 /// `inventory_text` returns the inventory's text at `rev`, and an empty text where `rev` holds no entry at its
-/// path. An entry that is no file, and a file that is empty or unreadable, is refused.
+/// path. [`files`] rejects a non-file entry and an inventory path missing beneath a link or a submodule.
 pub fn inventory_text(rev: &str) -> Result<String, Failure> {
     if files(rev, &[INVENTORY])?.is_empty() {
         return Ok(String::new());

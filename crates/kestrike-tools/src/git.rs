@@ -12,7 +12,7 @@ use crate::text::{Text, strip_str};
 const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
     ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_DIFF_OPTS"];
 
-/// A Git command that did not give its output. `Display` writes the line a tool prints after its own name.
+/// `Display` writes the text a tool prints after its own name.
 #[derive(Debug)]
 pub enum GitError {
     /// `Start` wraps an error from `Command::output` or `Command::spawn`, including a failure to launch Git:

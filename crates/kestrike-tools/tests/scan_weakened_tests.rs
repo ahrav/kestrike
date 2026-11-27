@@ -1129,6 +1129,11 @@ type Refusal = (Vec<(String, String)>, Vec<&'static str>, &'static str);
 #[test]
 fn an_inventory_that_cannot_be_compared_exits_two() {
     let repo = Repo::new("cannot-compare");
+    let ignored = repo.edit(
+        "src/a_tests.rs",
+        "#[test]\nfn second",
+        "#[test]\n#[ignore]\nfn second",
+    );
     let [a, b, f] = rows();
     let J::O(mut decoy) = document(&[b.with("seeds", J::N(3)), a.clone(), f.clone()], 10) else {
         panic!("the document is an object");
@@ -1220,6 +1225,14 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             INVENTORY,
         ),
         (
+            vec![
+                (INVENTORY.to_owned(), "not json".to_owned()),
+                ("src/a_tests.rs".to_owned(), ignored.clone()),
+            ],
+            vec![],
+            INVENTORY,
+        ),
+        (
             vec![(format!("{INVENTORY}/x"), "{}".to_owned())],
             vec![INVENTORY],
             "is not a file",
@@ -1235,7 +1248,7 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             .collect();
         let head = repo.change(&files);
         let run = repo.scan_head(&head);
-        assert_eq!(run.code, Some(2), "{message}: {}{}", run.stdout, run.stderr);
+        assert_eq!(run.outcome(), (Some(2), ""), "{message}: {}", run.stderr);
         assert!(run.stderr.contains(message), "{}", run.stderr);
         assert!(
             run.stderr.starts_with("scan-weakened-tests: "),
@@ -2001,8 +2014,7 @@ fn a_carriage_return_in_a_path_is_written_escaped() {
     );
 }
 
-/// A line feed, U+007F and U+0085 in an inventory key are written as `repr` writes them, and U+00A0, which
-/// lies past U+009F, is written as it is.
+/// A line feed, U+007F, U+0085 and U+00A0 in an inventory key are each written as `repr` writes them.
 #[test]
 fn a_control_character_in_an_inventory_key_is_written_escaped() {
     let repo = Repo::new("key-line-feed");
@@ -2163,17 +2175,17 @@ fn ci_scans_a_pull_request_from_the_first_parent_of_its_test_merge() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/agent-checks.yml");
     let workflow = fs::read_to_string(workflow).expect("the workflow reads");
     assert_eq!(
-        workflow
-            .matches("scripts/tool.sh scan-weakened-tests")
-            .count(),
+        workflow.matches("scan-weakened-tests").count(),
         1,
         "one step runs the scan"
     );
-    assert!(workflow.contains(
-        "          SCAN_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' \
-         || github.event.before || 'origin/main' }}\n"
-    ));
-    assert!(step_run(&workflow).contains(" scan-weakened-tests --base \"$SCAN_BASE\" "));
+    assert!(workflow.contains(SCAN_STEP), "{SCAN_STEP}");
+    let wrapper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ci-scan-weakened-tests.sh");
+    let wrapper = fs::read_to_string(wrapper).expect("the wrapper reads");
+    assert!(
+        wrapper.contains("\nbash scripts/tool.sh scan-weakened-tests \"$@\" 2>&1 || status=$?\n")
+    );
     let repo = Repo::new("first-parent");
     let key = format!("budget-lowered:{INVENTORY}");
     let [a, b, f] = rows();
@@ -2948,137 +2960,33 @@ fn a_main_rs_root_is_a_case_at_a_commit_without_tools_rs() {
     );
 }
 
-/// The `run` block of the workflow's scan step, each line without the block's ten-space indent.
-fn step_run(workflow: &str) -> String {
-    let (_, step) = workflow
-        .split_once("      - name: Weakened-test scan\n")
-        .expect("the workflow holds the scan's step");
-    let (head, block) = step
-        .split_once("        run: |\n")
-        .expect("the step runs a block");
-    assert!(
-        !head.contains("- name:"),
-        "the block is the scan step's own"
-    );
-    block
-        .lines()
-        .map_while(|line| line.strip_prefix("          "))
-        .map(|line| format!("{line}\n"))
-        .collect()
-}
+/// The step that runs the scan, from its name line to its `run` line: the step's own `env` sets the scan's
+/// base, and its one `run` line starts the wrapper that guards the runner's command processing.
+const SCAN_STEP: &str = "      - name: Weakened-test scan\n        env:\n          SCAN_BASE: ${{ \
+                         github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || \
+                         'origin/main' }}\n        run: bash scripts/ci-scan-weakened-tests.sh --base \
+                         \"$SCAN_BASE\"\n";
 
-const GUARDED_STEP: &str = "token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \\n')\n\
-                            [[ $token =~ ^[0-9a-f]{32}$ ]]\n\
-                            printf '::stop-commands::%s\\n' \"$token\"\n\
-                            status=0\n\
-                            bash scripts/tool.sh scan-weakened-tests --base \"$SCAN_BASE\" 2>&1 || status=$?\n\
-                            printf '::%s::\\n' \"$token\"\n\
-                            exit \"$status\"\n";
-
-/// The scan's step prints `::stop-commands::` with a token of 32 hex digits before the scan, every line the
-/// scan writes on either stream as the scan writes it, the legacy command text `##[error]` of a path included,
-/// and `::<token>::` on a line of its own after it, and it exits with the scan's status: 0, 1, 2, and 127
-/// from a launcher that fails and from a launcher that is absent. The token is new at each run and stands in
-/// no line of the scan and in no variable of the scan's environment. The step runs as a child under the two
-/// command lines the hosted runner gives a `bash` step; the stand-in launcher runs the tool itself.
+/// A path that holds the runner's legacy command text `##[error]` keeps its bytes in the report line: the
+/// CI step's wrapper stops command processing around the scan, and an acknowledgement repeats the key as the
+/// report spells it.
 #[test]
-fn the_ci_step_stops_workflow_commands_around_the_scan() {
-    let workflow =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/agent-checks.yml");
-    let step = step_run(&fs::read_to_string(workflow).expect("the workflow reads"));
-    assert_eq!(step, GUARDED_STEP);
-    let repo = Repo::new("step-guard");
-    let script = repo.temp.join("step.sh");
-    fs::write(&script, &step).expect("the step is written");
-    let seen = repo.temp.join("environment");
-    let launcher = repo.repo.join("scripts/tool.sh");
-    let runs = format!(
-        "env > '{}'\nexec '{TOOL}' . \"$@\"\n",
-        seen.to_str().expect("the path is UTF-8")
-    );
-    let fails = "printf 'tool.sh: the build of kestrike-tools failed\\n' >&2\nexit 127\n";
-    let legacy = repo.change(&[(
+fn a_legacy_command_text_in_a_path_keeps_its_bytes() {
+    let repo = Repo::new("legacy-command");
+    let head = repo.change(&[(
         "src/##[error]a_tests.rs",
         &format!("#[ignore]\n{}", test_fn("arrives")),
     )]);
-    repo.reset(&repo.base);
-    let blocked = repo.ignore_second("ignore");
-    let mut tokens = Vec::new();
-    for (head, base, stand_in, code) in [
-        (&legacy, repo.base.as_str(), Some(runs.as_str()), 0),
-        (&blocked, repo.base.as_str(), Some(runs.as_str()), 1),
-        (&blocked, "no-such-revision", Some(runs.as_str()), 2),
-        (&blocked, repo.base.as_str(), Some(fails), 127),
-        (&blocked, repo.base.as_str(), None, 127),
-    ] {
-        repo.reset(head);
-        let _ = fs::remove_file(&seen);
-        match stand_in {
-            Some(text) => fs::write(&launcher, text).expect("the launcher is written"),
-            None => {
-                let _ = fs::remove_file(&launcher);
-            }
-        }
-        let scan = match stand_in {
-            Some(text) if text == runs => {
-                let run = repo.scan(&["--base", base]);
-                assert_eq!(run.code, Some(code), "{}", run.stderr);
-                Some(format!("{}{}", run.stdout, run.stderr))
-            }
-            _ => None,
-        };
-        for shell in [
-            &["-e"][..],
-            &["--noprofile", "--norc", "-eo", "pipefail"][..],
-        ] {
-            let output = repo
-                .command("bash")
-                .args(shell)
-                .arg(&script)
-                .env("SCAN_BASE", base)
-                .output()
-                .expect("bash starts");
-            assert_eq!(output.status.code(), Some(code), "{base} {shell:?}");
-            assert!(
-                output.stderr.is_empty(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let printed = String::from_utf8(output.stdout).expect("the step writes UTF-8");
-            let (stop, rest) = printed
-                .split_once('\n')
-                .expect("the step prints a stop line");
-            let token = stop
-                .strip_prefix("::stop-commands::")
-                .expect("the first line stops command processing");
-            assert!(
-                token.len() == 32 && token.bytes().all(|b| b.is_ascii_hexdigit()),
-                "{token}"
-            );
-            let middle = rest
-                .strip_suffix(&format!("::{token}::\n"))
-                .expect("the last line resumes command processing");
-            assert!(middle.is_empty() || middle.ends_with('\n'), "{middle}");
-            assert!(!middle.contains(token), "{middle}");
-            if code == 0 {
-                assert_eq!(
-                    middle,
-                    "reports ignore-new:src/##[error]a_tests.rs arrives: absent -> #[ignore]\n"
-                );
-            }
-            if let Some(scan) = &scan {
-                assert_eq!(middle, scan);
-                let environment = fs::read_to_string(&seen).expect("the launcher ran");
-                assert!(!environment.contains(token), "{environment}");
-            }
-            tokens.push(token.to_owned());
-        }
-    }
-    assert_eq!(tokens.len(), 10);
-    let mut distinct = tokens.clone();
-    distinct.sort();
-    distinct.dedup();
-    assert_eq!(distinct.len(), tokens.len(), "{tokens:?}");
+    let run = repo.scan_head(&head);
+    assert_eq!(
+        run.outcome(),
+        (
+            Some(0),
+            "reports ignore-new:src/##[error]a_tests.rs arrives: absent -> #[ignore]\n"
+        ),
+        "{}",
+        run.stderr
+    );
 }
 
 impl Repo {
@@ -3097,7 +3005,8 @@ impl Repo {
 
 /// A fixed input or a changed Rust path with no entry at a commit, under a directory that is a link or a
 /// submodule there, is refused as lying under that entry, at the base and at the head. The fixed inputs are
-/// checked when the diff names none of them. An ancestor that is a regular file leaves the path absent, which
+/// checked when the diff names none of them: the inventory under a link at both ends, the workflow file under
+/// a link at the head alone, and the lane script that is a link at both ends while its target changes. An ancestor that is a regular file leaves the path absent, which
 /// reads as a deleted or an added file.
 #[test]
 fn a_path_under_a_link_or_a_submodule_at_either_commit_exits_two() {
@@ -3138,15 +3047,7 @@ fn a_path_under_a_link_or_a_submodule_at_either_commit_exits_two() {
     repo.reset(&repo.base);
     repo.git(&["rm", "-r", "-q", "scripts"]);
     let file = repo.change(&[("scripts", "a file\n")]);
-    repo.git(&["rm", "-q", "scripts"]);
-    let after_file = repo.commit(
-        &[
-            (INVENTORY, &inventory(&rows())),
-            ("scripts/rust-lane.sh", &lane),
-        ],
-        "restore the scripts beside the file",
-        &[],
-    );
+    let after_file = restore("restore the scripts beside the file");
     repo.reset(&repo.base);
     let tests = test_fn("first") + &test_fn("second");
     let rust = repo.change(&[("tests/t.rs", &tests)]);
@@ -3154,13 +3055,24 @@ fn a_path_under_a_link_or_a_submodule_at_either_commit_exits_two() {
     let ignored = tests.replace("#[test]\nfn second", "#[test]\n#[ignore]\nfn second");
     repo.commit(&[("moved_tests/t.rs", &ignored)], "move the tests", &[]);
     let rust_linked = repo.link("tests", "moved_tests", "link the tests");
+    repo.reset(&repo.base);
+    let workflow = ".github/workflows/agent-checks.yml";
+    let flow = fs::read_to_string(repo.repo.join(workflow)).expect("the workflow reads");
+    let unflowed = repo.commit(&[], "drop the workflow", &[workflow]);
+    repo.change(&[("elsewhere/agent-checks.yml", &flow.replace("15", "20"))]);
+    let flow_linked = repo.link(".github/workflows", "../elsewhere", "link the workflows");
+    repo.reset(&repo.base);
+    let lane_path = "scripts/rust-lane.sh";
+    repo.git(&["rm", "-q", lane_path]);
+    repo.change(&[("scripts/lane.txt", &lane)]);
+    let lane_linked = repo.link(lane_path, "lane.txt", "link the lane");
+    let lane_raised = repo.change(&[("scripts/lane.txt", &lane.replace("25m", "40m"))]);
     let under = |path: &str, commit: &str, ancestor: &str, kind: &str| {
         format!(
             "{path} at {} lies under {ancestor}, which is {kind}",
             short(commit)
         )
     };
-    let lane_path = "scripts/rust-lane.sh";
     for (base, head, line) in [
         (
             &repo.base,
@@ -3191,6 +3103,16 @@ fn a_path_under_a_link_or_a_submodule_at_either_commit_exits_two() {
             &rust,
             &rust_linked,
             under("tests/t.rs", &rust_linked, "tests", "a link"),
+        ),
+        (
+            &unflowed,
+            &flow_linked,
+            under(workflow, &flow_linked, ".github/workflows", "a link"),
+        ),
+        (
+            &lane_linked,
+            &lane_raised,
+            format!("{lane_path} at {} is not a file", short(&lane_linked)),
         ),
     ] {
         repo.refused(base, head, &line);
@@ -3269,7 +3191,7 @@ fn a_refusal_that_holds_a_line_break_is_written_escaped() {
     repo.write("src/a\r::error::b.rs", b"// \xff\n");
     repo.git(&["add", "--", "src/a\r::error::b.rs"]);
     let blob = repo.commit(&[], "a byte outside UTF-8", &[]);
-    let run = repo.scan_head(&blob);
+    let run = repo.scan_env(&["--base", &repo.base, "--head", &blob], &[("LC_ALL", "C")]);
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     assert_eq!(
         run.stderr,
@@ -3278,14 +3200,17 @@ fn a_refusal_that_holds_a_line_break_is_written_escaped() {
              from index 3\n"
         )
     );
-    let run = repo.scan(&["--base", "a\r::error::b"]);
+    let run = repo.scan_env(&["--base", "a\r::error::b"], &[("LC_ALL", "C")]);
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     assert_eq!(
         run.stderr,
         "scan-weakened-tests: git rev-parse --verify --end-of-options a\\r::error::b^{commit}: \
          fatal: Needed a single revision\n"
     );
-    let run = repo.scan_env(&["--base", "no-such-revision"], &[("GIT_TRACE", "1")]);
+    let run = repo.scan_env(
+        &["--base", "no-such-revision"],
+        &[("GIT_TRACE", "1"), ("LC_ALL", "C")],
+    );
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     assert!(one_line(&run.stderr), "{}", run.stderr);
     assert!(run.stderr.contains("trace: "), "{}", run.stderr);
@@ -3329,4 +3254,65 @@ fn a_bidirectional_control_in_a_path_is_written_escaped() {
         assert_eq!(run.outcome(), (Some(0), line.as_str()), "{}", run.stderr);
         repo.reset(&repo.base);
     }
+}
+
+impl Repo {
+    fn add_bytes(&self, names: &[&[u8]]) -> String {
+        use std::ffi::OsStr;
+        for &name in names {
+            let path = self.repo.join(OsStr::from_bytes(name));
+            fs::create_dir_all(path.parent().expect("a file has a parent"))
+                .expect("the parent is made");
+            fs::write(&path, "fixture\n").expect("the file is written");
+            let added = self
+                .command("git")
+                .args(["add", "--"])
+                .arg(OsStr::from_bytes(name))
+                .status()
+                .expect("git starts");
+            assert!(added.success());
+        }
+        self.commit(&[], "names outside UTF-8", &[])
+    }
+}
+
+/// An unchanged name that is not UTF-8 beside an ancestor of a changed Rust file and beside the inventory
+/// leaves the range as the base read it: exit 0, nothing on either stream.
+#[test]
+fn a_name_outside_utf8_beside_a_scanned_path_reads_as_before() {
+    let repo = Repo::new("quiet-neighbors");
+    let neighbors = repo.add_bytes(&[b"src/\xff", b"scripts/\xff"]);
+    let changed = repo.change(&[("src/deep/x.rs", "fn x() {}\n")]);
+    let run = repo.scan(&["--base", &neighbors, "--head", &changed]);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+}
+
+/// An unchanged name that is not UTF-8 in a fixture of the tools crate's test directory leaves a range that
+/// changes nothing under that directory as the base read it.
+#[test]
+fn a_name_outside_utf8_in_an_unchanged_case_directory_reads_as_before() {
+    let repo = Repo::new("quiet-cases");
+    let fixture = repo.add_bytes(&[b"crates/kestrike-tools/tests/fixtures/\xff"]);
+    let changed = repo.change(&[("src/later.rs", "fn later() {}\n")]);
+    let run = repo.scan(&["--base", &fixture, "--head", &changed]);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+}
+
+/// A Rust path 1,900 directories deep, whose ancestors' names together pass the 2,621,440-byte argument
+/// limit of a Linux host with an 8 MiB stack, reads as any other added file.
+#[test]
+fn a_path_whose_ancestors_pass_the_argument_limit_reads_as_before() {
+    let repo = Repo::new("deep-path");
+    let deep = format!("{}x.rs", "a/".repeat(1900));
+    let ancestors: usize = (1..=1900).map(|depth| 2 * depth).sum();
+    assert!(ancestors > 2_621_440);
+    let blob = repo.git(&["rev-parse", &format!("{}:src/model.rs", repo.base)]);
+    let entry = format!("100644,{blob},{deep}");
+    repo.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    let head = repo.commit(&[], "a deep path", &[]);
+    let run = repo.scan_head(&head);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
 }

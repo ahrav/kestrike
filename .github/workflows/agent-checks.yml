@@ -98,22 +98,10 @@ jobs:
         run: python3 scripts/verify-receipts.py admit
       # A pull request's checkout is its test merge. The merge's first parent is
       # the base commit GitHub merged into, which `pull_request.base.sha` can lag.
-      # The runner logs the scan's output as text while command processing stops.
-      # The shell keeps the resume token outside the scan's environment. The
-      # runner handles a batch's standard error lines before its standard output
-      # lines, so the scan writes both streams into standard output, in order
-      # between the stop line and the resume line.
       - name: Weakened-test scan
         env:
           SCAN_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'origin/main' }}
-        run: |
-          token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
-          [[ $token =~ ^[0-9a-f]{32}$ ]]
-          printf '::stop-commands::%s\n' "$token"
-          status=0
-          bash scripts/tool.sh scan-weakened-tests --base "$SCAN_BASE" 2>&1 || status=$?
-          printf '::%s::\n' "$token"
-          exit "$status"
+        run: bash scripts/ci-scan-weakened-tests.sh --base "$SCAN_BASE"
 
   lane-script:
     if: >-

@@ -1,6 +1,6 @@
 //! The scan reads a mode from the tree entry whose blob it reads: both name the same full commit id and path.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::git::git_text;
 use crate::text::Text;
@@ -8,6 +8,8 @@ use crate::text::Text;
 use super::Failure;
 use super::finding::short;
 use super::hunks::DIFF_BATCH;
+
+const TREE: &str = "040000";
 
 /// `entries` returns `(mode, path)` for each record that `git --literal-pathspecs ls-tree -t -z --full-tree`
 /// prints for `paths` at `commit`, every entry under them when `recursive` is set; each path names itself
@@ -54,7 +56,7 @@ pub(super) fn records(commit: &str, listed: &str) -> Result<Vec<(String, String)
 
 /// `redirect` names the kind of an entry that a checkout reads another place through: `a link` for mode
 /// `120000` and `a submodule` for mode `160000`.
-pub fn redirect(mode: Option<&String>) -> Option<&'static str> {
+fn redirect(mode: Option<&String>) -> Option<&'static str> {
     match mode.map(String::as_str) {
         Some("120000") => Some("a link"),
         Some("160000") => Some("a submodule"),
@@ -72,30 +74,40 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
     path.match_indices('/').map(|(at, _)| &path[..at])
 }
 
-/// `modes` returns the mode of each entry that `commit` holds among `paths` and their ancestors, keyed by path.
-/// Each batch of the diff's size lists its paths and their ancestors by their literal names in one
-/// `git ls-tree` call; the listing also holds the entries beside each ancestor, which no caller asks for. A
-/// path with no entry is refused when an ancestor is a link or a submodule, as
-/// `<path> at <short id> lies under <ancestor>, which is a link` (or `a submodule`): a checkout reads the path
-/// through that entry. An ancestor that is a directory, a regular file or absent leaves the path absent.
-pub fn modes(commit: &str, paths: &[&str]) -> Result<HashMap<String, String>, Failure> {
-    let mut modes = HashMap::new();
-    for batch in paths.chunks(DIFF_BATCH) {
-        let mut asked: Vec<&str> = batch.to_vec();
-        let mut seen: HashSet<&str> = batch.iter().copied().collect();
-        for path in batch {
-            asked.extend(ancestors(path).filter(|ancestor| seen.insert(ancestor)));
+/// `modes` returns the mode of each entry of `paths` that `commit` holds, and of each tree that Git enters on
+/// the way to one, keyed by path. If a missing path has ancestors with a missing or non-`TREE` listed mode,
+/// `modes` probes the topmost of them. If that ancestor is a link or a submodule, `modes` refuses the path
+/// with `<path> at <short id> lies under <ancestor>, which is a link` (or `a submodule`), since a checkout
+/// reads the path through that entry; an ancestor that is a regular file or absent leaves the path absent.
+/// Each listing covers the batch's requested entries and the trees Git traverses to reach them.
+fn modes(commit: &str, paths: &[&str]) -> Result<HashMap<String, String>, Failure> {
+    let list = |asked: &[&str], modes: &mut HashMap<String, String>| -> Result<(), Failure> {
+        for batch in asked.chunks(DIFF_BATCH) {
+            modes.extend(
+                entries(commit, batch, false)?
+                    .into_iter()
+                    .map(|(mode, path)| (path, mode)),
+            );
         }
-        modes.extend(
-            entries(commit, &asked, false)?
-                .into_iter()
-                .map(|(mode, path)| (path, mode)),
-        );
-    }
-    for &path in paths.iter().filter(|path| !modes.contains_key(**path)) {
-        if let Some((ancestor, kind)) = ancestors(path)
-            .find_map(|ancestor| redirect(modes.get(ancestor)).map(|kind| (ancestor, kind)))
-        {
+        Ok(())
+    };
+    let mut modes = HashMap::new();
+    list(paths, &mut modes)?;
+    let probed: Vec<(&str, &str)> = paths
+        .iter()
+        .filter(|path| !modes.contains_key(**path))
+        .filter_map(|&path| {
+            ancestors(path)
+                .find(|ancestor| modes.get(*ancestor).map(String::as_str) != Some(TREE))
+                .map(|ancestor| (path, ancestor))
+        })
+        .collect();
+    let mut asked: Vec<&str> = probed.iter().map(|&(_, ancestor)| ancestor).collect();
+    asked.sort_unstable();
+    asked.dedup();
+    list(&asked, &mut modes)?;
+    for (path, ancestor) in probed {
+        if let Some(kind) = redirect(modes.get(ancestor)) {
             return Err(Failure::Refused(format!(
                 "{path} at {} lies under {ancestor}, which is {kind}",
                 short(commit)
@@ -103,6 +115,19 @@ pub fn modes(commit: &str, paths: &[&str]) -> Result<HashMap<String, String>, Fa
         }
     }
     Ok(modes)
+}
+
+/// `directory` refuses `dir` at `commit` when its entry is a link or a submodule, as
+/// `<dir> at <short id> is a link` (or `a submodule`), and when it has no entry under such an ancestor, as
+/// [`modes`] refuses a path.
+pub fn directory(commit: &str, dir: &str) -> Result<(), Failure> {
+    match redirect(modes(commit, &[dir])?.get(dir)) {
+        Some(kind) => Err(Failure::Refused(format!(
+            "{dir} at {} is {kind}",
+            short(commit)
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// `files` returns the paths of `paths` that `commit` holds, and refuses the first whose entry has a mode
