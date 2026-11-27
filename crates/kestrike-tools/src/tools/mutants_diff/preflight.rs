@@ -4,12 +4,11 @@
 //!
 //! A set Git repository or index variable is refused before the first Git call, which would read it.
 //! Every Git call runs with `GIT_NO_REPLACE_OBJECTS=1` and without `GIT_DIFF_OPTS`. The text the tool and
-//! Cargo print is read as UTF-8 with each invalid sequence replaced by U+FFFD, and with `\r\n` and `\r`
-//! read as `\n`; the configuration and the workflow file must be UTF-8.
+//! Cargo print is read as UTF-8 with each invalid sequence replaced by U+FFFD; the configuration and the
+//! workflow file must be UTF-8. Both outputs and both files are read with `\r\n` and `\r` as `\n`.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +18,7 @@ use super::options::{Options, Revision};
 use super::pieces::text;
 use super::process::{INTERRUPT, capture, exit_code};
 use super::stop::{Fault, Stop};
-use crate::ownership::foreign_toolchain_paths;
+use crate::ownership::{foreign_toolchain_paths, status};
 use crate::paths;
 use crate::text::Text;
 
@@ -89,21 +88,12 @@ fn set(environ: &mut Environ, name: &str, value: OsString) {
     environ.push((OsString::from(name), value));
 }
 
-/// `is_file` holds for a path whose target is a regular file; a path that is absent, under a file, a
-/// loop of links or a closed descriptor reads as no file.
-pub(super) fn is_file(path: &Path) -> io::Result<bool> {
-    match fs::metadata(path) {
-        Ok(status) => Ok(status.is_file()),
-        Err(error)
-            if matches!(
-                error.raw_os_error(),
-                Some(libc::ENOENT | libc::ENOTDIR | libc::EBADF | libc::ELOOP)
-            ) =>
-        {
-            Ok(false)
-        }
-        Err(error) => Err(error),
-    }
+/// `is_file` holds for a path whose target is a regular file; [`status`] decides which errors read as no
+/// file.
+pub(super) fn is_file(path: &Path) -> Result<bool, Fault> {
+    status(path)
+        .map(|status| status.is_some_and(|status| status.is_file()))
+        .map_err(|error| Fault::os(error.error(), Some(error.path().as_os_str())))
 }
 
 /// A failed Git call: an exit other than 0 with the call and Git's standard error, a start or wait that
@@ -115,6 +105,16 @@ pub(super) enum GitError {
 }
 
 impl GitError {
+    /// `incomplete` is the stop of a failure inside the run's steps: a failed call makes the run
+    /// incomplete with its reason, and an unexpected error is the runner's failure.
+    pub(super) fn incomplete(self) -> Stop {
+        match self {
+            Self::Failed(reason) => Stop::incomplete(reason),
+            Self::Start(fault) => Stop::failed(&fault),
+            Self::Interrupted(stop) => stop,
+        }
+    }
+
     /// `rejected` is the stop of a failure in the input checks, where an unexpected error is rejected
     /// input too.
     fn rejected(self) -> Stop {
@@ -175,15 +175,17 @@ fn rejected_fault(fault: &Fault) -> Stop {
     Stop::rejected(fault.to_text())
 }
 
-/// `read_pins` returns the text of `path` when it is a file, or an empty text when it is none.
-fn read_pins(path: &Path) -> Result<String, Stop> {
-    let os = |error: io::Error| rejected_fault(&Fault::os(&error, Some(path.as_os_str())));
-    if !is_file(path).map_err(os)? {
+/// `read_pins` returns the text of `path` when it is a file, with `\r\n` and `\r` read as `\n`, or an
+/// empty text when it is none.
+pub(super) fn read_pins(path: &Path) -> Result<String, Stop> {
+    if !is_file(path).map_err(|fault| rejected_fault(&fault))? {
         return Ok(String::new());
     }
-    let bytes = fs::read(path).map_err(os)?;
-    String::from_utf8(bytes)
-        .map_err(|error| rejected_fault(&Fault::library("Utf8Error", &error.utf8_error())))
+    let bytes = fs::read(path)
+        .map_err(|error| rejected_fault(&Fault::os(&error, Some(path.as_os_str()))))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| rejected_fault(&Fault::library("Utf8Error", &error.utf8_error())))?;
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
 }
 
 fn text_command(program: &OsStr, args: &[&str], env: &Environ) -> Command {

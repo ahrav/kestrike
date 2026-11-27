@@ -1,8 +1,8 @@
 //! Readers of the pin lines, of the debug-assertion entry of `additional_cargo_args`, and of the inherited
 //! variables the run refuses.
 //!
-//! Whitespace here is the set [`is_space`] takes. A line ends at a line feed alone, so a line that ends in
-//! `\r\n` keeps its carriage return.
+//! Whitespace here is the set [`is_space`] takes. A line ends at a line feed alone; the pin files reach
+//! these readers with their line ends read as line feeds, and the worktree configuration as it is.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;

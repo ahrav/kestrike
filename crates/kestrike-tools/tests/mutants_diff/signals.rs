@@ -15,7 +15,7 @@ use kestrike_tools::json::Value;
 use kestrike_tools::tools::mutants_diff::{self, INTERRUPT, Run};
 
 use crate::fixture::{
-    self, Fixture, HANGUP_PAUSE, MARKER_LIMIT, Plan, RUN_LIMIT, SOURCE, lib_rs, listed,
+    self, Fixture, HANGUP_PAUSE, MARKER_LIMIT, Plan, RUN_LIMIT, SOURCE, lib_rs, listed, two_mutants,
 };
 
 /// The variable that names the window a re-started test executable runs.
@@ -25,13 +25,6 @@ const ARGS: &str = "MUTANTS_DIFF_ARGS";
 /// Each of the two waits for a group leader after SIGTERM and after SIGKILL; a child that ends in less
 /// time ended on SIGTERM.
 const GRACE: Duration = Duration::from_secs(10);
-
-fn two() -> Vec<(kestrike_tools::text::Text, kestrike_tools::text::Text)> {
-    let names: Vec<String> = (0..2)
-        .map(|n| format!("{SOURCE}/lib.rs:2:1: replace two -> u32 with {n}"))
-        .collect();
-    listed(&lib_rs(), &names)
-}
 
 fn reason(report: &kestrike_tools::json::Object) -> (bool, String) {
     let complete = report.get("complete") == Some(&Value::Bool(true));
@@ -50,7 +43,7 @@ fn a_signal_while_a_mutant_runs_stops_the_tool_and_removes_the_worktree() {
         fx.clear();
         fx.plan(&Plan {
             hang: true,
-            ..Plan::caught(&two())
+            ..Plan::caught(&two_mutants())
         });
         let mut runner = fx.start_until_ready(fx.start(), "ready");
         runner.signal(signal);
@@ -167,7 +160,7 @@ fn a_signal_ignored_at_start_stays_ignored() {
     let fx = Fixture::new("ignored-hangup");
     fx.plan(&Plan {
         hang: true,
-        ..Plan::caught(&two())
+        ..Plan::caught(&two_mutants())
     });
     let mut runner = fx.start_until_ready(fx.start().ignore_hangup(), "ready");
     runner.signal(libc::SIGHUP);
@@ -190,7 +183,7 @@ fn a_killed_runner_stops_the_tool() {
     let fx = Fixture::new("killed-runner");
     fx.plan(&Plan {
         hang: true,
-        ..Plan::caught(&two())
+        ..Plan::caught(&two_mutants())
     });
     let mut runner = fx.start_until_ready(fx.start(), "ready");
     runner.kill();
@@ -232,6 +225,24 @@ fn raise(signal: i32) {
     assert_eq!(unsafe { libc::raise(signal) }, 0);
 }
 
+/// The argument of the sleeper the spawn window's child starts, which names it in `/proc/<pid>/cmdline`.
+const WINDOW_SLEEPER: &str = "600.375";
+
+/// `sleeper_runs` holds while a process runs the spawn window's sleeper.
+fn sleeper_runs() -> bool {
+    let needle = format!("sleep\0{WINDOW_SLEEPER}\0");
+    fs::read_dir("/proc")
+        .expect("procfs is mounted")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            fs::read(entry.path().join("cmdline")).is_ok_and(|cmdline| {
+                cmdline
+                    .windows(needle.len())
+                    .any(|window| window == needle.as_bytes())
+            })
+        })
+}
+
 /// `blocked` returns the `SigBlk` mask of a `/proc/<pid>/status` text.
 fn blocked(status: &str) -> u64 {
     let line = status
@@ -248,7 +259,8 @@ fn spawn_window(window: &str) {
     mutants_diff::install_handlers().expect("the handlers install");
     let mask = place.join(format!("{window}.mask"));
     let script = format!(
-        "grep '^SigBlk:' /proc/self/status > '{0}.tmp' && mv '{0}.tmp' '{0}'; exec sleep 600",
+        "trap 'printf TERM > \"{0}.term\"; exit 143' TERM; grep '^SigBlk:' /proc/self/status > '{0}.tmp' && \
+         mv '{0}.tmp' '{0}'; sleep {WINDOW_SLEEPER} & wait",
         mask.display()
     );
     let argv = [OsStr::new("sh"), OsStr::new("-c"), OsStr::new(&script)];
@@ -284,7 +296,17 @@ fn spawn_window(window: &str) {
         elapsed < GRACE,
         "the new process ended on SIGTERM, before SIGKILL could follow: {elapsed:?}"
     );
+    let gone = Instant::now();
+    while sleeper_runs() && gone.elapsed() < GRACE {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !sleeper_runs(),
+        "the stop ended every member of the child's group"
+    );
     if window == "after" {
+        let term = fs::read_to_string(format!("{}.term", mask.display())).unwrap_or_default();
+        assert_eq!(term, "TERM", "the new process ended on SIGTERM");
         let blocked = blocked(&fs::read_to_string(&mask).expect("the child wrote its mask"));
         let handled =
             [libc::SIGINT, libc::SIGTERM, libc::SIGHUP].map(|signal| 1u64 << (signal - 1));
@@ -335,7 +357,16 @@ fn hand_off_window() {
     let mut run = Run::new(prepared);
     run.install().expect("the handlers install");
     let executed = run.execute();
+    assert!(executed.is_ok(), "{executed:?}");
     assert_eq!(INTERRUPT.recorded(), None);
+    let listed = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .expect("git starts");
+    let records = String::from_utf8_lossy(&listed.stdout)
+        .matches("worktree ")
+        .count();
+    assert_eq!(records, 2, "the run's worktree stands at the hand-off");
     raise(libc::SIGTERM);
     let stop = run.hand_off(executed);
     assert_eq!(run.finish(stop), 1);

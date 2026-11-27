@@ -9,30 +9,55 @@ use crate::json::{self, Object, Value};
 use crate::python;
 use crate::text::Text;
 
-pub(super) const VERDICTS: [(&str, &str); 4] = [
-    ("CaughtMutant", "caught"),
-    ("MissedMutant", "missed"),
-    ("Timeout", "timeout"),
-    ("Unviable", "unviable"),
+/// A listed mutant's outcome in the report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Outcome {
+    Caught,
+    Missed,
+    Timeout,
+    Unviable,
+    NotRun,
+}
+
+impl Outcome {
+    pub(super) const ALL: [Self; 5] = [
+        Self::Caught,
+        Self::Missed,
+        Self::Timeout,
+        Self::Unviable,
+        Self::NotRun,
+    ];
+
+    pub(super) fn word(self) -> &'static str {
+        match self {
+            Self::Caught => "caught",
+            Self::Missed => "missed",
+            Self::Timeout => "timeout",
+            Self::Unviable => "unviable",
+            Self::NotRun => "not-run",
+        }
+    }
+
+    /// `viable` holds for the outcomes of a judged mutant that compiled.
+    fn viable(self) -> bool {
+        matches!(self, Self::Caught | Self::Missed | Self::Timeout)
+    }
+}
+
+/// The tool's per-mutant summaries; a summary outside this table judges nothing.
+const VERDICTS: [(&str, Outcome); 4] = [
+    ("CaughtMutant", Outcome::Caught),
+    ("MissedMutant", Outcome::Missed),
+    ("Timeout", Outcome::Timeout),
+    ("Unviable", Outcome::Unviable),
 ];
-const KINDS: [&str; 5] = ["caught", "missed", "timeout", "unviable", "not-run"];
 const ROUND_DIGITS: usize = 3;
 
 /// One mutant of the listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Listed {
+pub(super) struct Listed {
     name: Text,
     file: Text,
-}
-
-impl Listed {
-    pub fn name(&self) -> &Text {
-        &self.name
-    }
-
-    pub fn file(&self) -> &Text {
-        &self.file
-    }
 }
 
 /// `read_listing` returns the mutants of the listing, each with its name and file, in order; a text of
@@ -42,7 +67,7 @@ impl Listed {
 ///
 /// The text is no JSON document, or no array of objects whose `name` and `file` are strings, or a name
 /// repeats.
-pub fn read_listing(text: &str) -> Result<Vec<Listed>, String> {
+pub(super) fn read_listing(text: &str) -> Result<Vec<Listed>, String> {
     if Text::from(text).strip().is_empty() {
         return Ok(Vec::new());
     }
@@ -121,7 +146,7 @@ impl Baseline {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcomes {
     baseline: Option<Baseline>,
-    pub(super) judged: Vec<(Key, &'static str, Object)>,
+    pub(super) judged: Vec<(Key, Outcome, Object)>,
 }
 
 impl Outcomes {
@@ -273,7 +298,7 @@ pub fn read_outcomes(bytes: &[u8]) -> Option<Outcomes> {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Entry {
     listed: Listed,
-    outcome: &'static str,
+    outcome: Outcome,
     phases: Object,
 }
 
@@ -283,7 +308,7 @@ impl Entry {
     }
 
     pub(super) fn is_missed(&self) -> bool {
-        self.outcome == "missed"
+        self.outcome == Outcome::Missed
     }
 }
 
@@ -291,7 +316,8 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Judgment {
     pub(super) mutants: Vec<Entry>,
-    pub(super) counts: [usize; 6],
+    /// The count of each outcome, in the order of [`Outcome::ALL`].
+    pub(super) counts: [usize; 5],
     pub(super) flagged: Vec<Text>,
     pub(super) baseline: Option<Baseline>,
     pub(super) reason: Option<Text>,
@@ -313,7 +339,7 @@ pub(super) fn judge(
     let judged_name = |name: &Text| {
         read.judged
             .iter()
-            .find(|(key, _, _)| *key == Key::String(name.clone()))
+            .find(|(key, _, _)| matches!(key, Key::String(judged) if judged == name))
     };
     let mut reason = reason;
     if reason.is_none() && !listed.is_empty() {
@@ -345,7 +371,7 @@ pub(super) fn judge(
         .map(|mutant| {
             let credited = judged_name(&mutant.name).filter(|_| passed);
             let (outcome, phases) = credited
-                .map_or(("not-run", Object::new()), |(_, verdict, phases)| {
+                .map_or((Outcome::NotRun, Object::new()), |(_, verdict, phases)| {
                     (*verdict, phases.clone())
                 });
             Entry {
@@ -355,29 +381,11 @@ pub(super) fn judge(
             }
         })
         .collect();
-    let mut counts = [mutants.len(), 0, 0, 0, 0, 0];
+    let mut counts = [0; 5];
     for entry in &mutants {
-        let kind = KINDS
-            .iter()
-            .position(|&kind| kind == entry.outcome)
-            .expect("an outcome is a kind");
-        counts[kind + 1] += 1;
+        counts[entry.outcome as usize] += 1;
     }
-    let mut files: Vec<&Text> = mutants.iter().map(|entry| &entry.listed.file).collect();
-    files.sort();
-    files.dedup();
-    let flagged = files
-        .into_iter()
-        .filter(|&file| {
-            let viable = mutants
-                .iter()
-                .filter(|entry| entry.listed.file == *file)
-                .filter(|entry| matches!(entry.outcome, "caught" | "missed" | "timeout"));
-            let mut viable = viable.peekable();
-            viable.peek().is_some() && viable.all(Entry::is_missed)
-        })
-        .cloned()
-        .collect();
+    let flagged = flagged(&mutants);
     Judgment {
         mutants,
         counts,
@@ -387,16 +395,35 @@ pub(super) fn judge(
     }
 }
 
+/// `flagged` returns, sorted, each file with one or more viable mutants, all of them missed.
+fn flagged(mutants: &[Entry]) -> Vec<Text> {
+    let mut files: Vec<&Text> = mutants.iter().map(|entry| &entry.listed.file).collect();
+    files.sort();
+    files.dedup();
+    files
+        .into_iter()
+        .filter(|&file| {
+            let mut viable = mutants
+                .iter()
+                .filter(|entry| entry.listed.file == *file && entry.outcome.viable())
+                .peekable();
+            viable.peek().is_some() && viable.all(Entry::is_missed)
+        })
+        .cloned()
+        .collect()
+}
+
 impl Judgment {
     pub(super) fn complete(&self) -> bool {
         self.reason.is_none()
     }
 
-    pub(super) fn count(&self, kind: &str) -> usize {
-        match KINDS.iter().position(|&known| known == kind) {
-            Some(at) => self.counts[at + 1],
-            None => self.counts[0],
-        }
+    pub(super) fn listed(&self) -> usize {
+        self.mutants.len()
+    }
+
+    pub(super) fn count(&self, outcome: Outcome) -> usize {
+        self.counts[outcome as usize]
     }
 
     /// `fields` writes the judgment's report fields into `report`.
@@ -405,15 +432,15 @@ impl Judgment {
             let mut object = Object::new();
             object.insert("name", Value::String(entry.listed.name.clone()));
             object.insert("file", Value::String(entry.listed.file.clone()));
-            object.insert("outcome", Value::String(Text::from(entry.outcome)));
+            object.insert("outcome", Value::String(Text::from(entry.outcome.word())));
             object.insert("phase_seconds", Value::Object(entry.phases.clone()));
             Value::Object(object)
         });
         report.insert("mutants", Value::Array(mutants.collect()));
         let mut counts = Object::new();
-        counts.insert("listed", Value::Integer(self.counts[0].into()));
-        for (at, kind) in KINDS.iter().enumerate() {
-            counts.insert(*kind, Value::Integer(self.counts[at + 1].into()));
+        counts.insert("listed", Value::Integer(self.listed().into()));
+        for outcome in Outcome::ALL {
+            counts.insert(outcome.word(), Value::Integer(self.count(outcome).into()));
         }
         report.insert("counts", Value::Object(counts));
         let flagged = self.flagged.iter().cloned().map(Value::String).collect();

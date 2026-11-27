@@ -8,14 +8,13 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::thread;
-use std::time::Duration;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use super::stop::{Fault, Stop};
 
@@ -23,8 +22,10 @@ pub const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
 /// Each of the two waits for the group leader after SIGTERM and after SIGKILL, and the wait for a plain
 /// child after SIGKILL.
 const GRACE: Duration = Duration::from_secs(10);
-/// The longest time between two readings of the interrupt while the run waits for a child.
+/// The longest pause between two checks of a child and of the interrupt while the run waits; the pause
+/// starts at [`FIRST_PAUSE`] and doubles up to this bound.
 const POLL: Duration = Duration::from_millis(20);
+const FIRST_PAUSE: Duration = Duration::from_micros(500);
 
 /// The first handled signal, or 0 while none has arrived.
 #[derive(Debug, Default)]
@@ -120,78 +121,69 @@ pub(super) fn exit_code(status: ExitStatus) -> i32 {
         .expect("an exited child has a code or a signal")
 }
 
-/// A started child that a reaper thread waits for. `ended` receives what the wait returned once the child
-/// has exited; until then the child's process id stays its own.
-struct Reaped<T> {
-    pid: libc::pid_t,
-    ended: Receiver<io::Result<T>>,
-    exited: bool,
-    result: Option<io::Result<T>>,
-}
-
-impl<T: Send + 'static> Reaped<T> {
-    fn new(child: Child, wait: impl FnOnce(Child) -> io::Result<T> + Send + 'static) -> Self {
-        let pid = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
-        let (send, ended) = mpsc::channel();
-        thread::spawn(move || {
-            let _ = send.send(wait(child));
-        });
-        Self {
-            pid,
-            ended,
-            exited: false,
-            result: None,
+/// `exited_within` waits up to `limit` for the child to exit and returns its status, polling it with a
+/// pause that grows to [`POLL`]; an `interrupt` that holds a signal ends the wait early with `Ok(None)`.
+///
+/// # Errors
+///
+/// The wait fails.
+fn exited_within(
+    child: &mut Child,
+    limit: Duration,
+    interrupt: Option<&Interrupt>,
+) -> io::Result<Option<ExitStatus>> {
+    let start = Instant::now();
+    let mut pause = FIRST_PAUSE;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
         }
-    }
-
-    /// `exited_within` waits up to `limit` for the child to exit.
-    fn exited_within(&mut self, limit: Duration) -> bool {
-        if !self.exited {
-            self.result = match self.ended.recv_timeout(limit) {
-                Ok(result) => Some(result),
-                Err(RecvTimeoutError::Timeout) => return false,
-                Err(RecvTimeoutError::Disconnected) => Some(Err(io::Error::other(
-                    "the reaper thread ended without a result",
-                ))),
-            };
-            self.exited = true;
+        let waited = start.elapsed();
+        if waited >= limit || interrupt.is_some_and(|interrupt| interrupt.recorded().is_some()) {
+            return Ok(None);
         }
-        true
-    }
-
-    /// `wait` returns what the wait returned once the child exits, or the interruption of a signal recorded
-    /// in `interrupt` first.
-    fn wait(&mut self, interrupt: &Interrupt) -> Result<io::Result<T>, Stop> {
-        loop {
-            interrupt.check()?;
-            if self.exited_within(POLL) {
-                return Ok(self.result.take().expect("a child's result is taken once"));
-            }
-        }
+        thread::sleep(pause.min(limit - waited));
+        pause = (pause * 2).min(POLL);
     }
 }
 
 /// `signal_group` sends `signal` to the process group `group` and returns false when no member is left.
-fn signal_group(group: libc::pid_t, signal: i32) -> bool {
+///
+/// # Errors
+///
+/// `killpg` fails with an error other than `ESRCH`.
+fn signal_group(group: libc::pid_t, signal: i32) -> Result<bool, Fault> {
     // SAFETY: `killpg` takes two integers and touches no memory of the caller.
-    let sent = unsafe { libc::killpg(group, signal) } == 0;
-    sent || io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    if unsafe { libc::killpg(group, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(Fault::os(&error, None))
 }
 
 /// `stop_group` stops the group the child leads. When the group is gone at SIGTERM it returns. Otherwise
 /// it waits up to [`GRACE`] for the leader, sends SIGKILL to the group if the leader still runs and waits
 /// up to [`GRACE`] again, and ends with SIGKILL to the group in every case. A member the leader left
 /// behind after it exited gets SIGTERM and SIGKILL with no wait between them.
-fn stop_group<T: Send + 'static>(child: &mut Reaped<T>) {
+///
+/// # Errors
+///
+/// A signal cannot be sent for a reason other than an empty group, or the wait fails.
+fn stop_group(child: &mut Child) -> Result<(), Fault> {
+    let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
     for signal in [libc::SIGTERM, libc::SIGKILL] {
-        if !signal_group(child.pid, signal) {
-            return;
+        if !signal_group(group, signal)? {
+            return Ok(());
         }
-        if child.exited_within(GRACE) {
+        let exited = exited_within(child, GRACE, None).map_err(|error| Fault::os(&error, None))?;
+        if exited.is_some() {
             break;
         }
     }
-    signal_group(child.pid, libc::SIGKILL);
+    signal_group(group, libc::SIGKILL).map(drop)
 }
 
 /// `lead_new_session` makes the child started by `command` lead a new session and receive SIGTERM when
@@ -217,11 +209,11 @@ fn lead_new_session(command: &mut Command) {
 /// to the two files and the environment `env`, in a new session, and returns its exit code as
 /// [`exit_code`] gives it. A signal recorded in `interrupt` before the child started or while it runs
 /// stops the child's group and returns the interruption. Once the leader has exited, the members of its
-/// group it left behind are stopped.
+/// group it left behind are stopped. The run passes [`INTERRUPT`].
 ///
 /// # Errors
 ///
-/// A recorded signal, or an output file, the start or the wait that fails.
+/// A recorded signal, or an output file, the start, the wait or a stop of the group that fails.
 pub fn supervise(
     interrupt: &Interrupt,
     argv: &[&OsStr],
@@ -246,16 +238,30 @@ pub fn supervise(
         command.current_dir(cwd);
     }
     lead_new_session(&mut command);
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| Stop::failed(&Fault::os(&error, Some(argv[0]))))?;
-    let mut child = Reaped::new(child, |mut child| child.wait());
-    let ended = child.wait(interrupt);
-    stop_group(&mut child);
-    match ended? {
-        Ok(status) => Ok(exit_code(status)),
-        Err(error) => Err(Stop::failed(&Fault::os(&error, None))),
-    }
+    let ended = interrupt.check().and_then(|()| {
+        match exited_within(&mut child, Duration::MAX, Some(interrupt)) {
+            Ok(Some(status)) => Ok(exit_code(status)),
+            Ok(None) => interrupt
+                .check()
+                .map(|()| unreachable!("a wait ends early only on a signal")),
+            Err(error) => Err(Stop::failed(&Fault::os(&error, None))),
+        }
+    });
+    stop_group(&mut child).map_err(|fault| Stop::failed(&fault))?;
+    ended
+}
+
+fn drain(stream: Option<impl Read + Send + 'static>) -> io::Result<JoinHandle<Vec<u8>>> {
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut stream) = stream {
+            let _ = stream.read_to_end(&mut bytes);
+        }
+        bytes
+    })
 }
 
 /// `capture` runs `command` with standard input inherited and returns its output. A signal recorded in
@@ -264,7 +270,7 @@ pub fn supervise(
 ///
 /// # Errors
 ///
-/// The outer error is a recorded signal; the inner one a start or a wait that fails.
+/// The outer error is a recorded signal; the inner one a start, a reader thread or a wait that fails.
 pub(super) fn capture(
     command: &mut Command,
     interrupt: &Interrupt,
@@ -274,16 +280,35 @@ pub(super) fn capture(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-    let child = match spawned {
+    let mut child = match spawned {
         Ok(child) => child,
         Err(error) => return Ok(Err(error)),
     };
-    let mut child = Reaped::new(child, Child::wait_with_output);
-    let ended = child.wait(interrupt);
-    if ended.is_err() && !child.exited_within(Duration::ZERO) {
-        // SAFETY: `kill` takes two integers; the child is not reaped yet, so its process id is its own.
-        unsafe { libc::kill(child.pid, libc::SIGKILL) };
-        child.exited_within(GRACE);
-    }
-    ended
+    let readers = drain(child.stdout.take()).and_then(|out| Ok((out, drain(child.stderr.take())?)));
+    let status = readers.and_then(|readers| {
+        let status = exited_within(&mut child, Duration::MAX, Some(interrupt))?;
+        Ok((readers, status))
+    });
+    let ((out, err), status) = match status {
+        Ok((readers, Some(status))) => (readers, status),
+        Ok((_, None)) => {
+            let _ = child.kill();
+            let _ = exited_within(&mut child, GRACE, None);
+            return interrupt
+                .check()
+                .map(|()| unreachable!("a wait ends early only on a signal"));
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = exited_within(&mut child, GRACE, None);
+            return Ok(Err(error));
+        }
+    };
+    let stdout = out.join().expect("a reader thread returns its bytes");
+    let stderr = err.join().expect("a reader thread returns its bytes");
+    Ok(Ok(Output {
+        status,
+        stdout,
+        stderr,
+    }))
 }

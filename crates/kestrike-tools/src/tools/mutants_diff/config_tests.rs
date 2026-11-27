@@ -34,3 +34,30 @@ fn a_debug_assertion_value_is_ascii_word_characters_and_commas_are_optional() {
         "debug_assertions(loose) gives 'on'"
     );
 }
+
+#[test]
+fn the_pin_files_read_their_line_ends_as_line_feeds() {
+    let directory =
+        std::env::temp_dir().join(format!("kestrike-tools-pins-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the directory is made");
+    let (config, workflow) = (
+        directory.join("mutants.toml"),
+        directory.join("agent-checks.yml"),
+    );
+    std::fs::write(&config, "# Tool pin: cargo-mutants 27.1.0\r\n").expect("written");
+    std::fs::write(&workflow, "a\r  STABLE: \"1.99.0\"\n").expect("written");
+    let config = super::preflight::read_pins(&config).expect("the file reads");
+    let workflow = super::preflight::read_pins(&workflow).expect("the file reads");
+    assert_eq!(
+        pins(&config),
+        ["27.1.0"],
+        "PIN.findall(Path(config).read_text()) gives ['27.1.0']"
+    );
+    assert_eq!(
+        stables(&workflow),
+        ["1.99.0"],
+        "STABLE.findall(Path(workflow).read_text()) gives ['1.99.0']"
+    );
+    std::fs::remove_dir_all(&directory).expect("the directory is removed");
+}

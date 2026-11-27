@@ -14,7 +14,7 @@ use std::fs;
 use kestrike_tools::json::Value;
 use kestrike_tools::text::Text;
 
-use fixture::{Fixture, Plan, SOURCE, lib_rs, listed, t};
+use fixture::{Fixture, Plan, SOURCE, lib_rs, listed, registered, t, two_mutants};
 
 fn integer(value: &Value) -> String {
     match value {
@@ -76,13 +76,6 @@ fn strings(value: &Value) -> Vec<String> {
         Value::Array(items) => items.iter().map(string).collect(),
         other => panic!("{other:?} is an array"),
     }
-}
-
-fn two_mutants() -> Vec<(Text, Text)> {
-    let names: Vec<String> = (0..2)
-        .map(|n| format!("{SOURCE}/lib.rs:2:1: replace two -> u32 with {n}"))
-        .collect();
-    listed(&lib_rs(), &names)
 }
 
 fn one_mutant(name: &str) -> Vec<(Text, Text)> {
@@ -172,6 +165,27 @@ fn a_complete_run_with_missed_mutants_exits_0_and_prints_each_missed() {
         .map(|(_, name)| (name.to_string(), format!("--- {name}")))
         .collect();
     assert_eq!(kept, expected, "list.json keeps each mutant's diff");
+    let run_dir = listing.parent().expect("a run directory");
+    let name = run_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a UTF-8 name");
+    let (stamp, letters) = name.split_at(name.len() - 8);
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    assert!(
+        stamp.len() == 17 && digits(&stamp[..8]) && &stamp[8..9] == "T" && digits(&stamp[9..15]),
+        "{name}"
+    );
+    assert_eq!(&stamp[15..], "Z-", "{name}");
+    let letter = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_';
+    assert!(letters.bytes().all(letter), "{name}");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(run_dir)
+        .expect("the run directory exists")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o700, "the run directory is private");
     assert_eq!(fx.snapshot(), before);
     fx.assert_gone("grandchild.pid");
 }
@@ -300,7 +314,7 @@ fn a_malformed_listing_or_outcome_file_makes_the_run_incomplete() {
         Value::Object(kestrike_tools::json::Object::new()),
     );
     let listing_of = |rows: &str| Plan {
-        raw_listing: Some(rows.to_owned()),
+        raw_listing: Some(rows.as_bytes().to_vec()),
         ..Plan::new(&mutants, &[])
     };
     let outcomes_of_file = |records: Vec<Value>, exit: i32| Plan {
@@ -545,12 +559,6 @@ fn a_tool_failure_is_incomplete_and_leaves_the_checkout_as_it_was() {
             assert!(fx.calls().is_empty(), "{expected}");
         }
     }
-}
-
-fn registered(fx: &Fixture) -> usize {
-    fx.git(&["worktree", "list", "--porcelain"])
-        .matches("worktree ")
-        .count()
 }
 
 #[test]
@@ -1315,4 +1323,46 @@ fn a_shard_applies_the_limit_to_its_slice_and_records_k_and_n() {
     for call in &calls[calls.len() - 2..] {
         assert_eq!(call.value("--shard"), "1/2");
     }
+}
+
+#[test]
+fn a_head_configuration_and_a_listing_that_are_not_utf_8_read_as_the_runner_reads_them() {
+    let fx = Fixture::new("not-utf-8-files");
+    let config = [b"# \xff a comment\n".as_slice(), fixture::CONFIG.as_bytes()].concat();
+    fs::write(fx.repo.join(".cargo/mutants.toml"), &config).expect("the configuration is written");
+    fx.write(
+        &lib_rs(),
+        "pub fn one() -> u32 { 1 }\npub fn three() -> u32 { 3 }\n",
+    );
+    let head = fx.commit("a configuration that is not UTF-8");
+    fs::write(fx.repo.join(".cargo/mutants.toml"), fixture::CONFIG)
+        .expect("the invoking checkout's copy");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().base(&fx.head).head(&head).run();
+    assert_eq!(
+        out.code,
+        0,
+        "the head's configuration is decoded with replacement: {}",
+        out.all()
+    );
+    let report = fx.report(Some(&out));
+    assert_eq!(string(get(&report, "debug_assertions")), "false");
+    assert_eq!(
+        string(get(&report, "config_sha256")),
+        sha256(&config),
+        "the digest is of the raw bytes"
+    );
+    fx.clear();
+    fx.plan(&Plan {
+        raw_listing: Some(b"\xff".to_vec()),
+        ..Plan::new(&one_mutant("2:1: m"), &[])
+    });
+    let out = fx.start().base(&fx.head).head(&head).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let found = reason(&fx.report(Some(&out))).unwrap_or_default();
+    assert!(
+        found.starts_with("the listing does not parse: "),
+        "a listing that is not UTF-8: {found}"
+    );
+    assert!(fx.builds().is_empty());
 }

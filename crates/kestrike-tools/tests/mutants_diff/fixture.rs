@@ -121,7 +121,7 @@ pub struct Plan {
     pub stray: bool,
     pub drop_git: bool,
     pub no_outcomes: bool,
-    pub raw_listing: Option<String>,
+    pub raw_listing: Option<Vec<u8>>,
     pub raw_outcomes: Option<String>,
 }
 
@@ -223,7 +223,8 @@ impl Plan {
             put("list_exit", &code.to_string());
         }
         if let Some(listing) = &self.raw_listing {
-            put("raw_listing", &format!("{listing}\n"));
+            let bytes = [listing.as_slice(), b"\n"].concat();
+            fs::write(directory.join("raw_listing"), bytes).expect("the plan file is written");
         }
         if let Some(outcomes) = &self.raw_outcomes {
             put("raw_outcomes", outcomes);
@@ -330,7 +331,8 @@ impl Runner {
     }
 
     pub fn signal(&self, signal: i32) {
-        // SAFETY: `kill` takes two integers; the runner is not reaped while it is held here.
+        // SAFETY: `kill` takes two integers. A case signals a runner before it observes the runner's exit,
+        // so the process id still names the runner.
         assert_eq!(
             unsafe { libc::kill(self.pid(), signal) },
             0,
@@ -990,4 +992,20 @@ impl Fixture {
             );
         }
     }
+}
+
+/// `two_mutants` lists the two mutants of `two` in `lib.rs`.
+pub fn two_mutants() -> Vec<(Text, Text)> {
+    let names: Vec<String> = (0..2)
+        .map(|n| format!("{SOURCE}/lib.rs:2:1: replace two -> u32 with {n}"))
+        .collect();
+    listed(&lib_rs(), &names)
+}
+
+/// `registered` counts the worktrees the fixture repository's listing names.
+pub fn registered(fixture: &Fixture) -> usize {
+    fixture
+        .git(&["worktree", "list", "--porcelain"])
+        .matches("worktree ")
+        .count()
 }

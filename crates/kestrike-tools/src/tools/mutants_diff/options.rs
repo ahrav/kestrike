@@ -102,11 +102,14 @@ fn given(value: &Text) -> Result<(), String> {
     Ok(())
 }
 
+/// `is_ascii_digits` holds for one or more ASCII digits.
+fn is_ascii_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// `ascii_digits` returns the text when it is one or more ASCII digits.
 fn ascii_digits(value: &Text) -> Option<&str> {
-    value
-        .to_str()
-        .filter(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+    value.to_str().filter(|digits| is_ascii_digits(digits))
 }
 
 /// A limit is ASCII digits worth one or more. Past [`MAX_INTEGER_DIGITS`] digits the value is refused as
@@ -127,8 +130,7 @@ fn positive(value: &Text) -> Result<(), String> {
 /// `shard_numbers` splits `K/N`, each one or more ASCII digits, into its two numbers.
 fn shard_numbers(value: &Text) -> Option<(&str, &str)> {
     let (k, n) = value.to_str()?.split_once('/')?;
-    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
-    (digits(k) && digits(n)).then_some((k, n))
+    (is_ascii_digits(k) && is_ascii_digits(n)).then_some((k, n))
 }
 
 fn integer(digits: &str) -> Integer {
@@ -171,22 +173,22 @@ pub fn parse(args: &[OsString]) -> Parsed<Options> {
     let help = format!("{USAGE}\n\n{}\n{OPTIONS_HELP}", include_str!("help.md"));
     let reader = Reader::new(TOOL, USAGE, &help, false, &TABLE);
     reader.parse(args).map(|values| {
-        let value = |name| match values.get(name) {
+        let explicit = |name| match values.get(name) {
             Given::Value(value) => Some(value.clone()),
             Given::Absent | Given::Empty => None,
         };
-        let given = |name, default: &str| match values.get(name) {
+        let or_default = |name, default: &str| match values.get(name) {
             Given::Absent => Some(OsString::from(default)),
             Given::Empty => None,
             Given::Value(value) => Some(value.clone()),
         };
-        let head = given("--head", "HEAD").map_or(Revision::EmptyList, Revision::Given);
-        let max_mutants = given("--max-mutants", DEFAULT_LIMIT).map(|digits| {
+        let head = or_default("--head", "HEAD").map_or(Revision::EmptyList, Revision::Given);
+        let max_mutants = or_default("--max-mutants", DEFAULT_LIMIT).map(|digits| {
             let digits = digits.to_str().expect("a checked limit is ASCII digits");
             let trimmed = digits.trim_start_matches('0');
             trimmed.to_owned()
         });
-        let shard = value("--shard").map(|text| {
+        let shard = explicit("--shard").map(|text| {
             let shown = Text::from_os(&text);
             let (k, n) = shard_numbers(&shown).expect("a checked shard is K/N");
             let (k, n) = (integer(k), integer(n));
@@ -204,13 +206,13 @@ pub fn parse(args: &[OsString]) -> Parsed<Options> {
             ),
         };
         Options {
-            base: value("--base"),
+            base: explicit("--base"),
             head,
             max_mutants,
             shard,
             tests,
-            artifacts: value("--artifacts"),
-            cargo: given("--cargo", "cargo"),
+            artifacts: explicit("--artifacts"),
+            cargo: or_default("--cargo", "cargo"),
         }
     })
 }

@@ -5,8 +5,6 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use super::args::{self, Parsed};
 use super::quint;
 use crate::json::{self, Integer, Object, Value};
@@ -152,10 +150,7 @@ pub(crate) fn generate(
 ) -> Result<(), String> {
     let source = top.join("quint").join(format!("{}.qnt", model.name));
     let bytes = fs::read(&source).map_err(at(&source))?;
-    let digest: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
+    let digest = crate::python::hexdigest(&bytes);
     for trace in traces {
         let file = output.join(format!("{}.itf.json", trace.name));
         let directory = output.join(&trace.name);

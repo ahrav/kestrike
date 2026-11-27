@@ -205,7 +205,13 @@ fn ignored(error: &io::Error) -> bool {
     )
 }
 
-fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
+/// `status` returns the `stat` of `path`, or `None` for the errors that make Python's `Path.exists` and
+/// `Path.is_file` false: `ENOENT`, `ENOTDIR`, `EBADF` and `ELOOP`.
+///
+/// # Errors
+///
+/// `stat` fails with another error.
+pub fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
     match fs::metadata(path) {
         Ok(status) => Ok(Some(status)),
         Err(error) if ignored(&error) => Ok(None),

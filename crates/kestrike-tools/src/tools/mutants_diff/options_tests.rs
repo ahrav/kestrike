@@ -108,3 +108,12 @@ fn numbers_keep_their_value_and_past_4300_digits_are_invalid() {
         format!("mutants-diff: error: argument --shard: invalid shard_value value: '{shard}'")
     );
 }
+
+#[test]
+fn help_prints_the_usage_and_the_header() {
+    let Parsed::Help(text) = read(&["--help"]) else {
+        panic!("--help prints the help");
+    };
+    assert!(text.starts_with("usage: mutants-diff [-h] "), "{text}");
+    assert!(text.contains(include_str!("help.md")));
+}
