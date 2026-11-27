@@ -1715,8 +1715,29 @@ class VerifyReceipts(unittest.TestCase):
         self.assertEqual(verify.credited_modules("verus", None), {None})
 
     def test_a_scheduled_tlc_receipt_credits_the_pr_records_and_a_pr_receipt_its_own(self):
-        self.assertEqual(verify.credited_modules("tlc", "scheduled"), {"scheduled"})
+        """The declaration lists the `pr` tier alone, and the runner's `scheduled` profile judges every `pr` case: a
+        scheduled receipt credits the `pr` records, and a module the runner defines no profile for credits itself."""
+        self.assertEqual(set(read_json(verify.CHECKER_JOBS["tlc"])["profiles"]), {"pr"})
+        self.assertEqual(verify.credited_modules("tlc", "scheduled"), {"pr"})
         self.assertEqual(verify.credited_modules("tlc", "pr"), {"pr"})
+        self.assertEqual(verify.credited_modules("tlc", "weekly"), {"weekly"})
+        fixture = load("tlc_judge_fixture", ROOT / "scripts/test-judge-tlc.py")
+        fixture.JudgeTlc.setUpClass()
+        self.addCleanup(fixture.JudgeTlc.doClassCleanups)
+        case = fixture.JudgeTlc("test_a_scheduled_profile_judges_the_pr_cases_as_well")
+        case.setUp()
+        case.scheduled()
+        case.write()
+        evidence = case.evidence
+        judged = subprocess.run([sys.executable, str(ROOT / "scripts/judge-tlc.py"), "judge", "--profile", "scheduled", "--evidence",
+                                 str(evidence), "--revision", REVISION], capture_output=True, text=True, check=False)
+        self.assertEqual(judged.returncode, 0, judged.stdout + judged.stderr)
+        code, report = self.run_script("credit", "--job", "tlc", "--module", "scheduled", "--receipt", str(evidence / "receipt.json"),
+                                       "--evidence", str(evidence), "--revision", REVISION)
+        self.assertEqual((code, report["refusals"]), (0, []), report)
+        tlc = [r for r in CATALOG["records"] if r["job"] == "tlc"]
+        self.assertEqual({r["module"] for r in tlc}, {"pr"})
+        self.assertEqual(report["obligations"], [r["id"] for r in tlc])
 
     def test_a_scheduled_genmc_receipt_credits_every_record_its_run_judges(self):
         evidence = self.genmc_evidence(profile="scheduled")

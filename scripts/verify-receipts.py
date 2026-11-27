@@ -501,12 +501,14 @@ def credited_modules(job, module):
 
     A GenMC, Kani or TLC run judges every test of `profile_cases(module)`, so its receipt also credits each profile
     whose declared tests that run judges: a `scheduled` receipt credits the `pr` records, and a `pr` receipt
-    never credits the scheduled domain. Every other lane credits its own module.
+    never credits the scheduled domain. A TLC profile that the runner defines and the declaration omits credits the
+    declared tiers whose cases that run judges. Every other lane credits its own module.
     """
     if job not in PROFILED:
         return {module}
     expected = checker_declaration(job)
-    if module not in expected["profiles"]:
+    if module not in expected["profiles"] and not (
+            job == "tlc" and module in judge_call("tlc", lambda judge: judge.runner().PROFILES)):
         return {module}
     judged = set(judge_call(job, lambda judge: judge.profile_cases(expected, module)))
     return {name for name, tests in expected["profiles"].items() if set(tests) <= judged}
