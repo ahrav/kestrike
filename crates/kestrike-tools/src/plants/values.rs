@@ -57,8 +57,7 @@ pub(crate) fn profile_name(value: &Value) -> bool {
         && *name != ".."
 }
 
-/// `argument` holds for a string a process takes as one argument: free of NUL and of surrogates, so it
-/// encodes as UTF-8, as a file name, and prints.
+/// `argument` accepts NUL-free UTF-8 strings of any length.
 pub(crate) fn argument(value: &Value) -> bool {
     matches!(value, Value::String(text) if text.to_str().is_some_and(|text| !text.contains('\0')))
 }

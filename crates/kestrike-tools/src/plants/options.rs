@@ -1,9 +1,10 @@
 //! The command line of the plant run: seven long options read by [`Reader`] with whole names alone, and
 //! the help. `--plant` keeps every occurrence in order; each other option keeps its last value.
 //!
-//! A count is read as Python's `int` reads a string, ASCII digits alone and at most
-//! [`crate::json::MAX_INTEGER_DIGITS`] of them, and must be at least 1; `--runs` must be at least
-//! [`FLOOR`].
+//! A count is read as Python's `int` reads a string: surrounding whitespace, a sign and single
+//! underscores between digits are taken, the digits are ASCII, at most
+//! [`crate::json::MAX_INTEGER_DIGITS`] of them, and the count must be at least 1; `--runs` must be at
+//! least [`FLOOR`].
 
 use std::ffi::{OsStr, OsString};
 

@@ -134,13 +134,6 @@ impl Object {
             .map(|(_, value)| value)
     }
 
-    fn get_text(&self, key: &Text) -> Option<&Value> {
-        self.0
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value)
-    }
-
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         self.0
             .iter_mut()
@@ -211,8 +204,10 @@ pub fn parse(text: &str) -> Result<Value, Error> {
     Reader::new(text, false)
         .document()
         .map_err(|error| match error {
-            ReadError::Syntax(error) => error,
-            ReadError::Repeated(_) => unreachable!("a read that keeps repeated keys refuses none"),
+            UniqueError::Syntax(error) => error,
+            UniqueError::Repeated(_) => {
+                unreachable!("a read that keeps repeated keys refuses none")
+            }
         })
 }
 
@@ -242,21 +237,12 @@ impl std::error::Error for UniqueError {}
 ///
 /// # Errors
 ///
-/// `parse_unique` returns [`UniqueError::Syntax`] where [`parse`] fails and [`UniqueError::Repeated`] for
-/// the first object to close that repeats a key.
+/// The reader stops at the first object to close that repeats a key and returns
+/// [`UniqueError::Repeated`]; a syntax or limit error the reader meets before that close is
+/// [`UniqueError::Syntax`]. So a repeat followed by trailing text is [`UniqueError::Repeated`], where
+/// [`parse`] refuses the trailing text.
 pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
-    Reader::new(text, true)
-        .document()
-        .map_err(|error| match error {
-            ReadError::Syntax(error) => UniqueError::Syntax(error),
-            ReadError::Repeated(name) => UniqueError::Repeated(name),
-        })
-}
-
-/// Why a read stopped: an error of the text, or, when repeated keys end the read, a repeated key.
-enum ReadError {
-    Syntax(Error),
-    Repeated(Text),
+    Reader::new(text, true).document()
 }
 
 struct Reader<'a> {
@@ -275,7 +261,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn document(&mut self) -> Result<Value, ReadError> {
+    fn document(&mut self) -> Result<Value, UniqueError> {
         self.space();
         let value = self.value(0)?;
         self.space();
@@ -285,8 +271,8 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
-    fn error(&self, reason: &'static str) -> ReadError {
-        ReadError::Syntax(error_at(self.at, reason))
+    fn error(&self, reason: &'static str) -> UniqueError {
+        UniqueError::Syntax(error_at(self.at, reason))
     }
 
     fn peek(&self) -> Option<u8> {
@@ -319,7 +305,7 @@ impl<'a> Reader<'a> {
         self.at - start
     }
 
-    fn value(&mut self, depth: usize) -> Result<Value, ReadError> {
+    fn value(&mut self, depth: usize) -> Result<Value, UniqueError> {
         match self.peek() {
             Some(b'{') => self.object(depth + 1),
             Some(b'[') => self.array(depth + 1),
@@ -335,7 +321,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn nest(&mut self, depth: usize) -> Result<(), ReadError> {
+    fn nest(&mut self, depth: usize) -> Result<(), UniqueError> {
         if depth > MAX_DEPTH {
             return Err(self.error("nesting deeper than the reader takes"));
         }
@@ -345,7 +331,7 @@ impl<'a> Reader<'a> {
     }
 
     /// Consumes `,` and the whitespace after it, or `close`, and returns whether `close` ended the list.
-    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, ReadError> {
+    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, UniqueError> {
         match self.peek() {
             Some(b',') => {
                 self.at += 1;
@@ -360,7 +346,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn object(&mut self, depth: usize) -> Result<Value, ReadError> {
+    fn object(&mut self, depth: usize) -> Result<Value, UniqueError> {
         self.nest(depth)?;
         let mut object = Object::new();
         if self.peek() == Some(b'}') {
@@ -380,21 +366,21 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.unique && repeated.is_none() && object.get_text(&key).is_some() {
+            if self.unique && repeated.is_none() && object.iter().any(|(name, _)| *name == key) {
                 repeated = Some(key.clone());
             }
             object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
-                    return Err(ReadError::Repeated(name));
+                    return Err(UniqueError::Repeated(name));
                 }
                 return Ok(Value::Object(object));
             }
         }
     }
 
-    fn array(&mut self, depth: usize) -> Result<Value, ReadError> {
+    fn array(&mut self, depth: usize) -> Result<Value, UniqueError> {
         self.nest(depth)?;
         let mut items = Vec::new();
         if self.peek() == Some(b']') {
@@ -410,7 +396,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn number(&mut self) -> Result<Value, ReadError> {
+    fn number(&mut self) -> Result<Value, UniqueError> {
         let start = self.at;
         let negative = self.peek() == Some(b'-');
         if negative {
@@ -445,7 +431,7 @@ impl<'a> Reader<'a> {
             return Ok(Value::Float(value));
         }
         if integer - digits > MAX_INTEGER_DIGITS {
-            return Err(ReadError::Syntax(error_at(
+            return Err(UniqueError::Syntax(error_at(
                 start,
                 "an integer of more digits than the reader takes",
             )));
@@ -456,7 +442,7 @@ impl<'a> Reader<'a> {
         ))
     }
 
-    fn string(&mut self) -> Result<Text, ReadError> {
+    fn string(&mut self) -> Result<Text, UniqueError> {
         self.at += 1;
         let mut text = Text::new();
         loop {
@@ -489,7 +475,7 @@ impl<'a> Reader<'a> {
     }
 
     /// `self.at` must point to the byte after the backslash.
-    fn escape(&mut self) -> Result<u32, ReadError> {
+    fn escape(&mut self) -> Result<u32, UniqueError> {
         let escaped = match self.peek() {
             Some(b'u') => return self.unicode(),
             Some(b'"') => b'"',
@@ -509,7 +495,7 @@ impl<'a> Reader<'a> {
 
     /// `self.at` must point to the `u` of the first escape. A high surrogate joins an immediately following
     /// `\u` escape encoding a low surrogate; any other code unit stands alone.
-    fn unicode(&mut self) -> Result<u32, ReadError> {
+    fn unicode(&mut self) -> Result<u32, UniqueError> {
         let first = self.code_unit()?;
         if (0xd800..0xdc00).contains(&first) && self.rest_starts_with(b"\\u") {
             let mark = self.at;
@@ -523,7 +509,7 @@ impl<'a> Reader<'a> {
         Ok(first)
     }
 
-    fn code_unit(&mut self) -> Result<u32, ReadError> {
+    fn code_unit(&mut self) -> Result<u32, UniqueError> {
         let digits = self
             .text
             .get(self.at + 1..self.at + 5)

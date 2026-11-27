@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 
-use super::files::{is_file, is_link, strerror};
+use super::files::strerror;
 use super::stop::Stop;
-use crate::ownership::PathError;
+use crate::ownership::{PathError, is_file, is_link};
 
 /// `lock` returns the bytes of `top/Cargo.lock`, which must be a regular file and no link.
 ///

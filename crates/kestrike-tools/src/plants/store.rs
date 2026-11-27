@@ -4,20 +4,19 @@
 //! The store's parent and the store are both tested for a link before either is refused. A store entry
 //! that is a directory, or a link to one, is a plant, selected or not; any other entry is
 //! passed over. Entries are taken in the order of their names' bytes. The store and its parent are real
-//! directories, since the run writes its score there. A path of `git status` under the store whose file
-//! name, leading dots removed, starts with `score.json` is the score or a staging file of one and no
-//! difference from the head.
+//! directories, since the run writes its score there. A path of `git status` anywhere under the store,
+//! in a plant directory too, whose file name, leading dots removed, starts with `score.json` is passed
+//! over; the score and its staging files carry such names.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::files::{is_dir, is_link};
 use super::git;
 use super::record::{Plant, load_plant};
 use super::stop::Stop;
 use crate::environ::Environ;
-use crate::ownership::PathError;
+use crate::ownership::{PathError, is_dir, is_link};
 use crate::text::Text;
 
 /// The store's path under the checkout's top.
