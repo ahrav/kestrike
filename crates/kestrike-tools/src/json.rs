@@ -3,7 +3,8 @@
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
-//! last value, and `-0` reads as the integer zero. The reader refuses nesting past [`MAX_DEPTH`] and an integer
+//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
+//! The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
 //! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
 
@@ -200,27 +201,78 @@ impl std::error::Error for Error {}
 /// [`MAX_DEPTH`], for an integer token of more than [`MAX_INTEGER_DIGITS`] digits, and when a
 /// non-whitespace byte follows the value. A successful parse can hold a non-finite float.
 pub fn parse(text: &str) -> Result<Value, Error> {
-    let mut reader = Reader {
-        text: text.as_bytes(),
-        at: 0,
-    };
-    reader.space();
-    let value = reader.value(0)?;
-    reader.space();
-    if reader.at != reader.text.len() {
-        return Err(reader.error("text after the value"));
+    Reader::new(text, false)
+        .document()
+        .map_err(|error| match error {
+            UniqueError::Syntax(error) => error,
+            UniqueError::Repeated(_) => {
+                unreachable!("a read that keeps repeated keys refuses none")
+            }
+        })
+}
+
+/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UniqueError {
+    Syntax(Error),
+    Repeated(Text),
+}
+
+impl fmt::Display for UniqueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax(error) => error.fmt(f),
+            Self::Repeated(name) => write!(f, "repeated member {name}"),
+        }
     }
-    Ok(value)
+}
+
+impl std::error::Error for UniqueError {}
+
+/// `parse_unique` reads what [`parse`] reads and refuses an object that holds a key twice.
+///
+/// Each object is judged when its closing `}` is read, so a syntax error inside an object, and a repeat
+/// in an object nested within it, comes first. The name refused is the first key of the object that
+/// repeats an earlier one.
+///
+/// # Errors
+///
+/// The reader stops at the first object to close that repeats a key and returns
+/// [`UniqueError::Repeated`]; a syntax or limit error the reader meets before that close is
+/// [`UniqueError::Syntax`]. So a repeat followed by trailing text is [`UniqueError::Repeated`], where
+/// [`parse`] refuses the trailing text.
+pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
+    Reader::new(text, true).document()
 }
 
 struct Reader<'a> {
     text: &'a [u8],
     at: usize,
+    /// Whether a repeated key ends the read.
+    unique: bool,
 }
 
-impl Reader<'_> {
-    fn error(&self, reason: &'static str) -> Error {
-        error_at(self.at, reason)
+impl<'a> Reader<'a> {
+    fn new(text: &'a str, unique: bool) -> Self {
+        Self {
+            text: text.as_bytes(),
+            at: 0,
+            unique,
+        }
+    }
+
+    fn document(&mut self) -> Result<Value, UniqueError> {
+        self.space();
+        let value = self.value(0)?;
+        self.space();
+        if self.at != self.text.len() {
+            return Err(self.error("text after the value"));
+        }
+        Ok(value)
+    }
+
+    fn error(&self, reason: &'static str) -> UniqueError {
+        UniqueError::Syntax(error_at(self.at, reason))
     }
 
     fn peek(&self) -> Option<u8> {
@@ -253,7 +305,7 @@ impl Reader<'_> {
         self.at - start
     }
 
-    fn value(&mut self, depth: usize) -> Result<Value, Error> {
+    fn value(&mut self, depth: usize) -> Result<Value, UniqueError> {
         match self.peek() {
             Some(b'{') => self.object(depth + 1),
             Some(b'[') => self.array(depth + 1),
@@ -269,7 +321,7 @@ impl Reader<'_> {
         }
     }
 
-    fn nest(&mut self, depth: usize) -> Result<(), Error> {
+    fn nest(&mut self, depth: usize) -> Result<(), UniqueError> {
         if depth > MAX_DEPTH {
             return Err(self.error("nesting deeper than the reader takes"));
         }
@@ -279,7 +331,7 @@ impl Reader<'_> {
     }
 
     /// Consumes `,` and the whitespace after it, or `close`, and returns whether `close` ended the list.
-    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, Error> {
+    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, UniqueError> {
         match self.peek() {
             Some(b',') => {
                 self.at += 1;
@@ -294,13 +346,14 @@ impl Reader<'_> {
         }
     }
 
-    fn object(&mut self, depth: usize) -> Result<Value, Error> {
+    fn object(&mut self, depth: usize) -> Result<Value, UniqueError> {
         self.nest(depth)?;
         let mut object = Object::new();
         if self.peek() == Some(b'}') {
             self.at += 1;
             return Ok(Value::Object(object));
         }
+        let mut repeated = None;
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -313,15 +366,21 @@ impl Reader<'_> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
+            if self.unique && repeated.is_none() && object.iter().any(|(name, _)| *name == key) {
+                repeated = Some(key.clone());
+            }
             object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
+                if let Some(name) = repeated {
+                    return Err(UniqueError::Repeated(name));
+                }
                 return Ok(Value::Object(object));
             }
         }
     }
 
-    fn array(&mut self, depth: usize) -> Result<Value, Error> {
+    fn array(&mut self, depth: usize) -> Result<Value, UniqueError> {
         self.nest(depth)?;
         let mut items = Vec::new();
         if self.peek() == Some(b']') {
@@ -337,7 +396,7 @@ impl Reader<'_> {
         }
     }
 
-    fn number(&mut self) -> Result<Value, Error> {
+    fn number(&mut self) -> Result<Value, UniqueError> {
         let start = self.at;
         let negative = self.peek() == Some(b'-');
         if negative {
@@ -372,10 +431,10 @@ impl Reader<'_> {
             return Ok(Value::Float(value));
         }
         if integer - digits > MAX_INTEGER_DIGITS {
-            return Err(error_at(
+            return Err(UniqueError::Syntax(error_at(
                 start,
                 "an integer of more digits than the reader takes",
-            ));
+            )));
         }
         Ok(Value::Integer(
             Integer::from_digits(negative, &text[digits - start..])
@@ -383,7 +442,7 @@ impl Reader<'_> {
         ))
     }
 
-    fn string(&mut self) -> Result<Text, Error> {
+    fn string(&mut self) -> Result<Text, UniqueError> {
         self.at += 1;
         let mut text = Text::new();
         loop {
@@ -416,7 +475,7 @@ impl Reader<'_> {
     }
 
     /// `self.at` must point to the byte after the backslash.
-    fn escape(&mut self) -> Result<u32, Error> {
+    fn escape(&mut self) -> Result<u32, UniqueError> {
         let escaped = match self.peek() {
             Some(b'u') => return self.unicode(),
             Some(b'"') => b'"',
@@ -436,7 +495,7 @@ impl Reader<'_> {
 
     /// `self.at` must point to the `u` of the first escape. A high surrogate joins an immediately following
     /// `\u` escape encoding a low surrogate; any other code unit stands alone.
-    fn unicode(&mut self) -> Result<u32, Error> {
+    fn unicode(&mut self) -> Result<u32, UniqueError> {
         let first = self.code_unit()?;
         if (0xd800..0xdc00).contains(&first) && self.rest_starts_with(b"\\u") {
             let mark = self.at;
@@ -450,7 +509,7 @@ impl Reader<'_> {
         Ok(first)
     }
 
-    fn code_unit(&mut self) -> Result<u32, Error> {
+    fn code_unit(&mut self) -> Result<u32, UniqueError> {
         let digits = self
             .text
             .get(self.at + 1..self.at + 5)
