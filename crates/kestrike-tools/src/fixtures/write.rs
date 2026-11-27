@@ -1,18 +1,23 @@
 //! [`write`] reads a writer's command line and writes its traces as the module comment of `fixtures` states.
 //!
-//! The output is all or nothing for each trace up to the first failure: the traces before it are complete,
-//! and the failing one keeps Quint's own bytes when Quint wrote them.
+//! The output is all or nothing for each trace up to the first failure: the traces before it are complete.
+//! A failure after the trace's path is cleared and before Quint writes leaves no entry there. Once Quint has
+//! written, the path holds Quint's raw trace until the whole rewrite is renamed over it, so a failure of the
+//! state count, the `#meta` rules or the rewrite leaves Quint's bytes there. A directory or an entry the
+//! writer cannot remove at a trace's path ends the run before Quint starts, and the entry stays.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
 use super::args::{self, Parsed};
-use super::quint;
+use super::{case, quint};
 use crate::json::{self, Integer, Object, Value};
 use crate::paths;
 use crate::python;
@@ -22,6 +27,33 @@ pub struct Model {
     pub about: &'static str,
     /// The stem of the model's file under `quint/` and the key of the writer's record under `#meta`.
     pub name: &'static str,
+    pub style: Style,
+    /// The time one `quint run` may take before the writer kills it with SIGKILL.
+    pub limit: Duration,
+}
+
+/// How a writer runs Quint and records each trace under `#meta`. Each variant fixes all of its points
+/// together; a writer that differs on one point needs a variant of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    /// Quint's standard output is discarded, and a seeded trace passes no `--step`. `#meta` becomes Quint's
+    /// `format` followed by the record `model_sha256`, `seed`, `steps`, the trace's own fields and, for a
+    /// directed trace, `recipe`. A trace whose `#meta` holds no `format` is refused.
+    Format,
+    /// Quint's standard output reaches the writer's, and a seeded trace passes `--step step`. `#meta` is
+    /// replaced by the record alone: `recipe` (empty for a seeded trace), `seed`, `steps`, the trace's own
+    /// fields and `model_sha256`. Quint's own `#meta` is never read; a trace without one gains `#meta` as its
+    /// last key.
+    Record,
+}
+
+impl Style {
+    fn stdout(self) -> Stdio {
+        match self {
+            Self::Format => Stdio::null(),
+            Self::Record => Stdio::inherit(),
+        }
+    }
 }
 
 /// The keys of the writer's record that [`Trace::new`] refuses in `meta`.
@@ -41,10 +73,13 @@ impl Trace {
     /// recipe makes a seeded trace of `steps` steps. `case` receives the step count and the recipe and returns
     /// the text of `case.qnt`. `meta` holds the fields of the writer's record that follow `steps`.
     ///
+    /// `name` names the trace directory `<output>/<name>/`, the trace `<output>/<name>.itf.json` and Quint's
+    /// `--out-itf ../<name>.itf.json`, so it is one path component that Quint expands nothing in.
+    ///
     /// # Panics
     ///
-    /// `Trace::new` panics if `meta` contains one of the keys `model_sha256`, `seed`, `steps` and
-    /// `recipe`.
+    /// `Trace::new` panics if `name` is empty, `.` or `..`, or holds `/`, `{`, `}` or a NUL byte, and if
+    /// `meta` contains one of the keys `model_sha256`, `seed`, `steps` and `recipe`.
     pub fn new(
         name: String,
         seed: u64,
@@ -53,6 +88,10 @@ impl Trace {
         case: impl FnOnce(usize, Option<&[&str]>) -> String,
         meta: Vec<(&'static str, Value)>,
     ) -> Self {
+        assert!(
+            !matches!(name.as_str(), "" | "." | "..") && !name.contains(['/', '{', '}', '\0']),
+            "a trace's name is one path component without a template: {name:?}"
+        );
         let recipe = recipe.filter(|recipe| !recipe.is_empty());
         let steps = recipe.map_or(steps, <[_]>::len);
         for (key, _) in &meta {
@@ -74,6 +113,28 @@ impl Trace {
     pub fn recipe(&self) -> Option<&'static [&'static str]> {
         self.recipe
     }
+}
+
+/// The traces of a model whose `case.qnt` sets `BOUND` alone: each recipe under `recipe_seed`, then a seeded
+/// trace of `steps` steps for each named seed, in the given orders.
+pub fn traces(
+    model: &Model,
+    recipes: &[(&str, &'static [&'static str])],
+    recipe_seed: u64,
+    seeds: &[(&str, u64)],
+    steps: usize,
+) -> Vec<Trace> {
+    let case = |steps, recipe: Option<&[&str]>| case::bounded(model.name, steps, recipe);
+    let directed = recipes
+        .iter()
+        .map(|&(name, recipe)| (name, recipe_seed, Some(recipe)));
+    let seeded = seeds.iter().map(|&(name, seed)| (name, seed, None));
+    directed
+        .chain(seeded)
+        .map(|(name, seed, recipe)| {
+            Trace::new(name.to_owned(), seed, recipe, steps, case, Vec::new())
+        })
+        .collect()
 }
 
 /// The hook a writer runs on the parsed trace after the state count check.
@@ -102,17 +163,7 @@ pub fn write(
     };
     let outcome = paths::resolve(Path::new(&options.output))
         .map_err(|error| format!("--output: {error}"))
-        .and_then(|output| {
-            generate(
-                model,
-                top,
-                &options.quint,
-                &output,
-                traces,
-                rewrite,
-                quint::LIMIT,
-            )
-        });
+        .and_then(|output| generate(model, top, &options.quint, &output, traces, rewrite));
     match outcome {
         Ok(()) => 0,
         Err(message) => fail(model, &message, 1),
@@ -152,26 +203,31 @@ pub(crate) fn generate(
     output: &Path,
     traces: &[Trace],
     rewrite: Rewrite,
-    limit: Duration,
 ) -> Result<(), String> {
     let source = top.join("quint").join(format!("{}.qnt", model.name));
     let bytes = fs::read(&source).map_err(at(&source))?;
     let digest = crate::python::hexdigest(&bytes);
+    // Every copy holds the model's bytes unchanged. A model that is not UTF-8 fails at the first trace, once
+    // its directory exists.
+    let copy = io::read_to_string(bytes.as_slice());
     for trace in traces {
-        let file = output.join(format!("{}.itf.json", trace.name));
+        let leaf = format!("{}.itf.json", trace.name);
+        let file = output.join(&leaf);
         let directory = output.join(&trace.name);
         create(&directory).map_err(at(&directory))?;
-        let text = read_text(&source).map_err(at(&source))?;
+        let text = copy.as_deref().map_err(at(&source))?;
         for (name, text) in [
-            (format!("{}.qnt", model.name), text.as_str()),
+            (format!("{}.qnt", model.name), text),
             ("case.qnt".to_owned(), &trace.case),
         ] {
             let path = directory.join(name);
             fs::write(&path, text).map_err(at(&path))?;
         }
-        quint::run(quint, &arguments(model, trace, &file), &directory, limit)
+        clear(&file).map_err(at(&file))?;
+        let args = arguments(model, trace, &Path::new("..").join(&leaf));
+        quint::run(quint, &args, &directory, model.style.stdout(), model.limit)
             .map_err(|failure| format!("{}: {failure}", trace.name))?;
-        let mut data = read_trace(&file)?;
+        let (mut data, mode) = read_trace(&file)?;
         let states = data
             .get("states")
             .ok_or_else(|| format!("{}: the trace has no key 'states'", file.display()))?;
@@ -184,57 +240,82 @@ pub(crate) fn generate(
             ));
         }
         rewrite(&mut data, trace).map_err(at(&file))?;
-        let format = match data.get("#meta") {
-            Some(Value::Object(meta)) => meta.get("format").cloned(),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            format!(
-                "{}: the trace has no '#meta' record with a 'format'",
-                file.display()
-            )
-        })?;
         // Quint's other `#meta` fields record the time of the run, so the written trace replaces them with
         // the writer's record, which depends on the model and the trace alone.
         let mut meta = Object::new();
-        meta.insert("format", format);
-        meta.insert(model.name, Value::Object(record(&digest, trace)));
+        match model.style {
+            Style::Format => {
+                let format = match data.get("#meta") {
+                    Some(Value::Object(meta)) => meta.get("format").cloned(),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    format!(
+                        "{}: the trace has no '#meta' record with a 'format'",
+                        file.display()
+                    )
+                })?;
+                meta.insert("format", format);
+            }
+            Style::Record => {}
+        }
+        meta.insert(
+            model.name,
+            Value::Object(record(model.style, &digest, trace)),
+        );
         data.insert("#meta", Value::Object(meta));
-        fs::write(&file, json::dump(&Value::Object(data))).map_err(at(&file))?;
+        let staged = directory.join(format!("{leaf}.new"));
+        replace(&file, &staged, mode, &json::dump(&Value::Object(data)))?;
     }
     Ok(())
 }
 
-fn record(digest: &str, trace: &Trace) -> Object {
+fn record(style: Style, digest: &str, trace: &Trace) -> Object {
     let mut record = Object::new();
-    record.insert("model_sha256", Value::String(digest.into()));
+    match style {
+        Style::Format => {
+            record.insert("model_sha256", Value::String(digest.into()));
+            fields(&mut record, trace);
+            if let Some(recipe) = trace.recipe {
+                record.insert("recipe", actions(recipe));
+            }
+        }
+        Style::Record => {
+            record.insert("recipe", actions(trace.recipe.unwrap_or_default()));
+            fields(&mut record, trace);
+            record.insert("model_sha256", Value::String(digest.into()));
+        }
+    }
+    record
+}
+
+/// `fields` inserts `seed`, `steps` and the trace's own fields, in that order.
+fn fields(record: &mut Object, trace: &Trace) {
     record.insert("seed", Value::String(format!("{:#x}", trace.seed).into()));
     record.insert("steps", Value::Integer(Integer::from(trace.steps)));
     for (key, value) in &trace.meta {
         record.insert(*key, value.clone());
     }
-    if let Some(recipe) = trace.recipe {
-        record.insert(
-            "recipe",
-            Value::Array(
-                recipe
-                    .iter()
-                    .map(|&step| Value::String(step.into()))
-                    .collect(),
-            ),
-        );
-    }
-    record
 }
 
-fn arguments(model: &Model, trace: &Trace, file: &Path) -> Vec<OsString> {
+fn actions(recipe: &[&str]) -> Value {
+    Value::Array(
+        recipe
+            .iter()
+            .map(|&action| Value::String(action.into()))
+            .collect(),
+    )
+}
+
+/// `arguments` returns the `quint run` vector for `trace`, which writes the trace to `out`.
+fn arguments(model: &Model, trace: &Trace, out: &Path) -> Vec<OsString> {
     let main = format!("{}Case", model.name);
     let seed = format!("{:#x}", trace.seed);
     let steps = trace.steps.to_string();
-    let step: &[&str] = if trace.recipe.is_some() {
-        &["--step", "recipe"]
-    } else {
-        &[]
+    let step: &[&str] = match (trace.recipe, model.style) {
+        (Some(_), _) => &["--step", "recipe"],
+        (None, Style::Record) => &["--step", "step"],
+        (None, Style::Format) => &[],
     };
     let head = ["run", "case.qnt", "--main", &main];
     let tail = [
@@ -256,7 +337,7 @@ fn arguments(model: &Model, trace: &Trace, file: &Path) -> Vec<OsString> {
         .chain(&last)
         .map(OsString::from)
         .collect();
-    args.push(file.as_os_str().to_owned());
+    args.push(out.as_os_str().to_owned());
     args
 }
 
@@ -273,22 +354,84 @@ fn create(directory: &Path) -> io::Result<()> {
     }
 }
 
-/// `read_text` reads `path` as UTF-8 and writes each `\r\n` and each lone `\r` as `\n`, the text a model
-/// copy holds.
-fn read_text(path: &Path) -> io::Result<String> {
-    Ok(fs::read_to_string(path)?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n"))
+/// `clear` removes the entry at `file`, a symbolic link itself and not its target, and succeeds when no
+/// entry is there, so the trace read after Quint exits is one this run's Quint wrote. A directory at `file`,
+/// or an entry the process cannot remove, returns the system's error (`EISDIR` for a directory on Linux).
+fn clear(file: &Path) -> io::Result<()> {
+    match fs::remove_file(file) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
-fn read_trace(file: &Path) -> Result<Object, String> {
-    let bytes = fs::read(file).map_err(at(file))?;
+/// `read_trace` returns the trace at `file` with the permission bits (`0o777`) of the file it read.
+fn read_trace(file: &Path) -> Result<(Object, u32), String> {
+    let mut opened = File::open(file).map_err(at(file))?;
+    let mode = opened.metadata().map_err(at(file))?.permissions().mode() & 0o777;
+    let mut bytes = Vec::new();
+    opened.read_to_end(&mut bytes).map_err(at(file))?;
     let text = String::from_utf8(bytes).map_err(at(file))?;
     match json::parse(&text).map_err(at(file))? {
-        Value::Object(data) => Ok(data),
+        Value::Object(data) => Ok((data, mode)),
         _ => Err(format!(
             "{}: the trace is a JSON value other than an object",
             file.display()
         )),
+    }
+}
+
+/// `replace` creates `staged`, which must be new, writes `text` to it, gives it the permission bits `mode`,
+/// syncs and closes it, so a deferred write error such as `ENOSPC` is reported here, and renames it over
+/// `file`. While the host stays up, `file` holds either its earlier bytes or the whole `text`; no directory
+/// is synced. A `text` longer than the soft `RLIMIT_FSIZE` is refused with `EFBIG` before the write, which leaves
+/// `SIGXFSZ` unraised. On a failure after the creation, `replace` removes `staged` and returns one line that
+/// names the failed step's path, `staged` or, for the rename, `file`, and the removal's error when the
+/// removal fails too.
+pub(crate) fn replace(file: &Path, staged: &Path, mode: u32, text: &str) -> Result<(), String> {
+    let mut new = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(staged)
+        .map_err(at(staged))?;
+    let prepared = fits(text.len())
+        .and_then(|()| new.write_all(text.as_bytes()))
+        .and_then(|()| new.set_permissions(fs::Permissions::from_mode(mode)))
+        .and_then(|()| new.sync_all());
+    let closed = close(new);
+    let written = prepared.and(closed).map_err(at(staged));
+    written
+        .and_then(|()| fs::rename(staged, file).map_err(at(file)))
+        .map_err(|line| match fs::remove_file(staged) {
+            Ok(()) => line,
+            Err(removal) => format!("{line}; removing {} failed: {removal}", staged.display()),
+        })
+}
+
+/// `close` closes `file` once and returns the error `close(2)` reports. The descriptor is released even on
+/// an error, so it is never closed again.
+fn close(file: File) -> io::Result<()> {
+    let descriptor = file.into_raw_fd();
+    // SAFETY: `into_raw_fd` hands this function the sole ownership of `descriptor`, which is closed here once.
+    if unsafe { libc::close(descriptor) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `fits` refuses with `EFBIG` a write of `len` bytes at offset 0 that the soft `RLIMIT_FSIZE` forbids.
+fn fits(len: usize) -> io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through the pointer, which refers to a live local.
+    if unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    match u64::try_from(len) {
+        Ok(len) if limit.rlim_cur == libc::RLIM_INFINITY || len <= limit.rlim_cur => Ok(()),
+        _ => Err(io::Error::from_raw_os_error(libc::EFBIG)),
     }
 }

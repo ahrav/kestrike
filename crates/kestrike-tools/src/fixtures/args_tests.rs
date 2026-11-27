@@ -31,6 +31,7 @@ fn values_follow_an_equals_sign_a_prefix_or_the_next_argument_and_the_last_wins(
     );
     assert_eq!(read(&["--quint", "-a b", "--output", ""]), run("-a b", ""));
     assert_eq!(read(&["--quint=--", "--output", "o"]), run("--", "o"));
+    assert_eq!(read(&["--quint", "q", "--output=--"]), run("q", "--"));
     assert_eq!(read(&["--qu=--", "--out=--"]), run("--", "--"));
     assert_eq!(read(&["--quint=", "--output", "o"]), run("", "o"));
 }

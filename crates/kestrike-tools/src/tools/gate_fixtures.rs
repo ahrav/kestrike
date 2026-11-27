@@ -7,13 +7,16 @@
 
 use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
-use crate::fixtures::{self, Model, Trace, case};
+use crate::fixtures::{self, Model, Style, Trace, case};
 
-const MODEL: Model = Model {
+pub(crate) const MODEL: Model = Model {
     tool: "gate_fixtures",
     about: "Attach-gate model traces for the replay against `Volume`: the directed recipes and seeded runs of `step`.",
     name: "gate",
+    style: Style::Format,
+    limit: Duration::from_secs(120),
 };
 
 pub const STEPS: usize = 12;

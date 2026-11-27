@@ -1,7 +1,8 @@
 //! Each public function returns Quint module text that imports its model with the supplied constants. For a
 //! directed trace the text adds the action `recipe`, which restricts each turn to the recipe's action at that
-//! turn. The text equals what `inputs` of `quint/escrow_check.py`, `quint/gate_check.py` and
-//! `quint/marklog_check.py` returns for a case without mutations or extra text.
+//! turn. The text equals what `inputs` of `quint/escrow_check.py`, `quint/gate_check.py`,
+//! `quint/marklog_check.py`, `quint/grace_check.py`, `quint/lookup_check.py`, `quint/reclaim_check.py` and
+//! `quint/register_check.py` returns for a case without mutations or extra text.
 
 use std::fmt::Write;
 
@@ -15,8 +16,14 @@ pub fn escrow(bound: usize, volume: &str, recipe: Option<&[&str]>) -> String {
 }
 
 pub fn gate(bound: usize, recipe: Option<&[&str]>) -> String {
+    bounded("gate", bound, recipe)
+}
+
+/// `bounded` writes the module `<model>Case`, which imports `<model>` with `BOUND` alone, and adds the recipe
+/// as [`escrow`] does.
+pub fn bounded(model: &str, bound: usize, recipe: Option<&[&str]>) -> String {
     format!(
-        "module gateCase {{\n  import gate(BOUND = {bound}).* from \"./gate\"\n{}}}\n",
+        "module {model}Case {{\n  import {model}(BOUND = {bound}).* from \"./{model}\"\n{}}}\n",
         grouped(recipe)
     )
 }

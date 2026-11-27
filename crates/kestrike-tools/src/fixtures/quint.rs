@@ -8,8 +8,6 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub const LIMIT: Duration = Duration::from_secs(120);
-
 const POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug)]
@@ -40,19 +38,20 @@ impl fmt::Display for Failure {
     }
 }
 
-/// `run` discards the child's standard output; the child inherits standard input, standard error and the
-/// environment. The timer starts once `spawn` returns. A failed status read returns at once and sends the
+/// `run` gives the child `stdout` as its standard output; the child inherits standard input, standard error and
+/// the environment. The timer starts once `spawn` returns. A failed status read returns at once and sends the
 /// child no signal, since the child may already be reaped.
 pub fn run(
     program: &OsStr,
     args: &[OsString],
     directory: &Path,
+    stdout: Stdio,
     limit: Duration,
 ) -> Result<(), Failure> {
     let mut child = Command::new(program)
         .args(args)
         .current_dir(directory)
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .spawn()
         .map_err(Failure::Start)?;
     let start = Instant::now();

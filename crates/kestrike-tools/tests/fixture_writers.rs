@@ -1,21 +1,25 @@
 //! The test runs the fixture writers against a POSIX `sh` script that stands in for `quint`. The script
-//! answers each call with a committed trace stripped of what the writer adds, and refuses a call whose
-//! arguments belong to another trace.
+//! answers each call with a committed trace stripped of what the writer adds, prints one line naming the
+//! trace on standard output, and refuses a call whose arguments belong to another trace or that runs in a
+//! directory other than `<output>/<name>/`.
 
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
 use std::io::{self, Write};
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use kestrike_tools::fixtures::Style;
 use kestrike_tools::json::{self, Object, Value};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
 
 struct Writer {
     tool: &'static str,
+    style: Style,
     model: &'static str,
     fixtures: &'static str,
     directed: (&'static str, &'static str),
@@ -24,9 +28,11 @@ struct Writer {
     recipes: &'static [&'static str],
 }
 
-const WRITERS: [Writer; 3] = [
+/// Each `case.qnt` text is the case module of one directed and one seeded trace of the model.
+const WRITERS: [Writer; 7] = [
     Writer {
         tool: "escrow_fixtures",
+        style: Style::Format,
         count: 14,
         recipes: &[
             "an_exact_promise_succeeds_and_a_short_one_refuses",
@@ -54,6 +60,7 @@ const WRITERS: [Writer; 3] = [
     },
     Writer {
         tool: "gate_fixtures",
+        style: Style::Format,
         count: 26,
         recipes: &[
             "passes",
@@ -90,6 +97,7 @@ const WRITERS: [Writer; 3] = [
     },
     Writer {
         tool: "marklog_fixtures",
+        style: Style::Format,
         count: 12,
         recipes: &[
             "partly_landed",
@@ -112,6 +120,111 @@ const WRITERS: [Writer; 3] = [
         seeded: (
             "step_6b01",
             "module marklogCase {\n  import marklog(BOUND = 14).* from \"./marklog\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "grace_fixtures",
+        style: Style::Record,
+        count: 13,
+        recipes: &[
+            "readerBeforePass",
+            "passBeforeReader",
+            "releaseAfterUnpin",
+            "terminalRefusesPins",
+            "refusals",
+            "keptCertificate",
+            "closingRetirement",
+        ],
+        model: "grace",
+        fixtures: "crates/kestrike/src/storage/grace_replay_fixtures",
+        directed: (
+            "releaseAfterUnpin",
+            "module graceCase {\n  import grace(BOUND = 16).* from \"./grace\"\n  action recipe = any {\n    all { \
+             Set(0).contains(turn), pin(0) },\n    all { Set(1).contains(turn), observe(0) },\n    all { \
+             Set(2).contains(turn), remove },\n    all { Set(3).contains(turn), retire },\n    all { Set(4, \
+             10).contains(turn), begin },\n    all { Set(5, 6, 11, 12).contains(turn), visit },\n    all { Set(7, \
+             13).contains(turn), complete },\n    all { Set(8, 14).contains(turn), release },\n    all { \
+             Set(9).contains(turn), unpin(0) },\n    all { Set(15).contains(turn), reuse },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module graceCase {\n  import grace(BOUND = 16).* from \"./grace\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "lookup_fixtures",
+        style: Style::Record,
+        count: 10,
+        recipes: &[
+            "replaceUnderLease",
+            "removeThenReclaim",
+            "expiryAndClose",
+            "twoKeys",
+        ],
+        model: "lookup",
+        fixtures: "crates/kestrike/src/storage/lookup_replay_fixtures",
+        directed: (
+            "twoKeys",
+            "module lookupCase {\n  import lookup(BOUND = 13).* from \"./lookup\"\n  action recipe = any {\n    all { \
+             Set(0, 9, 11).contains(turn), service },\n    all { Set(1, 2, 8).contains(turn), certify },\n    all { \
+             Set(3).contains(turn), publish(0) },\n    all { Set(4).contains(turn), publish(1) },\n    all { \
+             Set(5).contains(turn), lookup(1) },\n    all { Set(6).contains(turn), remove(0) },\n    all { \
+             Set(7).contains(turn), remove(1) },\n    all { Set(10).contains(turn), drop(2) },\n    all { \
+             Set(12).contains(turn), lookup(0) },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module lookupCase {\n  import lookup(BOUND = 16).* from \"./lookup\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "reclaim_fixtures",
+        style: Style::Record,
+        count: 11,
+        recipes: &[
+            "anchorLast",
+            "rightLast",
+            "pinnedReaderHolds",
+            "reuse",
+            "leases",
+        ],
+        model: "reclaim",
+        fixtures: "crates/kestrike/src/storage/reclaim_replay_fixtures",
+        directed: (
+            "reuse",
+            "module reclaimCase {\n  import reclaim(BOUND = 12).* from \"./reclaim\"\n  action recipe = any {\n    all \
+             { Set(0, 6).contains(turn), unlease },\n    all { Set(1, 7).contains(turn), retire },\n    all { Set(2, \
+             3, 8, 9).contains(turn), certify },\n    all { Set(4, 10).contains(turn), service },\n    all { Set(5, \
+             11).contains(turn), republish },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module reclaimCase {\n  import reclaim(BOUND = 18).* from \"./reclaim\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "register_fixtures",
+        style: Style::Record,
+        count: 11,
+        recipes: &[
+            "closeRacesAnEntry",
+            "leakedGuardBlocks",
+            "limitAndReturn",
+            "forgottenHandles",
+            "leakedAcrossTheClose",
+        ],
+        model: "register",
+        fixtures: "crates/kestrike/src/storage/register_replay_fixtures",
+        directed: (
+            "forgottenHandles",
+            "module registerCase {\n  import register(BOUND = 8).* from \"./register\"\n  action recipe = any {\n    \
+             all { Set(0, 1, 3, 7).contains(turn), register },\n    all { Set(2).contains(turn), forget(1) },\n    \
+             all { Set(4).contains(turn), leak(0) },\n    all { Set(5).contains(turn), forget(0) },\n    all { \
+             Set(6).contains(turn), close },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module registerCase {\n  import register(BOUND = 14).* from \"./register\"\n}\n",
         ),
     },
 ];
@@ -204,12 +317,14 @@ fn text<'a>(value: Option<&'a Value>, what: &str) -> &'a str {
     }
 }
 
+/// `reply` gives every trace a `#meta` of Quint's shape. A committed trace of a record writer holds no
+/// `format`, and its reply carries Quint's `ITF`.
 fn reply(trace: &Committed) -> String {
     let mut data = trace.data.clone();
     let format = object(data.get("#meta"), "#meta")
         .get("format")
         .cloned()
-        .expect("#meta holds format");
+        .unwrap_or_else(|| Value::String("ITF".into()));
     let mut meta = Object::new();
     meta.insert("format", format);
     for (key, value) in [
@@ -242,7 +357,8 @@ fn reply(trace: &Committed) -> String {
 }
 
 /// `expected_call` returns the arguments the writer passes to Quint for `trace`, each ended by a NUL byte.
-fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
+/// The trace path is relative to the trace directory `<output>/<name>/`, where Quint runs.
+fn expected_call(writer: &Writer, trace: &Committed) -> String {
     let record = object(
         object(trace.data.get("#meta"), "#meta").get(writer.model),
         "the writer's record",
@@ -256,8 +372,11 @@ fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     call.push(format!("{}Case", writer.model));
-    if record.get("recipe").is_some() {
+    let directed = matches!(record.get("recipe"), Some(Value::Array(recipe)) if !recipe.is_empty());
+    if directed {
         call.extend(["--step".to_owned(), "recipe".to_owned()]);
+    } else if writer.style == Style::Record {
+        call.extend(["--step".to_owned(), "step".to_owned()]);
     }
     for arg in [
         "--backend",
@@ -273,14 +392,18 @@ fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
     call.extend(["--max-samples", "1", "--max-steps"].map(str::to_owned));
     call.push(steps);
     call.extend(["--n-traces", "1", "--out-itf"].map(str::to_owned));
-    call.push(
-        output
-            .join(format!("{}.itf.json", trace.name))
-            .to_str()
-            .expect("the path is UTF-8")
-            .to_owned(),
-    );
+    call.push(format!("../{}.itf.json", trace.name));
     call.iter().map(|arg| format!("{arg}\0")).collect()
+}
+
+fn seed(writer: &Writer, trace: &Committed) -> u64 {
+    let record = object(
+        object(trace.data.get("#meta"), "#meta").get(writer.model),
+        "the writer's record",
+    );
+    let seed = text(record.get("seed"), "seed");
+    u64::from_str_radix(seed.strip_prefix("0x").expect("a seed is 0x-prefixed"), 16)
+        .expect("a seed is hexadecimal")
 }
 
 const STAND_IN: &str = r#"#!/bin/sh
@@ -294,8 +417,7 @@ name=${out##*/}
 name=${name%.itf.json}
 [ -f "$replies/$name.call" ] || { echo "stand-in: no trace $name" >&2; exit 3; }
 printf '%s\0' "$@" | cmp -s - "$replies/$name.call" || { echo "stand-in: a call of another trace" >&2; exit 3; }
-here=$(pwd -P)
-[ "${here##*/}" = "$name" ] || { echo "stand-in: $name runs outside its own directory" >&2; exit 3; }
+[ "$(pwd -P)" = "$(cat "$replies/$name.dir")" ] || { echo "stand-in: $name runs outside its own directory" >&2; exit 3; }
 [ -f case.qnt ] || { echo "stand-in: no case.qnt in the working directory" >&2; exit 3; }
 echo "$name" >> "$replies/calls"
 echo "stand-in: writing $name"
@@ -334,9 +456,14 @@ fn stand_in(
     for trace in committed(writer) {
         fs::write(
             replies.join(format!("{}.call", trace.name)),
-            expected_call(writer, &trace, output),
+            expected_call(writer, &trace),
         )
         .expect("the expected call is written");
+        fs::write(
+            replies.join(format!("{}.dir", trace.name)),
+            output.join(&trace.name).as_os_str().as_encoded_bytes(),
+        )
+        .expect("the trace directory is written");
         fs::write(replies.join(format!("{}.reply", trace.name)), reply(&trace))
             .expect("the reply is written");
     }
@@ -385,8 +512,8 @@ fn each_committed_trace_is_written_byte_for_byte() {
             stderr(&result)
         );
         assert!(
-            result.stdout.is_empty() && result.stderr.is_empty(),
-            "{} writes to neither stream",
+            result.stderr.is_empty(),
+            "{} writes nothing to standard error",
             writer.tool
         );
         let traces = committed(writer);
@@ -454,15 +581,13 @@ fn each_committed_trace_is_written_byte_for_byte() {
             .iter()
             .map(|name| (*name).to_owned())
             .collect();
-        let mut seeds: Vec<String> = traces
+        let mut seeds: Vec<(u64, String)> = traces
             .iter()
-            .map(|trace| trace.name.clone())
-            .filter(|name| name.starts_with("step_"))
+            .filter(|trace| !writer.recipes.contains(&trace.name.as_str()))
+            .map(|trace| (seed(writer, trace), trace.name.clone()))
             .collect();
-        seeds.sort_by_key(|name| {
-            u64::from_str_radix(&name["step_".len()..], 16).expect("a seed is hexadecimal")
-        });
-        order.extend(seeds);
+        seeds.sort();
+        order.extend(seeds.into_iter().map(|(_, name)| name));
         let calls =
             fs::read_to_string(scratch.0.join("replies/calls")).expect("the calls log reads");
         assert_eq!(
@@ -471,6 +596,117 @@ fn each_committed_trace_is_written_byte_for_byte() {
             "{}: the traces run in order",
             writer.tool
         );
+        let printed: String = match writer.style {
+            Style::Format => String::new(),
+            Style::Record => order
+                .iter()
+                .map(|name| format!("stand-in: writing {name}\n"))
+                .collect(),
+        };
+        assert_eq!(
+            std::str::from_utf8(&result.stdout).expect("standard output is UTF-8"),
+            printed,
+            "{}: Quint's standard output",
+            writer.tool
+        );
+    }
+}
+
+#[test]
+fn a_trace_generator_writes_its_traces_under_a_relative_output_directory() {
+    for writer in WRITERS
+        .iter()
+        .filter(|writer| writer.style == Style::Record)
+    {
+        let scratch = Scratch::new();
+        let quint = stand_in(&scratch.0, writer, &scratch.0.join("traces"), reply);
+        let result = Command::new(BINARY)
+            .arg(top())
+            .arg(writer.tool)
+            .args([
+                "--quint".as_ref(),
+                quint.as_os_str(),
+                "--output".as_ref(),
+                "traces".as_ref(),
+            ])
+            .current_dir(&scratch.0)
+            .output()
+            .expect("the binary starts");
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}: {}",
+            writer.tool,
+            stderr(&result)
+        );
+        let mut written: Vec<String> = fs::read_dir(scratch.0.join("traces"))
+            .expect("the traces directory lists")
+            .map(|entry| {
+                let name = entry.expect("an entry lists").file_name();
+                name.into_string().expect("a trace's name is UTF-8")
+            })
+            .filter(|name| name.ends_with(".itf.json"))
+            .collect();
+        written.sort();
+        let expected: Vec<String> = committed(writer)
+            .into_iter()
+            .map(|trace| format!("{}.itf.json", trace.name))
+            .collect();
+        assert_eq!(written, expected, "{}", writer.tool);
+    }
+}
+
+#[test]
+fn a_reply_without_meta_is_accepted_by_record_writers_and_refused_by_format_writers() {
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out");
+        let bare = |trace: &Committed| {
+            let Ok(Value::Object(mut data)) = json::parse(&reply(trace)) else {
+                panic!("a reply is a JSON object");
+            };
+            data.remove("#meta");
+            json::dump(&Value::Object(data))
+        };
+        let quint = stand_in(&scratch.0, writer, &output, bare);
+        let result = write_traces(writer, &quint, &output);
+        let first = committed(writer)
+            .into_iter()
+            .find(|trace| trace.name == writer.recipes[0])
+            .expect("the first recipe is committed");
+        let file = output.join(format!("{}.itf.json", first.name));
+        match writer.style {
+            Style::Format => {
+                assert_eq!(result.status.code(), Some(1), "{}", writer.tool);
+                assert_eq!(
+                    stderr(&result),
+                    format!(
+                        "{}: {}: the trace has no '#meta' record with a 'format'\n",
+                        writer.tool,
+                        file.display()
+                    )
+                );
+            }
+            Style::Record => {
+                assert_eq!(
+                    result.status.code(),
+                    Some(0),
+                    "{}: {}",
+                    writer.tool,
+                    stderr(&result)
+                );
+                let mut expected = first.data.clone();
+                let meta = expected.remove("#meta").expect("the trace holds #meta");
+                expected.insert("#meta", meta);
+                let written = fs::read_to_string(&file).expect("the trace is written");
+                assert_eq!(
+                    written,
+                    json::dump(&Value::Object(expected)),
+                    "{}",
+                    writer.tool
+                );
+            }
+        }
     }
 }
 
@@ -524,6 +760,8 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
     let quint = stand_in(&scratch.0, writer, &output, reply);
     let second = "a_claim_beside_a_promise_spares_the_promised_units";
     fs::create_dir_all(output.join(second)).expect("the earlier run's directory is made");
+    let earlier = output.join(format!("{second}.itf.json"));
+    fs::write(&earlier, "earlier").expect("the earlier run's trace is written");
     let result = write_traces(writer, &quint, &output);
     assert_eq!(result.status.code(), Some(1));
     let line = format!(
@@ -538,9 +776,10 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
         .find(|trace| trace.name == first)
         .expect("the first is committed");
     assert!(kept == expected.bytes, "the first trace is complete");
-    assert!(
-        !output.join(format!("{second}.itf.json")).exists(),
-        "the run stops at the second trace"
+    assert_eq!(
+        fs::read_to_string(&earlier).expect("the earlier run's trace stays"),
+        "earlier",
+        "the run stops at the second trace before its trace path is cleared"
     );
     assert!(
         !output
@@ -551,25 +790,32 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
 
 #[test]
 fn a_quint_that_exits_1_ends_the_run_with_exit_1() {
-    let scratch = Scratch::new();
-    let quint = scratch.0.join("quint");
-    write_script(
-        &quint,
-        "#!/bin/sh\necho 'quint: on standard output'\necho 'quint: on standard error' >&2\nexit 1\n",
-    );
-    let output = scratch.0.join("out");
-    let result = write_traces(&WRITERS[1], &quint, &output);
-    assert_eq!(result.status.code(), Some(1));
-    assert!(
-        result.stdout.is_empty(),
-        "Quint's standard output is discarded"
-    );
-    assert_eq!(
-        stderr(&result),
-        "quint: on standard error\ngate_fixtures: passes: Quint ended with exit status: 1\n"
-    );
-    assert!(!output.join("passes.itf.json").exists());
-    assert!(!output.join("busy_then_foreign_registrant").exists());
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let quint = scratch.0.join("quint");
+        write_script(
+            &quint,
+            "#!/bin/sh\necho 'quint: on standard output'\necho 'quint: on standard error' >&2\nexit 1\n",
+        );
+        let output = scratch.0.join("out");
+        let result = write_traces(writer, &quint, &output);
+        assert_eq!(result.status.code(), Some(1), "{}", writer.tool);
+        let first = writer.recipes[0];
+        assert_eq!(
+            stderr(&result),
+            format!(
+                "quint: on standard error\n{}: {first}: Quint ended with exit status: 1\n",
+                writer.tool
+            )
+        );
+        let printed = match writer.style {
+            Style::Format => "",
+            Style::Record => "quint: on standard output\n",
+        };
+        assert_eq!(result.stdout, printed.as_bytes(), "{}", writer.tool);
+        assert!(!output.join(format!("{first}.itf.json")).exists());
+        assert!(!output.join(writer.recipes[1]).exists(), "{}", writer.tool);
+    }
 }
 
 #[test]
@@ -668,31 +914,89 @@ fn a_relative_output_resolves_against_the_working_directory() {
     assert!(output.join("step_6b0d.itf.json").exists());
 }
 
-/// `--quint=--` names the program `--`, which no directory of the test's `PATH` holds: the writer creates
+/// `--quint=--` names the program `--`, which no directory of the test's `PATH` holds: each writer creates
 /// the first trace directory, writes the model copy and `case.qnt` there, and exits 1 when the program
 /// fails to start.
 #[test]
 fn a_quint_value_of_two_dashes_names_a_program_that_fails_to_start() {
-    let scratch = Scratch::new();
-    let output = scratch.0.join("out");
-    let result = Command::new(BINARY)
-        .arg(top())
-        .args([
-            "gate_fixtures".as_ref(),
-            "--quint=--".as_ref(),
-            "--output".as_ref(),
-            output.as_os_str(),
-        ])
-        .env("PATH", &scratch.0)
-        .output()
-        .expect("the binary starts");
-    assert_eq!(result.status.code(), Some(1));
-    assert_eq!(
-        stderr(&result),
-        "gate_fixtures: passes: Quint did not start: No such file or directory (os error 2)\n"
-    );
-    assert!(output.join("passes/gate.qnt").exists() && output.join("passes/case.qnt").exists());
-    assert!(!output.join("busy_then_foreign_registrant").exists());
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out");
+        let result = Command::new(BINARY)
+            .arg(top())
+            .args([
+                writer.tool.as_ref(),
+                "--quint=--".as_ref(),
+                "--output".as_ref(),
+                output.as_os_str(),
+            ])
+            .env("PATH", &scratch.0)
+            .output()
+            .expect("the binary starts");
+        let first = writer.recipes[0];
+        assert_eq!(result.status.code(), Some(1), "{}", writer.tool);
+        assert_eq!(
+            stderr(&result),
+            format!(
+                "{}: {first}: Quint did not start: No such file or directory (os error 2)\n",
+                writer.tool
+            )
+        );
+        let directory = output.join(first);
+        assert!(
+            directory.join(format!("{}.qnt", writer.model)).exists()
+                && directory.join("case.qnt").exists(),
+            "{}",
+            writer.tool
+        );
+        assert!(!output.join(writer.recipes[1]).exists(), "{}", writer.tool);
+    }
+}
+
+/// `-h=` is refused with exit 2 and the message of `--help=`, on standard error, by every writer, and an
+/// absent output directory stays absent while a present one keeps its entries.
+#[test]
+fn an_empty_value_attached_to_h_exits_2_and_leaves_the_output_as_it_was() {
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let absent = scratch.0.join("absent");
+        let present = scratch.0.join("present");
+        fs::create_dir(&present).expect("the present output is made");
+        fs::write(present.join("kept"), "kept").expect("the present output holds a file");
+        for output in [&absent, &present] {
+            let rest: [&OsStr; 4] = [
+                "--quint".as_ref(),
+                "quint".as_ref(),
+                "--output".as_ref(),
+                output.as_os_str(),
+            ];
+            let first: Vec<&OsStr> = std::iter::once("-h=".as_ref()).chain(rest).collect();
+            let last: Vec<&OsStr> = rest.into_iter().chain(["-h=".as_ref()]).collect();
+            for args in [first, last] {
+                let result = run(writer.tool, &args);
+                assert_eq!(result.status.code(), Some(2), "{}", writer.tool);
+                assert!(result.stdout.is_empty(), "{}", writer.tool);
+                assert_eq!(
+                    stderr(&result),
+                    format!(
+                        "usage: {0} [-h] --quint QUINT --output OUTPUT\n{0}: error: argument -h/--help: \
+                         ignored explicit argument ''\n",
+                        writer.tool
+                    )
+                );
+            }
+        }
+        assert!(!absent.exists(), "{}", writer.tool);
+        let entries: Vec<_> = fs::read_dir(&present)
+            .expect("the present output lists")
+            .map(|entry| entry.expect("an entry lists").file_name())
+            .collect();
+        assert_eq!(entries, ["kept"], "{}", writer.tool);
+        assert_eq!(
+            fs::read_to_string(present.join("kept")).expect("kept reads"),
+            "kept"
+        );
+    }
 }
 
 #[test]
@@ -724,6 +1028,78 @@ fn a_refusal_on_a_full_standard_error_exits_120() {
     assert_eq!(result.status.code(), Some(120));
 }
 
+/// When the rewritten trace exceeds the file size limit, the writer exits 1 with one line naming the rewrite's
+/// new file, removes that file, and leaves Quint's trace at the trace path, with `SIGXFSZ` ignored and with
+/// its default action.
+#[test]
+fn a_rewrite_that_passes_the_file_size_limit_exits_1_and_leaves_quints_trace() {
+    for (writer, disposition) in [
+        (&WRITERS[1], libc::SIG_IGN),
+        (&WRITERS[3], libc::SIG_IGN),
+        (&WRITERS[1], libc::SIG_DFL),
+        (&WRITERS[3], libc::SIG_DFL),
+    ] {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out");
+        let pad = fs::metadata(top().join(format!("quint/{}.qnt", writer.model)))
+            .expect("the model reads")
+            .len();
+        let padded = |trace: &Committed| {
+            let Ok(Value::Object(mut data)) = json::parse(&reply(trace)) else {
+                panic!("a reply is a JSON object");
+            };
+            let mut meta = Object::new();
+            meta.insert("format", Value::String("ITF".into()));
+            data.insert("#meta", Value::Object(meta));
+            let pad = "x".repeat(usize::try_from(pad).expect("the model's size fits usize"));
+            data.insert("pad", Value::String(pad.as_str().into()));
+            json::dump(&Value::Object(data))
+        };
+        let quint = stand_in(&scratch.0, writer, &output, padded);
+        let first = writer.recipes[0];
+        let raw =
+            fs::read(scratch.0.join(format!("replies/{first}.reply"))).expect("the reply reads");
+        let limit = libc::rlim_t::try_from(raw.len() + 8).expect("the limit fits rlim_t");
+        let mut command = Command::new(BINARY);
+        command.arg(top()).arg(writer.tool).args([
+            "--quint".as_ref(),
+            quint.as_os_str(),
+            "--output".as_ref(),
+            output.as_os_str(),
+        ]);
+        // SAFETY: the closure makes two calls into libc, `setrlimit` and `signal`, each one system call that
+        // allocates nothing and takes no lock, and reads only the copied `limit` and `disposition`.
+        unsafe {
+            command.pre_exec(move || {
+                let bound = libc::rlimit {
+                    rlim_cur: limit,
+                    rlim_max: limit,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &bound) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                libc::signal(libc::SIGXFSZ, disposition);
+                Ok(())
+            });
+        }
+        let result = command.output().expect("the binary starts");
+        let staged = output.join(format!("{first}/{first}.itf.json.new"));
+        assert_eq!(result.status.code(), Some(1), "{}", stderr(&result));
+        assert_eq!(
+            stderr(&result),
+            format!(
+                "{}: {}: File too large (os error 27)\n",
+                writer.tool,
+                staged.display()
+            )
+        );
+        let left = fs::read(output.join(format!("{first}.itf.json"))).expect("the trace stays");
+        assert!(left == raw, "{}: Quint's trace stands", writer.tool);
+        assert!(!staged.exists(), "{}: the new file is removed", writer.tool);
+        assert!(!output.join(writer.recipes[1]).exists());
+    }
+}
+
 fn committed_trace(writer: &Writer, name: &str) -> Committed {
     committed(writer)
         .into_iter()
@@ -738,28 +1114,61 @@ fn parsed(text: &str) -> Object {
     }
 }
 
-/// `--output=--` names the directory `--` of the working directory, and every trace is written there.
+/// `--output=--` names the directory `--` of the working directory, and every writer writes each of its
+/// traces there.
 #[test]
 fn an_output_value_of_two_dashes_names_a_directory_of_the_working_directory() {
-    let writer = &WRITERS[1];
-    let scratch = Scratch::new();
-    let output = scratch.0.join("--");
-    let quint = stand_in(&scratch.0, writer, &output, reply);
-    let result = Command::new(BINARY)
-        .arg(top())
-        .arg(writer.tool)
-        .args([
-            "--quint".as_ref(),
-            quint.as_os_str(),
-            "--output=--".as_ref(),
-        ])
-        .current_dir(&scratch.0)
-        .output()
-        .expect("the binary starts");
-    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
-    for trace in committed(writer) {
-        let written = output.join(format!("{}.itf.json", trace.name));
-        assert!(written.exists(), "{}", written.display());
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("--");
+        let quint = stand_in(&scratch.0, writer, &output, reply);
+        let result = Command::new(BINARY)
+            .arg(top())
+            .arg(writer.tool)
+            .args([
+                "--quint".as_ref(),
+                quint.as_os_str(),
+                "--output=--".as_ref(),
+            ])
+            .current_dir(&scratch.0)
+            .output()
+            .expect("the binary starts");
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}: {}",
+            writer.tool,
+            stderr(&result)
+        );
+        for trace in committed(writer) {
+            let written = fs::read(output.join(format!("{}.itf.json", trace.name)))
+                .expect("the trace is written");
+            assert!(written == trace.bytes, "{}: {}", writer.tool, trace.name);
+        }
+    }
+}
+
+/// An output path holding Quint's sequence template `{seq}` holds each trace byte for byte, since the
+/// stand-in accepts only the call with `--out-itf ../<name>.itf.json` run in `<output>/<name>/`.
+#[test]
+fn an_output_path_with_a_sequence_template_holds_each_trace_byte_for_byte() {
+    for writer in [&WRITERS[1], &WRITERS[3]] {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out{seq}");
+        let quint = stand_in(&scratch.0, writer, &output, reply);
+        let result = write_traces(writer, &quint, &output);
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}: {}",
+            writer.tool,
+            stderr(&result)
+        );
+        for trace in committed(writer) {
+            let written = fs::read(output.join(format!("{}.itf.json", trace.name)))
+                .expect("the trace is written");
+            assert!(written == trace.bytes, "{}: {}", writer.tool, trace.name);
+        }
     }
 }
 
@@ -828,6 +1237,8 @@ fn a_trace_the_reader_refuses_exits_1_naming_its_file_and_the_byte() {
     assert_eq!(shown.lines().count(), 1, "{shown}");
 }
 
+/// A relative `--output` resolves against the working directory, and the line names the trace by its
+/// absolute path.
 #[test]
 fn a_trace_without_states_exits_1_naming_its_file() {
     let writer = &WRITERS[1];
@@ -838,7 +1249,17 @@ fn a_trace_without_states_exits_1_naming_its_file() {
         data.remove("states");
         json::text(&Value::Object(data))
     });
-    let result = write_traces(writer, &quint, &output);
+    let result = Command::new(BINARY)
+        .arg(top())
+        .arg(writer.tool)
+        .args([
+            "--quint".as_ref(),
+            quint.as_os_str(),
+            "--output=out".as_ref(),
+        ])
+        .current_dir(&scratch.0)
+        .output()
+        .expect("the binary starts");
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(
         stderr(&result),
