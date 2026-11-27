@@ -6,14 +6,13 @@ use std::path::Path;
 
 use kestrike_tools::host_stop::{Disk, LockError, ProbeError, lock, probe, stands};
 
-use super::{Fault, Observed, Scratch, listing};
+use super::{Fault, Observed, PLACE, ROLE, Scratch, listing, passed, start_window};
 
-/// A second holder of a directory's lock gets the system's `EWOULDBLOCK` at once, and the lock frees
-/// when its value drops.
-#[test]
-fn a_second_holder_is_refused_and_the_lock_frees_on_drop() {
-    let scratch = Scratch::new("lock");
-    let directory = scratch.dir("injection");
+/// `held_twice` takes the lock of a new directory under `place`, is refused twice, drops the lock and
+/// takes it again.
+fn held_twice(place: &Path) {
+    let directory = place.join("injection");
+    fs::create_dir(&directory).expect("the directory is made");
     let first = lock(&Disk, &directory).expect("the first holder locks");
     for _ in 0..2 {
         match lock(&Disk, &directory) {
@@ -30,6 +29,31 @@ fn a_second_holder_is_refused_and_the_lock_frees_on_drop() {
         listing(&directory),
         Vec::<String>::new(),
         "the lock adds no file"
+    );
+}
+
+/// A second holder of a directory's lock gets the system's `EWOULDBLOCK` at once, and the lock frees
+/// when its value drops. The case runs in a process of its own: a child another test thread forks
+/// shares the lock's open file description until its `exec`, which would hold the lock past the drop.
+#[test]
+fn a_second_holder_is_refused_and_the_lock_frees_on_drop() {
+    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        held_twice(Path::new(&place));
+        return;
+    }
+    let scratch = Scratch::new("lock");
+    let output = start_window(
+        "host_stop::evidence::a_second_holder_is_refused_and_the_lock_frees_on_drop",
+        "lock",
+        &scratch.0,
+        "",
+    )
+    .output()
+    .expect("the window starts");
+    passed("lock", &output);
+    assert!(
+        scratch.0.join("injection").is_dir(),
+        "the window ran its checks"
     );
 }
 

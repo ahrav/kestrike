@@ -14,6 +14,7 @@ use std::io;
 use std::path::Path;
 
 use super::files::{Files, Links, proc_path};
+use crate::plants::files::strerror;
 
 /// The step of a write that failed before the link.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -170,15 +171,4 @@ fn one_component(name: &OsStr) -> bool {
 pub fn sync_directory(files: &impl Files, directory: &Path) -> io::Result<()> {
     let held = files.open_directory(directory, Links::Follow)?;
     files.fsync_directory(&held)
-}
-
-/// The operating system's text for `error`, without the code the standard library adds.
-fn strerror(error: &io::Error) -> String {
-    let shown = error.to_string();
-    match error.raw_os_error() {
-        Some(code) => shown
-            .strip_suffix(&format!(" (os error {code})"))
-            .map_or_else(|| shown.clone(), str::to_owned),
-        None => shown,
-    }
 }

@@ -19,7 +19,7 @@
 //! and the store.
 
 mod campaign;
-mod files;
+pub(crate) mod files;
 pub mod git;
 mod lock;
 mod options;
