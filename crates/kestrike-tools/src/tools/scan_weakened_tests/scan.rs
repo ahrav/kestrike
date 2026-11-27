@@ -79,10 +79,11 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .copied()
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
-    let mut diffs = path_hunks(base, head, &diffed)?;
-    let mut hunks_of = |path: &str| {
+    let diffs = path_hunks(base, head, &diffed)?;
+    let hunks_of = |path: &str| {
         diffs
-            .remove(path)
+            .get(path)
+            .cloned()
             .expect("path_hunks reads every listed path")
     };
     let mut found = Vec::new();
@@ -265,7 +266,10 @@ fn resolve(rev: &OsStr) -> Result<String, Failure> {
 }
 
 pub(super) fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(12)]
+    commit
+        .char_indices()
+        .nth(12)
+        .map_or(commit, |(at, _)| &commit[..at])
 }
 
 struct Scan {

@@ -412,3 +412,11 @@ fn duplicate_keys_keep_the_last_value_at_the_first_place() {
         .collect();
     assert_eq!(found, ["seeds: 7 -> 6", "seconds: 9 -> 8"]);
 }
+
+#[test]
+fn a_short_commit_name_takes_its_first_twelve_code_points() {
+    use super::scan::short;
+    assert_eq!(short("0123456789abcdef"), "0123456789ab");
+    assert_eq!(short("\u{e9}".repeat(13).as_str()), "\u{e9}".repeat(12));
+    assert_eq!(short("abc"), "abc");
+}

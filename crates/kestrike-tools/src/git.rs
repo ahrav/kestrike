@@ -80,12 +80,14 @@ pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
         .take()
         .expect("the child's standard input is piped");
     let output = std::thread::scope(|scope| {
-        let writer = scope.spawn(move || match stdin.write_all(input.as_bytes()) {
-            Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
-            _ => Ok(()),
+        let writer = std::thread::Builder::new().spawn_scoped(scope, move || {
+            match stdin.write_all(input.as_bytes()) {
+                Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
+                _ => Ok(()),
+            }
         });
         let output = child.wait_with_output();
-        let written = writer.join().expect("the writer thread returns");
+        let written = writer.and_then(|handle| handle.join().expect("the writer thread returns"));
         written.and(output)
     })
     .map_err(GitError::Io)?;

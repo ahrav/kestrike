@@ -196,11 +196,14 @@ impl Drop for Repo {
 
 impl Repo {
     fn new(name: &str) -> Self {
-        let temp = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("kestrike-scan-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&temp);
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(root).expect("the scratch root is made");
+        let temp = (0..1000)
+            .map(|at| root.join(format!("kestrike-scan-{name}-{}-{at}", std::process::id())))
+            .find(|temp| fs::create_dir(temp).is_ok())
+            .expect("a new scratch directory is made");
         let repo = temp.join("repo");
-        fs::create_dir_all(&repo).expect("the repository directory is made");
+        fs::create_dir(&repo).expect("the repository directory is made");
         let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
             .filter(|(key, _)| {
                 let key = key.to_string_lossy();
