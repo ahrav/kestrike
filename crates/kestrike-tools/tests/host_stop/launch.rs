@@ -16,8 +16,8 @@ use kestrike_tools::host_stop::{
 use super::{MARKER_LIMIT, Scratch, gone, wait_for};
 
 /// The stand-in `aws`: it writes its process id to `$HOST_STOP_PID`, then acts as `$HOST_STOP_MODE`
-/// names. Every program it starts is named by its absolute path, since its `PATH` holds its own
-/// directory alone.
+/// names. It uses shell builtins and programs named by their absolute paths alone, since its `PATH`
+/// holds its own directory alone.
 pub(super) const STANDIN: &str = r#"#!/bin/sh
 echo $$ > "$HOST_STOP_PID"
 case "$HOST_STOP_MODE" in
@@ -34,9 +34,7 @@ case "$HOST_STOP_MODE" in
     echo '{}'
     exit 254 ;;
   killed) printf 'dying\n' >&2; kill -KILL $$ ;;
-  hang)
-    trap 'echo trapped > "$HOST_STOP_PID.trapped"' TERM INT HUP QUIT USR1 USR2 ALRM
-    while :; do /bin/sleep 0.05; done ;;
+  hang) exec /bin/sleep 600 ;;
   invalid) printf '\377' ;;
   orphan) /bin/sleep 3 & echo '{}' ;;
   status) exec /bin/cat /proc/self/status ;;
@@ -230,8 +228,9 @@ fn a_child_that_exits_other_than_0_is_a_failed_call_with_its_code() {
     );
 }
 
-/// A child past its cut gets SIGKILL, which no trap of the stand-in sees, and is reaped before the
-/// call returns a failed call; the call returns within a slice of the cut.
+/// A child past its cut gets SIGKILL and is reaped before the call returns a failed call, within a
+/// slice of the cut. The stand-in replaces itself with the sleeper, so the process killed is the one
+/// that holds both output pipes.
 #[test]
 fn a_child_past_its_cut_is_killed_and_reaped() {
     let standin = Standin::new("launch-cut");
@@ -254,10 +253,6 @@ fn a_child_past_its_cut_is_killed_and_reaped() {
         .started()
         .expect("the stand-in started within its cut");
     assert!(gone(&pid), "the child {pid} is killed and reaped");
-    assert!(
-        !standin.pid.with_extension("trapped").exists(),
-        "the child got no catchable signal"
-    );
 }
 
 /// The cut counts until both output pipes close: a child that exits while a process it started holds
@@ -313,7 +308,6 @@ fn a_signal_that_may_raise_ends_the_wait() {
     assert!(after < SLICE + Duration::from_secs(1), "{after:?}");
     let pid = standin.started().expect("the stand-in started");
     assert!(gone(&pid), "the child {pid} is killed and reaped");
-    assert!(!standin.pid.with_extension("trapped").exists());
     assert!(!record.is_armed());
     assert_eq!(record.pending(), None);
 }

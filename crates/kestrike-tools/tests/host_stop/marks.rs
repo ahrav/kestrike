@@ -65,7 +65,11 @@ fn each_mark_is_synced_linked_synced_again_and_its_directory_synced() {
         assert!(written >= 1);
         let tail = &seen[2 + written..];
         let names: Vec<_> = tail.iter().map(|seen| seen.step).collect();
-        assert_eq!(names, ["fsync", "link", "fsync", "fsync"], "{mark}");
+        assert_eq!(
+            names,
+            ["fsync", "link", "fsync", "fsync_directory"],
+            "{mark}"
+        );
         let (file, held) = (tail[1].fds[0], tail[1].fds[1]);
         assert_eq!(
             seen[1].path.as_deref(),
@@ -126,6 +130,8 @@ fn a_failure_before_the_link_leaves_no_entry() {
                 other => panic!("{mark} {step}: {other:?}"),
             }
             assert!(!failed.linked() && !failed.stands());
+            let path = directory.join(file_name(mark));
+            assert_eq!(failed.sentence(&path), "Input/output error");
             assert_eq!(listing(&directory), Vec::<String>::new(), "{mark} {step}");
             assert_eq!(
                 files.steps().last(),
@@ -144,7 +150,15 @@ fn a_failure_before_the_link_leaves_no_entry() {
             OsStr::new(&file_name(mark)),
             &bytes_of(mark),
         );
-        assert!(matches!(stalled, Err(Unwritten::Stalled)), "{stalled:?}");
+        let Err(stalled) = stalled else {
+            panic!("a write that takes no byte fails")
+        };
+        assert!(matches!(stalled, Unwritten::Stalled), "{stalled:?}");
+        let path = directory.join(file_name(mark));
+        assert_eq!(
+            stalled.sentence(&path),
+            format!("a write of {} made no progress", file_name(mark))
+        );
         assert_eq!(
             files
                 .steps()
@@ -210,22 +224,30 @@ fn an_entry_at_the_name_fails_the_link_and_keeps_its_bytes() {
 #[test]
 fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
     let scratch = Scratch::new("marks-after");
-    let eio = |nth| Fault {
+    let file = |nth| Fault {
         step: "fsync",
+        nth,
+        errno: libc::EIO,
+    };
+    let directory_sync = |nth| Fault {
+        step: "fsync_directory",
         nth,
         errno: libc::EIO,
     };
     for mark in MARKS {
         let name = file_name(mark);
         let cases: [(&str, Vec<Fault>); 5] = [
-            ("file sync", vec![eio(2)]),
-            ("directory sync", vec![eio(3)]),
-            ("removal unsynced", vec![eio(2), eio(3)]),
-            ("directory removal unsynced", vec![eio(3), eio(4)]),
+            ("file sync", vec![file(2)]),
+            ("directory sync", vec![directory_sync(1)]),
+            ("removal unsynced", vec![file(2), directory_sync(1)]),
+            (
+                "directory removal unsynced",
+                vec![directory_sync(1), directory_sync(2)],
+            ),
             (
                 "stands",
                 vec![
-                    eio(2),
+                    file(2),
                     Fault {
                         step: "unlink",
                         nth: 1,
@@ -240,10 +262,18 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
             let failed = publish(&files, &directory, OsStr::new(&name), &bytes_of(mark))
                 .expect_err("the planted sync fails");
             assert!(failed.linked(), "{mark} {case}");
-            let first = faults[0].nth;
+            let path = directory.join(&name);
+            let sentence = failed.sentence(&path);
+            let shown = path.display();
             match (case, &failed) {
                 ("file sync" | "directory sync", Unwritten::Removed { error }) => {
                     assert_eq!(error.raw_os_error(), Some(libc::EIO));
+                    assert_eq!(
+                        sentence,
+                        format!(
+                            "{shown} cannot be synced, so the mark is removed: Input/output error"
+                        )
+                    );
                     assert_eq!(listing(&directory), Vec::<String>::new());
                 }
                 (
@@ -254,6 +284,13 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                         (error.raw_os_error(), removal.raw_os_error()),
                         (Some(libc::EIO), Some(libc::EIO))
                     );
+                    assert_eq!(
+                        sentence,
+                        format!(
+                            "{shown} cannot be synced (Input/output error), so it is removed; the \
+                             removal is unsynced, so the mark may stand again after a crash"
+                        )
+                    );
                     assert_eq!(listing(&directory), Vec::<String>::new());
                 }
                 ("stands", Unwritten::Stands { error, removal }) => {
@@ -262,6 +299,13 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                         (Some(libc::EIO), Some(libc::EACCES))
                     );
                     assert!(failed.stands());
+                    assert_eq!(
+                        sentence,
+                        format!(
+                            "{shown} stands, but it cannot be synced (Input/output error) and cannot \
+                             be removed, so it may not survive a crash"
+                        )
+                    );
                     assert_eq!(listing(&directory), std::slice::from_ref(&name));
                     assert_eq!(
                         fs::read(directory.join(&name)).expect("reads"),
@@ -271,18 +315,19 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                 (case, other) => panic!("{mark} {case}: {other:?}"),
             }
             let steps = files.steps();
+            let first = faults[0];
             let at = steps
                 .iter()
                 .enumerate()
-                .filter(|(_, step)| **step == "fsync")
-                .nth(first - 1)
+                .filter(|(_, step)| **step == first.step)
+                .nth(first.nth - 1)
                 .map(|(at, _)| at)
                 .expect("the failed sync is logged");
             let after: Vec<_> = steps[at + 1..].to_vec();
             let expected: &[&str] = if case == "stands" {
                 &["unlink"]
             } else {
-                &["unlink", "fsync"]
+                &["unlink", "fsync_directory"]
             };
             assert_eq!(
                 after, expected,
@@ -363,7 +408,7 @@ fn a_directory_sync_opens_and_syncs_the_directory() {
     symlink(&directory, scratch.0.join("link")).expect("the link is made");
     let files = Observed::default();
     sync_directory(&files, &scratch.0.join("link")).expect("a link to a directory syncs");
-    assert_eq!(files.steps(), ["open_directory", "fsync"]);
+    assert_eq!(files.steps(), ["open_directory", "fsync_directory"]);
     let missing = sync_directory(&Disk, &scratch.0.join("missing")).expect_err("no directory");
     assert_eq!(missing.raw_os_error(), Some(libc::ENOENT));
 }
@@ -377,7 +422,7 @@ fn paused_write(window: &str, place: &Path) {
     let (step, nth) = match window {
         "link" => ("link", 1),
         "file sync" => ("fsync", 2),
-        _ => ("fsync", 3),
+        _ => ("fsync_directory", 1),
     };
     let files = Observed {
         pause: Some((step, nth, place.join("ready"))),

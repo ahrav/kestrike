@@ -9,7 +9,6 @@
 //! unsynced, or failed with the mark standing.
 
 use std::ffi::OsStr;
-use std::fmt;
 use std::io;
 use std::path::Path;
 
@@ -66,27 +65,36 @@ impl Unwritten {
     pub fn stands(&self) -> bool {
         matches!(self, Self::Stands { .. })
     }
-}
 
-impl fmt::Display for Unwritten {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// The sentence that names this failure of the mark at `path`: the system's text of the error for
+    /// a failed step, and for a failure after the link what stands and whether a crash may change it.
+    pub fn sentence(&self, path: &Path) -> String {
+        let shown = path.display();
         match self {
-            Self::Failed { step, error } => write!(f, "{step:?} failed: {error}"),
-            Self::Stalled => f.write_str("a write made no progress"),
-            Self::Removed { error } => write!(f, "a sync failed ({error}); the mark is removed"),
-            Self::RemovalUnsynced { error, removal } => write!(
-                f,
-                "a sync failed ({error}); the mark is removed, and the removal is unsynced ({removal})"
+            Self::Failed { error, .. } => strerror(error),
+            Self::Stalled => {
+                let name = path.file_name().unwrap_or(path.as_os_str()).display();
+                format!("a write of {name} made no progress")
+            }
+            Self::Removed { error } => {
+                format!(
+                    "{shown} cannot be synced, so the mark is removed: {}",
+                    strerror(error)
+                )
+            }
+            Self::RemovalUnsynced { error, .. } => format!(
+                "{shown} cannot be synced ({}), so it is removed; the removal is unsynced, so the mark \
+                 may stand again after a crash",
+                strerror(error)
             ),
-            Self::Stands { error, removal } => write!(
-                f,
-                "a sync failed ({error}); the mark stands, since its removal failed ({removal})"
+            Self::Stands { error, .. } => format!(
+                "{shown} stands, but it cannot be synced ({}) and cannot be removed, so it may not \
+                 survive a crash",
+                strerror(error)
             ),
         }
     }
 }
-
-impl std::error::Error for Unwritten {}
 
 /// Writes `data` as the entry `name` of `directory` once, as the module states.
 ///
@@ -132,10 +140,13 @@ pub fn publish(
     files
         .link(&unnamed, &held, name)
         .map_err(failed(Step::Link))?;
-    if let Err(error) = files.fsync(&unnamed).and_then(|()| files.fsync(&held)) {
+    if let Err(error) = files
+        .fsync(&unnamed)
+        .and_then(|()| files.fsync_directory(&held))
+    {
         return Err(match files.unlink(&held, name) {
             Err(removal) => Unwritten::Stands { error, removal },
-            Ok(()) => match files.fsync(&held) {
+            Ok(()) => match files.fsync_directory(&held) {
                 Err(removal) => Unwritten::RemovalUnsynced { error, removal },
                 Ok(()) => Unwritten::Removed { error },
             },
@@ -161,5 +172,16 @@ fn one_component(name: &OsStr) -> bool {
 /// The open or the sync fails.
 pub fn sync_directory(files: &impl Files, directory: &Path) -> io::Result<()> {
     let held = files.open_directory(directory, Links::Follow)?;
-    files.fsync(&held)
+    files.fsync_directory(&held)
+}
+
+/// The operating system's text for `error`, without the code the standard library adds.
+fn strerror(error: &io::Error) -> String {
+    let shown = error.to_string();
+    match error.raw_os_error() {
+        Some(code) => shown
+            .strip_suffix(&format!(" (os error {code})"))
+            .map_or_else(|| shown.clone(), str::to_owned),
+        None => shown,
+    }
 }

@@ -44,9 +44,14 @@ pub trait Files {
         file.write(bytes)
     }
 
-    /// `fsync(2)` of a file or a directory.
+    /// `fsync(2)` of a file.
     fn fsync(&self, file: &File) -> io::Result<()> {
         file.sync_all()
+    }
+
+    /// `fsync(2)` of an open directory, which makes its entries durable.
+    fn fsync_directory(&self, directory: &File) -> io::Result<()> {
+        directory.sync_all()
     }
 
     /// `linkat` of `/proc/self/fd/<file>` to `name` in `directory` with `AT_SYMLINK_FOLLOW`, which

@@ -197,6 +197,11 @@ impl Files for Observed {
         Disk.fsync(file)
     }
 
+    fn fsync_directory(&self, directory: &File) -> io::Result<()> {
+        self.enter("fsync_directory", vec![directory.as_raw_fd()], None)?;
+        Disk.fsync_directory(directory)
+    }
+
     fn link(&self, file: &File, directory: &File, name: &std::ffi::OsStr) -> io::Result<()> {
         self.enter("link", vec![file.as_raw_fd(), directory.as_raw_fd()], None)?;
         Disk.link(file, directory, name)
