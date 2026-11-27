@@ -24,4 +24,5 @@ tools! {
     "escrow_fixtures" => escrow_fixtures,
     "gate_fixtures" => gate_fixtures,
     "marklog_fixtures" => marklog_fixtures,
+    "mutants-diff" => mutants_diff,
 }

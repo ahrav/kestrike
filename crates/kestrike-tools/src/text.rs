@@ -148,6 +148,10 @@ impl Text {
         self.0.extend_from_slice(text.as_bytes());
     }
 
+    pub fn push_text(&mut self, text: &Text) {
+        self.0.extend_from_slice(&text.0);
+    }
+
     /// `from_os` decodes as Python's `os.fsdecode` does under a UTF-8 locale with `surrogateescape`: each
     /// valid UTF-8 sequence becomes its scalar value and each other byte the surrogate U+DC00 plus the byte.
     pub fn from_os(bytes: &OsStr) -> Self {

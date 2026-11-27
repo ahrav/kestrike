@@ -30,7 +30,7 @@ pub const SHARED: u32 = 0o020 | 0o002;
 
 const MAX_LINKS: usize = 40;
 
-fn real_uid() -> u32 {
+pub(crate) fn real_uid() -> u32 {
     // SAFETY: `getuid` takes no argument, touches no memory of the caller and always succeeds.
     unsafe { libc::getuid() }
 }

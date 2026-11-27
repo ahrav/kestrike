@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 libc = "0.2.189"
 sha2 = "0.11.0"
+signal-hook = "0.3.18"
 
 # The binary and the library would both get a unit-test target named
 # `kestrike_tools`; the library's holds the unit tests.
