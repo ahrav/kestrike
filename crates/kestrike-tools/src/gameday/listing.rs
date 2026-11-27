@@ -22,7 +22,7 @@ fn in_dir(dir: BorrowedFd<'_>, name: &Path) -> PathBuf {
 }
 
 /// `open_dir` rejects a symbolic link at the final component of `path`. When `dir` is present,
-/// `open_dir` resolves relative paths from `dir`. Dropping the descriptor discards the close result.
+/// `open_dir` resolves relative paths from `dir`. An empty `path` fails with `ENOENT`.
 ///
 /// # Errors
 ///
@@ -72,7 +72,7 @@ pub fn entries(dir: BorrowedFd<'_>, prefix: &Text) -> Result<BTreeMap<Text, bool
     for entry in std::fs::read_dir(in_dir(dir, Path::new(""))).map_err(|error| listing(&error))? {
         names.push(entry.map_err(|error| listing(&error))?.file_name());
     }
-    names.sort_by_key(|name| Text::from_os(name));
+    names.sort_by_cached_key(|name| Text::from_os(name));
     let mut found = BTreeMap::new();
     for name in names {
         let rel = said!(prefix, Text::from_os(&name));

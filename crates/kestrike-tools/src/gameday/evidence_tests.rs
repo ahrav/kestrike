@@ -510,26 +510,71 @@ fn a_record_line_holds_its_time_and_then_the_versions_fields() {
 /// A directory that lists without search permission refuses its first entry, whose `lstat` fails.
 #[test]
 fn an_entry_whose_type_cannot_be_read_is_refused() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    let superuser = fs::metadata("/proc/self").expect("/proc is mounted").uid() == 0;
-    if superuser {
-        return;
+    use std::os::unix::fs::PermissionsExt;
+    struct Mode<'a>(&'a Path);
+    impl Drop for Mode<'_> {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
     }
-    for (dir, expected) in [
-        ("", "activations.jsonl cannot be read: Permission denied"),
+    for (dir, first, expected) in [
+        (
+            "",
+            "activations.jsonl",
+            "activations.jsonl cannot be read: Permission denied",
+        ),
         (
             "injection",
+            "collected.json",
             "injection/collected.json cannot be read: Permission denied",
         ),
     ] {
         let scratch = copy();
         let at = scratch.0.join(dir);
         fs::set_permissions(&at, fs::Permissions::from_mode(0o444)).expect("the mode is set");
-        let loaded = read_evidence(&scratch.0, FILE_LIMIT, &bounds());
-        fs::set_permissions(&at, fs::Permissions::from_mode(0o755)).expect("the mode is set");
-        match loaded {
+        let _mode = Mode(&at);
+        if fs::symlink_metadata(at.join(first)).is_ok() {
+            eprintln!(
+                "skipped: this process reads an entry of a directory without search permission"
+            );
+            return;
+        }
+        match read_evidence(&scratch.0, FILE_LIMIT, &bounds()) {
             Err(ReadError::Refused(refusal)) => assert_eq!(*refusal.message(), expected),
             other => panic!("the copy is refused, not {other:?}"),
         }
     }
+}
+
+#[test]
+fn an_empty_name_in_an_open_directory_is_no_directory() {
+    let root = tree().join("scripts/gameday-fixtures/held");
+    let what = Text::from("the name");
+    let top = crate::gameday::open_dir(&root, None, &what).expect("the fixture opens");
+    match crate::gameday::open_dir(Path::new(""), Some(std::os::fd::AsFd::as_fd(&top)), &what) {
+        Err(ReadError::Refused(refusal)) => assert_eq!(
+            *refusal.message(),
+            "the name is no directory: No such file or directory"
+        ),
+        other => panic!("an empty name is refused, not {other:?}"),
+    }
+}
+
+/// With no stop request the restoration's instance is compared with the package's target, and the
+/// refusal names the stop request's instance.
+#[test]
+fn a_restoration_of_another_instance_than_the_target_is_refused_without_a_stop() {
+    let ops = [
+        Op::Remove("injection/stop.json"),
+        Op::Remove("injection/stopped.json"),
+        Op::Replace(
+            "injection/restoration.json",
+            "\"instance\": \"i-h1\"",
+            "\"instance\": \"i-h2\"",
+        ),
+    ];
+    assert_eq!(
+        refusal(&ops, true),
+        "injection/restoration.json names another instance than the stop request's"
+    );
 }
