@@ -622,3 +622,32 @@ fn an_empty_quint_value_exits_1_after_the_first_trace_directory_is_written() {
     assert!(output.join("passes/gate.qnt").exists() && output.join("passes/case.qnt").exists());
     assert!(!output.join("busy_then_foreign_registrant").exists());
 }
+
+#[test]
+fn help_on_a_full_standard_output_exits_120() {
+    let full = fs::File::create("/dev/full").expect("/dev/full opens");
+    let result = Command::new(BINARY)
+        .arg(top())
+        .args(["gate_fixtures", "-h"])
+        .stdout(full)
+        .output()
+        .expect("the binary starts");
+    assert_eq!(result.status.code(), Some(120));
+    assert!(
+        stderr(&result).starts_with("gate_fixtures: standard output: "),
+        "{}",
+        stderr(&result)
+    );
+}
+
+#[test]
+fn a_refusal_on_a_full_standard_error_exits_120() {
+    let full = fs::File::create("/dev/full").expect("/dev/full opens");
+    let result = Command::new(BINARY)
+        .arg(top())
+        .args(["gate_fixtures", "--bogus"])
+        .stderr(full)
+        .output()
+        .expect("the binary starts");
+    assert_eq!(result.status.code(), Some(120));
+}

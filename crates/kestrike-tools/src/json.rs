@@ -413,6 +413,7 @@ impl Reader<'_> {
         self.at += 1;
         Ok(escaped)
     }
+
     /// `self.at` must point to the `u` of the first escape. A high surrogate requires an immediately following
     /// `\u` escape encoding a low surrogate.
     fn unicode(&mut self) -> Result<char, Error> {

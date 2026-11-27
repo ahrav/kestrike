@@ -37,44 +37,42 @@ fn integers_keep_their_digits_and_minus_zero_reads_as_zero() {
     assert_eq!(round_trip(&digits), format!("{digits}\n"));
 }
 
-/// Each row: the text, whether Python 3.9.25's `json.loads` takes it, and the reader's reason. The forms Python
+/// Each row: the text, whether Python 3.9.25's `json.loads` takes it, and the reader's offset and reason. The forms Python
 /// takes and the reader refuses are the JSON a Quint trace lacks.
 #[test]
 fn each_form_outside_the_reader_is_refused_with_its_reason() {
-    let refused: [(&str, bool, &str); 23] = [
-        ("null", true, "null is refused"),
-        ("1.5", true, "a fraction or an exponent is refused"),
-        ("1e3", true, "a fraction or an exponent is refused"),
-        ("1E3", true, "a fraction or an exponent is refused"),
-        ("NaN", true, "a number beyond the integers is refused"),
-        ("Infinity", true, "a number beyond the integers is refused"),
-        ("-Infinity", true, "a number beyond the integers is refused"),
-        ("\"\\ud800\"", true, "a lone surrogate escape is refused"),
-        ("\"\\udc00\"", true, "a lone surrogate escape is refused"),
-        (
-            "\"\\ud800\\u0041\"",
-            true,
-            "a lone surrogate escape is refused",
-        ),
-        ("[1,]", false, "expected a value"),
-        ("{\"a\":1,}", false, "expected a key"),
-        ("\"a\nb\"", false, "a control character in a string"),
-        ("01", false, "text after the value"),
-        ("-", false, "expected a digit"),
-        ("\"\\x\"", false, "an invalid escape"),
-        ("\"\\u12\"", false, "an invalid \\u escape"),
-        ("\"open", false, "an unterminated string"),
-        ("{\"a\" 1}", false, "expected ':'"),
-        ("[1 2]", false, "expected ',' or ']'"),
-        ("", false, "expected a value"),
-        ("\u{feff}1", false, "expected a value"),
-        ("1 2", false, "text after the value"),
+    #[rustfmt::skip]
+    let refused: [(&str, bool, usize, &str); 23] = [
+        ("null", true, 0, "null is refused"),
+        ("1.5", true, 0, "a fraction or an exponent is refused"),
+        ("1e3", true, 0, "a fraction or an exponent is refused"),
+        ("1E3", true, 0, "a fraction or an exponent is refused"),
+        ("NaN", true, 0, "a number beyond the integers is refused"),
+        ("Infinity", true, 0, "a number beyond the integers is refused"),
+        ("-Infinity", true, 1, "a number beyond the integers is refused"),
+        ("\"\\ud800\"", true, 1, "a lone surrogate escape is refused"),
+        ("\"\\udc00\"", true, 1, "a lone surrogate escape is refused"),
+        ("\"\\ud800\\u0041\"", true, 1, "a lone surrogate escape is refused"),
+        ("[1,]", false, 3, "expected a value"),
+        ("{\"a\":1,}", false, 7, "expected a key"),
+        ("\"a\nb\"", false, 2, "a control character in a string"),
+        ("01", false, 1, "text after the value"),
+        ("-", false, 1, "expected a digit"),
+        ("\"\\x\"", false, 2, "an invalid escape"),
+        ("\"\\u12\"", false, 2, "an invalid \\u escape"),
+        ("\"open", false, 5, "an unterminated string"),
+        ("{\"a\" 1}", false, 5, "expected ':'"),
+        ("[1 2]", false, 3, "expected ',' or ']'"),
+        ("", false, 0, "expected a value"),
+        ("\u{feff}1", false, 0, "expected a value"),
+        ("1 2", false, 2, "text after the value"),
     ];
-    for (text, python_takes_it, reason) in refused {
+    for (text, python_takes_it, offset, reason) in refused {
         let error = parse(text).expect_err(text);
+        let found = (error.offset(), error.reason());
         assert_eq!(
-            error.reason(),
-            reason,
+            found,
+            (offset, reason),
             "{text:?}, which Python takes: {python_takes_it}"
         );
     }

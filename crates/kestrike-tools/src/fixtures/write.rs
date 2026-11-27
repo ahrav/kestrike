@@ -101,10 +101,7 @@ pub fn write(
                 Err(error) => fail(model, &format!("standard output: {error}"), 120),
             };
         }
-        Parsed::Refused { code, text } => {
-            let _ = io::stderr().write_all(text.as_bytes());
-            return code;
-        }
+        Parsed::Refused { code, text } => return report(&text, code),
     };
     let outcome = options
         .output
@@ -130,8 +127,14 @@ pub fn write(
 }
 
 fn fail(model: &Model, message: &str, code: u8) -> u8 {
-    let _ = writeln!(io::stderr(), "{}: {message}", model.tool);
-    code
+    report(&format!("{}: {message}\n", model.tool), code)
+}
+
+fn report(text: &str, code: u8) -> u8 {
+    match io::stderr().write_all(text.as_bytes()) {
+        Ok(()) => code,
+        Err(_) => 120,
+    }
 }
 
 fn at<E: fmt::Display>(path: &Path) -> impl FnOnce(E) -> String + '_ {
