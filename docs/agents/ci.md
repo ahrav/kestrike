@@ -1795,7 +1795,8 @@ the base branch's copy of the workflow, and it runs for pull requests into
 `main` from branches of this repository. Its model token is a secret of the
 `claude-review` environment, which admits `main` and no other ref. A pull
 request stacked on another branch is reviewed when it is retargeted to `main`.
-`.github/CODEOWNERS` names the owner of `.github/`.
+`.github/CODEOWNERS` names the owner of `.github/`, and a ruleset on `main`
+requires that owner's review of a change under it.
 
 Keep the build roles on separate registrations. Each registration takes one
 job at a time; there is no shared job-level lock. Preserve legacy labels while old jobs drain, then
