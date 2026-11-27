@@ -26,6 +26,7 @@ tools! {
     "grace_fixtures" => grace_fixtures,
     "lookup_fixtures" => lookup_fixtures,
     "marklog_fixtures" => marklog_fixtures,
+    "mutants-diff" => mutants_diff,
     "reclaim_fixtures" => reclaim_fixtures,
     "register_fixtures" => register_fixtures,
     "scan-weakened-tests" => scan_weakened_tests,

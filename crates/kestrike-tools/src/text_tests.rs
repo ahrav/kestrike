@@ -240,3 +240,15 @@ fn a_surrogate_pair_of_code_points_stays_two_surrogates() {
     );
     assert_eq!(grown, "a");
 }
+
+#[test]
+fn push_text_appends_the_code_points_of_another_text() {
+    let mut joined = Text::from("a/");
+    joined.push_text(&text(&[0xdcff, 0x62]));
+    joined.push_text(&Text::from("\u{1f600}"));
+    assert_eq!(
+        joined.code_points().collect::<Vec<_>>(),
+        [0x61, 0x2f, 0xdcff, 0x62, 0x1f600]
+    );
+    assert_eq!(joined.repr(), "'a/\\udcffb\u{1f600}'");
+}

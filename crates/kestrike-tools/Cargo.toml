@@ -13,6 +13,7 @@ regex = { version = "=1.13.2", default-features = false, features = ["std", "uni
 regex-automata = { version = "=0.4.19", default-features = false }
 regex-syntax = { version = "=0.8.12", default-features = false, features = ["unicode-perl", "unicode-gencat"] }
 sha2 = "0.11.0"
+signal-hook = { version = "0.3.18", default-features = false }
 
 # The binary and the library would both get a unit-test target named
 # `kestrike_tools`; the library's holds the unit tests.

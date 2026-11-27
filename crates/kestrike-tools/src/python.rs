@@ -1,7 +1,9 @@
-//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, and [`say`], which writes one
-//! line with its control characters and surrogates escaped.
+//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, [`hexdigest`] for the SHA-256
+//! hex of bytes, and [`say`], which writes one line with its control characters and surrogates escaped.
 
 use std::io::{self, Write};
+
+use sha2::{Digest, Sha256};
 
 use crate::json::{Integer, MAX_INTEGER_DIGITS, Value};
 use crate::text::{Text, is_space, push_backslashed, push_repr};
@@ -169,4 +171,13 @@ pub fn say(out: &mut impl Write, line: &Text) -> io::Result<()> {
     }
     said.push('\n');
     out.write_all(said.as_bytes())
+}
+
+/// `hexdigest` writes the SHA-256 digest of `bytes` as 64 lowercase hexadecimal digits, as Python's
+/// `hashlib.sha256(bytes).hexdigest()` does.
+pub fn hexdigest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
