@@ -21,8 +21,7 @@ use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
 use crate::python::{hexdigest, say};
-use crate::text::Text;
-use crate::text::text;
+use crate::text::{Text, text};
 
 const PACKAGE: &str = "kestrike";
 const SOURCE: &str = "crates/kestrike/src";

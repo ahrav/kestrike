@@ -105,3 +105,13 @@ fn a_manifest_that_is_no_text_keeps_the_check_from_running() {
     let reason = format!("{}: stream did not contain valid UTF-8", path.display());
     assert_eq!(failed, Text::from(reason.as_str()));
 }
+
+/// A profile that holds a surrogate names no file, so its check runs nothing.
+#[test]
+fn a_profile_that_names_no_file_runs_nothing() {
+    let line = r#"{"profile": "\ud800", "run": 3, "seed": 42, "class": "violation", "key": "k"}"#;
+    let suspect = Suspect::from_line(line.as_bytes()).expect("a suspect");
+    let scratch = Scratch::new("seed-name");
+    let refused = manifest(&scratch.0, &suspect, None).expect_err("no file name");
+    assert_eq!(refused, Text::from("'\\ud800' names no manifest file"));
+}

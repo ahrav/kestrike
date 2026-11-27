@@ -1,7 +1,7 @@
 //! The judgment of a swept plant, row by row: each row's sweep status, last exit, `suspects.jsonl`,
 //! manifests and children's output go through `plants::judge`, whose entry must equal the row's entry
-//! member for member and in order. The stand-in children read what `campaign confirm` and each seed check
-//! printed with the library's own readers, as a run does.
+//! member for member and in order. The stand-in children return the exit and output of `campaign confirm`
+//! and each seed check, and write `confirm.err` where the judgment reads it.
 
 use std::fs;
 use std::os::unix::fs::symlink;

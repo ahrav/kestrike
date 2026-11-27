@@ -409,9 +409,9 @@ impl PartialEq<&str> for Text {
     }
 }
 
-/// A value [`text!`] writes into a [`Text`]: a string as its code points, a path or an operating-system
+/// A value `text!` writes into a [`Text`]: a string as its code points, a path or an operating-system
 /// string as [`Text::from_os`] decodes it, and a number as its decimal digits.
-pub trait Piece {
+pub(crate) trait Piece {
     fn push_to(&self, text: &mut Text);
 }
 

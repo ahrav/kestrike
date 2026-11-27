@@ -30,8 +30,8 @@ pub(crate) enum SeedCheck {
     NotRun(Text),
 }
 
-/// The lines of a profile's manifest, as the sweep wrote it; only [`manifest`] makes one, once its
-/// digest is the confirmed job's.
+/// The lines of a profile's manifest, as the sweep wrote it; the judgment makes one once its digest is
+/// the confirmed job's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest(Vec<String>);
 

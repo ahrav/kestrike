@@ -330,6 +330,7 @@ pub const ROWS: &[Row] = &[
         asked: &[],
         entry: r#"{"id":"alpha","row":7,"fix":{"pull_request":12,"commit":"0123abc"},"files":["src/lib.rs"],"proof":"tests::the_proof","campaign":"plant-alpha","profiles":["smoke","crash-loop"],"proof_exits":null,"commit":"c0mmit","tree":"tr33","archive":"a1","counts":{},"runs":{"smoke":{"next":300,"runs":300,"pass":300,"suspects":1,"range":[0,299],"replays":0,"uncredited":null},"crash-loop":{"next":300,"runs":300,"pass":300,"suspects":0,"range":[0,299],"replays":0,"uncredited":null}},"controls":{"runs":1},"histories":{"runs":2},"keys":{},"head_failures":[],"result":"no verdict","reason":"the seed check of violation: a in run 1 of smoke did not run: its manifest differs from the job `confirm` ran"}"#,
     },
+    // The tool's own reading, a stated difference: an OS error in the standard library's words.
     Row {
         name: "a_missing_manifest_leaves_the_seed_check_unrun",
         status: r#"{"campaign": "plant-alpha", "counts": {}, "suspects": 0, "profiles": {"smoke": {"next": 300, "runs": 300, "pass": 300, "suspects": 1, "replays": 0, "suspect_keys": {"violation: a": 1}}, "crash-loop": {"next": 300, "runs": 300, "pass": 300, "suspects": 0, "replays": 0, "suspect_keys": {}}}, "controls": {"runs": 1}, "histories": {"runs": 2}}"#,
@@ -1075,6 +1076,7 @@ pub const ROWS: &[Row] = &[
         asked: &[(r#"smoke/1-11"#, "profile = smoke\nroot = 11\nbuild = b0\nexecutable = e0\nplatform = p0\ntoolchain = t0\nruns = 1\n")],
         entry: r#"{"id":"alpha","row":7,"fix":{"pull_request":12,"commit":"0123abc"},"files":["src/lib.rs"],"proof":"tests::the_proof","campaign":"plant-alpha","profiles":["smoke","crash-loop"],"proof_exits":null,"commit":"c0mmit","tree":"tr33","archive":"a1","counts":{},"runs":{"smoke":{"next":300,"runs":300,"pass":300,"suspects":1,"range":[0,299],"replays":0,"uncredited":null},"crash-loop":{"next":300,"runs":300,"pass":300,"suspects":0,"range":[0,299],"replays":0,"uncredited":null}},"controls":{"runs":1},"histories":{"runs":2},"keys":{},"head_failures":[],"result":"caught","reason":"violation: a in run 1 of smoke","suspect":{"profile":"smoke","run":1,"seed":11,"key":"violation: a","finding":"F-a","head":"counts"}}"#,
     },
+    // The tool's own reading, a stated difference: a line of `suspects.jsonl` is strict UTF-8.
     Row {
         name: "a_line_with_a_byte_order_mark_is_no_suspect",
         status: r#"{"campaign": "plant-alpha", "counts": {}, "suspects": 0, "profiles": {"smoke": {"next": 300, "runs": 300, "pass": 300, "suspects": 0, "replays": 0, "suspect_keys": {}}, "crash-loop": {"next": 300, "runs": 300, "pass": 300, "suspects": 0, "replays": 0, "suspect_keys": {}}}, "controls": {"runs": 1}, "histories": {"runs": 2}}"#,

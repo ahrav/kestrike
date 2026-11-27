@@ -14,11 +14,12 @@
 //! step of a run makes.
 //!
 //! From what a run's children print and write, the module also gives each plant's result with its reason
-//! and the score: [`judge_rerun`] judges a proof rerun, [`archive_pins`] and [`confirmed`] read `campaign`'s
-//! documents, [`judge`] judges a plant after its sweeps with each seed check's manifest and ending,
-//! and [`score`] composes the score, its bytes, its lines and the exit code. These functions start no
-//! process and read no clock and no environment variable; each child a judgment needs, it asks of its
-//! caller.
+//! and the score: [`judge_rerun`] judges a proof rerun, [`archive_pins`] reads an archive's pins,
+//! [`first_object`] and [`last_object`] read a command's JSON line, [`judge`] judges a plant after its
+//! sweeps with what `campaign confirm` and each seed check printed, and [`score`] composes the score, its
+//! bytes, its lines and the exit code. These functions read the three files a judgment reads
+//! (`suspects.jsonl`, `confirm.err` and a profile's manifest) and take every other input as a value;
+//! each child a judgment needs, it asks of its caller.
 
 mod campaign;
 mod entry;
