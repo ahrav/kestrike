@@ -1,5 +1,6 @@
 //! Each expected text is the text of `json.dumps(value, separators=(",", ":"))` for the value the input holds.
-//! The reader takes an integer of any length.
+//! Python converts an integer to and from text up to 4,300 digits by default. The reader and the writer have
+//! no such limit, and the round trip of the 5,000-digit integer keeps all 5,000 digits.
 
 use crate::json::{Integer, MAX_DEPTH, Value, dump, parse};
 
