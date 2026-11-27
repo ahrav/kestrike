@@ -13,9 +13,9 @@ fail() {
 }
 
 prepare() {
-  local source directory top workflow line value at pin='' pins=0 rustup shown host='' hosts=0
-  local installed toolchain found cargo rustc wrapper name log
-  local chunks=() fields=() lines=()
+  local +x source directory top workflow line value at pin='' pins=0 rustup entry rest shown host='' hosts=0
+  local +x installed toolchain found cargo rustc wrapper name log extra
+  local +x chunks=() fields=() lines=()
   source=${BASH_SOURCE[0]}
   [[ $source == */* ]] || source=./$source
   while [[ -L $source ]]; do
@@ -28,15 +28,25 @@ prepare() {
   [[ $source == */* ]] || source=./$source
 
   # rustup and Cargo run in the top level. Before changing to it, the preparation resolves a relative
-  # RUSTUP_HOME and CARGO_HOME, and finds `rustup` on PATH, in the caller's directory.
-  [[ -z ${RUSTUP_HOME-} || $RUSTUP_HOME == /* ]] || export RUSTUP_HOME=$PWD/$RUSTUP_HOME
+  # RUSTUP_HOME and CARGO_HOME, and finds `rustup` on PATH, in the caller's physical directory. The
+  # preparation unsets an empty RUSTUP_HOME before it starts rustup or Cargo. The PATH lookup takes each
+  # entry as written, reads an empty entry as the caller's directory and picks the first executable
+  # regular file named `rustup`; an unexported PATH reads as `/bin:/usr/bin`.
+  CDPATH='' cd -P -- . 2>/dev/null || true
+  [[ -n ${RUSTUP_HOME-} ]] || unset RUSTUP_HOME
+  [[ ${RUSTUP_HOME-/} == /* ]] || export RUSTUP_HOME=$PWD/$RUSTUP_HOME
   [[ -z ${CARGO_HOME-} || $CARGO_HOME == /* ]] || export CARGO_HOME=$PWD/$CARGO_HOME
   rustup=
-  unset -f rustup
-  if hash rustup 2>/dev/null; then
-    rustup=${BASH_CMDS[rustup]}
-    [[ $rustup == /* ]] || rustup=$PWD/$rustup
-  fi
+  rest=/bin:/usr/bin:
+  [[ ${PATH@a} != *x* ]] || rest=$PATH:
+  while [[ -n $rest && -z $rustup ]]; do
+    entry=${rest%%:*}
+    rest=${rest#*:}
+    [[ $entry == /* ]] || entry=$PWD/$entry
+    if [[ -f $entry/rustup && -x $entry/rustup ]]; then
+      rustup=$entry/rustup
+    fi
+  done
   CDPATH='' cd -P -- "${source%/*}/.." || fail "cannot find the top level"
   top=$PWD
 
@@ -44,10 +54,13 @@ prepare() {
   # `"` on the same line. A line ends at a line feed or a carriage return. The text is split at each `"`, so
   # a pin is the field after one that ends in a line's blanks and `STABLE: `. Each NUL byte reads as the
   # byte 0x02, which a bash string can hold; the parser treats both bytes as ordinary text. The 0x02 that
-  # ends the text puts a field after every quote.
+  # ends the text puts a field after every quote. After `mapfile` returns, a read of one more byte leaves
+  # `extra` empty at the end of the file and unchanged after a read error.
   workflow=$top/.github/workflows/agent-checks.yml
   [[ -f $workflow ]] || fail "$workflow is not a regular file"
-  mapfile -d '' chunks 2>/dev/null <"$workflow" || fail "cannot read $workflow"
+  extra=x
+  { mapfile -d '' chunks && read -r -N 1 extra || true; } 2>/dev/null <"$workflow" || fail "cannot read $workflow"
+  [[ -z $extra ]] || fail "cannot read $workflow"
   printf -v value '%s\2' "${chunks[@]}"
   set -f
   IFS='"'
@@ -72,8 +85,8 @@ prepare() {
   set +f
   ((pins == 1)) && [[ $pin =~ ^[^[:space:]]+$ ]] || fail "$workflow pins no single STABLE toolchain"
 
-  # A missing `rustup` is refused after the pin, as a `show` that names no host is.
-  [[ -n $rustup ]] || fail "rustup names no single host"
+  # The launcher validates the workflow pin before reporting a missing `rustup`.
+  [[ -n $rustup ]] || fail "no rustup on PATH"
   unset RUSTUP_TOOLCHAIN
   export RUSTUP_AUTO_INSTALL=0
 

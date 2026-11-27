@@ -21,10 +21,14 @@ directory above it resolved, so it runs from any directory and leaves the caller
 is. The preparation below runs in a subshell, so its working variables, its working directory and the
 environment it gives rustup and Cargo stay out of the final step. It runs each rustup and Cargo call in the
 top level. Before the first, it makes a relative `RUSTUP_HOME` or `CARGO_HOME` absolute against the caller's
-directory, since rustup and Cargo read a relative value against their own working directory, and finds
-`rustup` on the caller's `PATH` from the caller's directory, passing over a shell function of that name. An
-empty value stays empty, as rustup and Cargo read it as unset. The launcher needs bash 4.4 or later, for
-`mapfile -d`. On every call it:
+physical directory, since rustup and Cargo read a relative value against their own working directory, and
+finds `rustup` on the caller's `PATH` from the caller's directory: it takes each entry as written, as
+`exec` does, so a `~` stays a literal name, reads an empty entry as the caller's directory, and picks the
+first executable regular file named `rustup`, passing over a shell function of that name. An unexported
+`PATH` reads as `/bin:/usr/bin`, the C library's default. An empty `CARGO_HOME` stays empty, and an empty
+`RUSTUP_HOME` is unset for the launcher's own rustup and Cargo calls; rustup and Cargo read both forms as
+unset, and Cargo's rustc cache stays on. The launcher needs bash 4.4 or later, for `mapfile -d`. On every
+call it:
 
 1. Reads the stable toolchain that `.github/workflows/agent-checks.yml` pins as `STABLE`, and checks
    that `rustup toolchain list` names `<pin>-<host>` as the first word of a line. The launcher installs
@@ -32,8 +36,9 @@ empty value stays empty, as rustup and Cargo read it as unset. The launcher need
    or a carriage return, so `\r\n` and a lone `\r` both end one. A line that holds, after spaces or tabs
    alone, `STABLE: "VALUE"` is a pin, where `VALUE` is one or more characters up to the first `"` on the
    line; text after that quote is allowed. Exactly one such line must stand in the file, and its `VALUE`
-   must hold no whitespace. A NUL byte reads as the byte 0x02, an ordinary character. Bash's `mapfile`
-   reports no read error, so an error after the file opened reads as the end of the file.
+   must hold no whitespace. A NUL byte reads as the byte 0x02, an ordinary character. A read error after
+   the file opened is refused as a file that cannot be opened is: after `mapfile` returns, the launcher
+   reads one more byte and takes only the end of the file as a complete read.
 2. Runs the pinned toolchain's own `cargo`, which `rustup which --toolchain <pin> cargo` names, with `RUSTC`
    set to the `rustc` beside it, so neither a `cargo` earlier on `PATH` nor a `build.rustc` in a Cargo
    configuration file replaces the pin. It builds the `kestrike-tools` binary for the host
@@ -69,8 +74,9 @@ binary that build left, and a failed build starts none. The fingerprint compares
 changed under an older time keeps the old binary until `target/tools` is removed. A first build in a clone
 writes the untracked `Cargo.lock`.
 
-The build reads the checkout's own Cargo configuration, as a script was read from the checkout, so a
-checkout that another user can write is no safe place to start a tool from. The launcher adds no check of
+The build reads Cargo configuration from the checkout, from each directory above it and from `CARGO_HOME`,
+as a script was read from the checkout, so a checkout that another user can write, or one below a
+directory another user can write, is no safe place to start a tool from. The launcher adds no check of
 its own for that; a tool's own ownership checks run after the build.
 
 ### Failures
@@ -79,9 +85,10 @@ its own for that; a tool's own ownership checks run after the build.
 | --- | --- | --- |
 | 127 | The top level cannot be found | `tool.sh: cannot find the top level` on standard error |
 | 127 | The workflow path is absent, a directory, a FIFO, a device or another file that is not a regular file once links are followed | `tool.sh: <path> is not a regular file` |
-| 127 | The workflow is a regular file that cannot be opened | `tool.sh: cannot read <path>` |
+| 127 | The workflow is a regular file that cannot be opened, or a read of it fails | `tool.sh: cannot read <path>` |
 | 127 | The workflow holds no pin line, two or more, or a pin whose value holds whitespace | `tool.sh: <path> pins no single STABLE toolchain` |
-| 127 | `rustup` is not on `PATH`, or `rustup show` names no single `Default host` | `tool.sh: rustup names no single host` |
+| 127 | No executable regular file named `rustup` stands on `PATH` | `tool.sh: no rustup on PATH` |
+| 127 | `rustup show` names no single `Default host` | `tool.sh: rustup names no single host` |
 | 127 | `rustup toolchain list` fails | `tool.sh: rustup lists no toolchains` |
 | 127 | The list names no `<pin>-<host>`, or the pinned toolchain has no `cargo` or no executable `rustc` beside it | `tool.sh: the pinned toolchain <pin>-<host> is not installed; install it with: rustup toolchain install <pin>`, `... has no cargo` or `... has no rustc` |
 | 127 | The build fails, a first dependency resolution without network included | Cargo's output, then `tool.sh: the build of kestrike-tools failed`; the next call builds again |

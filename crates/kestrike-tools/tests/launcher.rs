@@ -6,15 +6,19 @@
 //! error, and logs each call with its working directory, its rustup and Cargo homes and its rustup
 //! variables. The `cargo` that `which` names stands beside an executable `rustc`; it writes a line to
 //! each stream, logs its arguments and directory, records its environment, and writes a binary that logs
-//! and prints its build's number, then prints its arguments. A case compares the whole log of each call,
-//! so a decoy's line, a missing resolution, a skipped build or an earlier build's binary fails it, and it
-//! compares both streams whole, so a line of the preparation's own fails it too.
+//! and prints its build's number, then prints its arguments. The stand-ins log each argument in brackets,
+//! so a merged, split or extra argument changes the logged line, and the scratch tree's path holds a space.
+//! Each case checks the complete call log. A decoy's line, a missing resolution, a skipped build or an
+//! earlier build's binary causes a log mismatch. A successful call's standard error must equal the
+//! binary's line, and its standard output must start with the binary's marker. The pass-through, link and
+//! `CDPATH` rows compare standard output in full.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
@@ -49,14 +53,16 @@ const CLEARED: [&str; 13] = [
 
 const RUSTUP: &str = r#"#!/bin/sh
 root='@ROOT@'
-printf 'rustup %s|%s|RUSTUP_HOME=%s|CARGO_HOME=%s|RUSTUP_TOOLCHAIN=%s|RUSTUP_AUTO_INSTALL=%s\n' "$*" \
+args=
+for arg; do args="$args[$arg]"; done
+printf 'rustup %s|%s|RUSTUP_HOME=%s|CARGO_HOME=%s|RUSTUP_TOOLCHAIN=%s|RUSTUP_AUTO_INSTALL=%s\n' "$args" \
   "$(pwd -P)" "${RUSTUP_HOME-unset}" "${CARGO_HOME-unset}" "${RUSTUP_TOOLCHAIN-unset}" \
   "${RUSTUP_AUTO_INSTALL-unset}" >> "$root/log"
 echo 'info: the stand-in rustup on standard error' >&2
-case $* in
-show) cat "$root/answers/show" ;;
-'toolchain list') [ ! -e "$root/answers/list-fails" ] && cat "$root/answers/list" ;;
-'which --toolchain '*) [ ! -e "$root/answers/which-fails" ] && cat "$root/answers/cargo" ;;
+case $#$args in
+'1[show]') cat "$root/answers/show" ;;
+'2[toolchain][list]') [ ! -e "$root/answers/list-fails" ] && cat "$root/answers/list" ;;
+'4[which][--toolchain]'*'][cargo]') [ ! -e "$root/answers/which-fails" ] && cat "$root/answers/cargo" ;;
 *) exit 3 ;;
 esac
 "#;
@@ -65,7 +71,9 @@ const CARGO: &str = r#"#!/bin/sh
 root='@ROOT@'
 build=$(( $(cat "$root/builds") + 1 ))
 echo "$build" > "$root/builds"
-printf 'cargo %s|%s\n' "$*" "$(pwd -P)" >> "$root/log"
+args=
+for arg; do args="$args[$arg]"; done
+printf 'cargo %s|%s\n' "$args" "$(pwd -P)" >> "$root/log"
 env > "$root/cargo.env"
 echo 'stand-in cargo: compiling'
 echo 'warning: the stand-in cargo on standard error' >&2
@@ -73,6 +81,7 @@ if [ -e "$root/answers/build-fails" ]; then
   echo 'error: the stand-in build fails' >&2
   exit 101
 fi
+[ ! -e "$root/answers/build-noop" ] || exit 0
 binary="$root/top/target/tools/@HOST@/debug/kestrike-tools"
 mkdir -p "${binary%/*}"
 cat > "$binary.new" <<EOF
@@ -114,26 +123,36 @@ fn script(path: &Path, text: &str) {
     assert!(status.success(), "the script is written: {status}");
 }
 
-/// The absolute path of `bash` on the test process's own `PATH`, so a case can give the launcher a `PATH`
-/// that holds no system directory.
+/// The absolute path of `bash` on the test process's own `PATH`, resolved against the test process's
+/// directory. Cases start it from any working directory with any `PATH` for the launcher.
 fn bash() -> &'static Path {
     static BASH: OnceLock<PathBuf> = OnceLock::new();
     BASH.get_or_init(|| {
         let path = std::env::var_os("PATH").unwrap_or_else(|| OsString::from(PATH_TAIL));
-        std::env::split_paths(&path)
+        let found = std::env::split_paths(&path)
             .map(|directory| directory.join("bash"))
             .find(|candidate| {
                 fs::metadata(candidate)
                     .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
             })
-            .expect("bash is on PATH")
+            .expect("bash is on PATH");
+        std::path::absolute(found).expect("bash's path is made absolute")
     })
 }
 
-/// Runs `command` with `stdin` on its standard input and both streams captured, and panics when it runs
-/// past [`LIMIT`], after killing it.
+fn kill_group(group: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{group}")])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Runs `command` in a process group of its own with `stdin` on its standard input and both streams
+/// captured. If the call is still running or a stream remains open at [`LIMIT`], `finish` kills the
+/// whole group and panics.
 fn finish(mut command: Command, stdin: &[u8]) -> Output {
     let mut child = command
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -154,17 +173,19 @@ fn finish(mut command: Command, stdin: &[u8]) -> Output {
     let stdout = drain(Box::new(child.stdout.take().expect("a pipe")));
     let stderr = drain(Box::new(child.stderr.take().expect("a pipe")));
     let deadline = Instant::now() + LIMIT;
-    let status = loop {
-        if let Some(status) = child.try_wait().expect("the call is polled") {
-            break status;
+    loop {
+        let exited = child.try_wait().expect("the call is polled").is_some();
+        if exited && writer.is_finished() && stdout.is_finished() && stderr.is_finished() {
+            break;
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
+            kill_group(child.id());
             let _ = child.wait();
             panic!("the call ran past {LIMIT:?}");
         }
         thread::sleep(Duration::from_millis(5));
-    };
+    }
+    let status = child.wait().expect("the call is reaped");
     writer.join().expect("the writer ends");
     Output {
         status,
@@ -198,12 +219,6 @@ impl Tree {
             env.is_file() && env.permissions().mode() & 0o111 != 0,
             "/usr/bin/env is executable"
         );
-        for directory in PATH_TAIL.split(':') {
-            assert!(
-                !Path::new(directory).join("rustup").exists(),
-                "{directory}/rustup would answer for the stand-in"
-            );
-        }
         let scratch = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(scratch).expect("the scratch directory is made");
         let scratch = scratch
@@ -212,7 +227,7 @@ impl Tree {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let root = loop {
             let at = NEXT.fetch_add(1, Ordering::Relaxed);
-            let root = scratch.join(format!("launcher-{}-{at}", std::process::id()));
+            let root = scratch.join(format!("launcher {} {at}", std::process::id()));
             match DirBuilder::new().mode(0o700).create(&root) {
                 Ok(()) => break root,
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -224,6 +239,10 @@ impl Tree {
             .expect("the scratch path reads as UTF-8")
             .to_owned();
         assert!(!text.contains('\''), "the scratch path holds no quote");
+        assert!(
+            !text.contains('='),
+            "the scratch path holds no `=`, which gives the rustc path the empty wrappers"
+        );
         let tree = Self { root };
         for directory in [
             "top/scripts",
@@ -305,6 +324,11 @@ impl Tree {
         format!("{}:{PATH_TAIL}", self.at("bin").display())
     }
 
+    /// A `PATH` of the stand-ins' directory alone.
+    fn isolated_path(&self) -> String {
+        self.at("bin").display().to_string()
+    }
+
     /// Starts `bash <launcher> <args>` in `caller` with an environment of `PATH` and `env` alone.
     fn start(
         &self,
@@ -377,12 +401,12 @@ impl Tree {
             )
         };
         vec![
-            rustup("show"),
-            rustup("toolchain list"),
-            rustup(&format!("which --toolchain {pin} cargo")),
+            rustup("[show]"),
+            rustup("[toolchain][list]"),
+            rustup(&format!("[which][--toolchain][{pin}][cargo]")),
             format!(
-                "cargo build --quiet --package kestrike-tools --bin kestrike-tools --target {HOST} \
-                 --target-dir {top}/target/tools|{top}"
+                "cargo [build][--quiet][--package][kestrike-tools][--bin][kestrike-tools][--target]\
+                 [{HOST}][--target-dir][{top}/target/tools]|{top}"
             ),
             format!("binary {build}"),
         ]
@@ -576,6 +600,12 @@ fn the_pin_is_read_by_the_line_rule() {
             lf.replace(&quoted, "\"*\""),
             Pin::NotInstalled("*"),
         ),
+        (
+            "the closing quote at the end",
+            format!("name: x\n  STABLE: {quoted}"),
+            Pin::Read,
+        ),
+        ("an empty file", String::new(), Pin::NoneSingle),
     ];
     for (row, workflow, pin) in rows {
         let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
@@ -611,7 +641,13 @@ fn the_pin_is_read_by_the_line_rule() {
     let tree = Tree::new(lf.as_bytes()).with_old_binary();
     fs::write(tree.workflow(), lf.replace("STABLE", "UNSTABLE")).expect("the workflow is written");
     fs::remove_file(tree.at("bin/rustup")).expect("the stand-in is removed");
-    let output = tree.call(&["scan-weakened-tests"]);
+    let output = tree.start(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.isolated_path(),
+        &[],
+        &["scan-weakened-tests"],
+    );
     let line = format!(
         "{} pins no single STABLE toolchain",
         tree.workflow().display()
@@ -619,9 +655,9 @@ fn the_pin_is_read_by_the_line_rule() {
     refused_early(&tree, "no pin and no rustup", &output, &line);
 }
 
-/// A workflow path that is no regular file once links are followed is refused before it is opened, so a
-/// FIFO ends the call too; a link to a regular file is read. A regular file that cannot be opened is
-/// refused with its own line.
+/// The launcher follows workflow symlinks and checks the target type before opening the file, so it
+/// rejects a FIFO before an open can block. The launcher reports `cannot read` if opening or reading a
+/// regular file fails.
 #[test]
 fn the_workflow_file_must_be_a_regular_file() {
     type Make = fn(&Tree);
@@ -653,13 +689,24 @@ fn the_workflow_file_must_be_a_regular_file() {
     let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
     fs::set_permissions(tree.workflow(), fs::Permissions::from_mode(0o000))
         .expect("the mode is set");
-    assert!(
-        File::open(tree.workflow()).is_err(),
-        "a mode 000 file cannot be opened; run the cases as an account without CAP_DAC_OVERRIDE"
-    );
+    match File::open(tree.workflow()) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            let output = tree.call(&["scan-weakened-tests"]);
+            let line = format!("cannot read {}", tree.workflow().display());
+            refused_early(&tree, "unreadable", &output, &line);
+        }
+        Err(error) => panic!("the mode 000 file: {error}"),
+        Ok(_) => {
+            eprintln!("the mode 000 row needs an account without CAP_DAC_OVERRIDE; it ran no call")
+        }
+    }
+
+    let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    fs::remove_file(tree.workflow()).expect("the workflow is removed");
+    symlink("/proc/self/mem", tree.workflow()).expect("the link is made");
     let output = tree.call(&["scan-weakened-tests"]);
     let line = format!("cannot read {}", tree.workflow().display());
-    refused_early(&tree, "unreadable", &output, &line);
+    refused_early(&tree, "a read error after the open", &output, &line);
 
     let tree = Tree::new(b"");
     fs::write(tree.at("pins.yml"), workflow_text("\n")).expect("the target is written");
@@ -673,12 +720,25 @@ fn the_workflow_file_must_be_a_regular_file() {
 /// A relative `RUSTUP_HOME` and `CARGO_HOME`, and a relative `PATH` entry that holds `rustup`, resolve
 /// against the caller's directory for rustup and Cargo, which run in the top level; the binary gets the
 /// caller's own values and runs in the caller's directory. The decoy `rustup` later on `PATH` is what a
-/// lookup from the top level finds. An absolute `RUSTUP_HOME` and `CARGO_HOME` reach rustup unchanged, a
-/// relative `CARGO_HOME` is resolved when `RUSTUP_HOME` is unset, and an empty `RUSTUP_HOME` and
-/// `CARGO_HOME` stay empty.
+/// lookup from the top level finds. An absolute `RUSTUP_HOME` and `CARGO_HOME` reach rustup unchanged.
+/// When `RUSTUP_HOME` is unset, the launcher resolves a relative `CARGO_HOME` against the caller's
+/// directory. An empty `CARGO_HOME` stays empty.
 #[test]
 fn relative_homes_and_path_resolve_against_the_callers_directory() {
     let tree = Tree::new(workflow_text("\n").as_bytes());
+    let homes = |file: &str, rustup: Option<&str>, cargo: Option<&str>| {
+        let record = tree.environment(file);
+        assert_eq!(
+            record.get("RUSTUP_HOME").map(String::as_str),
+            rustup,
+            "{file}"
+        );
+        assert_eq!(
+            record.get("CARGO_HOME").map(String::as_str),
+            cargo,
+            "{file}"
+        );
+    };
     let caller = tree.at("caller");
     fs::create_dir(caller.join("tools")).expect("the directory is made");
     script(&caller.join("tools/rustup"), &tree.fill(RUSTUP));
@@ -738,6 +798,9 @@ fn relative_homes_and_path_resolve_against_the_callers_directory() {
         tree.take_log(),
         tree.resolved(PIN, ("/x/rustup-home", "/x/cargo-home"), 2)
     );
+    for file in ["cargo.env", "binary.env"] {
+        homes(file, Some("/x/rustup-home"), Some("/x/cargo-home"));
+    }
 
     let env = [("CARGO_HOME", "cargo-home")];
     let output = tree.start(
@@ -753,6 +816,8 @@ fn relative_homes_and_path_resolve_against_the_callers_directory() {
         tree.take_log(),
         tree.resolved(PIN, ("unset", &cargo_home), 3)
     );
+    homes("cargo.env", None, Some(&cargo_home));
+    homes("binary.env", None, Some("cargo-home"));
 
     let env = [("RUSTUP_HOME", ""), ("CARGO_HOME", "")];
     let output = tree.start(
@@ -763,10 +828,45 @@ fn relative_homes_and_path_resolve_against_the_callers_directory() {
         &["x"],
     );
     ran("empty", &output, 4);
-    assert_eq!(tree.take_log(), tree.resolved(PIN, ("", ""), 4));
-    let cargo = tree.environment("cargo.env");
-    assert_eq!(cargo.get("RUSTUP_HOME").map(String::as_str), Some(""));
-    assert_eq!(cargo.get("CARGO_HOME").map(String::as_str), Some(""));
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", ""), 4));
+    homes("cargo.env", None, Some(""));
+    homes("binary.env", Some(""), Some(""));
+
+    let env = [
+        ("RUSTUP_HOME", "rustup-home"),
+        ("CARGO_HOME", "../cargo-home"),
+    ];
+    let output = tree.start(
+        &tree.launcher(),
+        &caller,
+        &tree.default_path(),
+        &env,
+        &["x"],
+    );
+    ran("relative homes on an absolute PATH", &output, 5);
+    assert_eq!(
+        tree.take_log(),
+        tree.resolved(
+            PIN,
+            (&rustup_home, &format!("{}/../cargo-home", caller.display())),
+            5
+        )
+    );
+
+    let env = [
+        ("PWD", "/proc/self/cwd"),
+        ("RUSTUP_HOME", "rustup-home"),
+        ("CARGO_HOME", "cargo-home"),
+    ];
+    let output = tree.start(&tree.launcher(), &caller, &path, &env, &["x"]);
+    ran("PWD through /proc/self/cwd", &output, 6);
+    let cargo_home = format!("{}/cargo-home", caller.display());
+    assert_eq!(
+        tree.take_log(),
+        tree.resolved(PIN, (&rustup_home, &cargo_home), 6)
+    );
+    homes("cargo.env", Some(&rustup_home), Some(&cargo_home));
+    homes("binary.env", Some("rustup-home"), Some("cargo-home"));
 }
 
 /// Each call resolves the toolchain, runs one build and starts the binary that build left: cold, warm
@@ -813,17 +913,37 @@ fn cargo_is_asked_on_every_call() {
         ),
     ];
     let rustc = tree.at("toolchain/bin/rustc").display().to_string();
+    let mut caller: Vec<(&str, &str)> = CLEARED
+        .iter()
+        .map(|&name| (name, "caller's value"))
+        .collect();
+    caller.push(("CARGO_BUILD_JOBS", "3"));
+    let start = || {
+        tree.start(
+            &tree.launcher(),
+            &tree.at("caller"),
+            &tree.default_path(),
+            &caller,
+            &["scan-weakened-tests", "--help"],
+        )
+    };
     for (build, (row, change)) in (1..).zip(changes) {
         change(&tree);
-        let output = tree.call(&["scan-weakened-tests", "--help"]);
+        let output = start();
         ran(row, &output, build);
         assert_eq!(
             tree.take_log(),
             tree.resolved(PIN, ("unset", "unset"), build),
             "{row}"
         );
-        built_with(&tree, &[], &rustc, WRAPPER);
+        built_with(&tree, &caller, &rustc, WRAPPER);
     }
+
+    tree.answer("build-noop", Some(""));
+    let output = start();
+    ran("a build that compiles nothing", &output, 7);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 7));
+    built_with(&tree, &caller, &rustc, WRAPPER);
 }
 
 /// Where the pinned rustc's path holds a `=`, which `/usr/bin/env` would read as an assignment, both
@@ -862,13 +982,7 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     let pinned = format!("{PIN}-{HOST}");
     let no_host = "rustup names no single host".to_owned();
     type Make = fn(&Tree);
-    let rows: [(&str, Make, usize, String); 10] = [
-        (
-            "no rustup",
-            |tree| fs::remove_file(tree.at("bin/rustup")).expect("removed"),
-            0,
-            no_host.clone(),
-        ),
+    let rows: [(&str, Make, usize, String); 9] = [
         (
             "no host",
             |tree| tree.answer("show", Some("rustup home: x\n")),
@@ -947,6 +1061,29 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     }
 
     let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    fs::remove_file(tree.at("bin/rustup")).expect("removed");
+    let output = tree.start(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.isolated_path(),
+        &[],
+        &["scan-weakened-tests"],
+    );
+    refused_early(&tree, "no rustup", &output, "no rustup on PATH");
+
+    let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    let home = tree.root.display().to_string();
+    let env = [("HOME", home.as_str())];
+    let output = tree.start(
+        &tree.launcher(),
+        &tree.at("caller"),
+        "~/bin",
+        &env,
+        &["scan-weakened-tests"],
+    );
+    refused_early(&tree, "a literal ~ entry", &output, "no rustup on PATH");
+
+    let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
     tree.answer("build-fails", Some(""));
     let output = tree.call(&["scan-weakened-tests"]);
     refused(
@@ -1006,6 +1143,8 @@ fn a_successful_call_passes_the_caller_through() {
         ("RUSTUP_TOOLCHAIN", "nightly"),
         ("RUSTUP_AUTO_INSTALL", "1"),
         ("KESTRIKE_CASE", "a value with spaces"),
+        ("host", "the caller's host"),
+        ("value", "the caller's value"),
     ]);
     let args = ["mutants-diff", "--base", "", "two words", "-x"];
     let output = tree.start_with_input(
@@ -1068,6 +1207,31 @@ fn a_successful_call_passes_the_caller_through() {
     ran("a rustup function", &output, 5);
     assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 5));
 
+    let decoy = tree.at("decoy/rustup").display().to_string();
+    let cmds = [("BASH_CMDS", decoy.as_str())];
+    let output = tree.start(
+        &tree.launcher(),
+        &caller_dir,
+        &tree.default_path(),
+        &cmds,
+        &["x"],
+    );
+    ran("an exported BASH_CMDS", &output, 6);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 6));
+
+    fs::write(tree.at("no-hash.sh"), "set +h\n").expect("the file is written");
+    let startup = tree.at("no-hash.sh").display().to_string();
+    let env = [("BASH_ENV", startup.as_str())];
+    let output = tree.start(
+        &tree.launcher(),
+        &caller_dir,
+        &tree.default_path(),
+        &env,
+        &["x"],
+    );
+    ran("command hashing off", &output, 7);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 7));
+
     fs::create_dir_all(tree.at("elsewhere/scripts")).expect("the directory is made");
     let cdpath = tree.at("elsewhere").display().to_string();
     let env = [("CDPATH", cdpath.as_str())];
@@ -1079,10 +1243,10 @@ fn a_successful_call_passes_the_caller_through() {
         &env,
         &["x"],
     );
-    ran("a relative path with CDPATH set", &output, 6);
+    ran("a relative path with CDPATH set", &output, 8);
     assert_eq!(
         text(&output.stdout),
-        format!("marker 6\n{}\nx\n", tree.top())
+        format!("marker 8\n{}\nx\n", tree.top())
     );
-    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 6));
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 8));
 }
