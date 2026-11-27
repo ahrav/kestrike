@@ -5,6 +5,7 @@
 //! Offsets are byte offsets. [`read_text`] decodes a file as UTF-8 and reads `\r\n` and a lone `\r` as
 //! `\n`. [`walk`] lists every entry under a directory, hidden entries included, and enters each
 //! directory it meets that is no link. It passes over a directory it may not list.
+//! [`walk`] and [`package_sources`] trust the directory their caller names, with every link in it.
 
 use std::collections::BTreeSet;
 use std::fs;

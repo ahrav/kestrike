@@ -28,6 +28,9 @@
 //! distinct sentence once. Offsets are byte offsets of the source, which its scanned texts share, and
 //! each window before a bracket spans 40 code points of the source. A word edge of a pattern stands
 //! where [`is_word`] holds on one side only, a letter, a number or `_` of any script.
+//!
+//! Each function trusts the directories its caller names, the kernel package, the checkout root and
+//! the crate tree, and reads every link in them as it stands.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
