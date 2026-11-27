@@ -25,7 +25,7 @@ struct Writer {
     recipes: &'static [&'static str],
 }
 
-/// The `case.qnt` texts match `inputs` in `quint/<model>_check.py`.
+/// Each `case.qnt` text is the case module of one directed and one seeded trace of the model.
 const WRITERS: [Writer; 7] = [
     Writer {
         tool: "escrow_fixtures",
@@ -613,15 +613,10 @@ fn a_reply_without_meta_is_accepted_by_record_writers_and_refused_by_format_writ
         let scratch = Scratch::new();
         let output = scratch.0.join("out");
         let bare = |trace: &Committed| {
-            let mut data = trace.data.clone();
+            let Ok(Value::Object(mut data)) = json::parse(&reply(trace)) else {
+                panic!("a reply is a JSON object");
+            };
             data.remove("#meta");
-            if let Some(Value::Array(states)) = data.get_mut("states") {
-                for state in states {
-                    if let Value::Object(state) = state {
-                        state.remove("call");
-                    }
-                }
-            }
             json::dump(&Value::Object(data))
         };
         let quint = stand_in(&scratch.0, writer, &output, bare);

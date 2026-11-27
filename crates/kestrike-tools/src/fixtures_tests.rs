@@ -14,65 +14,61 @@ use crate::tools;
 
 #[test]
 fn the_limit_ends_a_sleeping_child_with_sigkill() {
-    let stdouts: [fn() -> Stdio; 2] = [Stdio::null, Stdio::inherit];
-    for stdout in stdouts {
-        let directory =
-            std::env::temp_dir().join(format!("kestrike-tools-limit-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir_all(&directory).expect("the directory is made");
-        let script = "trap 'echo term > terminated; exit 7' TERM; sleep 5 & wait";
-        let args: Vec<OsString> = ["-c", script].map(OsString::from).to_vec();
-        let start = Instant::now();
-        let outcome = run(
-            OsStr::new("sh"),
-            &args,
-            &directory,
-            stdout(),
-            Duration::from_millis(300),
-        );
-        let elapsed = start.elapsed();
-        let Err(Failure::Limit {
-            status: Some(status),
-            ..
-        }) = outcome
-        else {
-            panic!("the child passes the limit and is reaped: {outcome:?}");
-        };
-        assert_eq!(status.signal(), Some(9), "SIGKILL ends the child");
-        assert!(
-            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(5),
-            "{elapsed:?}"
-        );
-        assert!(
-            !directory.join("terminated").exists(),
-            "the child's TERM trap never runs"
-        );
-        fs::remove_dir_all(&directory).expect("the directory is removed");
-    }
+    let directory =
+        std::env::temp_dir().join(format!("kestrike-tools-limit-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(&directory).expect("the directory is made");
+    let script = "trap 'echo term > terminated; exit 7' TERM; sleep 5 & wait";
+    let args: Vec<OsString> = ["-c", script].map(OsString::from).to_vec();
+    let start = Instant::now();
+    let outcome = run(
+        OsStr::new("sh"),
+        &args,
+        &directory,
+        Stdio::null(),
+        Duration::from_millis(300),
+    );
+    let elapsed = start.elapsed();
+    let Err(Failure::Limit {
+        status: Some(status),
+        ..
+    }) = outcome
+    else {
+        panic!("the child passes the limit and is reaped: {outcome:?}");
+    };
+    assert_eq!(status.signal(), Some(9), "SIGKILL ends the child");
+    assert!(
+        elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(5),
+        "{elapsed:?}"
+    );
+    assert!(
+        !directory.join("terminated").exists(),
+        "the child's TERM trap never runs"
+    );
+    fs::remove_dir_all(&directory).expect("the directory is removed");
 }
 
 #[test]
 fn one_quint_run_is_limited_to_120_seconds_for_format_writers_and_60_for_record_writers() {
-    assert_eq!(Style::Format.limit(), Duration::from_secs(120));
-    assert_eq!(Style::Record.limit(), Duration::from_secs(60));
-    let styles = [
-        (tools::escrow_fixtures::MODEL, Style::Format),
-        (tools::gate_fixtures::MODEL, Style::Format),
-        (tools::marklog_fixtures::MODEL, Style::Format),
-        (tools::grace_fixtures::MODEL, Style::Record),
-        (tools::lookup_fixtures::MODEL, Style::Record),
-        (tools::reclaim_fixtures::MODEL, Style::Record),
-        (tools::register_fixtures::MODEL, Style::Record),
+    let models = [
+        (tools::escrow_fixtures::MODEL, Style::Format, 120),
+        (tools::gate_fixtures::MODEL, Style::Format, 120),
+        (tools::marklog_fixtures::MODEL, Style::Format, 120),
+        (tools::grace_fixtures::MODEL, Style::Record, 60),
+        (tools::lookup_fixtures::MODEL, Style::Record, 60),
+        (tools::reclaim_fixtures::MODEL, Style::Record, 60),
+        (tools::register_fixtures::MODEL, Style::Record, 60),
     ];
-    for (model, style) in styles {
+    for (model, style, seconds) in models {
         assert_eq!(model.style, style, "{}", model.tool);
+        assert_eq!(model.limit, Duration::from_secs(seconds), "{}", model.tool);
     }
 }
 
 #[test]
 fn a_child_exit_status_reaches_the_caller() {
     let args: Vec<OsString> = ["-c", "exit 3"].map(OsString::from).to_vec();
-    let limit = Style::Format.limit();
+    let limit = Duration::from_secs(120);
     let outcome = run(
         OsStr::new("sh"),
         &args,
@@ -146,12 +142,12 @@ fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() 
             about: "About.",
             name,
             style,
+            limit: Duration::from_millis(300),
         };
         let traces = ["first", "second"]
             .map(|name| Trace::new(name.to_owned(), 1, None, 12, case::gate, Vec::new()));
         let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let output = scratch.join("out");
-        let limit = Duration::from_millis(300);
         let outcome = generate(
             &model,
             &top,
@@ -159,7 +155,6 @@ fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() 
             &output,
             &traces,
             keep,
-            limit,
         );
         assert_eq!(
             outcome,

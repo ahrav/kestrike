@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::fixtures::{self, Model, Style};
 
@@ -8,6 +9,7 @@ pub(crate) const MODEL: Model = Model {
     about: "Lookup model traces for the replay against `Storage`: the directed recipes and seeded runs of `step`.",
     name: "lookup",
     style: Style::Record,
+    limit: Duration::from_secs(60),
 };
 
 pub const STEPS: usize = 16;

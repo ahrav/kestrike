@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::fixtures::{self, Model, Style, Trace, case};
 use crate::json::{Integer, Object, Value};
@@ -10,6 +11,7 @@ pub(crate) const MODEL: Model = Model {
     about: "Watermark-log model traces for the replay against the file log: the directed recipes and seeded runs of `step`.",
     name: "marklog",
     style: Style::Format,
+    limit: Duration::from_secs(120),
 };
 
 pub const STEPS: usize = 14;
