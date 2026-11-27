@@ -124,8 +124,8 @@ fn top() -> PathBuf {
 }
 
 /// `Scratch` is a directory the test process created itself, with mode 0700, and removes on drop. A name
-/// that already exists is left as it is and the next name is tried. The path is held resolved, as the
-/// writers resolve `--output`.
+/// that already exists is left as it is and the next name is tried. The path is the resolved temporary
+/// directory and the new name, as the writers resolve `--output`.
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -133,12 +133,12 @@ impl Scratch {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         loop {
             let at = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir()
-                .join(format!("kestrike-tools-test-{}-{at}", std::process::id()));
+            let parent = std::env::temp_dir()
+                .canonicalize()
+                .expect("the temporary directory resolves");
+            let path = parent.join(format!("kestrike-tools-test-{}-{at}", std::process::id()));
             match DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => {
-                    return Self(path.canonicalize().expect("the scratch directory resolves"));
-                }
+                Ok(()) => return Self(path),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => panic!("{}: {error}", path.display()),
             }

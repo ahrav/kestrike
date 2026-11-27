@@ -32,8 +32,10 @@ final step. On every call it:
    set to the pin and `RUSTUP_AUTO_INSTALL=0`. For this build it clears `RUSTFLAGS`,
    `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`, every `CARGO_PROFILE_*`,
    every `CARGO_BUILD_*` except `CARGO_BUILD_JOBS`, every `CARGO_TARGET_*` (`CARGO_TARGET_DIR`
-   included), `RUSTDOC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER`, and keeps the rest. A wrapper
-   that a Cargo configuration file names still wraps the pinned `rustc`. With `--target`, the
+   included), `RUSTDOC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER`, and keeps the rest. It then sets
+   `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` to the empty value, which outranks a wrapper a Cargo
+   configuration file names, and `CARGO_BUILD_BUILD_DIR=target/tools`, which outranks a configured
+   `build.build-dir`, so the build's fingerprints and lock stay under `target/tools`. With `--target`, the
    repository's `target.<cfg>.rustflags` apply to the binary and its dependencies and not to build
    scripts. A tool is then the same program whatever lane starts it.
 3. Replaces itself with the binary, started as `kestrike-tools <top> <tool> <arguments>`. The binary gets

@@ -14,12 +14,17 @@ prepare() {
   local source directory top workflow pin host installed toolchain found cargo rustc name log
   local cleared=()
   source=${BASH_SOURCE[0]}
+  [[ $source == */* ]] || source=./$source
   while [[ -L $source ]]; do
-    directory=$(CDPATH='' cd -P -- "$(dirname -- "$source")" && pwd -P) || fail "cannot find the top level"
-    source=$(readlink -- "$source") || fail "cannot find the top level"
+    directory=$(CDPATH='' cd -P -- "${source%/*}" && pwd -P && printf x) || fail "cannot find the top level"
+    directory=${directory%$'\nx'}
+    source=$(readlink -- "$source" && printf x) || fail "cannot find the top level"
+    source=${source%$'\nx'}
     [[ $source == /* ]] || source=$directory/$source
   done
-  top=$(CDPATH='' cd -P -- "$(dirname -- "$source")/.." && pwd -P) || fail "cannot find the top level"
+  [[ $source == */* ]] || source=./$source
+  top=$(CDPATH='' cd -P -- "${source%/*}/.." && pwd -P && printf x) || fail "cannot find the top level"
+  top=${top%$'\nx'}
   workflow=$top/.github/workflows/agent-checks.yml
   pin=$(sed -n 's/^  STABLE: "\([^"]*\)"$/\1/p' "$workflow") || fail "cannot read $workflow"
   [[ $pin =~ ^[^[:space:]]+$ ]] || fail "$workflow pins no single STABLE toolchain"
@@ -51,7 +56,7 @@ prepare() {
   done < <(compgen -e)
 
   if ! log=$(cd -- "$top" && env ${cleared[@]+"${cleared[@]}"} RUSTUP_TOOLCHAIN="$pin" RUSTUP_AUTO_INSTALL=0 \
-    RUSTC="$rustc" "$cargo" build --quiet --package kestrike-tools \
+    RUSTC="$rustc" RUSTC_WRAPPER='' RUSTC_WORKSPACE_WRAPPER='' CARGO_BUILD_BUILD_DIR=target/tools "$cargo" build --quiet --package kestrike-tools \
     --bin kestrike-tools --target "$host" --target-dir "$top/target/tools" 2>&1); then
     printf '%s\n' "$log" >&2 || true
     fail "the build of kestrike-tools failed"

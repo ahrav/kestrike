@@ -19,15 +19,15 @@ impl Scratch {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         loop {
             let at = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
+            let parent = std::env::temp_dir()
+                .canonicalize()
+                .expect("the temporary directory resolves");
+            let path = parent.join(format!(
                 "kestrike-tools-{label}-{}-{at}",
                 std::process::id()
             ));
             match DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => {
-                    let path = path.canonicalize().expect("the scratch directory resolves");
-                    return Self(path);
-                }
+                Ok(()) => return Self(path),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => panic!("{}: {error}", path.display()),
             }
