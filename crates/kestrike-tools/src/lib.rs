@@ -5,14 +5,19 @@
 
 pub mod args;
 pub mod classes;
+pub mod environ;
 pub mod fixtures;
 pub mod git;
 pub mod json;
 pub mod ownership;
 pub mod paths;
+#[cfg(target_os = "linux")]
+pub mod plants;
 pub mod python;
 pub mod rust_text;
 pub mod shell;
 pub mod stream;
+#[cfg(target_os = "linux")]
+pub mod temp_dir;
 pub mod text;
 pub mod tools;

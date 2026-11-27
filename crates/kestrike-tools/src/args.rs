@@ -32,6 +32,11 @@ pub enum Kind {
         required: bool,
         check: Check,
     },
+    /// An option that takes one value at each occurrence and keeps every value in command-line order.
+    /// `check` judges each value as it does for [`Kind::Value`].
+    Repeated {
+        check: Check,
+    },
 }
 
 impl Opt {
@@ -41,19 +46,31 @@ impl Opt {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Values(Vec<(&'static [&'static str], Option<OsString>)>);
+pub struct Values(Vec<(&'static [&'static str], Vec<OsString>)>);
 
 impl Values {
     /// Returns the value the command line gave for the row that lists `name`, `None` when the command
     /// line left the option out; any of a row's names selects it. A required option's value is `Some`.
+    /// For a [`Kind::Repeated`] row it is the last value.
     ///
     /// # Panics
     ///
     /// `get` panics when no row of the option table lists `name`.
     #[track_caller]
     pub fn get(&self, name: &str) -> Option<&OsStr> {
+        self.all(name).last().map(OsString::as_os_str)
+    }
+
+    /// Returns every value the command line gave for the row that lists `name`, in command-line order:
+    /// each occurrence for a [`Kind::Repeated`] row, and at most the last for any other row.
+    ///
+    /// # Panics
+    ///
+    /// `all` panics when no row of the option table lists `name`.
+    #[track_caller]
+    pub fn all(&self, name: &str) -> &[OsString] {
         match self.0.iter().find(|(names, _)| names.contains(&name)) {
-            Some((_, value)) => value.as_deref(),
+            Some((_, values)) => values,
             None => panic!("the option table names {name}"),
         }
     }
@@ -182,7 +199,8 @@ impl<'t> Reader<'t> {
     /// `parse` classifies every argument before it reads any value, so a classification error takes
     /// precedence over help and value errors. A value-taking option consumes the next argument only when it
     /// lacks an explicit value and the next argument has kind `Arg::Value`. `parse` calls the option's
-    /// `check` for every supplied value; a later occurrence replaces an earlier one. `parse` returns
+    /// `check` for every supplied value; a later occurrence replaces an earlier one, except under
+    /// [`Kind::Repeated`], which keeps each. `parse` returns
     /// `Parsed::Help` immediately upon accepting help. Missing required options take precedence over
     /// leftover arguments.
     pub fn parse(&self, args: &[OsString]) -> Parsed {
@@ -202,7 +220,7 @@ impl<'t> Reader<'t> {
                 }
             });
         }
-        let mut values: Vec<Option<OsString>> = vec![None; self.options.len()];
+        let mut values: Vec<Vec<OsString>> = vec![Vec::new(); self.options.len()];
         let mut extras = Vec::new();
         let mut at = 0;
         while at < args.len() {
@@ -226,7 +244,7 @@ impl<'t> Reader<'t> {
                         )),
                     };
                 }
-                Kind::Value { check, .. } => check,
+                Kind::Value { check, .. } | Kind::Repeated { check } => check,
             };
             let value = match (found.explicit, kinds.get(at + 1)) {
                 (Some(explicit), _) => explicit,
@@ -244,14 +262,18 @@ impl<'t> Reader<'t> {
             if let Err(message) = check(&Text::from_os(value)) {
                 return self.refuse(format!("argument {}: {message}", option.name()));
             }
-            values[found.option] = Some(value.to_owned());
+            let kept = &mut values[found.option];
+            if !matches!(option.kind, Kind::Repeated { .. }) {
+                kept.clear();
+            }
+            kept.push(value.to_owned());
         }
         let missing: Vec<String> = self
             .options
             .iter()
             .zip(&values)
             .filter(|(option, value)| {
-                matches!(option.kind, Kind::Value { required: true, .. }) && value.is_none()
+                matches!(option.kind, Kind::Value { required: true, .. }) && value.is_empty()
             })
             .map(|(option, _)| option.name())
             .collect();

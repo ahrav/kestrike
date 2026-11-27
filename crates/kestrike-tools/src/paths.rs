@@ -154,7 +154,7 @@ fn split(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
 
 /// `normalize` removes empty and `.` components and each `..` with the component before it, keeps a
 /// leading `//` and folds three or more leading slashes into one.
-fn normalize(path: &[u8]) -> Vec<u8> {
+pub(crate) fn normalize(path: &[u8]) -> Vec<u8> {
     let slashes = if path.starts_with(b"//") && !path.starts_with(b"///") {
         2
     } else {
