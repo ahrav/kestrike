@@ -1,6 +1,6 @@
 //! The test runs the fixture writers against a POSIX `sh` script that stands in for `quint`. The script
-//! answers each call with a committed trace stripped of what the writer adds, and refuses a call whose
-//! arguments belong to another trace.
+//! answers each call with a committed trace stripped of what the writer adds, prints one line naming the
+//! trace on standard output, and refuses a call whose arguments belong to another trace.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -9,12 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use kestrike_tools::fixtures::Style;
 use kestrike_tools::json::{self, Object, Value};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
 
 struct Writer {
     tool: &'static str,
+    style: Style,
     model: &'static str,
     fixtures: &'static str,
     directed: (&'static str, &'static str),
@@ -24,9 +26,10 @@ struct Writer {
 }
 
 /// The `case.qnt` texts match `inputs` in `quint/<model>_check.py`.
-const WRITERS: [Writer; 3] = [
+const WRITERS: [Writer; 7] = [
     Writer {
         tool: "escrow_fixtures",
+        style: Style::Format,
         count: 14,
         recipes: &[
             "an_exact_promise_succeeds_and_a_short_one_refuses",
@@ -54,6 +57,7 @@ const WRITERS: [Writer; 3] = [
     },
     Writer {
         tool: "gate_fixtures",
+        style: Style::Format,
         count: 26,
         recipes: &[
             "passes",
@@ -90,6 +94,7 @@ const WRITERS: [Writer; 3] = [
     },
     Writer {
         tool: "marklog_fixtures",
+        style: Style::Format,
         count: 12,
         recipes: &[
             "partly_landed",
@@ -112,6 +117,111 @@ const WRITERS: [Writer; 3] = [
         seeded: (
             "step_6b01",
             "module marklogCase {\n  import marklog(BOUND = 14).* from \"./marklog\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "grace_fixtures",
+        style: Style::Record,
+        count: 13,
+        recipes: &[
+            "readerBeforePass",
+            "passBeforeReader",
+            "releaseAfterUnpin",
+            "terminalRefusesPins",
+            "refusals",
+            "keptCertificate",
+            "closingRetirement",
+        ],
+        model: "grace",
+        fixtures: "crates/kestrike/src/storage/grace_replay_fixtures",
+        directed: (
+            "releaseAfterUnpin",
+            "module graceCase {\n  import grace(BOUND = 16).* from \"./grace\"\n  action recipe = any {\n    all { \
+             Set(0).contains(turn), pin(0) },\n    all { Set(1).contains(turn), observe(0) },\n    all { \
+             Set(2).contains(turn), remove },\n    all { Set(3).contains(turn), retire },\n    all { Set(4, \
+             10).contains(turn), begin },\n    all { Set(5, 6, 11, 12).contains(turn), visit },\n    all { Set(7, \
+             13).contains(turn), complete },\n    all { Set(8, 14).contains(turn), release },\n    all { \
+             Set(9).contains(turn), unpin(0) },\n    all { Set(15).contains(turn), reuse },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module graceCase {\n  import grace(BOUND = 16).* from \"./grace\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "lookup_fixtures",
+        style: Style::Record,
+        count: 10,
+        recipes: &[
+            "replaceUnderLease",
+            "removeThenReclaim",
+            "expiryAndClose",
+            "twoKeys",
+        ],
+        model: "lookup",
+        fixtures: "crates/kestrike/src/storage/lookup_replay_fixtures",
+        directed: (
+            "twoKeys",
+            "module lookupCase {\n  import lookup(BOUND = 13).* from \"./lookup\"\n  action recipe = any {\n    all { \
+             Set(0, 9, 11).contains(turn), service },\n    all { Set(1, 2, 8).contains(turn), certify },\n    all { \
+             Set(3).contains(turn), publish(0) },\n    all { Set(4).contains(turn), publish(1) },\n    all { \
+             Set(5).contains(turn), lookup(1) },\n    all { Set(6).contains(turn), remove(0) },\n    all { \
+             Set(7).contains(turn), remove(1) },\n    all { Set(10).contains(turn), drop(2) },\n    all { \
+             Set(12).contains(turn), lookup(0) },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module lookupCase {\n  import lookup(BOUND = 16).* from \"./lookup\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "reclaim_fixtures",
+        style: Style::Record,
+        count: 11,
+        recipes: &[
+            "anchorLast",
+            "rightLast",
+            "pinnedReaderHolds",
+            "reuse",
+            "leases",
+        ],
+        model: "reclaim",
+        fixtures: "crates/kestrike/src/storage/reclaim_replay_fixtures",
+        directed: (
+            "reuse",
+            "module reclaimCase {\n  import reclaim(BOUND = 12).* from \"./reclaim\"\n  action recipe = any {\n    all \
+             { Set(0, 6).contains(turn), unlease },\n    all { Set(1, 7).contains(turn), retire },\n    all { Set(2, \
+             3, 8, 9).contains(turn), certify },\n    all { Set(4, 10).contains(turn), service },\n    all { Set(5, \
+             11).contains(turn), republish },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module reclaimCase {\n  import reclaim(BOUND = 18).* from \"./reclaim\"\n}\n",
+        ),
+    },
+    Writer {
+        tool: "register_fixtures",
+        style: Style::Record,
+        count: 11,
+        recipes: &[
+            "closeRacesAnEntry",
+            "leakedGuardBlocks",
+            "limitAndReturn",
+            "forgottenHandles",
+            "leakedAcrossTheClose",
+        ],
+        model: "register",
+        fixtures: "crates/kestrike/src/storage/register_replay_fixtures",
+        directed: (
+            "forgottenHandles",
+            "module registerCase {\n  import register(BOUND = 8).* from \"./register\"\n  action recipe = any {\n    \
+             all { Set(0, 1, 3, 7).contains(turn), register },\n    all { Set(2).contains(turn), forget(1) },\n    \
+             all { Set(4).contains(turn), leak(0) },\n    all { Set(5).contains(turn), forget(0) },\n    all { \
+             Set(6).contains(turn), close },\n  }\n}\n",
+        ),
+        seeded: (
+            "step_c",
+            "module registerCase {\n  import register(BOUND = 14).* from \"./register\"\n}\n",
         ),
     },
 ];
@@ -190,12 +300,14 @@ fn text<'a>(value: Option<&'a Value>, what: &str) -> &'a str {
     }
 }
 
+/// `reply` gives every trace a `#meta` of Quint's shape. A committed trace of a record writer holds no
+/// `format`, and its reply carries Quint's `ITF`.
 fn reply(trace: &Committed) -> String {
     let mut data = trace.data.clone();
     let format = object(data.get("#meta"), "#meta")
         .get("format")
         .cloned()
-        .expect("#meta holds format");
+        .unwrap_or_else(|| Value::String("ITF".into()));
     let mut meta = Object::new();
     meta.insert("format", format);
     for (key, value) in [
@@ -241,8 +353,11 @@ fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
         .map(str::to_owned)
         .collect::<Vec<_>>();
     call.push(format!("{}Case", writer.model));
-    if record.get("recipe").is_some() {
+    let directed = matches!(record.get("recipe"), Some(Value::Array(recipe)) if !recipe.is_empty());
+    if directed {
         call.extend(["--step".to_owned(), "recipe".to_owned()]);
+    } else if writer.style == Style::Record {
+        call.extend(["--step".to_owned(), "step".to_owned()]);
     }
     for arg in [
         "--backend",
@@ -268,6 +383,16 @@ fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
     call.join("\n")
 }
 
+fn seed(writer: &Writer, trace: &Committed) -> u64 {
+    let record = object(
+        object(trace.data.get("#meta"), "#meta").get(writer.model),
+        "the writer's record",
+    );
+    let seed = text(record.get("seed"), "seed");
+    u64::from_str_radix(seed.strip_prefix("0x").expect("a seed is 0x-prefixed"), 16)
+        .expect("a seed is hexadecimal")
+}
+
 const STAND_IN: &str = r#"#!/bin/sh
 replies="$(dirname "$0")/replies"
 out= prev=
@@ -283,6 +408,7 @@ here=$(pwd -P)
 [ "${here##*/}" = "$name" ] || { echo "stand-in: $name runs outside its own directory" >&2; exit 3; }
 [ -f case.qnt ] || { echo "stand-in: no case.qnt in the working directory" >&2; exit 3; }
 echo "$name" >> "$replies/calls"
+echo "stand-in: $name"
 cat "$replies/$name.reply" > "$out"
 "#;
 
@@ -354,8 +480,8 @@ fn each_committed_trace_is_written_byte_for_byte() {
             stderr(&result)
         );
         assert!(
-            result.stdout.is_empty() && result.stderr.is_empty(),
-            "{} writes to neither stream",
+            result.stderr.is_empty(),
+            "{} writes nothing to standard error",
             writer.tool
         );
         let traces = committed(writer);
@@ -406,15 +532,13 @@ fn each_committed_trace_is_written_byte_for_byte() {
             .iter()
             .map(|name| (*name).to_owned())
             .collect();
-        let mut seeds: Vec<String> = traces
+        let mut seeds: Vec<(u64, String)> = traces
             .iter()
-            .map(|trace| trace.name.clone())
-            .filter(|name| name.starts_with("step_"))
+            .filter(|trace| !writer.recipes.contains(&trace.name.as_str()))
+            .map(|trace| (seed(writer, trace), trace.name.clone()))
             .collect();
-        seeds.sort_by_key(|name| {
-            u64::from_str_radix(&name["step_".len()..], 16).expect("a seed is hexadecimal")
-        });
-        order.extend(seeds);
+        seeds.sort();
+        order.extend(seeds.into_iter().map(|(_, name)| name));
         let calls =
             fs::read_to_string(scratch.0.join("replies/calls")).expect("the calls log reads");
         assert_eq!(
@@ -423,6 +547,122 @@ fn each_committed_trace_is_written_byte_for_byte() {
             "{}: the traces run in order",
             writer.tool
         );
+        let printed: String = match writer.style {
+            Style::Format => String::new(),
+            Style::Record => order
+                .iter()
+                .map(|name| format!("stand-in: {name}\n"))
+                .collect(),
+        };
+        assert_eq!(
+            std::str::from_utf8(&result.stdout).expect("standard output is UTF-8"),
+            printed,
+            "{}: Quint's standard output",
+            writer.tool
+        );
+    }
+}
+
+#[test]
+fn a_trace_generator_writes_its_traces_under_a_relative_output_directory() {
+    for writer in WRITERS
+        .iter()
+        .filter(|writer| writer.style == Style::Record)
+    {
+        let scratch = Scratch::new();
+        let quint = stand_in(&scratch.0, writer, &scratch.0.join("traces"), reply);
+        let result = Command::new(BINARY)
+            .arg(top())
+            .arg(writer.tool)
+            .args([
+                "--quint".as_ref(),
+                quint.as_os_str(),
+                "--output".as_ref(),
+                "traces".as_ref(),
+            ])
+            .current_dir(&scratch.0)
+            .output()
+            .expect("the binary starts");
+        assert_eq!(
+            result.status.code(),
+            Some(0),
+            "{}: {}",
+            writer.tool,
+            stderr(&result)
+        );
+        let mut written: Vec<String> = fs::read_dir(scratch.0.join("traces"))
+            .expect("the traces directory lists")
+            .map(|entry| {
+                let name = entry.expect("an entry lists").file_name();
+                name.into_string().expect("a trace's name is UTF-8")
+            })
+            .filter(|name| name.ends_with(".itf.json"))
+            .collect();
+        written.sort();
+        let expected: Vec<String> = committed(writer)
+            .into_iter()
+            .map(|trace| format!("{}.itf.json", trace.name))
+            .collect();
+        assert_eq!(written, expected, "{}", writer.tool);
+    }
+}
+
+#[test]
+fn a_reply_without_meta_is_accepted_by_record_writers_and_refused_by_format_writers() {
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out");
+        let bare = |trace: &Committed| {
+            let mut data = trace.data.clone();
+            data.remove("#meta");
+            if let Some(Value::Array(states)) = data.get_mut("states") {
+                for state in states {
+                    if let Value::Object(state) = state {
+                        state.remove("call");
+                    }
+                }
+            }
+            json::dump(&Value::Object(data))
+        };
+        let quint = stand_in(&scratch.0, writer, &output, bare);
+        let result = write_traces(writer, &quint, &output);
+        let first = committed(writer)
+            .into_iter()
+            .find(|trace| trace.name == writer.recipes[0])
+            .expect("the first recipe is committed");
+        let file = output.join(format!("{}.itf.json", first.name));
+        match writer.style {
+            Style::Format => {
+                assert_eq!(result.status.code(), Some(1), "{}", writer.tool);
+                assert_eq!(
+                    stderr(&result),
+                    format!(
+                        "{}: {}: the trace has no '#meta' record with a 'format'\n",
+                        writer.tool,
+                        file.display()
+                    )
+                );
+            }
+            Style::Record => {
+                assert_eq!(
+                    result.status.code(),
+                    Some(0),
+                    "{}: {}",
+                    writer.tool,
+                    stderr(&result)
+                );
+                let mut expected = first.data.clone();
+                let meta = expected.remove("#meta").expect("the trace holds #meta");
+                expected.insert("#meta", meta);
+                let written = fs::read_to_string(&file).expect("the trace is written");
+                assert_eq!(
+                    written,
+                    json::dump(&Value::Object(expected)),
+                    "{}",
+                    writer.tool
+                );
+            }
+        }
     }
 }
 
@@ -458,7 +698,8 @@ fn an_unknown_tool_exits_2() {
     assert_eq!(result.status.code(), Some(2));
     assert_eq!(
         stderr(&result),
-        "kestrike-tools: no tool is named check; the tools are escrow_fixtures, gate_fixtures, marklog_fixtures\n"
+        "kestrike-tools: no tool is named check; the tools are escrow_fixtures, gate_fixtures, \
+         grace_fixtures, lookup_fixtures, marklog_fixtures, reclaim_fixtures, register_fixtures\n"
     );
 }
 

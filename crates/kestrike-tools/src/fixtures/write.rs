@@ -3,12 +3,13 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
 use super::args::{self, Parsed};
-use super::quint;
+use super::{case, quint};
 use crate::json::{self, Integer, Object, Value};
 use crate::paths;
 use crate::python;
@@ -18,6 +19,38 @@ pub struct Model {
     pub about: &'static str,
     /// The stem of the model's file under `quint/` and the key of the writer's record under `#meta`.
     pub name: &'static str,
+    pub style: Style,
+}
+
+/// How a writer runs Quint and records each trace under `#meta`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    /// Quint's standard output is discarded, one run is limited to 120 seconds, and a seeded trace passes no
+    /// `--step`. `#meta` becomes Quint's `format` followed by the record `model_sha256`, `seed`, `steps`, the
+    /// trace's own fields and, for a directed trace, `recipe`. A trace whose `#meta` holds no `format` is
+    /// refused.
+    Format,
+    /// Quint's standard output reaches the writer's, one run is limited to 60 seconds, and a seeded trace
+    /// passes `--step step`. `#meta` is replaced by the record alone: `recipe` (empty for a seeded trace),
+    /// `seed`, `steps`, the trace's own fields and `model_sha256`. Quint's own `#meta` is never read; a trace
+    /// without one gains the record as its last key.
+    Record,
+}
+
+impl Style {
+    pub fn limit(self) -> Duration {
+        match self {
+            Self::Format => Duration::from_secs(120),
+            Self::Record => Duration::from_secs(60),
+        }
+    }
+
+    fn stdout(self) -> Stdio {
+        match self {
+            Self::Format => Stdio::null(),
+            Self::Record => Stdio::inherit(),
+        }
+    }
 }
 
 /// The keys of the writer's record that [`Trace::new`] refuses in `meta`.
@@ -75,6 +108,28 @@ impl Trace {
     }
 }
 
+/// The traces of a model whose `case.qnt` sets `BOUND` alone: each recipe under `recipe_seed`, then a seeded
+/// trace of `steps` steps for each named seed, in the given orders.
+pub fn traces(
+    model: &Model,
+    recipes: &[(&str, &'static [&'static str])],
+    recipe_seed: u64,
+    seeds: &[(&str, u64)],
+    steps: usize,
+) -> Vec<Trace> {
+    let case = |steps, recipe: Option<&[&str]>| case::bounded(model.name, steps, recipe);
+    let directed = recipes
+        .iter()
+        .map(|&(name, recipe)| (name, recipe_seed, Some(recipe)));
+    let seeded = seeds.iter().map(|&(name, seed)| (name, seed, None));
+    directed
+        .chain(seeded)
+        .map(|(name, seed, recipe)| {
+            Trace::new(name.to_owned(), seed, recipe, steps, case, Vec::new())
+        })
+        .collect()
+}
+
 /// The hook a writer runs on the parsed trace after the state count check.
 pub type Rewrite = fn(&mut Object, &Trace) -> Result<(), String>;
 
@@ -117,7 +172,7 @@ pub fn write(
                 &output,
                 traces,
                 rewrite,
-                quint::LIMIT,
+                model.style.limit(),
             )
         });
     match outcome {
@@ -172,7 +227,8 @@ pub(crate) fn generate(
         // to the trace directory.
         let quint =
             quint.ok_or_else(|| "argument --quint: the value `--` leaves no program".to_owned())?;
-        quint::run(quint, &arguments(model, trace, &file), &directory, limit)
+        let args = arguments(model, trace, &file);
+        quint::run(quint, &args, &directory, model.style.stdout(), limit)
             .map_err(|failure| format!("{}: {failure}", trace.name))?;
         let mut data = read_trace(&file)?;
         let states = data
@@ -187,43 +243,57 @@ pub(crate) fn generate(
             ));
         }
         rewrite(&mut data, trace).map_err(at(&file))?;
-        let format = match data.get("#meta") {
-            Some(Value::Object(meta)) => meta.get("format").cloned(),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            format!(
-                "{}: the trace has no '#meta' record with a 'format'",
-                file.display()
-            )
-        })?;
         let mut meta = Object::new();
-        meta.insert("format", format);
-        meta.insert(model.name, Value::Object(record(&digest, trace)));
+        if model.style == Style::Format {
+            let format = match data.get("#meta") {
+                Some(Value::Object(meta)) => meta.get("format").cloned(),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                format!(
+                    "{}: the trace has no '#meta' record with a 'format'",
+                    file.display()
+                )
+            })?;
+            meta.insert("format", format);
+        }
+        meta.insert(
+            model.name,
+            Value::Object(record(model.style, &digest, trace)),
+        );
         data.insert("#meta", Value::Object(meta));
         fs::write(&file, json::dump(&Value::Object(data))).map_err(at(&file))?;
     }
     Ok(())
 }
 
-fn record(digest: &str, trace: &Trace) -> Object {
+fn record(style: Style, digest: &str, trace: &Trace) -> Object {
+    let digest = ("model_sha256", Value::String(digest.into()));
+    let recipe = |recipe: &[&str]| {
+        let steps = recipe.iter().map(|&step| Value::String(step.into()));
+        ("recipe", Value::Array(steps.collect()))
+    };
+    let fields = [
+        ("seed", Value::String(format!("{:#x}", trace.seed).into())),
+        ("steps", Value::Integer(Integer::from(trace.steps))),
+    ]
+    .into_iter()
+    .chain(trace.meta.iter().cloned());
+    let fields: Vec<(&str, Value)> = match style {
+        Style::Format => [digest]
+            .into_iter()
+            .chain(fields)
+            .chain(trace.recipe.map(recipe))
+            .collect(),
+        Style::Record => [recipe(trace.recipe.unwrap_or_default())]
+            .into_iter()
+            .chain(fields)
+            .chain([digest])
+            .collect(),
+    };
     let mut record = Object::new();
-    record.insert("model_sha256", Value::String(digest.into()));
-    record.insert("seed", Value::String(format!("{:#x}", trace.seed).into()));
-    record.insert("steps", Value::Integer(Integer::from(trace.steps)));
-    for (key, value) in &trace.meta {
-        record.insert(*key, value.clone());
-    }
-    if let Some(recipe) = trace.recipe {
-        record.insert(
-            "recipe",
-            Value::Array(
-                recipe
-                    .iter()
-                    .map(|&step| Value::String(step.into()))
-                    .collect(),
-            ),
-        );
+    for (key, value) in fields {
+        record.insert(key, value);
     }
     record
 }
@@ -232,10 +302,10 @@ fn arguments(model: &Model, trace: &Trace, file: &Path) -> Vec<OsString> {
     let main = format!("{}Case", model.name);
     let seed = format!("{:#x}", trace.seed);
     let steps = trace.steps.to_string();
-    let step: &[&str] = if trace.recipe.is_some() {
-        &["--step", "recipe"]
-    } else {
-        &[]
+    let step: &[&str] = match (trace.recipe, model.style) {
+        (Some(_), _) => &["--step", "recipe"],
+        (None, Style::Record) => &["--step", "step"],
+        (None, Style::Format) => &[],
     };
     let head = ["run", "case.qnt", "--main", &main];
     let tail = [

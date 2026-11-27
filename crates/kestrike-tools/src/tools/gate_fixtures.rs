@@ -1,12 +1,13 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::fixtures::{self, Model, Trace, case};
+use crate::fixtures::{self, Model, Style, Trace, case};
 
-const MODEL: Model = Model {
+pub(crate) const MODEL: Model = Model {
     tool: "gate_fixtures",
     about: "Attach-gate model traces for the replay against `Volume`: the directed recipes and seeded runs of `step`.",
     name: "gate",
+    style: Style::Format,
 };
 
 pub const STEPS: usize = 12;

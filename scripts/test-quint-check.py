@@ -36,9 +36,7 @@ prefix-saturation projection is the prefix model's shrink condition. The
 binder's release-scope mutant keeps the devices a release's raw record decodes
 to and hands the release both devices, so its violation is a restore write
 outside the record. Each binder invariant that a passing case defines in its
-instance module has a mutant case that must violate it. The generator test
-checks that the grace, lookup, reclaim and register trace generators, given a
-relative `--output`, write one trace per committed fixture under it.
+instance module has a mutant case that must violate it.
 """
 
 import dataclasses
@@ -841,24 +839,6 @@ states='{}'
 while [ "$steps" -gt 0 ]; do states="$states,{}"; steps=$((steps - 1)); done
 printf '{"#meta":{"format":"ITF"},"states":[%s]}\\n' "$states" > "$out"
 """
-
-
-class Generators(unittest.TestCase):
-    def test_a_trace_generator_writes_its_traces_under_a_relative_output_directory(self):
-        storage = ROOT / "crates/kestrike/src/storage"
-        for script, fixtures in (("grace_fixtures.py", "grace_replay_fixtures"),
-                                 ("lookup_fixtures.py", "lookup_replay_fixtures"),
-                                 ("reclaim_fixtures.py", "reclaim_replay_fixtures"),
-                                 ("register_fixtures.py", "register_replay_fixtures")):
-            with self.subTest(script=script), tempfile.TemporaryDirectory() as temporary:
-                quint = Path(temporary) / "quint"
-                quint.write_text(QUINT_RUN)
-                quint.chmod(0o755)
-                run = subprocess.run([sys.executable, str(ROOT / "quint" / script), "--quint", str(quint),
-                                      "--output", "traces"], cwd=temporary, capture_output=True, text=True, check=False)
-                self.assertEqual(run.returncode, 0, run.stderr)
-                written = {path.name for path in (Path(temporary) / "traces").glob("*.itf.json")}
-                self.assertEqual(written, {path.name for path in (storage / fixtures).glob("*.itf.json")})
 
 
 # A stub `quint run` whose trace holds `--max-steps` + 1 states, each naming the trace's working directory.

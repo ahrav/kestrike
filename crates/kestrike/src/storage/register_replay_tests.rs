@@ -4,7 +4,7 @@
 //! The replay then requires the call's return to equal the step's recorded event, and both records' reports (claimed, pinned era, intervals), the cutoff and the count of outstanding registrations to equal the model's state.
 //! The model's `held` flag says whether the replay still holds a record's handle; `late` and `kept` are history the model's invariants read, and they stay inside the model, where `quint run --invariant safety` checks them as each trace is generated.
 //!
-//! `python3 quint/register_fixtures.py --quint QUINT --output DIR` writes the traces with `quint run --mbt`: five directed recipes and six traces of fourteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
+//! `bash scripts/tool.sh register_fixtures --quint QUINT --output DIR` writes the traces with `quint run --mbt`: five directed recipes and six traces of fourteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
 //! The replay is evidence for exactly the schedules these traces record, one call at a time; the close inside a call lands only at the two hooks.
 
 use std::collections::BTreeSet;

@@ -1,13 +1,14 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::fixtures::{self, Model, Trace, case};
+use crate::fixtures::{self, Model, Style, Trace, case};
 use crate::json::{Integer, Value};
 
-const MODEL: Model = Model {
+pub(crate) const MODEL: Model = Model {
     tool: "escrow_fixtures",
     about: "Builder-escrow model traces for the replay against `Storage`: the directed recipes and seeded runs of `step`.",
     name: "escrow",
+    style: Style::Format,
 };
 
 pub const STEPS: usize = 12;

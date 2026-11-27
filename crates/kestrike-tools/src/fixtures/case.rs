@@ -14,8 +14,14 @@ pub fn escrow(bound: usize, volume: &str, recipe: Option<&[&str]>) -> String {
 }
 
 pub fn gate(bound: usize, recipe: Option<&[&str]>) -> String {
+    bounded("gate", bound, recipe)
+}
+
+/// `bounded` writes the module `<model>Case`, which imports `<model>` with `BOUND` alone, and adds the recipe
+/// as [`escrow`] does.
+pub fn bounded(model: &str, bound: usize, recipe: Option<&[&str]>) -> String {
     format!(
-        "module gateCase {{\n  import gate(BOUND = {bound}).* from \"./gate\"\n{}}}\n",
+        "module {model}Case {{\n  import {model}(BOUND = {bound}).* from \"./{model}\"\n{}}}\n",
         grouped(recipe)
     )
 }
