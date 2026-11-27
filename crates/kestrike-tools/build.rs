@@ -83,9 +83,9 @@ const KEYWORDS: &[&str] = &[
 
 /// `list` returns the modules of `directory`, other than the entry `skip`, in ascending order of their
 /// entry names' bytes. `list` skips dot-prefixed names and keeps as candidates a directory, a link to one
-/// and an entry matching `*.rs`; `list` classifies candidates in entry-name byte order, and the first that
-/// fails module validation or uses a keyword or a name in `taken` (the names the including file already
-/// resolves) makes `list` return an error with the entry's path and the reason.
+/// and an entry matching `*.rs`; `list` classifies candidates in entry-name byte order and returns an
+/// error with the path and the reason of the first that is invalid. `taken` holds the module names that
+/// the including file reserves.
 fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, String> {
     let shown = directory.display();
     let prefix = directory
@@ -103,21 +103,24 @@ fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, Str
     names.sort_unstable();
     let mut modules: Vec<Module> = Vec::new();
     for name in names {
-        let path = directory.join(&name);
-        let kind = fs::symlink_metadata(&path)
-            .map_err(|error| format!("{}: {error}", path.display()))?
-            .file_type();
         let bytes = name.as_encoded_bytes();
+        if bytes.starts_with(b".") {
+            continue;
+        }
+        let path = directory.join(&name);
+        let kind = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        };
         let linked_directory = kind.is_symlink() && fs::metadata(&path).is_ok_and(|to| to.is_dir());
-        if bytes.starts_with(b".")
-            || !(bytes.ends_with(b".rs") || kind.is_dir() || linked_directory)
-        {
+        if !(bytes.ends_with(b".rs") || kind.is_dir() || linked_directory) {
             continue;
         }
         let refuse = |reason: &str| {
             format!(
-                "{}: {reason}; a directory or a `*.rs` entry of {shown} is a regular file <id>.rs or a \
-                 directory <id>/ that holds a regular file mod.rs, with <id> matching [a-z][a-z0-9_]*",
+                "{}: {reason}; a directory, a link to one or a `*.rs` entry of {shown} is a regular file <id>.rs \
+                 or a directory <id>/ that holds a regular file mod.rs, with <id> matching [a-z][a-z0-9_]*",
                 path.display()
             )
         };
@@ -152,7 +155,7 @@ fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, Str
         }
         if KEYWORDS.contains(&id.as_str()) || taken.contains(&id.as_str()) {
             return Err(refuse(&format!(
-                "the module name is a Rust keyword or one of {taken:?}, which the including file reserves"
+                "the module name is a Rust keyword or one of {taken:?}, which the build reserves"
             )));
         }
         // Among valid entry names, `<id>` and `<id>.rs` sort consecutively because `.` sorts before every
