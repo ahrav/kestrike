@@ -509,6 +509,8 @@ class Record(unittest.TestCase):
                                           "together mapped to #120 P1 to P10"),
             "a source issue that is no ticket": (lambda r: r["sources"]["cycles"].update(issue="1193"),
                                                  "source cycles"),
+            "another issue of the earlier tracker": (lambda r: r["sources"]["cycles"].update(
+                issue="blotter issue 1194"), "source cycles"),
             "a source class outside the record": (lambda r: r["sources"]["cycles"]["classes"].append("reboot"),
                                                   "source cycles classes"),
             "a source column outside the five": (lambda r: r["sources"]["cycles"]["columns"].append("speed"),
