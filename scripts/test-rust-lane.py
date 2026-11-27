@@ -422,10 +422,10 @@ class LaneCancellation(unittest.TestCase):
 
     def cancel(self, lane, command):
         script = self.dir / "step.sh"
-        script.write_text(command.replace("${{ matrix.module }}", "credit_model") + "\n")
+        script.write_text(command + "\n")
         step = subprocess.Popen(
             ["bash", "--noprofile", "--norc", "-eo", "pipefail", str(script)],
-            cwd=ROOT, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            cwd=ROOT, env={**self.env, "MODULE": "credit_model"}, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True, preexec_fn=default_sigint,
         )
         deadline = time.monotonic() + 60
@@ -1540,7 +1540,7 @@ class LaneCancellation(unittest.TestCase):
         self.assertTrue(all(guard in step for step in [steps[2], *steps[4:]]), steps)
         self.assertIn("evidence-*-${{ github.run_id }}-${{ github.run_attempt }}", gate)
         self.assertIn("uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131", gate)
-        self.assertIn('--run-attempt "${{ github.run_attempt }}"', gate)
+        self.assertIn('--run-attempt "$GITHUB_RUN_ATTEMPT"', gate)
 
     def test_the_aggregate_requires_exactly_the_lanes_and_profiles_the_workflow_selects(self):
         verify = load("verify_receipts", ROOT / "scripts/verify-receipts.py")
@@ -2956,6 +2956,8 @@ class LaneCancellation(unittest.TestCase):
         evidence = self.dir / "evidence"
         evidence.mkdir()
         (evidence / "exit.txt").write_text("0\n")
+        # The loom steps read the matrix module from the job environment.
+        self.assertIn("      MODULE: ${{ matrix.module }}\n", workflow_jobs(WORKFLOW.read_text())["loom"])
         self.assertEqual(self.cancel("loom", self.commands["loom"]), [])
         self.assertIn("- loom v0.7.2", self.pins_written())
 
@@ -4256,7 +4258,8 @@ class EventPolicy(unittest.TestCase):
         self.assertNotIn("quarantine", dependencies)
         self.assertEqual(re.findall(r"(?m)^    if: (.+)$", gate), ["always() && (github.event_name != 'pull_request' || !cancelled())"])
         self.assertIn("RESULTS: ${{ toJSON(needs) }}", gate)
-        self.assertIn('--event "${{ github.event_name }}"\n          --action "${{ github.event.action }}"', gate)
+        self.assertIn("EVENT_ACTION: ${{ github.event.action }}", gate)
+        self.assertIn('--event "$GITHUB_EVENT_NAME"\n          --action "$EVENT_ACTION"', gate)
 
     def test_the_gate_refuses_a_fork_before_reading_the_checkout(self):
         """A fork pull request checks nothing out, so the gate fails before any step reads the workspace, and the
@@ -4496,7 +4499,8 @@ class EventPolicy(unittest.TestCase):
         self.assertRegex(WORKFLOW.read_text(), r"^name: agent-checks\n")
         self.assertEqual(re.findall(r"(?m)^  ([\w-]+):", jobs), ["agent-checks-close-signal"])
         self.assertIn("if: github.event.action != 'closed'", jobs)
-        self.assertIn("runs-on: ubuntu-latest", jobs)
+        self.assertIn("runs-on: ubuntu-24.04\n", jobs)
+        self.assertIn("timeout-minutes: 5", jobs)
         self.assertIn('      - run: ":"', jobs)
         for forbidden in ("uses:", "secrets.", "self-hosted", "rust-gate:", "    concurrency:", "    permissions:"):
             self.assertNotIn(forbidden, text)

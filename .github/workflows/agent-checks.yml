@@ -505,6 +505,7 @@ jobs:
         module: ${{ fromJSON(needs.preflight.outputs.loom-modules) }}
     env:
       EVIDENCE: ${{ github.workspace }}/evidence
+      MODULE: ${{ matrix.module }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -516,15 +517,15 @@ jobs:
       - name: Loom kernel
         run: >-
           exec timeout --kill-after=60s 90m
-          bash scripts/rust-lane.sh loom "${{ matrix.module }}"
+          bash scripts/rust-lane.sh loom "$MODULE"
       - name: Summary
         if: always()
-        run: bash scripts/rust-lane.sh summary loom "${{ matrix.module }}"
+        run: bash scripts/rust-lane.sh summary loom "$MODULE"
       - name: Obligation receipt and credit
         if: always()
         run: >-
           python3 scripts/verify-receipts.py credit --job loom
-          --module "${{ matrix.module }}" --evidence evidence
+          --module "$MODULE" --evidence evidence
       - name: Evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -1244,10 +1245,11 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository
         env:
           RESULTS: ${{ toJSON(needs) }}
+          EVENT_ACTION: ${{ github.event.action }}
         run: >-
           python3 scripts/verify-receipts.py gate
-          --event "${{ github.event_name }}"
-          --action "${{ github.event.action }}"
+          --event "$GITHUB_EVENT_NAME"
+          --action "$EVENT_ACTION"
       - name: This attempt's lane evidence
         if: >-
           always() && (github.event_name != 'pull_request' ||
@@ -1263,10 +1265,10 @@ jobs:
           github.event.pull_request.head.repo.full_name == github.repository)
         run: >-
           python3 scripts/verify-receipts.py aggregate --lanes lanes
-          --event "${{ github.event_name }}"
-          --revision "${{ github.sha }}"
-          --run "${{ github.run_id }}"
-          --run-attempt "${{ github.run_attempt }}"
+          --event "$GITHUB_EVENT_NAME"
+          --revision "$GITHUB_SHA"
+          --run "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: The Verus trust inventory matches its sources
         if: >-
           always() && (github.event_name != 'pull_request' ||
