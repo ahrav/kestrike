@@ -548,8 +548,11 @@ class PrePushChecks(unittest.TestCase):
         for name in owning[0]:
             with self.subTest(readiness_hashes=name):
                 self.assertIn(hook.GAMEDAY_TEST[0], hook.checks_for([f"scripts/{name}"], set(), set()))
-                self.assertNotIn(hook.GAMEDAY_TEST[0],
-                                 hook.checks_for([f"scripts/{name}"], set(), set(), gameday_held=False))
+                unheld = hook.checks_for([f"scripts/{name}"], set(), set(), gameday_held=False)
+                if f"scripts/{name}" in hook.GAMEDAY_OWN:
+                    self.assertIn(hook.GAMEDAY_TEST[0], unheld)
+                else:
+                    self.assertNotIn(hook.GAMEDAY_TEST[0], unheld)
 
     def test_a_game_day_input_push_runs_the_isolated_self_test_and_its_failure_blocks(self):
         gameday = "test-gameday-judge.py"

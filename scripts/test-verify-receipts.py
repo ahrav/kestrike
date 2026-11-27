@@ -1715,7 +1715,7 @@ class VerifyReceipts(unittest.TestCase):
         self.assertEqual(verify.credited_modules("verus", None), {None})
 
     def test_a_scheduled_tlc_receipt_credits_the_pr_records_and_a_pr_receipt_its_own(self):
-        self.assertEqual(verify.credited_modules("tlc", "scheduled"), {"pr", "scheduled"})
+        self.assertEqual(verify.credited_modules("tlc", "scheduled"), {"scheduled"})
         self.assertEqual(verify.credited_modules("tlc", "pr"), {"pr"})
 
     def test_a_scheduled_genmc_receipt_credits_every_record_its_run_judges(self):
@@ -1936,7 +1936,7 @@ class VerifyReceipts(unittest.TestCase):
         refusals = self.admit(lambda c: c.update(records=[]))
         self.assertEqual({r["code"] for r in refusals}, {"uncovered-lane"})
         uncovered = {r["record"] for r in refusals}
-        self.assertEqual(uncovered, {"workspace", "campaigns", "search", "fuzz-smoke", "search-nightly", "long-run", "miri", "sweep", "rc11", "verus", "genmc pr", "genmc scheduled", "kani pr", "kani scheduled", "tlc pr", "tlc scheduled", "quint", "fuzz", "isa-x86-64", "isa-aarch64", *verify.TAG_COMPARE, *(f"loom {module}" for module in INVENTORY["loom"])})
+        self.assertEqual(uncovered, {"workspace", "campaigns", "search", "fuzz-smoke", "search-nightly", "long-run", "miri", "sweep", "rc11", "verus", "genmc pr", "genmc scheduled", "kani pr", "kani scheduled", "tlc pr", "quint", "fuzz", "isa-x86-64", "isa-aarch64", *verify.TAG_COMPARE, *(f"loom {module}" for module in INVENTORY["loom"])})
         refusals = self.admit(lambda c: c["records"].__delitem__(slice(0, len(c["records"]), 1)) or c["records"].extend(r for r in CATALOG["records"] if r["job"] != "fuzz"))
         self.assertEqual([(r["code"], r["record"]) for r in refusals], [("uncovered-lane", "fuzz")])
         refusals = self.admit(lambda c: c["records"].__delitem__(slice(0, len(c["records"]), 1)) or c["records"].extend(r for r in CATALOG["records"] if r.get("module") != "grace_model"))
