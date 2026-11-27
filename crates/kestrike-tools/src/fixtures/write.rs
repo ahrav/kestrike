@@ -1,8 +1,10 @@
 //! [`write`] reads a writer's command line and writes its traces as the module comment of `fixtures` states.
 //!
-//! The output is all or nothing for each trace up to the first failure: the traces before it are complete,
-//! and the failing one keeps Quint's own bytes when Quint wrote them. A directory or an entry the writer
-//! cannot remove at a trace's path ends the run before Quint starts for that trace.
+//! The output is all or nothing for each trace up to the first failure: the traces before it are complete.
+//! A failure after the trace's path is cleared and before Quint writes leaves no entry there. Once Quint has
+//! written, the path holds Quint's raw trace until the whole rewrite is renamed over it, so a failure of the
+//! state count, the `#meta` rules or the rewrite leaves Quint's bytes there. A directory or an entry the
+//! writer cannot remove at a trace's path ends the run before Quint starts, and the entry stays.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
