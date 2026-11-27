@@ -38,7 +38,7 @@ fn values_follow_an_equals_sign_a_prefix_or_the_next_argument_and_the_last_wins(
 #[test]
 fn each_refusal_carries_the_message_argparse_prints() {
     let required = "the following arguments are required: --quint, --output";
-    let cases: [(&[&str], &str); 15] = [
+    let cases: [(&[&str], &str); 18] = [
         (&[], required),
         (&["x", "--", "y"], required),
         (
@@ -80,6 +80,18 @@ fn each_refusal_carries_the_message_argparse_prints() {
             "ambiguous option: --=x could match --help, --quint, --output",
         ),
         (
+            &["-h", "--=x"],
+            "ambiguous option: --=x could match --help, --quint, --output",
+        ),
+        (
+            &["--help", "--=x"],
+            "ambiguous option: --=x could match --help, --quint, --output",
+        ),
+        (
+            &["--quint", "q", "-h", "--="],
+            "ambiguous option: --= could match --help, --quint, --output",
+        ),
+        (
             &["-h'\"x"],
             "argument -h/--help: ignored explicit argument '\\'\"x'",
         ),
@@ -105,12 +117,19 @@ fn each_refusal_carries_the_message_argparse_prints() {
     );
 }
 
+/// Help precedes each error the reader would find behind it while it reads values: a missing value
+/// (`-h --quint`) and text attached to a later help name (`-h --help=x`, `-h -hx`). An ambiguous prefix
+/// behind help is refused instead, since every argument is classified before the first is read; the rows
+/// `-h --=x` of the refusal test assert that.
 #[test]
 fn help_wins_once_the_reader_reaches_it() {
     for args in [
         &["-hh"][..],
         &["x", "-h"],
         &["--quint", "a", "-h", "--quint"],
+        &["-h", "--quint"],
+        &["-h", "--help=x"],
+        &["-h", "-hx"],
         &["--he"],
     ] {
         let Parsed::Help(text) = read(args) else {
