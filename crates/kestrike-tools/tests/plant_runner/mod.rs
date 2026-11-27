@@ -10,7 +10,12 @@
 
 mod git_call;
 mod inputs;
+mod judgment;
+mod judgment_rows;
 mod options;
+mod outputs;
 mod plants;
 mod repository;
+mod scores;
+mod seeds;
 mod store;

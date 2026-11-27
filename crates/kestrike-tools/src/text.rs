@@ -7,6 +7,9 @@
 //! outside a UTF-8 sequence becomes the surrogate U+DC80 to U+DCFF, as Python's `surrogateescape` decodes
 //! it, and [`Text::to_os`] turns that surrogate back into the byte.
 //!
+//! A code point's encoding begins with a byte that begins no other code point's, so a match of one text's
+//! bytes inside another's starts and ends at code points.
+//!
 //! The whitespace rules are Python's: [`is_space`] holds for the characters `str.isspace()` takes, and
 //! [`Text::strip`], [`Text::split`] and [`Text::splitlines`] apply them as `str.strip()`, `str.split()` and
 //! `str.splitlines()` do with no argument.
@@ -302,6 +305,36 @@ impl Text {
             joined.push_text(item);
         }
         joined
+    }
+
+    /// `starts_with` holds when the code points of `prefix` begin the text, as `str.startswith` holds.
+    pub fn starts_with(&self, prefix: &Self) -> bool {
+        self.0.starts_with(&prefix.0)
+    }
+
+    /// `ends_with` holds when the code points of `suffix` end the text, as `str.endswith` holds.
+    pub fn ends_with(&self, suffix: &Self) -> bool {
+        self.0.ends_with(&suffix.0)
+    }
+
+    /// `replace` writes `to` in place of each occurrence of `from`, a nonempty text, from the left without
+    /// overlaps, as `str.replace` does; an empty `from` leaves the text as it is.
+    pub fn replace(&self, from: &Self, to: &Self) -> Self {
+        if from.0.is_empty() {
+            return self.clone();
+        }
+        let mut replaced = Vec::with_capacity(self.0.len());
+        let mut rest = self.0.as_slice();
+        while let Some(at) = rest
+            .windows(from.0.len())
+            .position(|window| window == from.0)
+        {
+            replaced.extend_from_slice(&rest[..at]);
+            replaced.extend_from_slice(&to.0);
+            rest = &rest[at + from.0.len()..];
+        }
+        replaced.extend_from_slice(rest);
+        Self(replaced)
     }
 
     /// `repr` writes the text between single quotes, or between double quotes when it holds `'` and no `"`;

@@ -3,8 +3,8 @@
 //! Python converts an integer to and from text by default; a longer integer token is refused.
 
 use crate::json::{
-    Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, UniqueError, Value, dump, indented, parse,
-    parse_unique, text,
+    Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, UniqueError, Value, dump, indented,
+    indented_in_order, parse, parse_unique, text,
 };
 
 fn round_trip(text: &str) -> String {
@@ -284,4 +284,83 @@ fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
         Ok(r#"{"a":2}"#.to_owned()),
         "the present read keeps the last value"
     );
+}
+
+fn integer(text: &str) -> Integer {
+    match parse(text) {
+        Ok(Value::Integer(integer)) => integer,
+        other => panic!("{text} reads as {other:?}"),
+    }
+}
+
+/// Sums and differences carry and borrow across every digit, change sign through zero, and refuse a
+/// result of more than `MAX_INTEGER_DIGITS` digits, where Python 3.9.25's `str` of the integer raises.
+#[test]
+fn integers_add_and_step_down_by_one() {
+    let rows: &[(&str, &str, &str)] = &[
+        ("0", "0", "0"),
+        ("999", "1", "1000"),
+        ("1000", "-1", "999"),
+        ("-1000", "1", "-999"),
+        ("5", "-7", "-2"),
+        ("-5", "-7", "-12"),
+        ("7", "-7", "0"),
+        (
+            "123456789012345678901234567890",
+            "987654321098765432109876543210",
+            "1111111110111111111011111111100",
+        ),
+    ];
+    for (left, right, sum) in rows {
+        assert_eq!(
+            integer(left).checked_add(&integer(right)),
+            Some(integer(sum)),
+            "{left} + {right}"
+        );
+        assert_eq!(
+            integer(right).checked_add(&integer(left)),
+            Some(integer(sum)),
+            "{right} + {left}"
+        );
+    }
+    for (value, below) in [
+        ("1", "0"),
+        ("0", "-1"),
+        ("-1", "-2"),
+        ("1000", "999"),
+        ("100000", "99999"),
+    ] {
+        assert_eq!(
+            integer(value).minus_one(),
+            Some(integer(below)),
+            "{value} - 1"
+        );
+    }
+    let nines = "9".repeat(MAX_INTEGER_DIGITS);
+    assert_eq!(integer(&nines).checked_add(&Integer::from(1u64)), None);
+    assert_eq!(integer(&format!("-{nines}")).minus_one(), None);
+    assert_eq!(
+        integer(&nines)
+            .checked_add(&integer("-1"))
+            .map(|n| n.to_string().len()),
+        Some(MAX_INTEGER_DIGITS)
+    );
+    let items = [integer("2"), integer("40"), integer("0")];
+    assert_eq!(Integer::sum(&items), Some(integer("42")));
+    assert_eq!(Integer::sum(&[]), Some(integer("0")));
+    assert_eq!(
+        Integer::sum(&[integer(&nines), integer("1"), integer("-1")]),
+        None
+    );
+}
+
+/// `indented_in_order` keeps document order and writes non-finite floats, as
+/// `json.dumps(value, indent=2)` does.
+#[test]
+fn indented_in_order_keeps_members_in_document_order() {
+    let value = parse(r#"{"b": [1, {}], "a": {"y": [], "x": NaN}, "c": "\u00e9", "d": Infinity}"#)
+        .expect("JSON");
+    let python = "{\n  \"b\": [\n    1,\n    {}\n  ],\n  \"a\": {\n    \"y\": [],\n    \"x\": NaN\n  },\n  \
+                  \"c\": \"\\u00e9\",\n  \"d\": Infinity\n}";
+    assert_eq!(indented_in_order(&value), python);
 }

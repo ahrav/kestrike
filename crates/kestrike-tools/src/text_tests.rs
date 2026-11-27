@@ -273,3 +273,31 @@ fn join_separates_each_two_items() {
         assert_eq!(Text::join(separator, items).repr(), *expected, "{items:?}");
     }
 }
+
+/// `starts_with`, `ends_with` and `replace` match whole code points, a lone surrogate included, as
+/// `str.startswith`, `str.endswith` and `str.replace` do.
+#[test]
+fn texts_match_and_replace_by_code_points() {
+    let surrogate = text(&[0x61, 0xdc80, 0x62]);
+    assert!(surrogate.starts_with(&text(&[0x61, 0xdc80])));
+    assert!(surrogate.ends_with(&text(&[0xdc80, 0x62])));
+    assert!(!surrogate.starts_with(&text(&[0x61, 0xdc81])));
+    assert!(Text::from("ab").starts_with(&Text::new()));
+    let rows: &[(&str, &str, &str, &str)] = &[
+        ("/w/a /w/b", "/w", "<work>", "<work>/a <work>/b"),
+        ("aaa", "aa", "b", "ba"),
+        ("abc", "x", "y", "abc"),
+        ("abc", "", "y", "abc"),
+        ("é/w", "/w", "!", "é!"),
+    ];
+    for (whole, from, to, replaced) in rows {
+        let got = Text::from(*whole).replace(&Text::from(*from), &Text::from(*to));
+        assert_eq!(
+            got,
+            Text::from(*replaced),
+            "{whole:?}.replace({from:?}, {to:?})"
+        );
+    }
+    let replaced = surrogate.replace(&text(&[0xdc80]), &Text::from("-"));
+    assert_eq!(replaced, Text::from("a-b"));
+}

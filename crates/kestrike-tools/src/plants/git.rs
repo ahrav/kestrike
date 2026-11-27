@@ -115,7 +115,7 @@ fn code(status: ExitStatus) -> i32 {
 }
 
 /// `newlines` reads `\r\n` and `\r` as `\n`.
-fn newlines(text: String) -> String {
+pub(crate) fn newlines(text: String) -> String {
     if text.contains('\r') {
         text.replace("\r\n", "\n").replace('\r', "\n")
     } else {
