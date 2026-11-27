@@ -7,7 +7,7 @@
 
 use std::ffi::OsString;
 
-use crate::args::{Given, Opt, Reader, any};
+use crate::args::{Given, Kind, Opt, Reader, any};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Options {
@@ -20,24 +20,21 @@ pub type Parsed = crate::args::Parsed<Options>;
 const OPTIONS: [Opt; 3] = [
     Opt {
         names: &["-h", "--help"],
-        takes_value: false,
-        required: false,
-        prefix: true,
-        check: any,
+        kind: Kind::Help,
     },
     Opt {
         names: &["--quint"],
-        takes_value: true,
-        required: true,
-        prefix: true,
-        check: any,
+        kind: Kind::Value {
+            required: true,
+            check: any,
+        },
     },
     Opt {
         names: &["--output"],
-        takes_value: true,
-        required: true,
-        prefix: true,
-        check: any,
+        kind: Kind::Value {
+            required: true,
+            check: any,
+        },
     },
 ];
 
@@ -47,7 +44,7 @@ pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Parsed {
         "{usage}\n\n{about}\n\noptional arguments:\n  -h, --help       show this help message and exit\n  \
          --quint QUINT\n  --output OUTPUT\n"
     );
-    let reader = Reader::new(tool, &usage, &help, &OPTIONS);
+    let reader = Reader::new(tool, &usage, &help, true, &OPTIONS);
     let value = |given: &Given| match given {
         Given::Value(value) => Some(value.clone()),
         Given::Absent | Given::Empty => None,

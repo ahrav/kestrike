@@ -12,14 +12,17 @@ pub fn any(_: &Text) -> Result<(), String> {
     Ok(())
 }
 
-/// `parse` returns [`Parsed::Help`] when it accepts an option with `takes_value: false`.
 #[derive(Clone, Copy, Debug)]
 pub struct Opt {
     pub names: &'static [&'static str],
-    pub takes_value: bool,
-    pub required: bool,
-    pub prefix: bool,
-    pub check: Check,
+    pub kind: Kind,
+}
+
+/// `parse` returns [`Parsed::Help`] when it accepts a `Kind::Help` option.
+#[derive(Clone, Copy, Debug)]
+pub enum Kind {
+    Help,
+    Value { required: bool, check: Check },
 }
 
 impl Opt {
@@ -75,6 +78,7 @@ pub struct Reader<'a> {
     tool: &'a str,
     usage: &'a str,
     help: &'a str,
+    abbrev: bool,
     options: &'a [Opt],
 }
 
@@ -86,7 +90,7 @@ struct Match<'a> {
 }
 
 #[derive(Clone, Copy)]
-enum Kind<'a> {
+enum Arg<'a> {
     Value,
     Unknown,
     Option(Match<'a>),
@@ -101,9 +105,15 @@ impl<'t> Reader<'t> {
     /// # Panics
     ///
     /// `new` panics on any violation of these requirements: each option name starts with `-`, spans at least
-    /// two bytes, and occurs exactly once; the table holds exactly one help row, and it is optional;
+    /// two bytes, and occurs exactly once; the table holds exactly one `Kind::Help` row;
     /// `-h` on the help row is the only permitted short name.
-    pub fn new(tool: &'t str, usage: &'t str, help: &'t str, options: &'t [Opt]) -> Self {
+    pub fn new(
+        tool: &'t str,
+        usage: &'t str,
+        help: &'t str,
+        abbrev: bool,
+        options: &'t [Opt],
+    ) -> Self {
         let names: Vec<&str> = options
             .iter()
             .flat_map(|option| option.names.iter().copied())
@@ -120,17 +130,14 @@ impl<'t> Reader<'t> {
         }
         let helps: Vec<&Opt> = options
             .iter()
-            .filter(|option| !option.takes_value)
+            .filter(|option| matches!(option.kind, Kind::Help))
             .collect();
-        assert!(
-            matches!(helps.as_slice(), [help] if !help.required),
-            "the table holds one optional help row"
-        );
+        assert!(helps.len() == 1, "the table holds one help row");
         for option in options {
             for name in option.names {
                 let short = !name.starts_with("--");
                 assert!(
-                    !short || (*name == "-h" && !option.takes_value),
+                    !short || (*name == "-h" && matches!(option.kind, Kind::Help)),
                     "the help row holds the one short name, -h; {name} breaks it"
                 );
             }
@@ -139,6 +146,7 @@ impl<'t> Reader<'t> {
             tool,
             usage,
             help,
+            abbrev,
             options,
         }
     }
@@ -152,8 +160,8 @@ impl<'t> Reader<'t> {
 
     /// `parse` classifies every argument before it reads any value, so a classification error takes
     /// precedence over help and value errors. A value-taking option consumes the next argument only when it
-    /// lacks an explicit value and the next argument has kind `Kind::Value`. `parse` records `b"--"` as
-    /// `Given::Empty` and calls `option.check` for every other supplied value; a later occurrence replaces
+    /// lacks an explicit value and the next argument has kind `Arg::Value`. `parse` records `b"--"` as
+    /// `Given::Empty` and calls the option's `check` for every other supplied value; a later occurrence replaces
     /// an earlier one. `parse` returns `Parsed::Help` immediately upon accepting help. Missing required
     /// options take precedence over leftover arguments.
     pub fn parse(&self, args: &[OsString]) -> Parsed {
@@ -162,10 +170,10 @@ impl<'t> Reader<'t> {
         let mut ended = false;
         for arg in &args {
             kinds.push(if ended {
-                Kind::Value
+                Arg::Value
             } else if *arg == b"--" {
                 ended = true;
-                Kind::Unknown
+                Arg::Unknown
             } else {
                 match self.classify(arg) {
                     Ok(kind) => kind,
@@ -177,14 +185,14 @@ impl<'t> Reader<'t> {
         let mut extras = Vec::new();
         let mut at = 0;
         while at < args.len() {
-            let Kind::Option(found) = kinds[at] else {
+            let Arg::Option(found) = kinds[at] else {
                 extras.push(args[at]);
                 at += 1;
                 continue;
             };
             let option = &self.options[found.option];
-            let value = match (option.takes_value, found.explicit) {
-                (false, Some(explicit)) => match help_explicit(found.string, explicit) {
+            let value = match (option.kind, found.explicit) {
+                (Kind::Help, Some(explicit)) => match help_explicit(found.string, explicit) {
                     Ok(()) => None,
                     Err(HelpRefusal::Ignored(rest)) => {
                         return self.refuse(format!(
@@ -202,10 +210,10 @@ impl<'t> Reader<'t> {
                         return Parsed::Refused { code: 1, text };
                     }
                 },
-                (false, None) => None,
-                (true, Some(explicit)) => Some(explicit),
-                (true, None) => match kinds.get(at + 1) {
-                    Some(Kind::Value) => {
+                (Kind::Help, None) => None,
+                (Kind::Value { .. }, Some(explicit)) => Some(explicit),
+                (Kind::Value { .. }, None) => match kinds.get(at + 1) {
+                    Some(Arg::Value) => {
                         at += 1;
                         Some(args[at])
                     }
@@ -223,7 +231,10 @@ impl<'t> Reader<'t> {
                 Given::Empty
             } else {
                 let value = OsStr::from_bytes(value);
-                if let Err(message) = (option.check)(&Text::from_os(value)) {
+                let Kind::Value { check, .. } = option.kind else {
+                    unreachable!("a help option returns before it reaches a value");
+                };
+                if let Err(message) = check(&Text::from_os(value)) {
                     return self.refuse(format!("argument {}: {message}", option.name()));
                 }
                 Given::Value(value.to_owned())
@@ -233,7 +244,10 @@ impl<'t> Reader<'t> {
             .options
             .iter()
             .zip(&values)
-            .filter(|(option, given)| option.required && **given == Given::Absent)
+            .filter(|(option, given)| {
+                matches!(option.kind, Kind::Value { required: true, .. })
+                    && **given == Given::Absent
+            })
             .map(|(option, _)| option.name())
             .collect();
         if !missing.is_empty() {
@@ -263,24 +277,24 @@ impl<'t> Reader<'t> {
             .map(|(option, _)| option)
     }
 
-    fn classify<'a>(&self, arg: &'a [u8]) -> Result<Kind<'a>, String> {
+    fn classify<'a>(&self, arg: &'a [u8]) -> Result<Arg<'a>, String> {
         if arg.first() != Some(&b'-') {
-            return Ok(Kind::Value);
+            return Ok(Arg::Value);
         }
         if let Some(option) = self.exact(arg) {
-            return Ok(Kind::Option(Match {
+            return Ok(Arg::Option(Match {
                 option,
                 string: arg,
                 explicit: None,
             }));
         }
         if arg.len() == 1 {
-            return Ok(Kind::Value);
+            return Ok(Arg::Value);
         }
         if let Some(equals) = arg.iter().position(|&byte| byte == b'=') {
             let (string, explicit) = (&arg[..equals], &arg[equals + 1..]);
             if let Some(option) = self.exact(string) {
-                return Ok(Kind::Option(Match {
+                return Ok(Arg::Option(Match {
                     option,
                     string,
                     explicit: Some(explicit),
@@ -289,7 +303,7 @@ impl<'t> Reader<'t> {
         }
         match self.prefix_matches(arg).as_slice() {
             [] => {}
-            [found] => return Ok(Kind::Option(*found)),
+            [found] => return Ok(Arg::Option(*found)),
             matches => {
                 let names: Vec<String> = matches.iter().map(|found| shown(found.string)).collect();
                 return Err(format!(
@@ -300,9 +314,9 @@ impl<'t> Reader<'t> {
             }
         }
         if looks_negative(arg) || arg.contains(&b' ') {
-            return Ok(Kind::Value);
+            return Ok(Arg::Value);
         }
-        Ok(Kind::Unknown)
+        Ok(Arg::Unknown)
     }
 
     fn prefix_matches<'a>(&self, arg: &'a [u8]) -> Vec<Match<'a>> {
@@ -313,7 +327,7 @@ impl<'t> Reader<'t> {
                 None => (arg, None),
             };
             for (option, string) in self.strings() {
-                if self.options[option].prefix && string.starts_with(prefix) {
+                if self.abbrev && string.starts_with(prefix) {
                     matches.push(Match {
                         option,
                         string,

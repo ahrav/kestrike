@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use crate::args::{Given, Opt, Parsed, Reader, any};
+use crate::args::{Given, Kind, Opt, Parsed, Reader, any};
 use crate::text::Text;
 
 fn given(value: &Text) -> Result<(), String> {
@@ -26,20 +26,17 @@ fn positive(value: &Text) -> Result<(), String> {
 const fn value(name: &'static [&'static str], check: fn(&Text) -> Result<(), String>) -> Opt {
     Opt {
         names: name,
-        takes_value: true,
-        required: false,
-        prefix: false,
-        check,
+        kind: Kind::Value {
+            required: false,
+            check,
+        },
     }
 }
 
 const OPTIONS: [Opt; 8] = [
     Opt {
         names: &["-h", "--help"],
-        takes_value: false,
-        required: false,
-        prefix: false,
-        check: any,
+        kind: Kind::Help,
     },
     value(&["--base"], given),
     value(&["--head"], given),
@@ -51,7 +48,7 @@ const OPTIONS: [Opt; 8] = [
 ];
 
 fn read(args: &[&str]) -> Parsed {
-    let reader = Reader::new("tool", "usage: tool [options]", "help\n", &OPTIONS);
+    let reader = Reader::new("tool", "usage: tool [options]", "help\n", false, &OPTIONS);
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     reader.parse(&args)
 }
