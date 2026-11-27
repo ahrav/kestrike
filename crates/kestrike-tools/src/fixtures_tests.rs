@@ -1,8 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -18,10 +19,25 @@ const GATE: Model = Model {
     name: "gate",
 };
 
+/// Writes the executable stand-in at `path` through a child process, the one process that holds the file open
+/// for writing. `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and a child
+/// that another test thread forks inherits every descriptor of this process until its own `execve`. No
+/// descriptor of the stand-in is open here, so the stand-in starts whatever the other threads fork.
 fn script(path: &Path, text: &str) {
-    fs::write(path, text).expect("the stand-in is written");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .expect("the stand-in is executable");
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the stand-in's writer starts");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's standard input is a pipe")
+        .write_all(text.as_bytes())
+        .expect("the stand-in's text reaches the writer");
+    let status = writer.wait().expect("the stand-in's writer is reaped");
+    assert!(status.success(), "the stand-in is written: {status}");
 }
 
 fn checkout() -> PathBuf {
