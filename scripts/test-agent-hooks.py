@@ -545,6 +545,8 @@ class PrePushChecks(unittest.TestCase):
                   and [getattr(target, "id", None) for target in node.targets] == ["OWNING"]]
         self.assertEqual(len(owning), 1)
         self.assertGreaterEqual(len(owning[0]), 9)
+        self.assertEqual({f"scripts/{name}" for name in owning[0]} & set(hook.GAMEDAY_OWN),
+                         {"scripts/gameday-judge.py"})
         for name in owning[0]:
             with self.subTest(readiness_hashes=name):
                 self.assertIn(hook.GAMEDAY_TEST[0], hook.checks_for([f"scripts/{name}"], set(), set()))
