@@ -1,7 +1,5 @@
 use crate::production_text::{Closer, analyzed, blanked, closing, item_end, spliced};
 
-/// Each row's source has the production text beside it, recorded from the script's reading with each
-/// blanked character written as one space a byte.
 #[rustfmt::skip]
 const PRODUCTION_ROWS: &[(&str, &str, &str)] = &[
     ("an empty text", "", ""),
@@ -40,6 +38,7 @@ const CUT_ROWS: &[(&str, &str, &[usize])] = &[
     ("a union named ifx", "m!(#[cfg(test)] union ifx { a: u8 });\n", &[]),
     ("a union named ab", "m!(#[cfg(test)] union ab { a: u8 });\n", &[]),
     ("a test-only element without an end", "fn f() {}\n#[cfg(test)]\nconst A: u8 = 1\n", &[]),
+    ("a test-only element inside a test-only module", "#[cfg(test)]\nmod probes {\n    fn extra<A, #[cfg(test)] B>(a: A) -> A {\n        a\n    }\n}\n", &[]),
 ];
 
 #[test]

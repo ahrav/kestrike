@@ -94,8 +94,9 @@ pub fn word_edges(text: &str, start: usize, end: usize) -> bool {
 /// The first match of `regex` in `text` at or after `at` whose word edges pass [`word_edges`]. A candidate
 /// that fails resumes the search one code point after its start, as Python tries each start in turn. Only
 /// the `regex` crate's preferred match at each start is checked, so the result is Python's when, at each
-/// start, that match failing its edges means every match there fails them: each edge `\b` stands beside a
-/// fixed word or a greedy run of word characters.
+/// start, that match failing its edges means every match there fails them. Alternatives ending at
+/// different offsets break that condition when the preferred match fails an edge check and another passes
+/// both. For example, in `\b(?:cat|cater)\b` on `cater `, the rejected `cat` leaves `cater` untried.
 pub fn captures_bounded<'h>(regex: &Regex, text: &'h str, mut at: usize) -> Option<Captures<'h>> {
     loop {
         let found = regex.captures_at(text, at)?;
