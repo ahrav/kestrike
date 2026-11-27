@@ -38,7 +38,9 @@ to and hands the release both devices, so its violation is a restore write
 outside the record. Each binder invariant that a passing case defines in its
 instance module has a mutant case that must violate it. The generator test
 checks that the grace, lookup, reclaim and register trace generators, given a
-relative `--output`, write one trace per committed fixture under it.
+relative `--output`, write one trace per committed fixture under it. The replayed-run test checks that each
+run of the escrow, gate and marklog checkers is the recipe its committed replay trace records, and for escrow
+the trace's volume.
 """
 
 import dataclasses
@@ -872,6 +874,24 @@ def standbys_fixtures():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+class ReplayedRuns(unittest.TestCase):
+    def test_each_checked_run_is_the_recipe_of_its_committed_replay_trace(self):
+        storage = ROOT / "crates/kestrike/src/storage"
+        for model, checks, fixtures in (("escrow", check.escrow_checks, "builder_tests/escrow_replay_fixtures"),
+                                        ("gate", check.gate_checks, "volume/gate_replay_fixtures"),
+                                        ("marklog", check.marklog_checks, "marklog_replay_fixtures")):
+            self.assertTrue(checks.RUNS, model)
+            for name, row in checks.RUNS.items():
+                with self.subTest(run=name):
+                    prefix = f"{model}-run-"
+                    self.assertTrue(name.startswith(prefix))
+                    trace = storage / fixtures / (name[len(prefix):].replace("-", "_") + ".itf.json")
+                    meta = json.loads(trace.read_text())["#meta"][model]
+                    self.assertEqual(meta["recipe"], row[0])
+                    if model == "escrow":
+                        self.assertEqual(meta["volume"], int(row[2]))
 
 
 class StandbysGenerator(unittest.TestCase):
