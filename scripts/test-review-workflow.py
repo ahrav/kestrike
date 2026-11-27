@@ -129,7 +129,7 @@ class ReviewWorkflow(unittest.TestCase):
              if step[i].strip() and len(step[i]) - len(step[i].lstrip()) <= 8),
             len(step),
         )
-        return [line for line in step[start + 1:end] if re.match(r" {10}\S", line)]
+        return [line for line in step[start + 1:end] if re.match(r" {10}[^\s#]", line)]
 
     def job_env(self):
         return self.job_mapping("env:")
