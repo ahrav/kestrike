@@ -4,10 +4,10 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, DirBuilder};
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::io::{self, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kestrike_tools::json::{self, Object, Value};
@@ -302,10 +302,25 @@ echo "stand-in: writing $name"
 cat "$replies/$name.reply" > "$out"
 "#;
 
+/// Writes the executable script at `path` through a child process, the one process that holds the file open
+/// for writing. `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and a child
+/// that another test thread forks inherits every descriptor of this process until its own `execve`. No
+/// descriptor of the script is open here, so the script starts whatever the other threads fork.
 fn write_script(path: &Path, text: &str) {
-    fs::write(path, text).expect("the script is written");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .expect("the script is made executable");
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the script's writer starts");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's standard input is a pipe")
+        .write_all(text.as_bytes())
+        .expect("the script's text reaches the writer");
+    let status = writer.wait().expect("the script's writer is reaped");
+    assert!(status.success(), "the script is written: {status}");
 }
 
 fn stand_in(
@@ -966,7 +981,7 @@ fn a_read_only_standard_stream_exits_120() {
         .arg(top())
         .args(["gate_fixtures", "-h"])
         .stdout(read_only())
-        .stderr(std::process::Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("the binary starts");
     assert_eq!(help.code(), Some(120));

@@ -1,3 +1,7 @@
+//! Each expected text of a round trip is the text of `json.dumps(value, separators=(",", ":"))` for the value
+//! the input holds. The reader and [`Integer`] hold an integer of at most 4,300 digits, the length up to which
+//! Python converts an integer to and from text by default; a longer integer token is refused.
+
 use crate::json::{Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, Value, dump, indented, parse};
 
 fn round_trip(text: &str) -> String {
