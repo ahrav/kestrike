@@ -50,3 +50,30 @@ fn roles_reach_lists_each_unmet_condition_before_the_stop() {
         assert_eq!(found, expected, "roles_reach of {label}");
     }
 }
+
+/// The judge's self-test case of the same name: the held roles meet every condition, and a shard's
+/// standby moved off the target with an unhealthy standby host gives two unmet conditions.
+#[test]
+fn the_pre_stop_half_of_the_reach_reads_the_roles_and_the_package_alone() {
+    let package = held("package.json");
+    let roles = held("injection/roles.json");
+    assert!(roles_reach(object(&roles), object(&package)).is_empty());
+    let changed = patched(
+        &roles,
+        &[
+            ("shards/s4/standby", Some(r#""h3""#)),
+            ("standbys/h3/host_report", Some(r#""unhealthy""#)),
+        ],
+    );
+    let found: Vec<String> = roles_reach(object(&changed), object(&package))
+        .iter()
+        .map(Text::to_string)
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "the target stands by for 0 shards, fewer than 1",
+            "standby host h3 of s2 reads running and unhealthy"
+        ]
+    );
+}

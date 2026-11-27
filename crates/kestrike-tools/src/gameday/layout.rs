@@ -1,6 +1,6 @@
 //! The schemas of the package and of each file of the evidence layout, in the layout's order.
 
-use super::constants::{CAUSES, OUTCOMES, PACKAGE};
+use super::constants::{CAUSES, KINDS, OUTCOMES, PACKAGE};
 use super::schema::{Each, Scalar, Schema};
 
 const fn s(scalar: Scalar) -> Schema {
@@ -11,15 +11,19 @@ const fn maybe(scalar: Scalar) -> Schema {
     Schema::nullable(scalar)
 }
 
-pub const WINDOW: Schema = Schema::Object(&[("start", s(Scalar::Time)), ("end", s(Scalar::Time))]);
+pub(super) const WINDOW: Schema =
+    Schema::Object(&[("start", s(Scalar::Time)), ("end", s(Scalar::Time))]);
 
-pub const VERSION: Schema = Schema::Object(&[
+/// The fields of a shard's version, which a record line holds beside its time.
+pub const VERSION_FIELDS: [(&str, Schema); 5] = [
     ("owner", s(Scalar::Host)),
     ("standby", maybe(Scalar::Host)),
     ("generation", s(Scalar::Generation)),
     ("volume", s(Scalar::Name)),
     ("attempts", s(Scalar::Attempts)),
-]);
+];
+
+pub const VERSION: Schema = Schema::Object(&VERSION_FIELDS);
 
 pub const REQUEST: Schema = Schema::Object(&[
     ("instance", s(Scalar::Name)),
@@ -28,9 +32,9 @@ pub const REQUEST: Schema = Schema::Object(&[
 ]);
 
 /// The package without its optional `note`.
-pub const PACKAGE_SCHEMA: Schema = Schema::Object(&[
+pub(super) const PACKAGE_SCHEMA: Schema = Schema::Object(&[
     ("id", Schema::Member(&[PACKAGE])),
-    ("kind", Schema::Member(&["staging", "simulation"])),
+    ("kind", Schema::Member(&[KINDS[0].0, KINDS[1].0])),
     ("revision", s(Scalar::Commit)),
     ("date", s(Scalar::Date)),
     ("clock", s(Scalar::Name)),
@@ -236,3 +240,7 @@ pub fn layout(rel: &str) -> Option<(&'static Schema, bool)> {
         .find(|(name, _, _)| *name == rel)
         .map(|(_, schema, optional)| (schema, *optional))
 }
+
+#[cfg(test)]
+#[path = "layout_tests.rs"]
+mod tests;

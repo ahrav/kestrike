@@ -9,6 +9,7 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use super::{ReadError, read_file};
+use crate::gameday::constants::FILE_LIMIT;
 use crate::paths::tests::Scratch;
 use crate::text::Text;
 
@@ -27,6 +28,8 @@ type Row = (
     Result<&'static str, &'static str>,
 );
 
+/// `/proc/self/mem` is a regular file of size 0 whose read at offset 0 fails, so it reaches the read's
+/// refusal with and without the sync; the sync call itself has no effect a unit test observes.
 #[test]
 fn read_file_reads_a_regular_file_and_refuses_every_other_input() {
     let scratch = Scratch::new("gameday-read");
@@ -51,6 +54,8 @@ fn read_file_reads_a_regular_file_and_refuses_every_other_input() {
     (r#"a"#, 4, true, false, Ok(r#"b'abcd'"#)),
     (r#"a"#, 4, false, true, Ok(r#"b'abcd'"#)),
     (r#"absent"#, 4, true, false, Err(r#"x cannot be read: No such file or directory"#)),
+        (r#"/proc/self/mem"#, 4, false, false, Err(r#"x cannot be read: Input/output error"#)),
+        (r#"/proc/self/mem"#, 4, false, true, Err(r#"x cannot be read and synced: Input/output error"#)),
     ];
     for &(name, limit, at, sync, expected) in rows {
         let path = if name.starts_with('/') || at {
@@ -107,4 +112,29 @@ fn read_file_reads_a_regular_file_and_refuses_every_other_input() {
         false,
     );
     assert_eq!(nul, Err(ReadError::Nul));
+}
+
+/// The judge's self-test case of the same name: a file past the limit is refused by its size, a file that
+/// reads longer than its size (a file of `/proc`, whose size reads 0) is refused before the sync, and a
+/// regular file within the limit is read and synced.
+#[test]
+fn a_file_past_the_limit_is_refused_before_it_is_read_and_one_that_grows_before_it_is_synced() {
+    let scratch = Scratch::new("gameday-big");
+    let path = scratch.0.join("big.json");
+    fs::write(&path, "12345").expect("written");
+    let big = Text::from("big");
+    let refused = |result: Result<Vec<u8>, ReadError>| match result {
+        Err(ReadError::Refused(refusal)) => refusal.to_string(),
+        other => panic!("{other:?} is a refusal"),
+    };
+    assert_eq!(
+        refused(read_file(&path, None, &big, 4, true)),
+        "big holds more than 4 bytes"
+    );
+    let status = read_file(Path::new("/proc/self/status"), None, &big, FILE_LIMIT, true);
+    assert_eq!(refused(status), "big grew while it was read");
+    assert_eq!(
+        read_file(&path, None, &big, FILE_LIMIT, true),
+        Ok(b"12345".to_vec())
+    );
 }

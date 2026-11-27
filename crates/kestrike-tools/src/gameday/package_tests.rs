@@ -6,7 +6,8 @@ use std::fs;
 use super::{FleetBounds, check_package};
 use crate::gameday::constants::FILE_LIMIT;
 use crate::gameday::schema::{Names, sorted};
-use crate::gameday::test_support::{held, object, patched, tree};
+use crate::gameday::test_support::{held, object, patched, tree, value};
+use crate::json::Value;
 use crate::paths::tests::Scratch;
 
 const HOSTS: &str = "crates/kestrike/src/failover/zone_loop/directory.rs";
@@ -109,6 +110,15 @@ fn check_package_passes_the_held_package_and_refuses_each_changed_copy() {
     (r#"simulation clock error -0.0"#, &[(r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"-0.0"#)), (r#"outside/origin"#, Some(r#""none""#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
     (r#"staging outside"#, &[(r#"outside/origin"#, Some(r#""none""#)), (r#"outside/provider"#, Some(r#""none""#))], None, Err(r#"a staging package names ['origin', 'provider'] as outside its world"#)),
     (r#"staging clock error"#, &[(r#"clock_error_seconds"#, Some(r#"0.5"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+        (r#"two defects: hosts empty, id"#, &[(r#"hosts"#, Some(r#"[]"#)), (r#"id"#, Some(r#""GD-3""#))], None, Err(r#"package.json hosts is empty or repeats a name"#)),
+        (r#"two defects: id, note"#, &[(r#"id"#, Some(r#""GD-3""#)), (r#"note"#, Some(r#"1"#))], None, Err(r#"package.json id 'GD-3' is none of ['GD-2']"#)),
+        (r#"two defects: note, witness key"#, &[(r#"note"#, Some(r#"1"#)), (r#"witness/1/key"#, Some(r#""img/k1""#))], None, Err(r#"package.json note is no name of the layout: 1"#)),
+        (r#"two defects: witness key, windows"#, &[(r#"witness/1/key"#, Some(r#""img/k1""#)), (r#"baseline/end"#, Some(r#"0"#))], None, Err(r#"package.json repeats a witness key"#)),
+        (r#"two defects: windows, interval"#, &[(r#"baseline/end"#, Some(r#"0"#)), (r#"interval"#, Some(r#"7"#))], None, Err(r#"the windows are empty, or the baseline window ends after the run window or before it starts"#)),
+        (r#"two defects: interval, clock error"#, &[(r#"interval"#, Some(r#"7"#)), (r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"1"#))], None, Err(r#"the run window is not a whole number of origin intervals, from 1 to 1000000"#)),
+        (r#"two defects: clock error, outside"#, &[(r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"1"#)), (r#"outside/origin"#, Some(r#""x""#))], None, Err(r#"a simulation package names a clock error other than 0"#)),
+        (r#"one interval"#, &[(r#"interval"#, Some(r#"300"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+        (r#"both lists past their bounds"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 3;\n"), Some(b"pub const MAX_SLOTS: usize = 4;\n"))), Err(r#"package.json hosts holds 4 entries, more than the 3 that MAX_HOSTS of crates/kestrike/src/failover/zone_loop/directory.rs declares"#)),
     ];
     for &(label, patches, top, expected) in rows {
         let scratch = top.map(|(hosts, slots)| declaring(hosts, slots));
@@ -167,4 +177,217 @@ fn a_bound_read_is_held_and_a_refused_read_is_not() {
 fn a_top_with_a_nul_byte_is_refused_at_construction() {
     let top = std::path::Path::new(std::ffi::OsStr::new("a\0b"));
     assert!(FleetBounds::new(top, FILE_LIMIT).is_none());
+}
+
+/// The judge's self-test case of the same name, at the tree's own bounds: each list filled to its bound
+/// passes, one entry more is refused, and a last entry of another type is refused by the count first.
+#[test]
+fn lists_past_the_fleets_declared_bounds_are_refused_before_any_set_is_built() {
+    let bounds = FleetBounds::new(&tree(), FILE_LIMIT).expect("the top holds no NUL");
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("hosts", "MAX_HOSTS", HOSTS),
+        ("shards", "MAX_SLOTS", SLOTS),
+        ("witness", "MAX_SLOTS", SLOTS),
+    ];
+    for &(field, name, rel) in rows {
+        let bound = bounds
+            .fleet_bound(field)
+            .expect("the tree declares the bound");
+        assert_eq!(bound, 4096, "{rel} declares {name} once");
+        let mut p = held("package.json");
+        let entry = |at: u64| match field {
+            "witness" => value(&format!(
+                r#"{{"key": "img/x{at}", "shard": "s1", "sha256": "{}"}}"#,
+                "0".repeat(64)
+            )),
+            _ => value(&format!(r#""x{at}""#)),
+        };
+        let Some(Value::Array(items)) = object_mut(&mut p).get_mut(field) else {
+            panic!("the package holds the list {field}");
+        };
+        let start = u64::try_from(items.len()).expect("fits");
+        items.extend((0..bound - start).map(entry));
+        assert!(
+            check_package(object(&p), &bounds).is_ok(),
+            "{field} at its bound"
+        );
+        let past = format!(
+            "package.json {field} holds 4097 entries, more than the 4096 that {name} of {rel} declares"
+        );
+        for last in [entry(bound), value("[[]]")] {
+            let mut q = p.clone();
+            let Some(Value::Array(items)) = object_mut(&mut q).get_mut(field) else {
+                panic!("the package holds the list {field}");
+            };
+            items.push(last);
+            let found = check_package(object(&q), &bounds).map_err(|refusal| refusal.to_string());
+            assert_eq!(found.err(), Some(past.clone()), "{field} past its bound");
+        }
+    }
+}
+
+/// The judge's self-test case of the same name, with each declaration planted in a tree of its own: the
+/// bound each list reads, the lists past them, each declaration the judge refuses, and a missing file, a
+/// link and a named pipe, which is refused without blocking.
+#[test]
+fn a_fleet_bound_is_read_from_its_own_declaration_or_refused() {
+    let slots: &[u8] = b"pub const MAX_SLOTS: usize = 5;\n";
+    let scratch = declaring(
+        Some(b"/// The most hosts.\r\npub const MAX_HOSTS: usize = 4;\r\n"),
+        Some(slots),
+    );
+    let bounds = FleetBounds::new(&scratch.0, FILE_LIMIT).expect("the top holds no NUL");
+    let read: Vec<u64> = ["hosts", "shards", "witness"]
+        .iter()
+        .map(|field| bounds.fleet_bound(field).expect("a bound"))
+        .collect();
+    assert_eq!(
+        read,
+        [4, 5, 5],
+        "[gj.fleet_bound(f) for f in ('hosts', 'shards', 'witness')]"
+    );
+    let witness = |at: &str| {
+        format!(
+            r#"{{"key": "img/x{at}", "shard": "s1", "sha256": "{}"}}"#,
+            "0".repeat(64)
+        )
+    };
+    let (first, second, ninth) = (witness("0"), witness("1"), witness("9"));
+    let mut p = held("package.json");
+    for added in [&first, &second] {
+        let Some(Value::Array(items)) = object_mut(&mut p).get_mut("witness") else {
+            panic!("a list");
+        };
+        items.push(value(added));
+    }
+    assert!(
+        check_package(object(&p), &bounds).is_ok(),
+        "five witness keys pass"
+    );
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("hosts", r#""h5""#, "package.json hosts holds 5 entries, more than the 4 that MAX_HOSTS of crates/kestrike/src/failover/zone_loop/directory.rs declares"),
+        ("shards", r#""s6""#, "package.json shards holds 6 entries, more than the 5 that MAX_SLOTS of crates/kestrike/src/failover/standbys.rs declares"),
+        ("witness", &ninth, "package.json witness holds 6 entries, more than the 5 that MAX_SLOTS of crates/kestrike/src/failover/standbys.rs declares"),
+    ];
+    for &(field, entry, expected) in rows {
+        let mut q = p.clone();
+        let Some(Value::Array(items)) = object_mut(&mut q).get_mut(field) else {
+            panic!("a list");
+        };
+        items.push(value(entry));
+        let found = check_package(object(&q), &bounds).map_err(|refusal| refusal.to_string());
+        assert_eq!(
+            found.err().as_deref(),
+            Some(expected),
+            "{field} past its planted bound"
+        );
+    }
+    let nines = |count: usize| "9".repeat(count);
+    let declarations: Vec<(Vec<u8>, Result<u64, String>)> = vec![
+        (
+            b"pub const MAX_HOSTS: usize = 1 << 12;\n".to_vec(),
+            Err(format!(
+                "{HOSTS} declares MAX_HOSTS 0 times as `pub const MAX_HOSTS: usize = N;`, not once"
+            )),
+        ),
+        (
+            b"pub const MAX_HOSTS: usize = 4;\npub const MAX_HOSTS: usize = 4;\n".to_vec(),
+            Err(format!(
+                "{HOSTS} declares MAX_HOSTS 2 times as `pub const MAX_HOSTS: usize = N;`, not once"
+            )),
+        ),
+        (
+            b"pub const MAX_HOSTS: usize = 18446744073709551616;\n".to_vec(),
+            Err(format!(
+                "{HOSTS} declares MAX_HOSTS as a value past a 64-bit usize"
+            )),
+        ),
+        (
+            format!("pub const MAX_HOSTS: usize = {};\n", nines(5000)).into_bytes(),
+            Err(format!(
+                "{HOSTS} declares MAX_HOSTS as a value past a 64-bit usize"
+            )),
+        ),
+        (
+            format!(
+                "pub const MAX_HOSTS: usize = 4;\npub const MAX_HOSTS: usize = {};\n",
+                nines(30)
+            )
+            .into_bytes(),
+            Err(format!(
+                "{HOSTS} declares MAX_HOSTS 2 times as `pub const MAX_HOSTS: usize = N;`, not once"
+            )),
+        ),
+        (
+            b"pub const MAX_HOSTS: usize = 4;\n\xff\n".to_vec(),
+            Err(format!(
+                "{HOSTS} is not UTF-8: invalid utf-8 sequence of 1 bytes from index 32"
+            )),
+        ),
+        (
+            b"pub const MAX_HOSTS: usize = 18446744073709551615;\n".to_vec(),
+            Ok(u64::MAX),
+        ),
+    ];
+    for (text, expected) in declarations {
+        let scratch = declaring(Some(&text), Some(slots));
+        let bounds = FleetBounds::new(&scratch.0, FILE_LIMIT).expect("the top holds no NUL");
+        let found = check_package(object(&held("package.json")), &bounds)
+            .map_err(|refusal| refusal.to_string())
+            .and_then(|_| {
+                bounds
+                    .fleet_bound("hosts")
+                    .map_err(|refusal| refusal.to_string())
+            });
+        assert_eq!(
+            found,
+            expected,
+            "{}",
+            String::from_utf8_lossy(&text[..text.len().min(60)])
+        );
+    }
+    let scratch = declaring(None, Some(slots));
+    let path = scratch.0.join(HOSTS);
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the directories are made");
+    fs::write(
+        scratch.0.join("valid.rs"),
+        "pub const MAX_HOSTS: usize = 4;\n",
+    )
+    .expect("written");
+    #[rustfmt::skip]
+    let kinds: &[(&str, &str)] = &[
+        ("missing", "cannot be read: No such file or directory"),
+        ("link", "cannot be read: Too many levels of symbolic links"),
+        ("fifo", "is no regular file"),
+    ];
+    for &(kind, words) in kinds {
+        let _ = fs::remove_file(&path);
+        match kind {
+            "link" => {
+                std::os::unix::fs::symlink(scratch.0.join("valid.rs"), &path).expect("linked")
+            }
+            "fifo" => {
+                let made = std::process::Command::new("mkfifo").arg(&path).status();
+                assert!(made.expect("mkfifo starts").success(), "the fifo is made");
+            }
+            _ => {}
+        }
+        let bounds = FleetBounds::new(&scratch.0, FILE_LIMIT).expect("the top holds no NUL");
+        let found = check_package(object(&held("package.json")), &bounds)
+            .map_err(|refusal| refusal.to_string());
+        assert_eq!(
+            found.err(),
+            Some(format!("{HOSTS} {words}")),
+            "the declaring file is a {kind}"
+        );
+    }
+}
+
+fn object_mut(value: &mut Value) -> &mut crate::json::Object {
+    match value {
+        Value::Object(object) => object,
+        _ => panic!("an object"),
+    }
 }

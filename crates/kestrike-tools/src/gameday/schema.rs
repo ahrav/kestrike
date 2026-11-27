@@ -2,15 +2,25 @@
 //! off its shape with the file, the keys on the way and Python's `repr` of the value.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::LazyLock;
+
+use regex::Regex;
 
 use super::constants::{ATTEMPTS_MAX, WRITTEN_GUARDRAILS};
 use super::refusal::{Refusal, said};
+use crate::classes::compiled;
 use crate::json::{Integer, Object, Value};
 use crate::python::repr;
 use crate::text::Text;
 
 /// 2^53, the largest magnitude of a JSON number the layout takes.
 const MOST: u64 = 1 << 53;
+
+/// The judge's patterns, each matched against the whole text.
+static COMMIT: LazyLock<Regex> = LazyLock::new(|| compiled(r"\A[0-9a-f]{40}\z"));
+static DIGEST: LazyLock<Regex> = LazyLock::new(|| compiled(r"\A[0-9a-f]{64}\z"));
+static DATE: LazyLock<Regex> = LazyLock::new(|| compiled(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\z"));
+static SHARD: LazyLock<Regex> = LazyLock::new(|| compiled(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\z"));
 
 /// `Schema` states the shape of a decoded value.
 #[derive(Clone, Copy, Debug)]
@@ -48,7 +58,8 @@ pub struct Each {
     pub exact: bool,
 }
 
-/// The scalar checks of the layout, each named in a refusal by [`Scalar::name`].
+/// The scalar checks of the layout. A refusal names each by its variant's name in lowercase, and
+/// `FileName` as `file-name`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scalar {
     /// A string with a code point outside Python's whitespace and no surrogate.
@@ -61,9 +72,9 @@ pub enum Scalar {
     Count,
     /// A count from 1 to 2^32 - 1.
     Generation,
-    /// A count of at most [`ATTEMPTS_MAX`].
+    /// A count of at most 2^31 - 2.
     Attempts,
-    /// A count of at most twice [`ATTEMPTS_MAX`].
+    /// A count of at most 2^32 - 4.
     Epoch,
     /// 64 lowercase hexadecimal digits.
     Digest,
@@ -84,7 +95,7 @@ pub enum Scalar {
 }
 
 impl Scalar {
-    pub fn name(self) -> &'static str {
+    fn name(self) -> &'static str {
         match self {
             Self::Name => "name",
             Self::Time => "time",
@@ -106,7 +117,7 @@ impl Scalar {
     }
 
     /// Whether `value` passes the check. A member check reads `names` only for a string.
-    pub fn holds(self, value: &Value, names: &Names) -> bool {
+    fn holds(self, value: &Value, names: &Names) -> bool {
         let count = |least: u64, most: u64| {
             matches!(value, Value::Integer(integer)
                 if !negative(integer) && magnitude(integer).is_some_and(|n| least <= n && n <= most))
@@ -121,11 +132,11 @@ impl Scalar {
             Self::Generation => count(1, (1 << 32) - 1),
             Self::Attempts => count(0, ATTEMPTS_MAX),
             Self::Epoch => count(0, 2 * ATTEMPTS_MAX),
-            Self::Digest => string(value).is_some_and(|text| hexadecimal(text, 64)),
-            Self::Commit => string(value).is_some_and(|text| hexadecimal(text, 40)),
+            Self::Digest => matches(&DIGEST, value),
+            Self::Commit => matches(&COMMIT, value),
             Self::Date => calendar(value),
             Self::FileName => {
-                string(value).is_some_and(|text| file_name(text) && *text != "receipts")
+                matches(&SHARD, value) && string(value).is_some_and(|text| *text != "receipts")
             }
             Self::Guardrail => {
                 string(value).is_some_and(|text| WRITTEN_GUARDRAILS.iter().any(|g| text == g))
@@ -162,11 +173,32 @@ impl Names {
     }
 }
 
-fn string(value: &Value) -> Option<&Text> {
+pub(super) fn string(value: &Value) -> Option<&Text> {
     match value {
         Value::String(text) => Some(text),
         _ => None,
     }
+}
+
+/// The object that a passed schema check made `value`.
+pub(super) fn checked_object(value: &Value) -> &Object {
+    match value {
+        Value::Object(object) => object,
+        _ => panic!("the checked value {value:?} is an object"),
+    }
+}
+
+/// The items of the list that a passed schema check made `value`.
+pub(super) fn checked_list(value: &Value) -> &[Value] {
+    match value {
+        Value::Array(items) => items,
+        _ => panic!("the checked value {value:?} is a list"),
+    }
+}
+
+/// The text that a passed schema check made `value`.
+pub(super) fn checked_text(value: &Value) -> &Text {
+    string(value).unwrap_or_else(|| panic!("the checked value {value:?} is a string"))
 }
 
 fn negative(integer: &Integer) -> bool {
@@ -205,19 +237,13 @@ pub fn encodable(text: &Text) -> bool {
 
 /// `calendar` holds for a string `YYYY-MM-DD` of ASCII digits that names a day of the proleptic
 /// Gregorian calendar from year 1 to 9999.
-pub fn calendar(value: &Value) -> bool {
-    let Some(text) = string(value).and_then(Text::to_str) else {
-        return false;
-    };
-    let bytes = text.as_bytes();
-    let shaped = bytes.len() == 10
-        && bytes.iter().enumerate().all(|(at, byte)| match at {
-            4 | 7 => *byte == b'-',
-            _ => byte.is_ascii_digit(),
-        });
-    if !shaped {
+fn calendar(value: &Value) -> bool {
+    if !matches(&DATE, value) {
         return false;
     }
+    let text = string(value)
+        .and_then(Text::to_str)
+        .expect("a matched date is ASCII");
     let number = |range: std::ops::Range<usize>| text[range].parse::<u32>().expect("ASCII digits");
     let (year, month, day) = (number(0..4), number(5..7), number(8..10));
     let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
@@ -231,20 +257,12 @@ pub fn calendar(value: &Value) -> bool {
     year >= 1 && (1..=days).contains(&day)
 }
 
-fn hexadecimal(text: &Text, length: usize) -> bool {
-    text.len() == length
-        && text
-            .code_points()
-            .all(|code| matches!(code, 0x30..=0x39 | 0x61..=0x66))
-}
-
-/// `[A-Za-z0-9][A-Za-z0-9._-]*`.
-fn file_name(text: &Text) -> bool {
-    let alphanumeric =
-        |code: u32| u8::try_from(code).is_ok_and(|byte| byte.is_ascii_alphanumeric());
-    let mut codes = text.code_points();
-    codes.next().is_some_and(alphanumeric)
-        && codes.all(|code| alphanumeric(code) || matches!(code, 0x2e | 0x5f | 0x2d))
+/// Whether `value` is a string that `pattern` matches. A text that holds a surrogate matches none of the
+/// judge's patterns, which take ASCII alone.
+fn matches(pattern: &Regex, value: &Value) -> bool {
+    string(value)
+        .and_then(Text::to_str)
+        .is_some_and(|text| pattern.is_match(text))
 }
 
 /// Whether `value` is a string among the names of `kind`.

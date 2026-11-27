@@ -117,6 +117,9 @@ fn each_scalar_passes_and_fails_at_its_bounds() {
     (r#"conform(null, 'host?')"#, r#"null"#, Schema::nullable(Scalar::Host), Ok(r#"None"#)),
     (r#"conform("h2", 'host?')"#, r#""h2""#, Schema::nullable(Scalar::Host), Ok(r#"None"#)),
     (r#"conform("h9", 'host?')"#, r#""h9""#, Schema::nullable(Scalar::Host), Err(r#"f is no host of the layout: 'h9'"#)),
+        (r#"conform(9007199254740992, 'positive')"#, r#"9007199254740992"#, Schema::scalar(Scalar::Positive), Ok(r#"None"#)),
+        (r#"conform(9007199254740993, 'nonnegative')"#, r#"9007199254740993"#, Schema::scalar(Scalar::Nonnegative), Err(r#"f is no nonnegative of the layout: 9007199254740993"#)),
+        (r#"conform(0, 'epoch')"#, r#"0"#, Schema::scalar(Scalar::Epoch), Ok(r#"None"#)),
     ];
     for (expression, text, schema, expected) in rows {
         let found = conform(&value(text), schema, &Text::from("f"), &names)
@@ -157,6 +160,8 @@ fn each_schema_kind_refuses_with_its_sentence_and_key_path() {
     (r#"conform({"a.jsonl": {"from": 0, "to": 1, "lines": 2}}, gj.LAYOUT['coverage.json'][0])"#, r#"{"a.jsonl": {"from": 0, "to": 1, "lines": 2}}"#, *layout("coverage.json").expect("a file of the layout").0, Ok(r#"None"#)),
     (r#"conform({}, gj.LAYOUT['coverage.json'][0])"#, r#"{}"#, *layout("coverage.json").expect("a file of the layout").0, Err(r#"f names [], not exactly the observeds ['a.jsonl']"#)),
     (r#"conform({"a.jsonl": {"from": 0, "to": 1, "lines": 2.0}}, gj.LAYOUT['coverage.json'][0])"#, r#"{"a.jsonl": {"from": 0, "to": 1, "lines": 2.0}}"#, *layout("coverage.json").expect("a file of the layout").0, Err(r#"f a.jsonl lines is no count of the layout: 2.0"#)),
+        (r#"conform({"end": "y", "start": "x"}, gj.WINDOW)"#, r#"{"end": "y", "start": "x"}"#, WINDOW, Err(r#"f start is no time of the layout: 'x'"#)),
+        (r#"conform({"event": "CreateVolume"}, gj.LAYOUT['provider.jsonl'][0])"#, r#"{"event": "CreateVolume"}"#, *layout("provider.jsonl").expect("a file of the layout").0, Err(r#"f holds the keys ['event'], not ['event', 'time', 'volume']"#)),
     ];
     for (expression, text, schema, expected) in rows {
         let found = conform(&value(text), schema, &Text::from("f"), &names)

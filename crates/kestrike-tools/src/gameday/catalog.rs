@@ -72,7 +72,11 @@ pub fn gd2_entry(catalog: &Value) -> Result<&Object, Refusal> {
     need(guardrails, || {
         said!(PACKAGE, "'s guardrails differ from ", WRITTEN)
     })?;
-    for (key, digest) in [("reach", WRITTEN_REACH), ("expected", WRITTEN_EXPECTED)] {
+    let oracle = [
+        ("reach", WRITTEN_REACH, None),
+        ("expected", WRITTEN_EXPECTED, Some(WITNESS)),
+    ];
+    for (key, digest, holds) in oracle {
         let text = match gd2.get("oracle") {
             Some(Value::Object(oracle)) => oracle.get(key),
             _ => None,
@@ -80,7 +84,8 @@ pub fn gd2_entry(catalog: &Value) -> Result<&Object, Refusal> {
         let written = match text {
             Some(Value::String(text)) if encodable(text) => {
                 let text = text.to_str().expect("an encodable text is UTF-8");
-                hexdigest(text.as_bytes()) == digest && (key == "reach" || text.contains(WITNESS))
+                hexdigest(text.as_bytes()) == digest
+                    && holds.is_none_or(|sentence| text.contains(sentence))
             }
             _ => false,
         };

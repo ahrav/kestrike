@@ -36,6 +36,14 @@ fn gd2_entry_takes_the_committed_catalog_and_refuses_each_changed_copy() {
     (r#"reach surrogate"#, &[(r#"entries/1/oracle/reach"#, Some(r#""\ud800""#))], Err(r#"GD-2's oracle.reach differs from the texts the judge's rules were written from"#)),
     (r#"expected"#, &[(r#"entries/1/oracle/expected"#, Some(r#""x""#))], Err(r#"GD-2's oracle.expected differs from the texts the judge's rules were written from"#)),
     (r#"oracle no object"#, &[(r#"entries/1/oracle"#, Some(r#"[]"#))], Err(r#"GD-2's oracle.reach differs from the texts the judge's rules were written from"#)),
+        (r#"two defects: mode, clause"#, &[(r#"entries/1/mode"#, Some(r#""x""#)), (r#"entries/1/hypothesis/0/clause"#, Some(r#""x""#))], Err(r#"GD-2 is not a causal package"#)),
+        (r#"two defects: clause, guardrail"#, &[(r#"entries/1/hypothesis/0/clause"#, Some(r#""x""#)), (r#"entries/1/guardrail/0"#, Some(r#""x""#))], Err(r#"GD-2's hypothesis clauses or their bounds differ from the texts the judge's rules were written from"#)),
+        (r#"two defects: guardrail, reach"#, &[(r#"entries/1/guardrail/0"#, Some(r#""x""#)), (r#"entries/1/oracle/reach"#, Some(r#""x""#))], Err(r#"GD-2's guardrails differ from the texts the judge's rules were written from"#)),
+        (r#"two defects: reach, expected"#, &[(r#"entries/1/oracle/reach"#, Some(r#""x""#)), (r#"entries/1/oracle/expected"#, Some(r#""x""#))], Err(r#"GD-2's oracle.reach differs from the texts the judge's rules were written from"#)),
+        (r#"hypothesis no list"#, &[(r#"entries/1/hypothesis"#, Some(r#"{}"#))], Err(r#"GD-2's hypothesis clauses or their bounds differ from the texts the judge's rules were written from"#)),
+        (r#"hypothesis item no object"#, &[(r#"entries/1/hypothesis/0"#, Some(r#""x""#))], Err(r#"GD-2's hypothesis clauses or their bounds differ from the texts the judge's rules were written from"#)),
+        (r#"run rule no string"#, &[(r#"run_rule"#, Some(r#"1"#))], Err(r#"the game-day catalog holds no entries, budgets and run rule"#)),
+        (r#"an entry no object"#, &[(r#"entries/0"#, Some(r#"1"#))], Ok(r#"GD-2"#)),
     ];
     for &(label, patches, expected) in rows {
         let changed = patched(&catalog, patches);

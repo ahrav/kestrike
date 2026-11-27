@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::gameday::Decimal;
+use crate::decimal::spells_shortest;
 use crate::python::repr_float;
 pub use crate::text::Text;
 
@@ -204,7 +204,7 @@ impl std::error::Error for Error {}
 /// [`MAX_DEPTH`], for an integer token of more than [`MAX_INTEGER_DIGITS`] digits, and when a
 /// non-whitespace byte follows the value. A successful parse can hold a non-finite float.
 pub fn parse(text: &str) -> Result<Value, Error> {
-    Reader::new(text, false, false)
+    Reader::new(text, Mode::Keep)
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
@@ -245,7 +245,7 @@ impl std::error::Error for UniqueError {}
 /// [`UniqueError::Syntax`]. So a repeat followed by trailing text is [`UniqueError::Repeated`], where
 /// [`parse`] refuses the trailing text.
 pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
-    Reader::new(text, true, false)
+    Reader::new(text, Mode::Unique)
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => UniqueError::Syntax(error),
@@ -256,20 +256,20 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
 
 /// A number that strict JSON refuses, holding the token as the text spells it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unnumber {
+pub(crate) enum Unnumber {
     /// `NaN`, `Infinity` or `-Infinity`.
     Constant(&'static str),
     /// A token with a fraction or an exponent whose nearest double is infinite.
     Range(String),
     /// A token with a fraction or an exponent whose decimal value differs from the shortest form of its
-    /// nearest double, or whose exponent lies past the range [`Decimal::literal`] takes.
+    /// nearest double, or whose exponent lies past the range of Python's `decimal` module.
     Digits(String),
 }
 
 /// A refusal of [`parse_strict`]: an error of [`parse`], an object that repeats the member `name`, or a
 /// number strict JSON refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StrictError {
+pub(crate) enum StrictError {
     Syntax(Error),
     Repeated(Text),
     Number(Unnumber),
@@ -311,26 +311,33 @@ impl std::error::Error for StrictError {}
 /// The reader stops at the first refusal in document order. A number is judged where it stands and a
 /// repeated key when its object closes, so in `[{"k": 1, "k": 2}, NaN]` the repeat comes first and in
 /// `{"k": 1, "k": NaN}` the constant does.
-pub fn parse_strict(text: &str) -> Result<Value, StrictError> {
-    Reader::new(text, true, true).document()
+pub(crate) fn parse_strict(text: &str) -> Result<Value, StrictError> {
+    Reader::new(text, Mode::Strict).document()
 }
 
 struct Reader<'a> {
     text: &'a [u8],
     at: usize,
-    /// Whether a repeated key ends the read.
-    unique: bool,
-    /// Whether a number [`parse_strict`] refuses ends the read.
-    strict: bool,
+    mode: Mode,
+}
+
+/// What ends a read beyond a syntax or limit error.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Nothing more: a repeated key takes its last value.
+    Keep,
+    /// A repeated key.
+    Unique,
+    /// A repeated key, and a number [`parse_strict`] refuses.
+    Strict,
 }
 
 impl<'a> Reader<'a> {
-    fn new(text: &'a str, unique: bool, strict: bool) -> Self {
+    fn new(text: &'a str, mode: Mode) -> Self {
         Self {
             text: text.as_bytes(),
             at: 0,
-            unique,
-            strict,
+            mode,
         }
     }
 
@@ -395,7 +402,7 @@ impl<'a> Reader<'a> {
     }
 
     fn constant(&self, token: &'static str, value: f64) -> Result<Value, StrictError> {
-        if self.strict {
+        if self.mode == Mode::Strict {
             return Err(StrictError::Number(Unnumber::Constant(token)));
         }
         Ok(Value::Float(value))
@@ -446,7 +453,10 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.unique && repeated.is_none() && object.iter().any(|(name, _)| *name == key) {
+            if self.mode != Mode::Keep
+                && repeated.is_none()
+                && object.iter().any(|(name, _)| *name == key)
+            {
                 repeated = Some(key.clone());
             }
             object.insert(key, value);
@@ -508,7 +518,7 @@ impl<'a> Reader<'a> {
         let text = std::str::from_utf8(&self.text[start..self.at]).expect("a number is ASCII");
         if self.at > integer {
             let value = text.parse().expect("a JSON number parses as an f64");
-            if self.strict {
+            if self.mode == Mode::Strict {
                 double(text, value).map_err(StrictError::Number)?;
             }
             return Ok(Value::Float(value));
@@ -615,9 +625,10 @@ fn double(token: &str, value: f64) -> Result<(), Unnumber> {
     if !value.is_finite() {
         return Err(Unnumber::Range(token.to_owned()));
     }
-    match Decimal::literal(token) {
-        Some(exact) if Decimal::from_float(value).as_ref() == Some(&exact) => Ok(()),
-        _ => Err(Unnumber::Digits(token.to_owned())),
+    if spells_shortest(token, value) {
+        Ok(())
+    } else {
+        Err(Unnumber::Digits(token.to_owned()))
     }
 }
 

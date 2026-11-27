@@ -10,33 +10,16 @@ use crate::text::Text;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     message: Text,
-    written: bool,
 }
 
 impl Refusal {
     pub fn new(message: Text) -> Self {
-        Self {
-            message,
-            written: false,
-        }
+        Self { message }
     }
 
-    /// `after_record` is a refusal that follows the write of the run's record: the sync of its directory
-    /// failed, so the removal of the record is not durable and the record may stand.
-    pub fn after_record(message: Text) -> Self {
-        Self {
-            message,
-            written: true,
-        }
-    }
-
+    /// The judge's sentence.
     pub fn message(&self) -> &Text {
         &self.message
-    }
-
-    /// Whether the run's record may stand after this refusal.
-    pub fn written(&self) -> bool {
-        self.written
     }
 }
 

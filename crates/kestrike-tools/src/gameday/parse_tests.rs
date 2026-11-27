@@ -77,6 +77,10 @@ fn decode_reads_strict_json_and_refuses_the_first_defect_in_document_order() {
     (r#"decode('[1,]', 'f')"#, r#"[1,]"#, Err(r#"f is not strict JSON: JSONDecodeError('Expecting value: line 1 column 4 (char 3)')"#), Some(r#"f is not strict JSON: expected a value at byte 3"#)),
     (r#"decode('01', 'f')"#, r#"01"#, Err(r#"f is not strict JSON: JSONDecodeError('Extra data: line 1 column 2 (char 1)')"#), Some(r#"f is not strict JSON: text after the value at byte 1"#)),
     (r#"decode('', 'f')"#, r#""#, Err(r#"f is not strict JSON: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')"#), Some(r#"f is not strict JSON: expected a value at byte 0"#)),
+        (r#"decode('0e999999999999999999', 'f')"#, r#"0e999999999999999999"#, Ok(r#"0.0"#), None),
+        (r#"decode('0e-1999999999999999997', 'f')"#, r#"0e-1999999999999999997"#, Ok(r#"0.0"#), None),
+        (r#"decode('0.000e-1999999999999999994', 'f')"#, r#"0.000e-1999999999999999994"#, Ok(r#"0.0"#), None),
+        (r#"decode('0.000e-1999999999999999995', 'f')"#, r#"0.000e-1999999999999999995"#, Err(r#"f is not strict JSON: InvalidOperation([<class 'decimal.InvalidOperation'>])"#), Some(r#"f is not strict JSON: the number 0.000e-1999999999999999995 holds more digits than a double carries"#)),
     ];
     for &(expression, text, judged, tool) in rows {
         let found = shown(decode(text, &Text::from("f")));
@@ -109,5 +113,42 @@ fn parsed_reads_a_json_file_as_one_value_and_a_jsonl_file_as_its_lines() {
             .map(str::to_owned)
             .map_err(|judged| ours(judged, tool));
         assert_eq!(found, expected, "{expression}");
+    }
+}
+
+/// A sweep over fixed-seed bit patterns: every finite double's shortest form reads back as that double,
+/// and the same form with a digit added past the seventeenth significant one is refused, since no shortest
+/// form holds that many.
+#[test]
+fn strict_json_takes_each_shortest_form_and_refuses_one_digit_more() {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut checked = 0;
+    while checked < 20_000 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let value = f64::from_bits(state);
+        if !value.is_finite() || value == 0.0 {
+            continue;
+        }
+        let shortest = crate::python::repr_float(value);
+        let read = decode(&shortest, &Text::from("f")).expect("a shortest form is strict JSON");
+        assert_eq!(read, crate::json::Value::Float(value), "{shortest}");
+        let (mantissa, power) = shortest
+            .split_once('e')
+            .map_or((shortest.as_str(), ""), |(m, p)| (m, p));
+        let point = if mantissa.contains('.') { "" } else { "." };
+        let power = if power.is_empty() {
+            String::new()
+        } else {
+            format!("e{power}")
+        };
+        let longer = format!("{mantissa}{point}00000000000000000001{power}");
+        let refused = decode(&longer, &Text::from("f")).map_err(|refusal| refusal.to_string());
+        let words = format!(
+            "f is not strict JSON: the number {longer} holds more digits than a double carries"
+        );
+        assert_eq!(refused, Err(words));
+        checked += 1;
     }
 }
