@@ -247,7 +247,8 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
 }
 
 /// `parse_members` reads what [`parse`] reads and returns each object as an array of its keys and values in
-/// document order, `[key, value, key, value, ...]`, so each member of a repeated key stands in it.
+/// document order, `[key, value, key, value, ...]`, so each member of a repeated key stands in it. The
+/// result tells an object from an array by nothing.
 ///
 /// # Errors
 ///

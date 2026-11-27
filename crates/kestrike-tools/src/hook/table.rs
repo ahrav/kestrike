@@ -34,7 +34,6 @@ pub struct Row {
     pub held: Option<&'static str>,
 }
 
-const LINKS: &str = "verification/models/links.json";
 const CONTRACT: &str = "chaos/ledger.json";
 const REPLAY: &str = "scripts/chaos-receipt-replay.py";
 const JUDGES: &str = "chaos/tests/test_judges.py";
@@ -116,7 +115,7 @@ impl Check {
 }
 
 /// The links registry, which the links check reads at the tip.
-pub(super) const LINKS_REGISTRY: &str = LINKS;
+pub(super) const LINKS_REGISTRY: &str = "verification/models/links.json";
 
 /// The paths whose change selects the test selection and the receipt admission, beside
 /// [`SELECTION_PATTERN`] and [`INTAKE_PREFIX`].
@@ -233,7 +232,9 @@ pub(super) fn chaos_change<S: AsRef<str>>(paths: &[S]) -> bool {
 }
 
 /// Whether the tip holds the script of a check that a change to one of its inputs runs only where it is
-/// held. [`Held::default`] holds the judges', the game-day and the host stop self-tests, and not the replay.
+/// held. [`Held::default`] holds the judges', the game-day and the host stop self-tests, and not the replay,
+/// the defaults of the selection's cases; [`super::Plan`] reads each field from the tip, and a field may be
+/// `false` wherever none of its check's inputs changed, since the selection then asks nothing of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Held {
     pub judges: bool,

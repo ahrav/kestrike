@@ -11,12 +11,11 @@ use crate::text::Text;
 
 use super::table::{LINKS_REGISTRY, LINKS_SCRIPTS};
 
-/// A set of the values a document names: its texts, and whether it also holds a number, a Boolean or
-/// `null`, which equals no path.
+/// The texts of a set of the values a document names; a number, a Boolean or `null` in the set equals no
+/// path, so the set keeps none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Members {
     texts: HashSet<Text>,
-    others: bool,
 }
 
 impl Members {
@@ -25,9 +24,9 @@ impl Members {
         self.texts.contains(&Text::from(path))
     }
 
-    /// `is_empty` holds for a set with no member of any kind.
+    /// `is_empty` holds for a set with no text.
     pub fn is_empty(&self) -> bool {
-        self.texts.is_empty() && !self.others
+        self.texts.is_empty()
     }
 
     /// `insert` adds `value` and returns `None` for an array or an object, which no set holds.
@@ -37,9 +36,7 @@ impl Members {
                 self.texts.insert(text.clone());
             }
             Value::Array(_) | Value::Object(_) => return None,
-            Value::Integer(_) | Value::Float(_) | Value::Bool(_) | Value::Null => {
-                self.others = true
-            }
+            Value::Integer(_) | Value::Float(_) | Value::Bool(_) | Value::Null => {}
         }
         Some(())
     }
@@ -52,7 +49,6 @@ impl<S: AsRef<str>> FromIterator<S> for Members {
                 .into_iter()
                 .map(|path| Text::from(path.as_ref()))
                 .collect(),
-            others: false,
         }
     }
 }

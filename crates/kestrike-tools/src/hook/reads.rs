@@ -8,29 +8,36 @@ use crate::git::{blob_bytes, git, merge_base, output};
 use crate::rust_text::{FUNCTION, IGNORE};
 use crate::text::Text;
 
-use super::Failure;
 use super::members::{Members, link_inputs, verus_sources};
-use super::table::{LINKS_REGISTRY, ORDER};
+use super::table::LINKS_REGISTRY;
+use super::{Check, Failure, argument};
 
 pub(super) const ZERO: &str = "0000000000000000000000000000000000000000";
 
 /// `revision` is `commit` followed by `suffix`, as one Git argument.
 fn revision(commit: &Text, suffix: &str) -> OsString {
-    let mut argument = commit
-        .to_os()
-        .expect("a ref line's field is read from bytes, which it encodes");
-    argument.push(suffix);
-    argument
+    let mut revision = argument(commit);
+    revision.push(suffix);
+    revision
 }
 
 /// `holds` holds when the tree of `commit` holds `path`, as `git cat-file -e` reports it.
-pub(super) fn holds(environ: &Environ, commit: &Text, path: &str) -> Result<bool, Failure> {
+fn holds(environ: &Environ, commit: &Text, path: &str) -> Result<bool, Failure> {
     let spec = revision(commit, &format!(":{path}"));
     Ok(
         output(environ, &[OsString::from("cat-file"), "-e".into(), spec])?
             .status
             .success(),
     )
+}
+
+/// `holds_check` holds when the tree of `commit` holds the file `check` asks for.
+pub(super) fn holds_check(environ: &Environ, commit: &Text, check: Check) -> Result<bool, Failure> {
+    let path = check
+        .row()
+        .held
+        .expect("a check whose presence the plan reads names the file it asks for");
+    holds(environ, commit, path)
 }
 
 /// `comparison_base` returns the commit a tip's changes are read against: `remote` when this clone holds it
@@ -65,8 +72,7 @@ pub(super) fn comparison_base(
     if listed.is_empty() {
         return Ok(None);
     }
-    let local = revision(local, "");
-    Ok(merge_base(environ, OsString::from("origin/main"), local)?.map(Text::from))
+    Ok(merge_base(environ, OsString::from("origin/main"), argument(local))?.map(Text::from))
 }
 
 /// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it fails.
@@ -98,10 +104,7 @@ pub(super) fn sources(environ: &Environ, commit: &Text) -> Result<Option<Members
 /// `None`, on which the check runs and reports the defect.
 pub(super) fn links(environ: &Environ, commit: &Text) -> Result<Option<Members>, Failure> {
     let Some(bytes) = shown_file(environ, commit, LINKS_REGISTRY)? else {
-        let check = ORDER[3]
-            .held
-            .expect("the links check names the script it asks for");
-        return Ok(Some(if holds(environ, commit, check)? {
+        return Ok(Some(if holds_check(environ, commit, Check::Links)? {
             [LINKS_REGISTRY].into_iter().collect()
         } else {
             Members::default()

@@ -12,7 +12,7 @@ const REFUSED: &str = "holds what may be an AWS account number";
 const LEAK: &str = r#"{"account": 123456789012}"#;
 
 /// `contract` commits a chaos contract with its validator and judges' test as stubs, and returns it.
-fn contract(repository: &Repository) -> String {
+pub fn contract(repository: &Repository) -> String {
     repository.commit(&[
         ("chaos/ledger.json", "{}\n"),
         ("chaos/READINESS.md", "r\n"),
@@ -259,6 +259,7 @@ fn the_history_guard_reads_pathspecs_whatever_mode_the_push_set() {
     for mode in [
         "GIT_LITERAL_PATHSPECS",
         "GIT_GLOB_PATHSPECS",
+        "GIT_NOGLOB_PATHSPECS",
         "GIT_ICASE_PATHSPECS",
     ] {
         repository.set(mode, "1");
@@ -356,5 +357,109 @@ fn a_new_ref_reads_the_records_of_commits_only_another_remote_holds() {
             "a_new_ref_reads_the_records_of_commits_only_another_remote_holds",
         ),
         &[("HEAD", &head), ("LEAKED", &leaked)],
+    );
+}
+
+/// A chaos change reads every record of the tip, one that only the base added included, from a
+/// subdirectory of the checkout as from its top.
+#[test]
+fn a_chaos_change_reads_every_record_of_the_tip_from_any_directory() {
+    if let Some(row) = child() {
+        assert_eq!(
+            pushed(),
+            [at("chaos/runs/old/run.json", &row.get("HEAD"), REFUSED)]
+        );
+        return;
+    }
+    let (repository, _) = fixture("tip-records");
+    contract(&repository);
+    let base = repository.commit(&[("chaos/runs/old/run.json", LEAK)]);
+    let head = repository.commit(&[("chaos/survey.md", "edited\n")]);
+    repository.in_child_at(
+        &repository.top.join("crates"),
+        &id(
+            module_path!(),
+            "a_chaos_change_reads_every_record_of_the_tip_from_any_directory",
+        ),
+        &[("BASE", &base), ("HEAD", &head)],
+    );
+}
+
+/// With no comparison base the tip's records are guarded: its link fails as a link at the tip and as a
+/// pushed record that is no regular file, and its record with an account number fails under the tip,
+/// the first record that holds the blob.
+#[test]
+fn a_new_branch_without_origin_main_guards_the_chaos_records_of_its_tip() {
+    if let Some(row) = child() {
+        let head = row.get("HEAD");
+        let linked = "chaos/runs/linked/run.json";
+        assert_eq!(
+            guarded(&[(head.clone(), ZERO.to_owned())]),
+            [
+                at(linked, &head, "is a link or a submodule"),
+                at(
+                    linked,
+                    &head,
+                    "is a chaos record that is not a regular file"
+                ),
+                at("chaos/runs/run/run.json", &head, REFUSED),
+            ]
+        );
+        return;
+    }
+    let (repository, _) = fixture("no-base-guard");
+    contract(&repository);
+    repository.git(&["rm", "-q", "--", "chaos/ledger.json"]);
+    let leaked = repository.commit(&[
+        ("chaos/runs/run/run.json", LEAK),
+        ("chaos/elsewhere.json", "{}\n"),
+    ]);
+    let head = repository.link("chaos/runs/linked/run.json", "../../elsewhere.json");
+    repository.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    repository.in_child(
+        &id(
+            module_path!(),
+            "a_new_branch_without_origin_main_guards_the_chaos_records_of_its_tip",
+        ),
+        &[("HEAD", &head), ("LEAKED", &leaked)],
+    );
+}
+
+/// `chaos` as a link and as a submodule each fail the tip of a line with a base.
+#[test]
+fn a_link_or_a_submodule_at_the_chaos_root_fails_a_push_with_a_base() {
+    if let Some(row) = child() {
+        let (base, linked, submodule) = (row.get("BASE"), row.get("LINKED"), row.get("SUBMODULE"));
+        assert_eq!(
+            guarded(&[(linked.clone(), base.clone()), (submodule.clone(), base)]),
+            [
+                at("chaos", &linked, "is a link or a submodule"),
+                at("chaos", &submodule, "is a link or a submodule"),
+            ]
+        );
+        return;
+    }
+    let (repository, base) = fixture("chaos-root");
+    repository.commit(&[("elsewhere/runs/run/run.json", LEAK)]);
+    let linked = repository.link("chaos", "elsewhere");
+    repository.git(&["checkout", "-q", "--detach", &base]);
+    repository.git(&["config", "diff.ignoreSubmodules", "all"]);
+    repository.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{base},chaos"),
+    ]);
+    let submodule = repository.commit(&[]);
+    repository.in_child(
+        &id(
+            module_path!(),
+            "a_link_or_a_submodule_at_the_chaos_root_fails_a_push_with_a_base",
+        ),
+        &[
+            ("BASE", &base),
+            ("LINKED", &linked),
+            ("SUBMODULE", &submodule),
+        ],
     );
 }

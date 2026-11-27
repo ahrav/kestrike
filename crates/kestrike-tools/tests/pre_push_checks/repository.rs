@@ -145,8 +145,14 @@ impl Repository {
     /// `in_child` starts this test executable again for the test `id` in the repository, with `values`
     /// passed as `ROW_<name>` variables, fails the row unless that run passes, and returns the run's output.
     pub fn in_child(&self, id: &str, values: &[(&str, &str)]) -> Output {
+        self.in_child_at(&self.top, id, values)
+    }
+
+    /// `in_child_at` is [`Repository::in_child`] with the child started in `dir`.
+    pub fn in_child_at(&self, dir: &Path, id: &str, values: &[(&str, &str)]) -> Output {
         let output = self
             .command(std::env::current_exe().expect("the test executable is known"))
+            .current_dir(dir)
             .args(["--exact", id, "--nocapture", "--test-threads", "1"])
             .env(ROLE, "1")
             .envs(

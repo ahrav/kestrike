@@ -13,7 +13,7 @@ use crate::git::{blob_bytes, git};
 use crate::json::{Value, parse_members};
 use crate::text::Text;
 
-use super::{Failure, short, shown};
+use super::{Failure, argument, short, shown};
 
 /// The directories that hold chaos records.
 pub(super) const RECORD_DIRS: [&str; 4] = [
@@ -22,6 +22,13 @@ pub(super) const RECORD_DIRS: [&str; 4] = [
     "chaos/tests/receipts",
     "chaos/tests/runs",
 ];
+
+/// `record_pathspecs` names each record directory from the top level.
+pub(super) fn record_pathspecs() -> impl Iterator<Item = OsString> {
+    RECORD_DIRS
+        .iter()
+        .map(|dir| OsString::from(format!(":(top){dir}")))
+}
 
 const CHAOS_TREES: [&str; 6] = [
     "chaos",
@@ -74,12 +81,7 @@ pub(super) fn tip_records(
         "-z".into(),
         "--full-tree".into(),
     ];
-    args.push(
-        commit
-            .to_os()
-            .expect("a ref line's field is read from bytes, which it encodes"),
-    );
-    args.extend(["--".into(), "chaos".into()]);
+    args.extend([argument(commit), "--".into(), "chaos".into()]);
     let listed = git(environ, &args)?;
     let (mut failures, mut records) = (Vec::new(), Vec::new());
     for entry in listed.split('\0').filter(|entry| !entry.is_empty()) {
@@ -132,17 +134,8 @@ pub(super) fn pushed_records(
         ]
         .map(OsString::from)
         .to_vec();
-        args.push(
-            commit
-                .to_os()
-                .expect("a listed commit is read from Git's UTF-8 output"),
-        );
-        args.push("--".into());
-        args.extend(
-            RECORD_DIRS
-                .iter()
-                .map(|dir| OsString::from(format!(":(top){dir}"))),
-        );
+        args.extend([argument(commit), "--".into()]);
+        args.extend(record_pathspecs());
         let listed = git(environ, &args)?;
         let fields: Vec<&str> = listed.split('\0').collect();
         for at in (0..fields.len().saturating_sub(1)).step_by(2) {

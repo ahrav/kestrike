@@ -1,7 +1,7 @@
 use crate::hook::guard::CHAOS_RECORD;
 use crate::hook::members::{Members, link_inputs, verus_sources};
 use crate::hook::table::{Check, Held, ORDER, checks_for};
-use crate::hook::{account_number, record_values, shown};
+use crate::hook::{Failure, account_number, ignored_tests, record_values, shown};
 use crate::text::Text;
 
 /// The run order holds the ten checks of the hook, each at the index of its `Check`, with the argument
@@ -61,7 +61,7 @@ fn a_judge_script_change_runs_selection_checks() {
 /// A record path matches whole, with `.` and `[^/]` taking a line feed; the values are the interpreter's
 /// for the hook's pattern.
 #[test]
-fn a_chaos_record_with_an_account_number_fails_the_push_by_its_path() {
+fn a_chaos_record_path_matches_whole_with_line_feeds_inside() {
     for (path, expected) in [
         ("chaos/receipts/a.json", true),
         ("chaos/receipts/a\nb.json", true),
@@ -124,7 +124,7 @@ fn a_malformed_verus_inventory_reads_as_none_for_each_shape() {
         assert_eq!(verus_sources(text.as_bytes()), expected, "{text}");
     }
     let mixed = verus_sources(br#"{"sources": ["a", 1, null]}"#).expect("the list reads");
-    assert!(mixed.holds("a") && !mixed.holds("1") && !mixed.is_empty());
+    assert_eq!(mixed, members(&["a"]));
     assert_eq!(verus_sources(b"{\"sources\": {\"\xff\": 1}}"), None);
 }
 
@@ -191,4 +191,202 @@ fn a_chaos_record_with_an_account_number_under_a_repeated_key_is_refused() {
         ["0", "a", "123456789012", "a"].map(Text::from).to_vec()
     );
     assert!(values.iter().any(account_number));
+}
+
+/// `selected` is `checks_for` of `paths` with `sources`, `links` and the default `Held`.
+fn selected(paths: &[&str], sources: Option<&Members>, links: Option<&Members>) -> Vec<Check> {
+    checks_for(paths, sources, links, false, Held::default())
+}
+
+/// Each row names the file whose presence at the tip the plan reads for its check, and no other row does.
+#[test]
+fn each_row_names_the_file_the_plan_asks_the_tip_for() {
+    let held: Vec<(Check, Option<&str>)> = ORDER.iter().map(|row| (row.check, row.held)).collect();
+    assert_eq!(
+        held,
+        [
+            (Check::SelectTests, None),
+            (Check::Admit, None),
+            (Check::Reconcile, None),
+            (Check::Links, Some("scripts/model-links.py")),
+            (Check::LinksSelfTest, None),
+            (Check::Contract, Some("chaos/ledger.json")),
+            (Check::Replay, Some("scripts/chaos-receipt-replay.py")),
+            (Check::Judges, Some("chaos/tests/test_judges.py")),
+            (Check::Gameday, Some("scripts/test-gameday-judge.py")),
+            (
+                Check::HostStop,
+                Some("scripts/test-host-stop-controller.py")
+            ),
+        ]
+    );
+}
+
+/// Each selection input, and each path under the intake directory, selects the test selection and the
+/// receipt admission; a directory that only starts like the intake directory selects nothing.
+#[test]
+fn each_admission_input_runs_its_checks() {
+    let none = Members::default();
+    let both = [Check::SelectTests, Check::Admit];
+    for path in [
+        "scripts/test-inventory.json",
+        "scripts/test-registry.json",
+        "scripts/select-tests.py",
+        "scripts/test-select-tests.py",
+        "verification/obligations.json",
+        "verification/control-less.json",
+        ".github/workflows/agent-checks.yml",
+        "scripts/verify-receipts.py",
+        "scripts/test-verify-receipts.py",
+        "scripts/run-receipt-selftests.py",
+        "scripts/scan-tag-compare.py",
+        "scripts/classify-atomics.py",
+        "verification/atomics/census.json",
+        "quint/check.py",
+        "verification/intake/dsw-4.json",
+        "verification/intake/exclusions/old/notes.md",
+        "verification/intake/old\nrow.md",
+    ] {
+        let unheld = Held {
+            gameday: false,
+            host_stop: false,
+            ..Held::default()
+        };
+        let checks = checks_for(&[path], Some(&none), Some(&none), false, unheld);
+        assert_eq!(checks, both, "{path:?}");
+    }
+    let inventory = selected(
+        &["verification/verus/inventory.json"],
+        Some(&none),
+        Some(&none),
+    );
+    assert_eq!(
+        inventory,
+        [Check::SelectTests, Check::Admit, Check::Reconcile]
+    );
+    assert!(selected(&["tla/check.py"], Some(&none), Some(&none)).starts_with(&both));
+    let outside = selected(
+        &["verification/intake-old/dsw-4.json"],
+        Some(&none),
+        Some(&none),
+    );
+    assert_eq!(outside, []);
+}
+
+/// A path the inventory names or one under `verification/verus/` runs reconciliation, and an inventory
+/// that could not be read runs it on any change but none for no change.
+#[test]
+fn a_verus_source_change_runs_reconciliation() {
+    let none = Members::default();
+    let sources = members(&["crates/v.rs"]);
+    assert_eq!(
+        selected(&["crates/v.rs"], Some(&sources), Some(&none)),
+        [Check::Reconcile]
+    );
+    assert_eq!(
+        selected(&["crates/plain.rs"], Some(&sources), Some(&none)),
+        []
+    );
+    assert_eq!(
+        selected(&["verification/verus/x.rs"], Some(&none), Some(&none)),
+        [Check::Reconcile]
+    );
+    assert_eq!(
+        selected(&["crates/plain.rs"], None, Some(&none)),
+        [Check::Reconcile]
+    );
+    assert_eq!(selected(&[], None, None), []);
+}
+
+/// A path the registry names runs the links check, a script the check loads also runs its self-test, and a
+/// registry that could not be read runs the check on any change.
+#[test]
+fn each_links_input_runs_its_checks_by_the_selection() {
+    let none = Members::default();
+    let links = members(&["tla/M.tla", "scripts/model-links.py"]);
+    assert_eq!(
+        selected(&["tla/M.tla"], Some(&none), Some(&links)),
+        [Check::Links]
+    );
+    assert_eq!(selected(&["tla/Other.tla"], Some(&none), Some(&links)), []);
+    assert_eq!(
+        selected(&["scripts/model-links.py"], Some(&none), Some(&links)),
+        [Check::Links, Check::LinksSelfTest]
+    );
+    assert_eq!(
+        selected(&["scripts/judge-rc11.py"], Some(&none), Some(&none)),
+        [Check::SelectTests, Check::Admit]
+    );
+    assert_eq!(
+        selected(&["crates/plain.rs"], Some(&none), None),
+        [Check::Links]
+    );
+    assert_eq!(
+        selected(&["scripts/test-model-links.py"], Some(&none), None),
+        [Check::Links, Check::LinksSelfTest]
+    );
+}
+
+/// A chaos change runs the replay at a tip that holds it, and a change to the replay runs it at any tip.
+#[test]
+fn a_chaos_change_at_a_tip_that_holds_the_receipt_replay_runs_it() {
+    let none = Members::default();
+    let replay = "scripts/chaos-receipt-replay.py";
+    assert_eq!(
+        selected(&[replay], Some(&none), Some(&none)),
+        [Check::Replay]
+    );
+    let held = Held {
+        replay: true,
+        ..Held::default()
+    };
+    let chaos = checks_for(
+        &["chaos/READINESS.md"],
+        Some(&none),
+        Some(&none),
+        false,
+        held,
+    );
+    assert_eq!(chaos, [Check::Contract, Check::Replay]);
+    assert_eq!(
+        selected(&["chaos/READINESS.md"], Some(&none), Some(&none)),
+        [Check::Contract]
+    );
+}
+
+/// Each ignore attribute's span runs through the name of the next fn past the attributes between them, a
+/// later attribute takes a new fn once the found one starts before its end, and an attribute with no fn
+/// after it spans to the end of the text.
+#[test]
+fn the_ignore_spans_end_at_the_fn_each_attribute_precedes() {
+    let text = "#[ignore]\nfn a() {}\n#[cfg_attr(\n    miri,\n    ignore = \"slow\"\n)]\n\
+                #[should_panic(expected = \"fn sentinel\")]\nfn b() {}\n#[ignore]\nconst N: u8 = 1;\n";
+    let spans = ignored_tests(text);
+    assert_eq!(spans.len(), 3);
+    assert_eq!(spans[0], "#[ignore]\nfn a");
+    assert!(
+        spans[1].starts_with("#[cfg_attr(") && spans[1].ends_with("fn sentinel\")]\nfn b"),
+        "{spans:?}"
+    );
+    assert_eq!(spans[2], "#[ignore]\nconst N: u8 = 1;\n");
+    assert_eq!(ignored_tests("fn plain() {}\n"), Vec::<&str>::new());
+}
+
+/// The record read takes nesting up to the reader's 1,000 levels and refuses deeper; the script's reader
+/// refuses from 993 levels on Python 3.9.25, a stated difference.
+#[test]
+fn a_record_nested_past_the_readers_depth_is_not_json() {
+    let nested = |depth: usize| "[".repeat(depth) + &"]".repeat(depth);
+    assert_eq!(record_values(&nested(1000)), Some(Vec::new()));
+    assert_eq!(record_values(&nested(1001)), None);
+}
+
+/// A commit whose text is not UTF-8 names itself by its `repr` when a batch read cannot name it.
+#[test]
+fn an_unencodable_commit_names_itself_by_its_repr() {
+    let commit = Text::from_code_points([0x61, 0xdcff]).expect("the code points are in range");
+    assert_eq!(
+        Failure::Unencodable(commit).to_string(),
+        "the batch name of 'a\\udcff' is not UTF-8"
+    );
 }

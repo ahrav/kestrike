@@ -3,7 +3,8 @@
 //! push.
 //!
 //! [`Plan::line`] reads one ref line of Git's pre-push input, `<local ref> <local sha> <remote ref>
-//! <remote sha>`, and states the states of a line. [`Plan::guard`] reads the chaos records after the scans.
+//! <remote sha>`, and plans its checks and scan or returns its failure. [`Plan::guard`] reads the chaos
+//! records after the scans.
 //! [`crate::git::push_environ`] makes every Git child read the original objects even when `refs/replace/`
 //! entries exist, and read each pathspec with its magic whatever pathspec mode the caller set.
 
@@ -19,6 +20,7 @@ pub use plan::{Plan, Skipped};
 pub use reads::{destination_refs, ignored_tests};
 pub use table::{Check, Held, ORDER, Row, checks_for};
 
+use std::ffi::OsString;
 use std::fmt;
 
 use crate::git::GitError;
@@ -33,8 +35,8 @@ pub enum Failure {
     Git(GitError),
     /// A tree entry or a raw diff record of a form that Git's manual does not give.
     Form(String),
-    /// A commit named in a batch read whose text is not UTF-8, as a ref line's field read from bytes
-    /// outside UTF-8 can be.
+    /// A commit named in a batch read whose text is not UTF-8, as a ref line's field the caller decoded
+    /// from bytes outside UTF-8 can be.
     Unencodable(Text),
 }
 
@@ -58,6 +60,13 @@ impl fmt::Display for Failure {
 }
 
 impl std::error::Error for Failure {}
+
+/// `argument` is `text` as a Git argument. The texts the plan passes to Git are read from bytes or from
+/// Git's UTF-8 output, so each encodes as bytes.
+fn argument(text: &Text) -> OsString {
+    text.to_os()
+        .expect("a text read from bytes encodes as those bytes")
+}
 
 /// `short` writes the first twelve code points of `commit`.
 fn short(commit: &Text) -> String {

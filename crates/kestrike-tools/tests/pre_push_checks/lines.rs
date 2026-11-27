@@ -37,7 +37,7 @@ pub fn line(local: &str, remote: &str) -> OsString {
 pub fn planned(lines: &[OsString]) -> Plan {
     let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
     for line in lines {
-        plan.line(line).expect("the line reads");
+        plan.line(line, |_| {}).expect("the line reads");
     }
     plan
 }
@@ -78,7 +78,8 @@ fn a_deletion_runs_no_check() {
 fn a_blank_ref_line_is_skipped() {
     if child().is_some() {
         let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
-        assert_eq!(plan.line(" \t".as_ref()).expect("a blank line reads"), None);
+        plan.line(" \t".as_ref(), |_| panic!("a blank line has no note"))
+            .expect("a blank line reads");
         assert_eq!((checks(&plan), scans(&plan)), (vec![], vec![]));
         return;
     }
@@ -92,7 +93,7 @@ fn a_malformed_ref_line_fails() {
     if child().is_some() {
         let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
         let error = plan
-            .line("ref-update".as_ref())
+            .line("ref-update".as_ref(), |_| {})
             .expect_err("the line is malformed");
         assert!(matches!(error, Failure::Malformed(_)), "{error:?}");
         assert_eq!(error.to_string(), "malformed ref line: 'ref-update'");
@@ -153,7 +154,9 @@ fn a_ref_without_a_comparison_base_prints_the_skipped_scan_and_runs_every_check(
     if let Some(row) = child() {
         let head = row.get("HEAD");
         let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
-        let note = plan.line(&line(&head, ZERO)).expect("the line reads");
+        let mut note = None;
+        plan.line(&line(&head, ZERO), |skipped| note = Some(skipped))
+            .expect("the line reads");
         assert_eq!(
             note.map(|note| note.to_string()),
             Some(format!(
@@ -253,7 +256,7 @@ fn an_unreadable_origin_main_fails_the_push_with_a_git_error() {
         let head = row.get("HEAD");
         let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
         let error = plan
-            .line(&line(&head, ZERO))
+            .line(&line(&head, ZERO), |_| {})
             .expect_err("the merge base fails");
         assert!(matches!(error, Failure::Git(_)), "{error:?}");
         assert!(
@@ -280,37 +283,74 @@ fn an_unreadable_origin_main_fails_the_push_with_a_git_error() {
     );
 }
 
-/// An inventory that is not JSON, or that is no object, runs reconciliation on any change.
+/// An inventory that is not JSON, or that is no object, runs reconciliation on any later change; a change
+/// to the inventory itself also runs the selection checks.
 #[test]
 fn a_malformed_verus_inventory_runs_reconciliation() {
-    if let Some(row) = child() {
-        for (base, head) in [
-            (row.get("BASE"), row.get("TEXT")),
-            (row.get("LIST"), row.get("LATER")),
-        ] {
-            let plan = planned(&[line(&head, &base)]);
-            assert!(checks(&plan)[0].1.contains(&Check::Reconcile), "{head}");
-        }
-        return;
+    if child().is_some() {
+        return plan_row();
     }
     let (repository, base) = fixture("malformed-inventory");
     let text = repository.commit(&[
         ("verification/verus/inventory.json", "not json"),
         ("crates/plain.rs", "edited\n"),
     ]);
+    let again = repository.commit(&[("crates/plain.rs", "edited again\n")]);
     repository.git(&["checkout", "-q", "-b", "other", &base]);
     let list = repository.commit(&[("verification/verus/inventory.json", "[]")]);
     let later = repository.commit(&[("crates/plain.rs", "again\n")]);
-    repository.in_child(
+    let every = [Check::SelectTests, Check::Admit, Check::Reconcile];
+    let reconcile = [Check::Reconcile];
+    assert_plan(
+        &repository,
         &id(
             module_path!(),
             "a_malformed_verus_inventory_runs_reconciliation",
         ),
+        &[(&text, &base), (&again, &text), (&later, &list)],
+        &[(&text, &every), (&again, &reconcile), (&later, &reconcile)],
+    );
+}
+
+/// `plan_row` is the child of a row that [`assert_plan`] starts: it plans the lines of `ROW_LINES` and
+/// compares the plan's checks with `ROW_EXPECTED`.
+pub fn plan_row() {
+    let row = child().expect("the row's child reads its values");
+    let lines: Vec<OsString> = row
+        .get("LINES")
+        .split(';')
+        .map(|pair| {
+            let (local, remote) = pair.split_once(' ').expect("a pair is two commits");
+            line(local, remote)
+        })
+        .collect();
+    assert_eq!(
+        format!("{:?}", checks(&planned(&lines))),
+        row.get("EXPECTED")
+    );
+}
+
+/// `assert_plan` starts the child of the row `id`, which plans `lines` of (local, remote) in the repository
+/// and fails unless each tip gets the checks of `expected`, in that order.
+pub fn assert_plan(
+    repository: &Repository,
+    id: &str,
+    lines: &[(&str, &str)],
+    expected: &[(&str, &[Check])],
+) {
+    let lines: Vec<String> = lines
+        .iter()
+        .map(|(local, remote)| format!("{local} {remote}"))
+        .collect();
+    let expected: Vec<(String, Vec<Check>)> = expected
+        .iter()
+        .map(|(tip, checks)| ((*tip).to_owned(), checks.to_vec()))
+        .collect();
+    repository.in_child(
+        id,
         &[
-            ("BASE", &base),
-            ("TEXT", &text),
-            ("LIST", &list),
-            ("LATER", &later),
+            ("LINES", &lines.join(";")),
+            ("EXPECTED", &format!("{expected:?}")),
         ],
     );
 }

@@ -1,10 +1,10 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
 use crate::environ::get;
 use crate::git::{
     GitError, PATHSPEC_MODES, batch_texts, blob_bytes, blob_texts, caller_environ, git, label,
-    merge_base, push_environ, replies,
+    merge_base, push_environ, replies, without_pathspec_modes,
 };
 use crate::text::strip_str;
 
@@ -230,20 +230,24 @@ fn the_bytes_reader_refuses_a_line_feed_or_a_nul_in_a_name() {
     ));
 }
 
-/// The push's environment is the caller's with replace objects off and no pathspec mode; the caller's sets
-/// replace objects off and keeps the rest.
+/// Both environments set replace objects off; the push's drops each pathspec mode variable and keeps every
+/// other variable in order.
 #[test]
 fn the_push_environment_removes_the_pathspec_modes() {
-    let caller = caller_environ();
-    let push = push_environ();
-    assert_eq!(get(&caller, "GIT_NO_REPLACE_OBJECTS"), Some(&"1".into()));
-    assert_eq!(get(&push, "GIT_NO_REPLACE_OBJECTS"), Some(&"1".into()));
-    for mode in PATHSPEC_MODES {
-        assert_eq!(get(&push, mode), None, "{mode}");
-    }
-    let kept: Vec<_> = caller
-        .iter()
-        .filter(|(name, _)| !PATHSPEC_MODES.iter().any(|mode| name == mode))
-        .collect();
-    assert_eq!(push.iter().collect::<Vec<_>>(), kept);
+    assert_eq!(
+        get(&caller_environ(), "GIT_NO_REPLACE_OBJECTS"),
+        Some(&"1".into())
+    );
+    assert_eq!(
+        get(&push_environ(), "GIT_NO_REPLACE_OBJECTS"),
+        Some(&"1".into())
+    );
+    let pair = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
+    let mut given = vec![pair("A", "1")];
+    given.extend(PATHSPEC_MODES.iter().map(|mode| pair(mode, "1")));
+    given.push(pair("B", "2"));
+    assert_eq!(
+        without_pathspec_modes(given),
+        [pair("A", "1"), pair("B", "2")]
+    );
 }

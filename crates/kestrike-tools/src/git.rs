@@ -84,7 +84,11 @@ pub fn caller_environ() -> Environ {
 /// `push_environ` is [`caller_environ`] without the [`PATHSPEC_MODES`] variables, so a child reads each
 /// pathspec with its magic whatever pathspec mode the caller set.
 pub fn push_environ() -> Environ {
-    let mut environ = caller_environ();
+    without_pathspec_modes(caller_environ())
+}
+
+/// `without_pathspec_modes` is `environ` without the [`PATHSPEC_MODES`] variables, the others kept in order.
+pub(crate) fn without_pathspec_modes(mut environ: Environ) -> Environ {
     for name in PATHSPEC_MODES {
         remove(&mut environ, name);
     }
