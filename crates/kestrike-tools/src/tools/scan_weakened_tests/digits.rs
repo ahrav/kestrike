@@ -1,8 +1,8 @@
 //! A decimal digit is a code point of category `Nd`. Unicode assigns these digits in runs of ten from zero, so
 //! a digit's value is its offset in its run of `Nd` code points, modulo ten.
 
+use crate::classes::is_digit;
 use crate::json::{Integer, MAX_INTEGER_DIGITS};
-use crate::rust_text::is_digit;
 
 use super::Failure;
 

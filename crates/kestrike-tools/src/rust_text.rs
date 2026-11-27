@@ -1,12 +1,12 @@
-//! The module defines character classes and patterns for scanning Rust source.
+//! `lexemes` locates the comments, string literals and char literals of Rust source as byte spans, and
+//! `code` blanks them with one space for each byte, keeping each newline, so an offset of the view is the
+//! same offset of the source.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
-use regex_syntax::hir::{Class as HirClass, HirKind};
 
-pub const SPACE: &str = r"[\s\x1c-\x1f]";
-pub const WORD: &str = r"[\p{L}\p{N}_]";
+use crate::classes::{SPACE, WORD, compiled, is_digit, is_word};
 
 pub static IGNORE: LazyLock<Regex> =
     LazyLock::new(|| compiled(r"#\[ignore\b[^\]]*\]|#\[cfg_attr\([^\]]*\bignore\b[^\]]*\]"));
@@ -19,54 +19,6 @@ pub static FUNCTION: LazyLock<Regex> = LazyLock::new(|| {
 
 static BLOCK_EDGE: LazyLock<Regex> = LazyLock::new(|| compiled(r"/\*|\*/"));
 
-static WORD_CLASS: LazyLock<Class> = LazyLock::new(|| Class::new(WORD));
-static DIGIT_CLASS: LazyLock<Class> = LazyLock::new(|| Class::new(r"\d"));
-
-pub fn compiled(pattern: &str) -> Regex {
-    Regex::new(pattern).unwrap_or_else(|error| panic!("the pattern {pattern} compiles: {error}"))
-}
-
-pub struct Class(Vec<(char, char)>);
-
-impl Class {
-    pub fn new(pattern: &str) -> Self {
-        let hir = regex_syntax::Parser::new()
-            .parse(pattern)
-            .unwrap_or_else(|error| panic!("the class {pattern} parses: {error}"));
-        let HirKind::Class(HirClass::Unicode(class)) = hir.kind() else {
-            panic!("the pattern {pattern} is one Unicode class");
-        };
-        Self(
-            class
-                .ranges()
-                .iter()
-                .map(|range| (range.start(), range.end()))
-                .collect(),
-        )
-    }
-
-    pub fn contains(&self, c: char) -> bool {
-        let at = self.0.partition_point(|&(_, high)| high < c);
-        self.0.get(at).is_some_and(|&(low, _)| low <= c)
-    }
-}
-
-pub fn is_word(c: char) -> bool {
-    if c.is_ascii() {
-        c.is_ascii_alphanumeric() || c == '_'
-    } else {
-        WORD_CLASS.contains(c)
-    }
-}
-
-pub fn is_digit(c: char) -> bool {
-    if c.is_ascii() {
-        c.is_ascii_digit()
-    } else {
-        DIGIT_CLASS.contains(c)
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Lexeme {
     Comment,
@@ -75,43 +27,55 @@ pub enum Lexeme {
     Unclosed,
 }
 
+#[derive(Clone, Copy)]
+enum Token {
+    LineComment,
+    BlockOpen,
+    String,
+    Char,
+    Code,
+}
+
+/// `lexemes` returns each comment, string literal and char literal of `text` in order. Block comments nest,
+/// and one that never closes is [`Lexeme::Unclosed`] and ends at the end of `text`.
 pub fn lexemes(text: &str) -> Vec<(Lexeme, usize, usize)> {
     let mut found = Vec::new();
     let mut start = 0;
-    while let Some((at, end)) = next_lexeme(text, start) {
-        let lexeme = &text[at..end];
+    while let Some((token, at, end)) = next_token(text, start) {
         start = end;
-        let kind = if lexeme == "/*" {
-            let mut depth = 1_usize;
-            while depth > 0 {
-                let Some(edge) = BLOCK_EDGE.find_at(text, start) else {
-                    break;
-                };
-                depth = if edge.as_str() == "/*" {
-                    depth + 1
-                } else {
-                    depth - 1
-                };
-                start = edge.end();
-            }
-            if depth == 0 {
-                Lexeme::Comment
-            } else {
-                start = text.len();
-                Lexeme::Unclosed
-            }
-        } else if lexeme.starts_with('/') {
-            Lexeme::Comment
-        } else if lexeme.ends_with(['"', '#']) {
-            Lexeme::String
-        } else if lexeme.ends_with('\'') {
-            Lexeme::Char
-        } else {
-            continue;
+        let kind = match token {
+            Token::BlockOpen => match block_comment_end(text, end) {
+                Some(close) => {
+                    start = close;
+                    Lexeme::Comment
+                }
+                None => {
+                    start = text.len();
+                    Lexeme::Unclosed
+                }
+            },
+            Token::LineComment => Lexeme::Comment,
+            Token::String => Lexeme::String,
+            Token::Char => Lexeme::Char,
+            Token::Code => continue,
         };
         found.push((kind, at, start));
     }
     found
+}
+
+fn block_comment_end(text: &str, mut at: usize) -> Option<usize> {
+    let mut depth = 1_usize;
+    while depth > 0 {
+        let edge = BLOCK_EDGE.find_at(text, at)?;
+        depth = if edge.as_str() == "/*" {
+            depth + 1
+        } else {
+            depth - 1
+        };
+        at = edge.end();
+    }
+    Some(at)
 }
 
 pub fn blank(text: &str) -> String {
@@ -132,27 +96,32 @@ pub fn code(text: &str) -> String {
     view
 }
 
-fn next_lexeme(text: &str, start: usize) -> Option<(usize, usize)> {
+fn next_token(text: &str, start: usize) -> Option<(Token, usize, usize)> {
     let bytes = text.as_bytes();
     let mut at = start;
     while at < bytes.len() {
         let found = match bytes[at] {
             b'/' => match bytes.get(at + 1) {
-                Some(b'/') => Some(
-                    text[at..]
+                Some(b'/') => {
+                    let end = text[at..]
                         .find('\n')
-                        .map_or(text.len(), |offset| at + offset),
-                ),
-                Some(b'*') => Some(at + 2),
+                        .map_or(text.len(), |offset| at + offset);
+                    Some((Token::LineComment, end))
+                }
+                Some(b'*') => Some((Token::BlockOpen, at + 2)),
                 _ => None,
             },
-            b'r' => raw_string(text, at).or_else(|| raw_identifier(text, at)),
-            b'"' => cooked_string(text, at),
-            b'\'' => char_literal(text, at).or_else(|| lifetime(text, at)),
+            b'r' => raw_string(text, at)
+                .map(|end| (Token::String, end))
+                .or_else(|| raw_identifier(text, at).map(|end| (Token::Code, end))),
+            b'"' => cooked_string(text, at).map(|end| (Token::String, end)),
+            b'\'' => char_literal(text, at)
+                .map(|end| (Token::Char, end))
+                .or_else(|| lifetime(text, at).map(|end| (Token::Code, end))),
             _ => None,
         };
-        if let Some(end) = found {
-            return Some((at, end));
+        if let Some((token, end)) = found {
+            return Some((token, at, end));
         }
         at += text[at..].chars().next().map_or(1, char::len_utf8);
     }

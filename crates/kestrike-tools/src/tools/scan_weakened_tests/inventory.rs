@@ -6,12 +6,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::git::{blob_texts, git_text};
 use crate::json::{self, Value};
-use crate::text::Text;
+use crate::text::{Text, words};
 
 use super::digits::{integer, is_digits};
-use super::hunks::{paired, text_of};
-use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET};
-use super::{Failure, Shown};
+use super::hunks::paired;
+use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
+use super::scan::short;
+use super::{Change, Class, Failure, Shown};
 
 pub const INVENTORY: &str = "scripts/test-inventory.json";
 const BUDGETS: [&str; 3] = ["seeds", "seconds", "executions"];
@@ -111,9 +112,6 @@ fn count(value: Option<&Value>) -> Option<&json::Integer> {
     }
 }
 
-/// An inventory finding: its class, its name and its old and new values.
-pub type Change = (&'static str, String, Shown, Shown);
-
 /// `inventory_changes` returns each inventory budget that fell or went absent and each timeout that rose. A
 /// budget counts as absent when its owner remains but loses the budget field, or when a string field in
 /// `TEXTS` loses the count or disappears from an owner that remains.
@@ -134,30 +132,50 @@ pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, 
         let after = new.get(path);
         let dropped = !new.index.contains_key(path) && new.owners.contains(&owner);
         let field = field.to_str().unwrap_or_default();
+        let (budget, timeout) = (BUDGETS.contains(&field), TIMEOUTS.contains(&field));
         let (earlier, later) = (count(Some(before)), count(after));
+        let after_text = match after {
+            Some(Value::String(text)) => Some(text),
+            _ => None,
+        };
         let name = path.to_string();
         let shown = |integer: &json::Integer| Shown::Count(integer.clone());
-        if let (true, Some(earlier), true) = (BUDGETS.contains(&field), earlier, dropped) {
-            found.push(("budget-lowered", name, shown(earlier), Shown::absent()));
-        } else if let (true, Some(earlier), Some(later)) =
-            (BUDGETS.contains(&field), earlier, later)
+        if budget
+            && let Some(earlier) = earlier
+            && dropped
+        {
+            found.push(Change::new(
+                Class::BudgetLowered,
+                name,
+                shown(earlier),
+                Shown::absent(),
+            ));
+        } else if budget
+            && let (Some(earlier), Some(later)) = (earlier, later)
             && later < earlier
         {
-            found.push(("budget-lowered", name, shown(earlier), shown(later)));
-        } else if let (true, Some(earlier), Some(later)) =
-            (TIMEOUTS.contains(&field), earlier, later)
+            found.push(Change::new(
+                Class::BudgetLowered,
+                name,
+                shown(earlier),
+                shown(later),
+            ));
+        } else if timeout
+            && let (Some(earlier), Some(later)) = (earlier, later)
             && later > earlier
         {
-            found.push(("timeout-raised", name, shown(earlier), shown(later)));
-        } else if let (true, Value::String(before)) = (TEXTS.contains(&field), before)
-            && (matches!(after, Some(Value::String(_))) || dropped)
+            found.push(Change::new(
+                Class::TimeoutRaised,
+                name,
+                shown(earlier),
+                shown(later),
+            ));
+        } else if TEXTS.contains(&field)
+            && let Value::String(before) = before
+            && (after_text.is_some() || dropped)
         {
             let empty = Text::new();
-            let after = match after {
-                Some(Value::String(after)) => after,
-                _ => &empty,
-            };
-            found.extend(text_changes(&name, before, after)?);
+            found.extend(text_changes(&name, before, after_text.unwrap_or(&empty))?);
         }
     }
     Ok(found)
@@ -181,20 +199,17 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
         let later = integer(&later)?;
         let earlier = integer(&earlier)?;
         if later < earlier {
-            found.push((
-                "budget-lowered",
-                label(&word),
-                Shown::Count(earlier),
-                Shown::Count(later),
-            ));
+            let (old, new) = (Shown::Count(earlier), Shown::Count(later));
+            found.push(Change::new(Class::BudgetLowered, label(&word), old, new));
         }
     }
     for (word, (_, earlier)) in unpaired {
         let earlier = integer(&earlier)?;
-        found.push((
-            "budget-lowered",
+        let old = Shown::Count(earlier);
+        found.push(Change::new(
+            Class::BudgetLowered,
             label(&word),
-            Shown::Count(earlier),
+            old,
             Shown::absent(),
         ));
     }
@@ -206,10 +221,8 @@ pub fn inventory_text(rev: &str) -> Result<String, Failure> {
     if entry.is_empty() {
         return Ok(String::new());
     }
-    let short = &rev[..rev.len().min(12)];
-    let mode = entry
-        .split(|c: char| crate::text::is_space(u32::from(c)))
-        .find(|word| !word.is_empty());
+    let short = short(rev);
+    let mode = words(&entry).next();
     if !matches!(mode, Some("100644" | "100755")) {
         return Err(Failure::Refused(format!(
             "{INVENTORY} at {short} is not a file"

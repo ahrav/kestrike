@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 
-use regex::bytes::{Captures, Match, NoExpand};
+use regex::bytes::{Captures, NoExpand};
 
 use crate::git::git_text;
 use crate::json::Integer;
@@ -11,7 +11,7 @@ use crate::rust_text::code;
 
 use super::Failure;
 use super::digits::integer;
-use super::patterns::{CONSTANT, CONSTANT_END, DIGITS, HUNK, NAMED_BOUND, Pattern};
+use super::patterns::{CONSTANT, CONSTANT_END, DIGITS, HUNK, NAMED_BOUND, Pattern, text_of};
 
 const DIFF_BATCH: usize = 256;
 
@@ -21,8 +21,10 @@ pub struct Hunk {
     pub added: Vec<(u64, String)>,
 }
 
-pub fn text_of(found: Match<'_>) -> &str {
-    std::str::from_utf8(found.as_bytes()).expect("a match in UTF-8 text is UTF-8")
+impl Hunk {
+    fn is_empty(&self) -> bool {
+        self.removed.is_empty() && self.added.is_empty()
+    }
 }
 
 fn patch(base: &str, head: &str, paths: &[&str]) -> Result<String, Failure> {
@@ -64,10 +66,9 @@ pub fn hunks<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Vec<Hunk>, 
     let mut number: Option<u64> = None;
     for line in lines {
         if let Some(header) = HUNK.captures(line.as_bytes()).next() {
-            if !hunk.removed.is_empty() || !hunk.added.is_empty() {
+            if !hunk.is_empty() {
                 found.push(std::mem::take(&mut hunk));
             }
-            hunk = Hunk::default();
             let start = text_of(header.get(1).expect("the hunk pattern captures its start"));
             number = Some(integer(start)?.to_string().parse().map_err(|_| {
                 Failure::Refused(format!("the hunk header {line} names a line past 2^64"))
@@ -81,7 +82,7 @@ pub fn hunks<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Vec<Hunk>, 
             }
         }
     }
-    if !hunk.removed.is_empty() || !hunk.added.is_empty() {
+    if !hunk.is_empty() {
         found.push(hunk);
     }
     Ok(found)
@@ -219,7 +220,7 @@ fn constants(text: &str) -> HashMap<String, String> {
     let haystack = view.as_bytes();
     let mut values: HashMap<String, Vec<Option<String>>> = HashMap::new();
     let mut at = 0;
-    while let Some(found) = CONSTANT.regex().captures_at(haystack, at) {
+    while let Some(found) = CONSTANT.captures_at(haystack, at) {
         let whole = found.get(0).expect("group 0 is the match");
         let name = text_of(found.name("name").expect("the pattern captures a name"));
         let mut value = None;
@@ -241,8 +242,8 @@ fn constants(text: &str) -> HashMap<String, String> {
     }
     values
         .into_iter()
-        .filter_map(|(name, mut seen)| match (seen.pop(), seen.is_empty()) {
-            (Some(Some(value)), true) => Some((name, value)),
+        .filter_map(|(name, seen)| match seen.as_slice() {
+            [Some(value)] => Some((name, value.clone())),
             _ => None,
         })
         .collect()

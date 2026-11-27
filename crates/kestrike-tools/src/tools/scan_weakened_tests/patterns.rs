@@ -2,9 +2,9 @@
 
 use std::sync::LazyLock;
 
-use regex::bytes::{Captures, Regex};
+use regex::bytes::{Captures, Match, Regex};
 
-use crate::rust_text::{SPACE, WORD};
+use crate::classes::{SPACE, WORD, compiled_bytes};
 
 const NUMBER: &str = r"(?P<value>\d[\d_]*)";
 const INTEGER_TYPE: &str = r"[iu](?:8|16|32|64|128|size)";
@@ -20,22 +20,20 @@ pub struct Pattern {
 
 impl Pattern {
     fn new(pattern: &str, ahead: Option<&str>) -> Self {
-        let compile = |pattern: &str| {
-            Regex::new(pattern)
-                .unwrap_or_else(|error| panic!("the pattern {pattern} compiles: {error}"))
-        };
         Self {
-            regex: compile(pattern),
-            ahead: ahead.map(|ahead| compile(&format!(r"\A(?:{ahead})"))),
+            regex: compiled_bytes(pattern),
+            ahead: ahead.map(|ahead| compiled_bytes(&format!(r"\A(?:{ahead})"))),
         }
     }
 
+    /// `regex` finds candidate matches; `captures` checks the optional lookahead at each candidate's end.
     pub fn regex(&self) -> &Regex {
         &self.regex
     }
 
     /// `captures` yields matches in order. When a candidate fails its lookahead, `captures` resumes one code
-    /// point after the candidate's start to keep overlapping candidates eligible.
+    /// point after the candidate's start to keep overlapping candidates eligible. Patterns must ensure that
+    /// when the selected match fails its lookahead, every match at the same start also fails.
     pub fn captures<'h>(&'h self, haystack: &'h [u8]) -> impl Iterator<Item = Captures<'h>> + 'h {
         let mut at = 0;
         std::iter::from_fn(move || {
@@ -60,6 +58,10 @@ impl Pattern {
             .as_ref()
             .is_none_or(|ahead| ahead.is_match(&haystack[end..]))
     }
+}
+
+pub fn text_of(found: Match<'_>) -> &str {
+    std::str::from_utf8(found.as_bytes()).expect("a match in UTF-8 text is UTF-8")
 }
 
 fn code_point_length(bytes: &[u8]) -> usize {
@@ -97,17 +99,16 @@ pub static CONST_BUDGET: LazyLock<Pattern> = LazyLock::new(|| {
     )
 });
 
-pub static CONSTANT: LazyLock<Pattern> = LazyLock::new(|| {
-    Pattern::new(
+pub static CONSTANT: LazyLock<Regex> = LazyLock::new(|| {
+    compiled_bytes(
         &(format!(r"\bconst{SPACE}+(?P<name>{WORD}+){SPACE}*:")
             + &format!(r"(?P<typed>{SPACE}*{INTEGER_TYPE}{SPACE}*={SPACE}*{NUMBER})?")),
-        None,
     )
 });
 
 /// `CONSTANT_END` matches the terminator of `CONSTANT`'s optional `typed` group: trivia followed by `;`.
 pub static CONSTANT_END: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r"\A(?:{};)", trivia())).expect("the pattern compiles"));
+    LazyLock::new(|| compiled_bytes(&format!(r"\A(?:{};)", trivia())));
 
 pub static NAMED_BOUND: LazyLock<Pattern> = LazyLock::new(|| {
     Pattern::new(
@@ -145,7 +146,7 @@ pub static TIMEOUT: LazyLock<Pattern> = LazyLock::new(|| {
 pub static INVENTORY_TEXT_BUDGET: LazyLock<Pattern> = LazyLock::new(|| {
     Pattern::new(
         r"\b(?P<name>depth:|actions|cycles) (?P<value>\d+)",
-        Some(&format!(r"[{}:,;$)]|\z", &SPACE[1..SPACE.len() - 1])),
+        Some(&format!(r"{SPACE}|[:,;$)]|\z")),
     )
 });
 

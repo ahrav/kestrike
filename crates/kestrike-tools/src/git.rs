@@ -5,7 +5,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
-use crate::text::{Text, is_space};
+use crate::text::{Text, strip_str};
 
 const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
     ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_DIFF_OPTS"];
@@ -13,6 +13,7 @@ const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
 #[derive(Debug)]
 pub enum GitError {
     Start(io::Error),
+    Io(io::Error),
     Failed(String),
     NotUtf8(String),
     Truncated(String),
@@ -22,6 +23,7 @@ impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Start(error) => write!(f, "git: {error}"),
+            Self::Io(error) => write!(f, "git cat-file --batch: {error}"),
             Self::Failed(text) | Self::NotUtf8(text) | Self::Truncated(text) => f.write_str(text),
         }
     }
@@ -29,6 +31,8 @@ impl fmt::Display for GitError {
 
 impl std::error::Error for GitError {}
 
+/// `git` returns the standard output of `git args` in the caller's environment. Its [`GitError::NotUtf8`]
+/// holds the decoder's message verbatim.
 pub fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
     let output = captured(Command::new("git").args(args), args)?;
     String::from_utf8(output).map_err(|error| GitError::NotUtf8(error.utf8_error().to_string()))
@@ -59,7 +63,7 @@ pub fn merge_base(one: &str, other: &str) -> Result<Option<String>, GitError> {
     }
     let found = String::from_utf8(output.stdout)
         .map_err(|error| GitError::NotUtf8(error.utf8_error().to_string()))?;
-    Ok(Some(strip(&found)))
+    Ok(Some(strip_str(&found).to_owned()))
 }
 
 pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
@@ -84,7 +88,7 @@ pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
         let written = writer.join().expect("the writer thread returns");
         written.and(output)
     })
-    .map_err(GitError::Start)?;
+    .map_err(GitError::Io)?;
     if !output.status.success() {
         return Err(failed(&["cat-file", "--batch"], &output.stderr));
     }
@@ -150,7 +154,7 @@ fn failed<S: AsRef<OsStr>>(args: &[S], stderr: &[u8]) -> GitError {
     GitError::Failed(format!(
         "{}: {}",
         label(args),
-        strip(&String::from_utf8_lossy(stderr))
+        strip_str(&String::from_utf8_lossy(stderr))
     ))
 }
 
@@ -161,9 +165,4 @@ pub(crate) fn label<S: AsRef<OsStr>>(args: &[S]) -> String {
         line.push_str(&Text::from_os(arg.as_ref()).to_string());
     }
     line
-}
-
-pub fn strip(text: &str) -> String {
-    text.trim_matches(|c: char| is_space(u32::from(c)))
-        .to_owned()
 }

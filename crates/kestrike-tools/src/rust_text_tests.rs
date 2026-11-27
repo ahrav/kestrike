@@ -1,4 +1,5 @@
-use crate::rust_text::{FUNCTION, IGNORE, Lexeme, blank, code, is_digit, is_word, lexemes};
+use crate::classes::{is_digit, is_word};
+use crate::rust_text::{FUNCTION, IGNORE, Lexeme, blank, code, lexemes};
 
 use Lexeme::{Char, Comment, String, Unclosed};
 

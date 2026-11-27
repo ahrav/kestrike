@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -167,9 +168,7 @@ impl Run {
     }
 
     fn lines(&self) -> Vec<&str> {
-        let mut lines: Vec<&str> = self.stdout.lines().collect();
-        lines.sort_unstable();
-        lines
+        self.stdout.lines().collect()
     }
 }
 
@@ -828,7 +827,10 @@ fn a_rust_path_holding_a_newline_exits_two() {
     repo.change(&[("src/a\nb.rs", "fn x() {}\n")]);
     let run = repo.scan(&["--base", &repo.base]);
     assert_eq!(run.code, Some(2), "{}{}", run.stdout, run.stderr);
-    assert!(run.stderr.contains("newline"), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "scan-weakened-tests: a changed Rust path holds a newline, which the blob reader cannot name\n"
+    );
 }
 
 #[test]
@@ -1202,11 +1204,11 @@ fn an_inventory_entry_whose_object_is_missing_exits_two() {
     let head = repo.git(&["commit-tree", &tree, "-p", &repo.base, "-m", "missing"]);
     let run = repo.scan_head(&head);
     assert_eq!(run.code, Some(2), "{}{}", run.stdout, run.stderr);
-    assert!(
-        run.stderr.contains("is empty or unreadable"),
-        "{}",
-        run.stderr
+    let expected = format!(
+        "scan-weakened-tests: {INVENTORY} at {} is empty or unreadable\n",
+        &head[..12]
     );
+    assert_eq!(run.stderr, expected);
 }
 
 #[test]
@@ -1415,8 +1417,8 @@ fn a_non_ascii_path_reads_under_a_non_utf8_locale() {
         assert_eq!(
             run.lines(),
             [
-                format!("blocks budget-lowered:{path} SEEDS at line 1: 12 -> 11"),
                 format!("blocks ignore-existing:{path} second: not ignored -> #[ignore]"),
+                format!("blocks budget-lowered:{path} SEEDS at line 1: 12 -> 11"),
             ]
         );
     }
@@ -1504,23 +1506,19 @@ fn one_acknowledged_key_leaves_another_blocking() {
     assert_eq!(
         run.lines(),
         [
+            format!("blocks {KEY} second: not ignored -> #[ignore]"),
             format!(
                 "acknowledged {budget} qualified.lane.rows[a].seeds: 12 -> 11 (Weakens-Test: the row moved to a nightly lane)"
             ),
-            format!("blocks {KEY} second: not ignored -> #[ignore]"),
         ]
     );
-    assert!(
-        run.stderr
-            .contains(&format!("Weakens-Test: {KEY}: <reason>")),
-        "{}",
-        run.stderr
-    );
-    assert!(
-        !run.stderr
-            .contains(&format!("Weakens-Test: {budget}: <reason>")),
-        "{}",
-        run.stderr
+    let range = format!("{}..{}", &repo.base[..12], &head[..12]);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {range}: \
+             Weakens-Test: {KEY}: <reason>\n"
+        )
     );
 }
 
@@ -1585,10 +1583,12 @@ fn an_unreadable_head_or_an_unwritable_summary_exits_two() {
     );
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     assert!(
-        run.stderr.contains("scan-weakened-tests: step summary:"),
+        run.stderr
+            .starts_with("scan-weakened-tests: step summary: "),
         "{}",
         run.stderr
     );
+    assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
 }
 
 #[test]
@@ -1623,8 +1623,8 @@ fn a_comment_before_a_budget_terminator_keeps_the_budget() {
     assert_eq!(
         run.lines(),
         [
-            "blocks budget-lowered:src/model.rs max_branches at line 1: 10 -> 9",
             "blocks budget-lowered:src/model.rs preemption_bound at line 2: 3 -> 2",
+            "blocks budget-lowered:src/model.rs max_branches at line 1: 10 -> 9",
         ]
     );
 }
@@ -1874,7 +1874,11 @@ fn an_inventory_that_is_a_link_exits_two() {
     ] {
         let run = repo.scan(&["--base", base, "--head", head]);
         assert_eq!(run.code, Some(2), "{base}: {}{}", run.stdout, run.stderr);
-        assert!(run.stderr.contains("is not a file"), "{}", run.stderr);
+        let expected = format!(
+            "scan-weakened-tests: {INVENTORY} at {} is not a file\n",
+            &link[..12]
+        );
+        assert_eq!(run.stderr, expected);
     }
 }
 
@@ -2051,7 +2055,12 @@ fn a_base_that_shares_no_history_with_the_head_exits_two() {
     let head = repo.ignore_second("ignore");
     let run = repo.scan(&["--base", &unrelated, "--head", &head]);
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
-    assert!(run.stderr.contains("share no history"), "{}", run.stderr);
+    let expected = format!(
+        "scan-weakened-tests: {} and {} share no history\n",
+        &unrelated[..12],
+        &head[..12]
+    );
+    assert_eq!(run.stderr, expected);
 }
 
 #[test]
@@ -2147,4 +2156,232 @@ fn a_file_that_becomes_a_link_leaves_each_later_file_its_own_hunks() {
     let run = repo.scan(&["--base", "HEAD^", "--head", "HEAD"]);
     let expected = "blocks budget-lowered:src/b.rs max_branches at line 1: 10 -> 9\n";
     assert_eq!(run.outcome(), (Some(1), expected), "{}", run.stderr);
+}
+
+#[test]
+fn a_changed_path_name_that_is_not_utf8_exits_two() {
+    let repo = Repo::new("path-not-utf8");
+    let name = std::ffi::OsStr::from_bytes(b"src/caf\xff.rs");
+    fs::write(repo.repo.join(name), "x\n").expect("the file is written");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "a path that is not UTF-8"]);
+    let run = repo.scan(&["--base", "HEAD^"]);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "scan-weakened-tests: invalid utf-8 sequence of 1 bytes from index 7\n"
+    );
+}
+
+#[test]
+fn a_workflow_diff_that_is_not_utf8_exits_two_and_names_its_command() {
+    let repo = Repo::new("workflow-not-utf8");
+    repo.write(
+        ".github/workflows/agent-checks.yml",
+        b"    timeout-minutes: 16 \xff\n",
+    );
+    repo.git(&["commit", "-q", "-am", "a workflow byte that is not UTF-8"]);
+    let run = repo.scan(&["--base", "HEAD^"]);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert!(
+        run.stderr.starts_with(
+            "scan-weakened-tests: git --no-literal-pathspecs -c core.quotePath=false diff "
+        ),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains(":(top,literal).github/workflows/agent-checks.yml: invalid utf-8 sequence of 1 bytes from index "),
+        "{}",
+        run.stderr
+    );
+}
+
+#[test]
+fn two_blocking_keys_print_their_hints_in_the_order_they_first_block() {
+    let repo = Repo::new("two-keys");
+    let [a, b, f] = rows();
+    let tests = repo.edit(
+        "src/a_tests.rs",
+        "#[test]\nfn second",
+        "#[test]\n#[ignore]\nfn second",
+    );
+    let head = repo.change(&[
+        ("src/a_tests.rs", &tests),
+        (INVENTORY, &inventory(&[a.with("seeds", J::N(11)), b, f])),
+    ]);
+    let run = repo.scan_head(&head);
+    let budget = format!("budget-lowered:{INVENTORY}");
+    let range = format!("{}..{}", &repo.base[..12], &head[..12]);
+    let hint = |key: &str| {
+        format!(
+            "scan-weakened-tests: {key} blocks; acknowledge it with a commit-message line in {range}: Weakens-Test: {key}: <reason>\n"
+        )
+    };
+    assert_eq!(run.code, Some(1));
+    assert_eq!(
+        run.stdout,
+        format!(
+            "blocks {KEY} second: not ignored -> #[ignore]\nblocks {budget} qualified.lane.rows[a].seeds: 12 -> 11\n"
+        )
+    );
+    assert_eq!(run.stderr, hint(KEY) + &hint(&budget));
+}
+
+#[test]
+fn the_arguments_read_as_the_option_table_states() {
+    let repo = Repo::new("arguments");
+    let help = repo.scan(&["--help"]);
+    assert_eq!(help.code, Some(0));
+    assert!(
+        help.stdout
+            .starts_with("usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\n"),
+        "{}",
+        help.stdout
+    );
+    let usage =
+        "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\nscan-weakened-tests: error: ";
+    let missing = repo.scan(&[]);
+    assert_eq!(missing.code, Some(2));
+    assert_eq!(
+        missing.stderr,
+        format!("{usage}the following arguments are required: --base\n")
+    );
+    let ambiguous = repo.scan(&["--he", "HEAD"]);
+    assert_eq!(ambiguous.code, Some(2));
+    assert_eq!(
+        ambiguous.stderr,
+        format!("{usage}ambiguous option: --he could match --help, --head\n")
+    );
+    let head = repo.ignore_second("ignore");
+    let abbreviated = repo.scan(&["--bas", &repo.base, "--hea", &head]);
+    assert_eq!(
+        abbreviated.outcome(),
+        (
+            Some(1),
+            format!("blocks {KEY} second: not ignored -> #[ignore]\n").as_str()
+        )
+    );
+    let dashes = repo.scan(&["--base=--"]);
+    assert_eq!(dashes.code, Some(2));
+    assert!(
+        dashes.stderr.starts_with(
+            "scan-weakened-tests: git rev-parse --verify --end-of-options --^{commit}: fatal: "
+        ),
+        "{}",
+        dashes.stderr
+    );
+}
+
+#[test]
+fn a_full_standard_output_writes_the_summary_and_the_hint_and_exits_120() {
+    let repo = Repo::new("full-output");
+    let head = repo.ignore_second("ignore");
+    let summary = repo.temp.join("summary.md");
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full opens");
+    let path = summary.to_str().expect("the path is UTF-8");
+    let run = Run::from(
+        repo.tool(
+            &["--base", &repo.base],
+            &[("GITHUB_STEP_SUMMARY", path)],
+            None,
+        )
+        .stdout(full)
+        .output()
+        .expect("the tool starts"),
+    );
+    let range = format!("{}..{}", &repo.base[..12], &head[..12]);
+    let line = format!("blocks {KEY} second: not ignored -> #[ignore]\n");
+    assert_eq!(run.code, Some(120), "{}", run.stderr);
+    assert_eq!(
+        fs::read_to_string(&summary).expect("the summary reads"),
+        format!("Weakened-test scan of {range}:\n\n```text\n{line}```\n")
+    );
+    let hint = format!(
+        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {range}: Weakens-Test: {KEY}: <reason>\n"
+    );
+    assert_eq!(
+        run.stderr,
+        format!(
+            "{hint}scan-weakened-tests: standard output: No space left on device (os error 28)\n"
+        )
+    );
+}
+
+#[test]
+fn an_empty_summary_variable_or_an_empty_report_writes_no_summary() {
+    let repo = Repo::new("no-summary");
+    let summary = repo.temp.join("summary.md");
+    let path = summary.to_str().expect("the path is UTF-8");
+    let quiet = repo.change(&[("src/model.rs", "// unrelated\n")]);
+    let run = repo.scan_env(
+        &["--base", &repo.base, "--head", &quiet],
+        &[("GITHUB_STEP_SUMMARY", path)],
+    );
+    assert_eq!(run.outcome(), (Some(0), ""));
+    assert!(!summary.exists());
+    repo.ignore_second("ignore");
+    let run = repo.scan_env(&["--base", &repo.base], &[("GITHUB_STEP_SUMMARY", "")]);
+    assert_eq!(run.code, Some(1));
+    assert!(!summary.exists());
+}
+
+#[test]
+fn counts_past_u64_negative_counts_and_decimal_digits_outside_ascii_compare_by_value() {
+    let repo = Repo::new("values");
+    repo.change(&[
+        (
+            INVENTORY,
+            "{\"seeds\": -1, \"seconds\": 123456789012345678901}",
+        ),
+        (
+            "src/model.rs",
+            "    b.max_branches = \u{661}\u{660};\n    b.max_branches\x1c=\x1c9;\n",
+        ),
+    ]);
+    let head = repo.change(&[
+        (
+            INVENTORY,
+            "{\"seeds\": -2, \"seconds\": 123456789012345678900}",
+        ),
+        (
+            "src/model.rs",
+            "    b.max_branches = \u{669};\n    b.max_branches\x1c=\x1c8;\n",
+        ),
+    ]);
+    let run = repo.scan_parent(&head);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert_eq!(
+        run.lines(),
+        [
+            "blocks budget-lowered:src/model.rs max_branches at line 1: 10 -> 9",
+            "blocks budget-lowered:src/model.rs max_branches at line 2: 9 -> 8",
+            &format!("blocks budget-lowered:{INVENTORY} seeds: -1 -> -2"),
+            &format!(
+                "blocks budget-lowered:{INVENTORY} seconds: 123456789012345678901 -> 123456789012345678900"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_budget_of_more_than_4300_digits_exits_two() {
+    let repo = Repo::new("digit-limit");
+    repo.change(&[(
+        "src/model.rs",
+        &format!("    b.max_branches = {};\n", "1".repeat(4301)),
+    )]);
+    let head = repo.change(&[(
+        "src/model.rs",
+        &format!("    b.max_branches = {};\n", "2".repeat(4301)),
+    )]);
+    let run = repo.scan_parent(&head);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "scan-weakened-tests: a run of 4301 digits passes the limit of 4300 for integer conversion\n"
+    );
 }

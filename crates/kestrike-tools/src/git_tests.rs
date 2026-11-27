@@ -1,7 +1,8 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::git::{GitError, batch_texts, git, label, merge_base, strip};
+use crate::git::{GitError, batch_texts, git, label, merge_base};
+use crate::text::strip_str;
 
 fn specs(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
@@ -54,8 +55,8 @@ fn a_size_past_the_reply_takes_the_rest_of_the_reply() {
 
 #[test]
 fn strip_removes_python_white_space_at_both_ends() {
-    assert_eq!(strip("\u{1c}\u{3000} a b\t\u{85}\n"), "a b");
-    assert_eq!(strip("\u{200b}x"), "\u{200b}x");
+    assert_eq!(strip_str("\u{1c}\u{3000} a b\t\u{85}\n"), "a b");
+    assert_eq!(strip_str("\u{200b}x"), "\u{200b}x");
 }
 
 #[test]

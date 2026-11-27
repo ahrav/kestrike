@@ -1,5 +1,5 @@
 use super::digits::{integer, is_digits};
-use super::hunks::{Hunk, hunks, paired, text_of};
+use super::hunks::{Hunk, hunks, paired};
 use super::inventory::inventory_changes;
 use super::patterns::*;
 use super::{Failure, Shown};
@@ -70,6 +70,14 @@ fn the_max_branches_pattern_matches_the_inputs_of_the_scan() {
             ("    max_branches = 5_000 * 4;", &[]),
             ("f(max_branches = 7, 2)", &[("max_branches = 7", Some("7"))]),
             ("max_branches = 9x;", &[]),
+            (
+                "max_branches = 9x; max_branches = 3;",
+                &[("max_branches = 3", Some("3"))],
+            ),
+            (
+                "max_branches\x1c=\x1c9;",
+                &[("max_branches\x1c=\x1c9", Some("9"))],
+            ),
         ],
     );
 }
@@ -129,6 +137,10 @@ fn the_named_bound_pattern_matches_the_inputs_of_the_scan() {
             ),
             ("preemption_bound = Some(LOW + 1)", &[]),
             ("preemption_bound = Some(3)", &[]),
+            (
+                "x.preemption_bound = Some(preemption_bound = Some(LOW));",
+                &[("preemption_bound = Some(LOW", None)],
+            ),
         ],
     );
 }
@@ -359,7 +371,12 @@ fn an_inventory_reports_falls_absences_and_rises_in_document_order() {
     let found: Vec<(String, String)> = inventory_changes(old, new)
         .expect("the inventories compare")
         .into_iter()
-        .map(|(kind, name, old, new)| (format!("{kind} {name}"), format!("{old} -> {new}")))
+        .map(|change| {
+            (
+                format!("{} {}", change.class.as_str(), change.name),
+                format!("{} -> {}", change.old, change.new),
+            )
+        })
         .collect();
     let row = |kind: &str, name: &str, values: &str| (format!("{kind} {name}"), values.to_owned());
     assert_eq!(
@@ -391,7 +408,7 @@ fn duplicate_keys_keep_the_last_value_at_the_first_place() {
     let found: Vec<String> = inventory_changes(old, new)
         .expect("the inventories compare")
         .into_iter()
-        .map(|(_, name, old, new)| format!("{name}: {old} -> {new}"))
+        .map(|change| format!("{}: {} -> {}", change.name, change.old, change.new))
         .collect();
     assert_eq!(found, ["seeds: 7 -> 6", "seconds: 9 -> 8"]);
 }

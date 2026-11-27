@@ -9,18 +9,12 @@ use std::collections::{HashMap, HashSet};
 use regex::bytes::NoExpand;
 
 use crate::rust_text::{FUNCTION, IGNORE, code};
-use crate::text::is_space;
+use crate::text::words;
 
-use super::hunks::text_of;
-use super::patterns::{REASON, SCOPE};
+use super::patterns::{REASON, SCOPE, text_of};
 
 /// Each entry groups one fn name's declarations in file order, with one attribute list per declaration.
 pub type Declarations = Vec<(String, Vec<Vec<String>>)>;
-
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| is_space(u32::from(c)))
-        .filter(|word| !word.is_empty())
-}
 
 pub fn declarations(text: &str) -> Declarations {
     let view = code(text);

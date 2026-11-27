@@ -1,26 +1,27 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 
 use crate::args::{Given, Kind, Opt, Parsed, Reader, any};
-use crate::git::{GitError, blob_texts, git, git_text, merge_base, strip};
-use crate::json::{Integer, MAX_INTEGER_DIGITS};
+use crate::git::{blob_texts, git, git_text, merge_base};
+use crate::json::Integer;
+use crate::text::strip_str;
 
 use super::declarations::{conditions, declarations, plain};
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
-use super::patterns::{ASSERT, rust_budgets, timeouts};
+use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
+use super::{Change, Class, Failure, Finding, Shown};
 
 const TOOL: &str = "scan-weakened-tests";
 const USAGE: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]";
 const HELP: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\nReport changes that weaken \
                     a Rust test or its budget.\n\noptional arguments:\n  -h, --help   show this help message \
                     and exit\n  --base BASE\n  --head HEAD\n";
-const BLOCKING: [&str; 2] = ["ignore-existing", "budget-lowered"];
 const TIMEOUT_FILES: [&str; 2] = [".github/workflows/agent-checks.yml", "scripts/rust-lane.sh"];
+const STREAM_FAILED: u8 = 120;
 
 const OPTIONS: [Opt; 3] = [
     Opt {
@@ -42,81 +43,6 @@ const OPTIONS: [Opt; 3] = [
         },
     },
 ];
-
-#[derive(Debug)]
-pub enum Failure {
-    Git(GitError),
-    Refused(String),
-    Digits(usize),
-}
-
-impl From<GitError> for Failure {
-    fn from(error: GitError) -> Self {
-        Self::Git(error)
-    }
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Git(error) => error.fmt(f),
-            Self::Refused(text) => f.write_str(text),
-            Self::Digits(count) => write!(
-                f,
-                "a run of {count} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion"
-            ),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Shown {
-    Count(Integer),
-    Word(String),
-}
-
-impl Shown {
-    pub fn absent() -> Self {
-        Self::Word("absent".to_owned())
-    }
-}
-
-impl fmt::Display for Shown {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Count(count) => count.fmt(f),
-            Self::Word(word) => f.write_str(word),
-        }
-    }
-}
-
-struct Finding {
-    kind: &'static str,
-    path: String,
-    name: String,
-    old: Shown,
-    new: Shown,
-}
-
-impl Finding {
-    fn key(&self) -> String {
-        format!("{}:{}", self.kind, self.path)
-    }
-
-    fn blocking(&self) -> bool {
-        BLOCKING.contains(&self.kind)
-    }
-}
-
-fn finding(kind: &'static str, path: &str, name: String, old: Shown, new: Shown) -> Finding {
-    Finding {
-        kind,
-        path: path.to_owned(),
-        name,
-        old,
-        new,
-    }
-}
 
 fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
     let listed = git(&[
@@ -154,52 +80,67 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
     let mut diffs = path_hunks(base, head, &diffed)?;
+    let mut hunks_of = |path: &str| {
+        diffs
+            .remove(path)
+            .expect("path_hunks reads every listed path")
+    };
     let mut found = Vec::new();
+    let mut push = |path: &str, changes: Vec<Change>| {
+        found.extend(changes.into_iter().map(|change| Finding {
+            path: path.to_owned(),
+            change,
+        }));
+    };
     for (path, pair) in rust.iter().zip(texts.chunks(2)) {
         let [old, new] = pair else {
             unreachable!("each Rust path reads two blobs");
         };
-        ignores(path, old, new, &mut found);
-        let changes = diffs.remove(*path).unwrap_or_default();
-        let changes = named_bounds(changes, old, new);
-        for (name, old, new) in line_changes(&changes, &rust_budgets())? {
-            if new < old {
-                found.push(finding(
-                    "budget-lowered",
-                    path,
-                    name,
-                    Shown::Count(old),
-                    Shown::Count(new),
-                ));
-            }
-        }
-        assertions(path, &changes, &mut found);
+        push(path, ignores(old, new));
+        let changes = hunks_of(path);
+        let valued = named_bounds(changes.clone(), old, new);
+        push(
+            path,
+            line_findings(
+                &valued,
+                &rust_budgets(),
+                Class::BudgetLowered,
+                |old, new| new < old,
+            )?,
+        );
+        push(path, assertions(&changes).into_iter().collect());
     }
     for path in TIMEOUT_FILES.iter().filter(|path| paths.contains(path)) {
-        let changes = diffs.remove(*path).unwrap_or_default();
-        for (name, old, new) in line_changes(&changes, &timeouts())? {
-            if new > old {
-                found.push(finding(
-                    "timeout-raised",
-                    path,
-                    name,
-                    Shown::Count(old),
-                    Shown::Count(new),
-                ));
-            }
-        }
+        let changes = hunks_of(path);
+        push(
+            path,
+            line_findings(&changes, &timeouts(), Class::TimeoutRaised, |old, new| {
+                new > old
+            })?,
+        );
     }
     if paths.contains(&INVENTORY) {
         let old = inventory_text(base)?;
         let new = inventory_text(head)?;
-        for (kind, name, old, new) in inventory_changes(&old, &new)? {
-            found.push(finding(kind, INVENTORY, name, old, new));
-        }
+        push(INVENTORY, inventory_changes(&old, &new)?);
     }
     Ok(found)
 }
 
-fn ignores(path: &str, old: &str, new: &str, found: &mut Vec<Finding>) {
+fn line_findings(
+    changes: &[Hunk],
+    patterns: &[&Pattern],
+    class: Class,
+    reported: fn(&Integer, &Integer) -> bool,
+) -> Result<Vec<Change>, Failure> {
+    Ok(line_changes(changes, patterns)?
+        .into_iter()
+        .filter(|(_, old, new)| reported(old, new))
+        .map(|(name, old, new)| Change::new(class, name, Shown::Count(old), Shown::Count(new)))
+        .collect())
+}
+
+fn ignores(old: &str, new: &str) -> Vec<Change> {
     let after = if new.contains("ignore") {
         declarations(new)
     } else {
@@ -213,22 +154,20 @@ fn ignores(path: &str, old: &str, new: &str, found: &mut Vec<Finding>) {
     } else {
         HashMap::new()
     };
+    let mut found = Vec::new();
     for (name, heads) in after {
         let bases = before.get(&name).map_or(&[][..], Vec::as_slice);
         for (index, attributes) in heads.iter().enumerate() {
-            let joined = attributes.join("; ");
+            let new = || Shown::Word(attributes.join("; "));
             match bases.get(index) {
                 None if !attributes.is_empty() => {
-                    let old = Shown::absent();
-                    found.push(finding(
-                        "ignore-new",
-                        path,
+                    found.push(Change::new(
+                        Class::IgnoreNew,
                         name.clone(),
-                        old,
-                        Shown::Word(joined),
+                        Shown::absent(),
+                        new(),
                     ));
                 }
-                None => {}
                 Some(base)
                     if plain(base) == 0 && !conditions(attributes).is_subset(&conditions(base)) =>
                 {
@@ -237,38 +176,41 @@ fn ignores(path: &str, old: &str, new: &str, found: &mut Vec<Finding>) {
                     } else {
                         base.join("; ")
                     };
-                    let (old, new) = (Shown::Word(old), Shown::Word(joined));
-                    found.push(finding("ignore-existing", path, name.clone(), old, new));
+                    found.push(Change::new(
+                        Class::IgnoreExisting,
+                        name.clone(),
+                        Shown::Word(old),
+                        new(),
+                    ));
                 }
-                Some(_) => {}
+                _ => {}
             }
         }
     }
+    found
 }
 
-fn assertions(path: &str, changes: &[Hunk], found: &mut Vec<Finding>) {
-    let holds = |text: &String| ASSERT.is_match(text.as_bytes());
+fn assertions(changes: &[Hunk]) -> Option<Change> {
+    let holds = |text: &&String| ASSERT.is_match(text.as_bytes());
     let removed = changes
         .iter()
         .flat_map(|hunk| &hunk.removed)
-        .filter(|text| holds(text))
+        .filter(holds)
         .count();
     let added = changes
         .iter()
         .flat_map(|hunk| hunk.added.iter().map(|(_, text)| text))
-        .filter(|text| holds(text))
+        .filter(holds)
         .count();
-    if removed > added {
+    (removed > added).then(|| {
         let (old, new) = (format!("{removed} removed"), format!("{added} added"));
-        let name = "assert lines".to_owned();
-        found.push(finding(
-            "assertions-removed",
-            path,
-            name,
+        Change::new(
+            Class::AssertionsRemoved,
+            "assert lines".to_owned(),
             Shown::Word(old),
             Shown::Word(new),
-        ));
-    }
+        )
+    })
 }
 
 /// `acknowledgements` retains each key's first nonblank reason in `git log base..head` order. A line
@@ -283,20 +225,26 @@ fn acknowledgements(
     if keys.is_empty() {
         return Ok(reasons);
     }
+    let prefixes: Vec<(String, &String)> = keys
+        .iter()
+        .map(|key| (format!("Weakens-Test: {key}: "), key))
+        .collect();
     let range = format!("{base}..{head}");
     let log = git_text(&["log", "--encoding=UTF-8", "--format=%B", &range])?;
     for line in log.split('\n') {
         if !line.starts_with("Weakens-Test: ") {
             continue;
         }
-        let owner = keys
+        let owner = prefixes
             .iter()
-            .filter(|key| line.starts_with(&format!("Weakens-Test: {key}: ")))
-            .max_by_key(|key| key.len());
-        if let Some(key) = owner {
-            let reason = strip(&line["Weakens-Test: ".len() + key.len() + 2..]);
+            .filter(|(prefix, _)| line.starts_with(prefix.as_str()))
+            .max_by_key(|(prefix, _)| prefix.len());
+        if let Some((prefix, key)) = owner {
+            let reason = strip_str(&line[prefix.len()..]);
             if !reason.is_empty() {
-                reasons.entry(key.clone()).or_insert(reason);
+                reasons
+                    .entry((*key).clone())
+                    .or_insert_with(|| reason.to_owned());
             }
         }
     }
@@ -312,10 +260,10 @@ fn resolve(rev: &OsStr) -> Result<String, Failure> {
         OsStr::new("--end-of-options"),
         &named,
     ];
-    Ok(strip(&git(&args)?))
+    Ok(strip_str(&git(&args)?).to_owned())
 }
 
-fn short(commit: &str) -> &str {
+pub(super) fn short(commit: &str) -> &str {
     &commit[..commit.len().min(12)]
 }
 
@@ -329,7 +277,7 @@ struct Scan {
 fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
     let (base, head) = (resolve(base)?, resolve(head)?);
     let range = format!("{base}..{head}");
-    if strip(&git(&["rev-list", "--count", &range])?) == "0" {
+    if strip_str(&git(&["rev-list", "--count", &range])?) == "0" {
         return Ok(None);
     }
     let Some(fork) = merge_base(&base, &head)? else {
@@ -343,7 +291,7 @@ fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
     let mut keys: Vec<String> = Vec::new();
     for key in found
         .iter()
-        .filter(|found| found.blocking())
+        .filter(|found| found.change.class.blocks())
         .map(Finding::key)
     {
         if !keys.contains(&key) {
@@ -363,6 +311,10 @@ fn complain(text: &str) -> Result<(), io::Error> {
     io::stderr().write_all(text.as_bytes())
 }
 
+fn fail(text: &str, code: u8) -> u8 {
+    complain(text).map_or(STREAM_FAILED, |()| code)
+}
+
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let reader = Reader::new(TOOL, USAGE, HELP, true, &OPTIONS);
     let values = match reader.parse(args) {
@@ -374,32 +326,39 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
                 .and_then(|()| stdout.flush())
             {
                 Ok(()) => 0,
-                Err(_) => 120,
+                Err(_) => STREAM_FAILED,
             };
         }
-        Parsed::Refused { code, text } => return complain(&text).map_or(120, |()| code),
+        Parsed::Refused { code, text } => return fail(&text, code),
     };
     let rev = |name: &str, absent: &str| match values.get(name) {
         Given::Absent => OsString::from(absent),
-        Given::Empty => OsString::from("[]"),
+        Given::Empty => OsString::from("--"),
         Given::Value(value) => value.clone(),
     };
     let scanned = match scan(&rev("--base", ""), &rev("--head", "HEAD")) {
         Ok(Some(scanned)) => scanned,
         Ok(None) => return 0,
-        Err(error) => return complain(&format!("{TOOL}: {error}\n")).map_or(120, |()| 2),
+        Err(error) => return fail(&format!("{TOOL}: {error}\n"), 2),
     };
-    report(&scanned).unwrap_or(120)
+    report(&scanned).unwrap_or(STREAM_FAILED)
 }
 
-/// `run` maps a `report` error to exit code 120. Only a failed write to standard error produces that error.
+/// If a standard output write fails, `report` finishes the remaining report output before returning
+/// [`STREAM_FAILED`]. It returns `Err` when standard error cannot be written.
 fn report(scanned: &Scan) -> Result<u8, io::Error> {
     let mut lines = String::new();
     let mut unacknowledged: Vec<String> = Vec::new();
     for found in &scanned.found {
         let key = found.key();
-        let line = format!("{key} {}: {} -> {}", found.name, found.old, found.new);
-        if !found.blocking() {
+        let Change {
+            class,
+            name,
+            old,
+            new,
+        } = &found.change;
+        let line = format!("{key} {name}: {old} -> {new}");
+        if !class.blocks() {
             lines.push_str(&format!("reports {line}\n"));
         } else if let Some(reason) = scanned.reasons.get(&key) {
             lines.push_str(&format!("acknowledged {line} (Weakens-Test: {reason})\n"));
@@ -411,15 +370,14 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
         }
     }
     let range = format!("{}..{}", short(&scanned.base), short(&scanned.head));
+    let mut unwritten = None;
+    let mut code = u8::from(!unacknowledged.is_empty());
     if !lines.is_empty() {
         let mut stdout = io::stdout().lock();
-        if let Err(error) = stdout
+        unwritten = stdout
             .write_all(lines.as_bytes())
             .and_then(|()| stdout.flush())
-        {
-            complain(&format!("{TOOL}: standard output: {error}\n"))?;
-            return Ok(1);
-        }
+            .err();
         if let Some(summary) =
             std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty())
         {
@@ -431,7 +389,8 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
                 .and_then(|mut file| file.write_all(text.as_bytes()));
             if let Err(error) = written {
                 complain(&format!("{TOOL}: step summary: {error}\n"))?;
-                return Ok(2);
+                unacknowledged.clear();
+                code = 2;
             }
         }
     }
@@ -441,5 +400,9 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
              Weakens-Test: {key}: <reason>\n"
         ))?;
     }
-    Ok(u8::from(!unacknowledged.is_empty()))
+    if let Some(error) = unwritten {
+        complain(&format!("{TOOL}: standard output: {error}\n"))?;
+        return Ok(STREAM_FAILED);
+    }
+    Ok(code)
 }

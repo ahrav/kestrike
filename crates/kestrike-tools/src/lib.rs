@@ -1,4 +1,5 @@
 pub mod args;
+pub mod classes;
 pub mod fixtures;
 pub mod git;
 pub mod json;
