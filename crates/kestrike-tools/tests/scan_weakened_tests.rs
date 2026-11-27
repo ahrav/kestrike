@@ -2693,7 +2693,7 @@ fn an_acknowledged_case_removal_passes() {
     );
 }
 
-/// A Rust path that is a file at the base and a tree at the head is refused whatever the tree holds: a
+/// A Rust path that is a file at one commit and a tree at the other is refused whatever the tree holds: a
 /// changed `.rs` file under the tree, listed in the same batch, leaves the tree's own record in place.
 #[test]
 fn a_rust_path_that_becomes_a_tree_exits_two_whatever_it_holds() {
@@ -2702,15 +2702,19 @@ fn a_rust_path_that_becomes_a_tree_exits_two_whatever_it_holds() {
         let file = repo.change(&[("src/foo.rs", "fn f() {}\n")]);
         repo.git(&["rm", "-q", "--", "src/foo.rs"]);
         let tree = repo.change(&[(&format!("src/foo.rs/{inner}"), "fn g() {}\n")]);
-        let run = repo.scan(&["--base", &file, "--head", &tree]);
-        assert_eq!(run.outcome(), (Some(2), ""), "{inner}: {}", run.stderr);
-        assert_eq!(
-            run.stderr,
-            format!(
-                "scan-weakened-tests: src/foo.rs at {} is not a file\n",
-                &tree[..12]
-            )
-        );
+        repo.git(&["rm", "-q", "-r", "--", "src/foo.rs"]);
+        let restored = repo.change(&[("src/foo.rs", "fn f() {}\n")]);
+        for (base, head) in [(&file, &tree), (&tree, &restored)] {
+            let run = repo.scan(&["--base", base, "--head", head]);
+            assert_eq!(run.outcome(), (Some(2), ""), "{inner}: {}", run.stderr);
+            assert_eq!(
+                run.stderr,
+                format!(
+                    "scan-weakened-tests: src/foo.rs at {} is not a file\n",
+                    &tree[..12]
+                )
+            );
+        }
         repo.reset(&repo.base);
     }
 }

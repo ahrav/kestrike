@@ -1,6 +1,6 @@
 //! These functions pass argument vectors to Git and read its standard output as strict UTF-8. Every Git
-//! child of this module starts from [`command`], which sets `GIT_NO_REPLACE_OBJECTS=1`, so Git reads each object as the
-//! repository stores it and no `refs/replace` entry stands in for one.
+//! child of this module starts from [`command`], which sets `GIT_NO_REPLACE_OBJECTS=1`, so Git reads each
+//! object as the repository stores it and no `refs/replace` entry stands in for one.
 
 use std::ffi::OsStr;
 use std::fmt;
