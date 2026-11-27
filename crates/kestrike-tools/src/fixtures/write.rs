@@ -8,7 +8,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::Stdio;
@@ -73,10 +73,13 @@ impl Trace {
     /// recipe makes a seeded trace of `steps` steps. `case` receives the step count and the recipe and returns
     /// the text of `case.qnt`. `meta` holds the fields of the writer's record that follow `steps`.
     ///
+    /// `name` names the trace directory `<output>/<name>/`, the trace `<output>/<name>.itf.json` and Quint's
+    /// `--out-itf ../<name>.itf.json`, so it is one path component that Quint expands nothing in.
+    ///
     /// # Panics
     ///
-    /// `Trace::new` panics if `meta` contains one of the keys `model_sha256`, `seed`, `steps` and
-    /// `recipe`.
+    /// `Trace::new` panics if `name` is empty, `.` or `..`, or holds `/`, `{`, `}` or a NUL byte, and if
+    /// `meta` contains one of the keys `model_sha256`, `seed`, `steps` and `recipe`.
     pub fn new(
         name: String,
         seed: u64,
@@ -85,6 +88,10 @@ impl Trace {
         case: impl FnOnce(usize, Option<&[&str]>) -> String,
         meta: Vec<(&'static str, Value)>,
     ) -> Self {
+        assert!(
+            !matches!(name.as_str(), "" | "." | "..") && !name.contains(['/', '{', '}', '\0']),
+            "a trace's name is one path component without a template: {name:?}"
+        );
         let recipe = recipe.filter(|recipe| !recipe.is_empty());
         let steps = recipe.map_or(steps, <[_]>::len);
         for (key, _) in &meta {
@@ -203,7 +210,9 @@ pub(crate) fn generate(
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let copy = model_text(&bytes);
+    // Every copy holds the model's bytes unchanged. A model that is not UTF-8 fails at the first trace, once
+    // its directory exists.
+    let copy = io::read_to_string(bytes.as_slice());
     for trace in traces {
         let leaf = format!("{}.itf.json", trace.name);
         let file = output.join(&leaf);
@@ -348,16 +357,9 @@ fn create(directory: &Path) -> io::Result<()> {
     }
 }
 
-/// `model_text` decodes the model's bytes as UTF-8 and writes each `\r\n` and each lone `\r` as `\n`, the
-/// text a model copy holds.
-fn model_text(bytes: &[u8]) -> io::Result<String> {
-    Ok(io::read_to_string(bytes)?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n"))
-}
-
 /// `clear` removes the entry at `file`, a symbolic link itself and not its target, and succeeds when no
-/// entry is there. A directory at `file` is refused with `EISDIR`.
+/// entry is there, so the trace read after Quint exits is one this run's Quint wrote. A directory at `file`,
+/// or an entry the process cannot remove, returns the system's error (`EISDIR` for a directory on Linux).
 fn clear(file: &Path) -> io::Result<()> {
     match fs::remove_file(file) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -365,10 +367,10 @@ fn clear(file: &Path) -> io::Result<()> {
     }
 }
 
-/// `read_trace` returns the trace at `file` with the permission bits of the file it read.
+/// `read_trace` returns the trace at `file` with the permission bits (`0o777`) of the file it read.
 fn read_trace(file: &Path) -> Result<(Object, u32), String> {
     let mut opened = File::open(file).map_err(at(file))?;
-    let mode = opened.metadata().map_err(at(file))?.permissions().mode() & 0o7777;
+    let mode = opened.metadata().map_err(at(file))?.permissions().mode() & 0o777;
     let mut bytes = Vec::new();
     opened.read_to_end(&mut bytes).map_err(at(file))?;
     let text = String::from_utf8(bytes).map_err(at(file))?;
@@ -382,33 +384,57 @@ fn read_trace(file: &Path) -> Result<(Object, u32), String> {
 }
 
 /// `replace` creates `staged`, which must be new, writes `text` to it, gives it the permission bits `mode`,
-/// syncs it and renames it over `file`, so `file` holds either its earlier bytes or the whole `text`. On a
-/// failure after the creation, `replace` removes `staged` and returns one line naming the path of the step
-/// that failed.
-fn replace(file: &Path, staged: &Path, mode: u32, text: &str) -> Result<(), String> {
+/// syncs and closes it, so a deferred write error such as `ENOSPC` is reported here, and renames it over
+/// `file`. While the host stays up, `file` holds either its earlier bytes or the whole `text`; no directory
+/// is synced. A `text` longer than the soft `RLIMIT_FSIZE` is refused with `EFBIG` before the write, which leaves
+/// `SIGXFSZ` unraised. On a failure after the creation, `replace` removes `staged` and returns one line that
+/// names the failed step's path, `staged` or, for the rename, `file`, and the removal's error when the
+/// removal fails too.
+pub(crate) fn replace(file: &Path, staged: &Path, mode: u32, text: &str) -> Result<(), String> {
     let mut new = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(staged)
         .map_err(at(staged))?;
-    let written = new
-        .write_all(text.as_bytes())
+    let prepared = fits(text.len())
+        .and_then(|()| new.write_all(text.as_bytes()))
         .and_then(|()| new.set_permissions(fs::Permissions::from_mode(mode)))
-        .and_then(|()| new.sync_all())
-        .map_err(|error| (staged, error));
-    drop(new);
-    let Err((path, error)) =
-        written.and_then(|()| fs::rename(staged, file).map_err(|error| (file, error)))
-    else {
-        return Ok(());
+        .and_then(|()| new.sync_all());
+    let closed = close(new);
+    let written = prepared.and(closed).map_err(at(staged));
+    written
+        .and_then(|()| fs::rename(staged, file).map_err(at(file)))
+        .map_err(|line| match fs::remove_file(staged) {
+            Ok(()) => line,
+            Err(removal) => format!("{line}; removing {} failed: {removal}", staged.display()),
+        })
+}
+
+/// `close` closes `file` once and returns the error `close(2)` reports. The descriptor is released even on
+/// an error, so it is never closed again.
+fn close(file: File) -> io::Result<()> {
+    let descriptor = file.into_raw_fd();
+    // SAFETY: `into_raw_fd` hands this function the sole ownership of `descriptor`, which is closed here once.
+    if unsafe { libc::close(descriptor) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// `fits` refuses with `EFBIG` a write of `len` bytes at offset 0 that the soft `RLIMIT_FSIZE` forbids.
+fn fits(len: usize) -> io::Result<()> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
     };
-    Err(match fs::remove_file(staged) {
-        Ok(()) => format!("{}: {error}", path.display()),
-        Err(removal) => format!(
-            "{}: {error}; removing {} failed: {removal}",
-            path.display(),
-            staged.display()
-        ),
-    })
+    // SAFETY: `getrlimit` writes one `rlimit` through the pointer, which refers to a live local.
+    if unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    match u64::try_from(len) {
+        Ok(len) if limit.rlim_cur == libc::RLIM_INFINITY || len <= limit.rlim_cur => Ok(()),
+        _ => Err(io::Error::from_raw_os_error(libc::EFBIG)),
+    }
 }

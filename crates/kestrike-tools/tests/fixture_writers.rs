@@ -760,6 +760,8 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
     let quint = stand_in(&scratch.0, writer, &output, reply);
     let second = "a_claim_beside_a_promise_spares_the_promised_units";
     fs::create_dir_all(output.join(second)).expect("the earlier run's directory is made");
+    let earlier = output.join(format!("{second}.itf.json"));
+    fs::write(&earlier, "earlier").expect("the earlier run's trace is written");
     let result = write_traces(writer, &quint, &output);
     assert_eq!(result.status.code(), Some(1));
     let line = format!(
@@ -774,9 +776,10 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
         .find(|trace| trace.name == first)
         .expect("the first is committed");
     assert!(kept == expected.bytes, "the first trace is complete");
-    assert!(
-        !output.join(format!("{second}.itf.json")).exists(),
-        "the run stops at the second trace"
+    assert_eq!(
+        fs::read_to_string(&earlier).expect("the earlier run's trace stays"),
+        "earlier",
+        "the run stops at the second trace before its trace path is cleared"
     );
     assert!(
         !output
@@ -1026,10 +1029,16 @@ fn a_refusal_on_a_full_standard_error_exits_120() {
 }
 
 /// When the rewritten trace exceeds the file size limit, the writer exits 1 with one line naming the rewrite's
-/// new file, removes that file, and leaves Quint's trace at the trace path.
+/// new file, removes that file, and leaves Quint's trace at the trace path, with `SIGXFSZ` ignored and with
+/// its default action.
 #[test]
 fn a_rewrite_that_passes_the_file_size_limit_exits_1_and_leaves_quints_trace() {
-    for writer in [&WRITERS[1], &WRITERS[3]] {
+    for (writer, disposition) in [
+        (&WRITERS[1], libc::SIG_IGN),
+        (&WRITERS[3], libc::SIG_IGN),
+        (&WRITERS[1], libc::SIG_DFL),
+        (&WRITERS[3], libc::SIG_DFL),
+    ] {
         let scratch = Scratch::new();
         let output = scratch.0.join("out");
         let pad = fs::metadata(top().join(format!("quint/{}.qnt", writer.model)))
@@ -1059,7 +1068,7 @@ fn a_rewrite_that_passes_the_file_size_limit_exits_1_and_leaves_quints_trace() {
             output.as_os_str(),
         ]);
         // SAFETY: the closure makes two calls into libc, `setrlimit` and `signal`, each one system call that
-        // allocates nothing and takes no lock, and reads only the copied `limit`.
+        // allocates nothing and takes no lock, and reads only the copied `limit` and `disposition`.
         unsafe {
             command.pre_exec(move || {
                 let bound = libc::rlimit {
@@ -1069,7 +1078,7 @@ fn a_rewrite_that_passes_the_file_size_limit_exits_1_and_leaves_quints_trace() {
                 if libc::setrlimit(libc::RLIMIT_FSIZE, &bound) != 0 {
                     return Err(io::Error::last_os_error());
                 }
-                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                libc::signal(libc::SIGXFSZ, disposition);
                 Ok(())
             });
         }
@@ -1160,7 +1169,6 @@ fn an_output_path_with_a_sequence_template_holds_each_trace_byte_for_byte() {
                 .expect("the trace is written");
             assert!(written == trace.bytes, "{}: {}", writer.tool, trace.name);
         }
-        assert!(!scratch.0.join("out0").exists(), "{}", writer.tool);
     }
 }
 
@@ -1229,6 +1237,8 @@ fn a_trace_the_reader_refuses_exits_1_naming_its_file_and_the_byte() {
     assert_eq!(shown.lines().count(), 1, "{shown}");
 }
 
+/// A relative `--output` resolves against the working directory, and the line names the trace by its
+/// absolute path.
 #[test]
 fn a_trace_without_states_exits_1_naming_its_file() {
     let writer = &WRITERS[1];
@@ -1239,7 +1249,17 @@ fn a_trace_without_states_exits_1_naming_its_file() {
         data.remove("states");
         json::text(&Value::Object(data))
     });
-    let result = write_traces(writer, &quint, &output);
+    let result = Command::new(BINARY)
+        .arg(top())
+        .arg(writer.tool)
+        .args([
+            "--quint".as_ref(),
+            quint.as_os_str(),
+            "--output=out".as_ref(),
+        ])
+        .current_dir(&scratch.0)
+        .output()
+        .expect("the binary starts");
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(
         stderr(&result),
