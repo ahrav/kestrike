@@ -151,7 +151,12 @@ pub(super) fn load_plants(
         .to_path_buf();
     let mut linked = Vec::with_capacity(2);
     for path in [parent, directory.clone()] {
-        if is_link(&path).map_err(|error| Stop::failed(error.to_string()))? {
+        let tested = is_link(&path).map_err(|error| {
+            Stop::failed(format!(
+                "the plant store cannot be tested for a link: {error}"
+            ))
+        });
+        if tested? {
             linked.push(path);
         }
     }

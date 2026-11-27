@@ -44,8 +44,8 @@ impl Inputs {
         &self.options
     }
 
-    /// The environment every Git call of the run is given: the caller's, with
-    /// `GIT_NO_REPLACE_OBJECTS=1`.
+    /// The environment every Git call of the run is given: the caller's, the first variable of each name
+    /// kept, with `GIT_NO_REPLACE_OBJECTS=1`.
     pub fn env(&self) -> &Environ {
         &self.env
     }

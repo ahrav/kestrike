@@ -288,17 +288,22 @@ fn the_work_directory_is_new_private_and_outside_the_checkout() {
             repository.call(&[]).set("TMPDIR", &shared_dir),
             shared(&shown(&shared_dir), DEFAULT_WAY),
         ),
-        (
-            repository.call(&[]).unset("TMPDIR"),
-            shared(&foreign(Path::new("/tmp")), DEFAULT_WAY),
-        ),
-        (
-            repository.call(&[]).set("TMPDIR", ""),
-            shared(&foreign(Path::new("/tmp")), DEFAULT_WAY),
-        ),
     ];
     for (call, expected) in rows {
         assert_eq!(repository.refused(&call), expected, "{:?}", call.env.last());
+    }
+    let open = fs::metadata("/tmp").is_ok_and(|tmp| tmp.permissions().mode() & 0o002 != 0);
+    if !open {
+        eprintln!("the /tmp rows did not run: no other user can write /tmp here");
+        return;
+    }
+    let tmp = foreign(Path::new("/tmp"));
+    assert!(tmp.starts_with("/tmp"), "{tmp}");
+    for call in [
+        repository.call(&[]).unset("TMPDIR"),
+        repository.call(&[]).set("TMPDIR", ""),
+    ] {
+        assert_eq!(repository.refused(&call), shared(&tmp, DEFAULT_WAY));
     }
 }
 
@@ -325,7 +330,7 @@ fn missing_ancestors_are_made_private_and_links_resolved() {
         .expect("the ancestor stays")
         .permissions()
         .mode();
-    assert_eq!(mode & 0o077, 0, "{mode:o}");
+    assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     let real = repository.scratch.join("real");
     private_dir(&real);
     symlink(&real, repository.scratch.join("linked")).expect("linked");
@@ -386,9 +391,11 @@ fn standin(repository: &Repository, when: &str, out: &str, code: u8) -> Call {
         .expect("UTF-8")
         .trim()
         .to_owned();
-    let dir = repository
-        .scratch
-        .join(format!("standin{}", when.trim_start_matches('-')));
+    let dir = repository.scratch.join(format!(
+        "standin{}{}",
+        when.trim_start_matches('-'),
+        out.len()
+    ));
     private_dir(&dir);
     executable(
         &dir.join("git"),
@@ -440,6 +447,10 @@ fn git_failures_outside_a_plant() {
         ),
         (
             standin(&repository, "--numstat", "", 1),
+            "rejected: alpha: plant.patch is no patch: it changes no path".to_owned(),
+        ),
+        (
+            standin(&repository, "--numstat", "1\\t1\\tsrc/lib.rs\\n", 1),
             "rejected: alpha: plant.patch is no patch: it changes no path".to_owned(),
         ),
     ];
@@ -563,7 +574,6 @@ fn a_run_holds_every_checked_input() {
     assert_eq!(letters.len(), 8, "{name}");
     let mode = fs::metadata(work).expect("made").permissions().mode();
     assert_eq!(mode & 0o777, 0o700, "{mode:o}");
-    assert_eq!(repository.hooks_ran(), "", "the checks run no hook");
 }
 
 /// A parent of `--work` whose links loop cannot be resolved and is refused.

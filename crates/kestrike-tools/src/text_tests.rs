@@ -252,3 +252,24 @@ fn push_text_appends_the_code_points_of_another_text() {
     );
     assert_eq!(joined.repr(), "'a/\\udcffb\u{1f600}'");
 }
+
+/// `join` puts the separator between each two items alone, takes an empty separator, and copies an item's
+/// surrogates as they are.
+#[test]
+fn join_separates_each_two_items() {
+    let odd = Text::from_os(OsStr::from_bytes(b"\xff"));
+    let rows: &[(&str, Vec<Text>, &str)] = &[
+        (", ", vec![], "''"),
+        (", ", vec![Text::from("a")], "'a'"),
+        (
+            ", ",
+            vec![Text::from("a"), Text::from("b"), Text::from("c")],
+            "'a, b, c'",
+        ),
+        ("", vec![Text::from("a"), Text::from("b")], "'ab'"),
+        ("/", vec![Text::from("a"), odd], "'a/\\udcff'"),
+    ];
+    for (separator, items, expected) in rows {
+        assert_eq!(Text::join(separator, items).repr(), *expected, "{items:?}");
+    }
+}

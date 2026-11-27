@@ -251,6 +251,9 @@ fn both_links_are_tested_before_the_parent_is_named() {
     chmod(&moved, 0o000);
     assert_eq!(
         repository.refused(&repository.call(&[])),
-        format!("failed: {}: Permission denied (os error 13)", shown(&store))
+        format!(
+            "failed: the plant store cannot be tested for a link: {}: Permission denied (os error 13)",
+            shown(&store)
+        )
     );
 }

@@ -82,9 +82,10 @@ fn a_text_call_passes_its_vector_and_environment() {
     let mut given = env.clone();
     given.sort();
     assert_eq!(seen(&repository), given);
+    let names: Vec<OsString> = given.iter().map(|(name, _)| name.clone()).collect();
     assert!(
-        std::env::var_os("PATH").is_some(),
-        "the test process holds a PATH of its own"
+        std::env::vars_os().any(|(name, _)| !names.contains(&name)),
+        "the test process holds a variable the given environment lacks"
     );
     assert_eq!(
         (done.code, done.stdout.as_str(), done.stderr.as_str()),
@@ -164,7 +165,8 @@ fn failures_of_the_call() {
     );
 }
 
-/// Output that is no UTF-8 fails a text call with its step; a bytes call returns the bytes.
+/// Output that is no UTF-8, on either stream, fails a text call with its step; a bytes call returns the
+/// bytes.
 #[test]
 fn text_output_must_be_utf8() {
     let repository = Repository::new();
@@ -180,6 +182,15 @@ fn text_output_must_be_utf8() {
     );
     let done = git::bytes(&env, &repository.top, &[OsStr::new("x")], b"").expect("runs");
     assert_eq!(done.stdout, b"\xff");
+    let dir = repository.scratch.join("odd-error");
+    private_dir(&dir);
+    executable(&dir.join("git"), "#!/bin/sh\nprintf '\\377' >&2\n");
+    set(&mut env, "PATH", dir.into_os_string());
+    let error = git::text(&env, &repository.top, &[OsStr::new("status")]).expect_err("fails");
+    assert_eq!(
+        error.to_string(),
+        "`git status` wrote output that is no UTF-8"
+    );
 }
 
 /// The repository's hooks run for the host's Git and never for the call, which a commit through it

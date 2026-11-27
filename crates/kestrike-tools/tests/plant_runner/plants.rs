@@ -398,6 +398,15 @@ fn the_patch_changes_exactly_its_files_and_contents_alone() {
     );
     let created =
         "diff --git a/src/run.sh b/src/run.sh\nnew file mode 100755\nindex 0000000..e69de29\n";
+    let copied = "diff --git a/src/lib.rs b/src/copy.rs\nsimilarity index 100%\n\
+                  copy from src/lib.rs\ncopy to src/copy.rs\n";
+    let deleted = format!(
+        "diff --git a/src/lib.rs b/src/lib.rs\ndeleted file mode 100644\n--- a/src/lib.rs\n+++ /dev/null\n\
+         @@ -1,3 +0,0 @@\n{}",
+        LIB.lines()
+            .map(|line| format!("-{line}\n"))
+            .collect::<String>()
+    );
     rows(&[
         (
             "plant.patch changes src/util.rs, and files names src/lib.rs",
@@ -421,7 +430,30 @@ fn the_patch_changes_exactly_its_files_and_contents_alone() {
                 r.write(JSON, replaced("files", "[\"src/run.sh\"]"));
             },
         ),
+        (
+            "plant.patch does more than change file contents: copy src/{lib.rs => copy.rs} (100%)",
+            &|r| {
+                r.write(PATCH, copied);
+                r.write(JSON, replaced("files", "[\"src/copy.rs\"]"));
+            },
+        ),
+        (
+            "plant.patch does more than change file contents: delete mode 100644 src/lib.rs",
+            &|r| r.write(PATCH, &deleted),
+        ),
     ]);
+    let repository = Repository::new();
+    repository.write(
+        PATCH,
+        "diff --git a/src/new.rs b/src/new.rs\nnew file mode 100644\n--- /dev/null\n+++ b/src/new.rs\n\
+         @@ -0,0 +1 @@\n+pub fn h() {}\n",
+    );
+    repository.write(JSON, replaced("files", "[\"src/new.rs\"]"));
+    refused_with(
+        &repository,
+        "the plant store differs from HEAD at verification/plants/alpha/plant.json; commit the plants \
+         first",
+    );
 }
 
 /// A valid plant whose bytes differ from the head commit's, or which the head holds with another mode, is
