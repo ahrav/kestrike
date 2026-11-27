@@ -83,8 +83,8 @@ static ATTRIBUTE_HASH: LazyLock<Regex> =
 /// What a test-only element is read as: an item or statement, or an element of a list that ends at its
 /// `,` (`Comma`), before a generic parameter list's `>` (`Angle`) or before a closure parameter list's `|`
 /// (`Pipe`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Closer {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closer {
     Item,
     Comma,
     Angle,
@@ -121,7 +121,7 @@ impl Analysis {
 
 /// The offset just past the brace that closes the block opening at `start`, or `None`. Braces are counted
 /// from `start`, and a `start` that holds a character other than a brace closes at once, just past that
-/// character.
+/// character. `start` is a code point boundary of `text`.
 pub fn closing(text: &str, start: usize) -> Option<usize> {
     if let Some(c) = text.get(start..).and_then(|rest| rest.chars().next())
         && c != '{'
@@ -145,12 +145,13 @@ pub fn closing(text: &str, start: usize) -> Option<usize> {
 
 /// The end of the item or statement starting at `start`: its block, or its `;` outside brackets, or for a
 /// field, variant, argument or arm, its `,` outside brackets. An item keyword after the attributes and
-/// visibility, such as `fn` or `impl`, runs past the commas of its generics to its block or `;`. A closing
+/// visibility, such as `fn` or `impl`, runs past each comma outside brackets, those of its generics
+/// included, to its block or `;`. A closing
 /// bracket or brace that the item never opened belongs to the enclosing list or block, so a last element
 /// without a trailing comma ends before it. Under [`Closer::Angle`] or [`Closer::Pipe`] the element ends at
 /// its `,` or before the list's `>` or `|`; under [`Closer::Comma`] it ends at its `,` whatever word starts
 /// it. `start` is a code point boundary.
-pub fn item_end(text: &str, start: usize, closer: Closer) -> Option<usize> {
+fn item_end(text: &str, start: usize, closer: Closer) -> Option<usize> {
     let item = closer == Closer::Item && ITEM.is_match(&text[start..]);
     let tracked = matches!(closer, Closer::Angle | Closer::Pipe);
     let bytes = text.as_bytes();
@@ -186,7 +187,7 @@ pub fn item_end(text: &str, start: usize, closer: Closer) -> Option<usize> {
 }
 
 /// The closers [`item_end`] reads the test-only element at `start` under, from the text before its
-/// attributes. `text` is the scanned text of `source`.
+/// attributes. `text` is `code(source)`.
 ///
 /// Directly after `{`, `}`, `;` or the start of `text` the element is an item, a statement or the first
 /// element of a braced list. No parameter list is open there, so it is read once, as an item or statement.
@@ -234,7 +235,7 @@ fn readings(text: &str, source: &str, start: usize) -> Vec<Closer> {
 }
 
 /// The (opening bracket, closing bracket) offsets of the tokens of each macro definition and invocation of
-/// `text`, the scanned text of `source`: each bracket pair that follows `name!` or `macro_rules! name`
+/// `text`, which is `code(source)`: each bracket pair that follows `name!` or `macro_rules! name`
 /// within 80 code points.
 fn macro_spans(text: &str, source: &str) -> Vec<(usize, usize)> {
     let (mut spans, mut stack) = (Vec::new(), Vec::new());
@@ -325,13 +326,6 @@ pub fn analyzed(text: &str) -> Analysis {
             spans.push((attribute.start(), end));
         }
     }
-    if spans.is_empty() {
-        return Analysis {
-            production: text.to_owned(),
-            scanned: masked,
-            cut,
-        };
-    }
     Analysis {
         production: spliced(text, &spans),
         scanned: spliced(&masked, &spans),
@@ -342,7 +336,7 @@ pub fn analyzed(text: &str) -> Analysis {
 /// `text` with every byte other than a newline inside one of the `(start, end)` spans replaced by a space,
 /// offsets kept. The spans may nest or overlap, so each run of overlapping spans blanks once. Each span's
 /// ends are code point boundaries of `text`.
-pub fn spliced(text: &str, spans: &[(usize, usize)]) -> String {
+fn spliced(text: &str, spans: &[(usize, usize)]) -> String {
     let mut sorted = spans.to_vec();
     sorted.sort_unstable();
     let (mut pieces, mut at) = (String::with_capacity(text.len()), 0);

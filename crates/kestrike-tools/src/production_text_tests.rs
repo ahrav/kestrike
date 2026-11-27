@@ -16,62 +16,28 @@ const PRODUCTION_ROWS: &[(&str, &str, &str)] = &[
     ("an item keyword with a mark outside ASCII after it", "fn f(n: u8) -> u8 {\n    match n {\n        #[cfg(test)]\n        type\u{301} => 1, _ => 2,\n    }\n}\n", "fn f(n: u8) -> u8 {\n    match n {\n                    \n                            \n    }\n}\n"),
 ];
 
+#[rustfmt::skip]
 const CUT_ROWS: &[(&str, &str, &[usize])] = &[
-    (
-        "a generic parameter",
-        "fn extra<A, #[cfg(test)] B>(a: A) -> A {\n    a\n}\n",
-        &[12],
-    ),
-    (
-        "a statement keyword with a mark outside ASCII after it",
-        "m!(a, #[cfg(test)] let\u{301} x = 1; b);\n",
-        &[],
-    ),
-    (
-        "a statement keyword with a word outside ASCII after it",
-        "m!(a, #[cfg(test)] let\u{b2} x = 1; b);\n",
-        &[6],
-    ),
+    ("a generic parameter", "fn extra<A, #[cfg(test)] B>(a: A) -> A {\n    a\n}\n", &[12]),
+    ("a statement keyword with a mark outside ASCII after it", "m!(a, #[cfg(test)] let\u{301} x = 1; b);\n", &[]),
+    ("a statement keyword with a word outside ASCII after it", "m!(a, #[cfg(test)] let\u{b2} x = 1; b);\n", &[6]),
     ("a union", "m!(#[cfg(test)] union U { a: u8 });\n", &[]),
-    (
-        "a union named by a letter outside ASCII",
-        "m!(#[cfg(test)] union \u{e9} { a: u8 });\n",
-        &[3],
-    ),
+    ("a union named by a letter outside ASCII", "m!(#[cfg(test)] union \u{e9} { a: u8 });\n", &[3]),
     ("union as", "m!(#[cfg(test)] union as u8);\n", &[3]),
-    (
-        "union as with a mark outside ASCII after it",
-        "m!(#[cfg(test)] union as\u{301} { a: u8 });\n",
-        &[3],
-    ),
-    (
-        "union as with a word outside ASCII after it",
-        "m!(#[cfg(test)] union as\u{b2} { a: u8 });\n",
-        &[],
-    ),
+    ("union as with a mark outside ASCII after it", "m!(#[cfg(test)] union as\u{301} { a: u8 });\n", &[3]),
+    ("union as with a word outside ASCII after it", "m!(#[cfg(test)] union as\u{b2} { a: u8 });\n", &[]),
     ("union if", "m!(#[cfg(test)] union if x {});\n", &[3]),
     ("a static", "m!(#[cfg(test)] static S: u8 = 0;);\n", &[]),
     ("static move", "m!(#[cfg(test)] static move || 1);\n", &[3]),
-    (
-        "static move with a word outside ASCII after it",
-        "m!(#[cfg(test)] static move\u{b2}: u8 = 0;);\n",
-        &[],
-    ),
-    (
-        "static move with a mark outside ASCII after it",
-        "m!(#[cfg(test)] static move\u{301}: u8 = 0;);\n",
-        &[3],
-    ),
-    (
-        "macro_rules after a word outside ASCII",
-        "x\u{b2}macro_rules! m { #[cfg(test)] a, b }\n",
-        &[],
-    ),
-    (
-        "macro_rules after a mark outside ASCII",
-        "x\u{301}macro_rules! m { #[cfg(test)] a, b }\n",
-        &[20],
-    ),
+    ("static move with a word outside ASCII after it", "m!(#[cfg(test)] static move\u{b2}: u8 = 0;);\n", &[]),
+    ("static move with a mark outside ASCII after it", "m!(#[cfg(test)] static move\u{301}: u8 = 0;);\n", &[3]),
+    ("macro_rules after a word outside ASCII", "x\u{b2}macro_rules! m { #[cfg(test)] a, b }\n", &[]),
+    ("macro_rules after a mark outside ASCII", "x\u{301}macro_rules! m { #[cfg(test)] a, b }\n", &[20]),
+    ("a static mut", "m!(#[cfg(test)] static mut S: u8 = 0;);\n", &[]),
+    ("a static named by m", "m!(#[cfg(test)] static mx: u8 = 0;);\n", &[]),
+    ("a union named i32", "m!(#[cfg(test)] union i32 { a: u8 });\n", &[]),
+    ("a union named ifx", "m!(#[cfg(test)] union ifx { a: u8 });\n", &[]),
+    ("a union named ab", "m!(#[cfg(test)] union ab { a: u8 });\n", &[]),
 ];
 
 #[test]
@@ -112,7 +78,8 @@ fn the_scanned_text_is_the_code_of_the_production_text() {
 const NBSP: &str = "\u{a0}";
 
 /// The windows of the test-only reading span code points of the source: 8 before an attribute's bracket
-/// and 80 before a macro's bracket. A no-break space is white space of two bytes.
+/// and 80 before a macro's bracket. A no-break space is white space of two bytes, and a `é` in a comment is
+/// one code point of the source and two spaces of the scanned text.
 #[test]
 fn a_window_of_the_test_only_reading_spans_its_count_of_code_points() {
     let field = |spaces: usize| {
@@ -149,6 +116,21 @@ fn a_window_of_the_test_only_reading_spans_its_count_of_code_points() {
         [] as [usize; 0],
         "the bang 81 code points back"
     );
+    let commented = |count: usize| "\u{e9}".repeat(count);
+    let field = |count: usize| {
+        format!(
+            "fn f() {{\n    S {{ #/*{}*/[inline] #[cfg(test)] const a, b }}\n}}\n",
+            commented(count)
+        )
+    };
+    assert!(
+        analyzed(&field(3)).production().ends_with("        }\n}\n"),
+        "a comment's code points count once each"
+    );
+    assert!(analyzed(&field(4)).production().ends_with("      b }\n}\n"));
+    let invocation = |count: usize| format!("m!/*{}*/(#[cfg(test)] a, b);\n", commented(count));
+    assert_eq!(analyzed(&invocation(74)).cut(), [155]);
+    assert_eq!(analyzed(&invocation(75)).cut(), [] as [usize; 0]);
 }
 
 #[test]

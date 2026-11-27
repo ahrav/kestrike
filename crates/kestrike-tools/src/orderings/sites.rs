@@ -25,10 +25,10 @@
 //! definition with only blank text between. Each departure from these rules is a defect, as is each
 //! test-only element whose end the production text's rules read more than one way.
 //!
-//! Offsets are byte offsets of the source, which the production and scanned texts share. A window counted
-//! in characters (200 before and after a fence name, 200 before a method) spans that many code points of
-//! the source. Each pattern compiles with Python's classes; [`captures_bounded`] checks Python's `\b` at a
-//! match's word edges, and `FENCE_PATH`'s `$` also matches before a final newline.
+//! Offsets are byte offsets of the source, which the production and scanned texts share. Each window
+//! spans a count of code points of the source: 200 before and after a fence name, 200 before a method.
+//! Each pattern compiles with Python's classes; [`captures_bounded`] checks Python's `\b` at a match's word
+//! edges, and `fence_path` also matches the fence path before a final newline, as Python's `$` does.
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
@@ -52,8 +52,10 @@ pub const HOOKS: [&str; 5] = [
 /// The op of a strength constant whose consumer lies outside its file, keyed by the defining file and the
 /// constant's name: `RELOAD` of `storage/credit.rs` reaches `record_credits` in `storage/lease.rs` as
 /// `S::RELOAD`, and both of its `credit::credits` calls load with it.
-pub const EXTERNAL: [(&str, &str, Op); 1] =
-    [("crates/kestrike/src/storage/credit.rs", "RELOAD", Op::Load)];
+pub const EXTERNAL: &[Pin] = &[("crates/kestrike/src/storage/credit.rs", "RELOAD", Op::Load)];
+
+/// A strength constant's op pinned by hand: the defining file, the constant's name and the op.
+pub type Pin = (&'static str, &'static str, Op);
 
 /// An `Ordering` variant stronger than `Relaxed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -243,7 +245,7 @@ struct View<'t> {
     scanned: &'t str,
 }
 
-/// The 1-based line of `offset` in `text`.
+/// The 1-based line of `offset` in `text`; `offset` is at most `text.len()`.
 pub fn line_of(text: &str, offset: usize) -> usize {
     text.as_bytes()[..offset]
         .iter()
@@ -298,14 +300,6 @@ fn body_open(text: &str, index: usize) -> Option<usize> {
     None
 }
 
-/// The offset one code point before `at`, or 0.
-fn one_before(text: &str, at: usize) -> usize {
-    text[..at]
-        .chars()
-        .next_back()
-        .map_or(0, |c| at - c.len_utf8())
-}
-
 /// `text[start..end]`, or the empty text when `start` lies past `end`.
 fn between(text: &str, start: usize, end: usize) -> &str {
     text.get(start..end).unwrap_or("")
@@ -350,24 +344,21 @@ fn call_op(view: View<'_>, offset: usize) -> Op {
         .captures(window)
         .and_then(|found| found.get(1))
         .map_or("", |name| name.as_str());
-    match name {
-        "load" => return Op::Load,
-        "store" => return Op::Store,
-        "swap" => return Op::Rmw,
-        _ if name.starts_with("fetch_") && name != "fetch_update" => return Op::Rmw,
-        _ => {}
-    }
-    match (generic, name, commas) {
-        (true, _, _) => Op::Unread,
-        (_, "compare_exchange" | "compare_exchange_weak", 2) | (_, "fetch_update", 0) => Op::Rmw,
-        (_, "compare_exchange" | "compare_exchange_weak", 3) | (_, "fetch_update", 1) => Op::Load,
+    match (name, generic, commas) {
+        ("load", ..) => Op::Load,
+        ("store", ..) => Op::Store,
+        ("swap", ..) => Op::Rmw,
+        _ if name.starts_with("fetch_") && name != "fetch_update" => Op::Rmw,
+        (_, true, _) => Op::Unread,
+        ("compare_exchange" | "compare_exchange_weak", _, 2) | ("fetch_update", _, 0) => Op::Rmw,
+        ("compare_exchange" | "compare_exchange_weak", _, 3) | ("fetch_update", _, 1) => Op::Load,
         _ => Op::Unread,
     }
 }
 
 /// The hooks of [`HOOKS`] that `scanned` defines with at least one body, each body empty.
 fn empty_hooks(scanned: &str) -> Vec<&'static str> {
-    let last = one_before(scanned, scanned.len());
+    let last = back(scanned, scanned.len(), 1);
     HOOKS
         .into_iter()
         .filter(|name| {
@@ -391,17 +382,17 @@ fn empty_hooks(scanned: &str) -> Vec<&'static str> {
 /// the fence name by its length: a callee `<W>::x` on the line above `fence(` gives a site that starts at
 /// `W>` and a prefix that ends with `<`.
 fn fence_path(before: &str) -> (usize, usize) {
+    let span = |found: regex::Match<'_>| (found.start(), found.end());
     let full = FENCE_PATH
         .find(before)
-        .map(|found| (found.start(), found.end()));
+        .map_or((before.len(), before.len()), span);
     let short = before
         .strip_suffix('\n')
         .and_then(|rest| FENCE_PATH.find(rest))
-        .map(|found| (found.start(), found.end()));
-    match (full, short) {
-        (Some(full), Some(short)) if short.0 < full.0 => short,
-        (Some(full), _) => full,
-        (None, short) => short.unwrap_or((before.len(), before.len())),
+        .map(span);
+    match short {
+        Some(short) if short.0 < full.0 => short,
+        _ => full,
     }
 }
 
@@ -566,7 +557,7 @@ fn forwarder_defects(scanned: &str, fences: &Fences) -> Vec<String> {
         let mut cursor = ARM.find(&scanned[low + 1..]).and_then(|arm| {
             let arm_open = low + 1 + arm.end() - 1;
             let after_arm = closing(scanned, arm_open).unwrap_or(*low);
-            let tail = between(scanned, after_arm, one_before(scanned, *high));
+            let tail = between(scanned, after_arm, back(scanned, *high, 1));
             ARM_TAIL.is_match(tail).then_some(*high)
         });
         for &(offset, open) in &invoked {
@@ -586,9 +577,8 @@ fn forwarder_defects(scanned: &str, fences: &Fences) -> Vec<String> {
     defects
 }
 
-/// Each site of the view in order of start, given its fence calls and the op of each strength constant
-/// whose consumer lies outside the file.
-fn ordered_sites(view: View<'_>, fences: &[Site], external: &[(&str, Op)]) -> Vec<Site> {
+/// Each site of the view in order of start, given its fence calls and the pins of the file at `path`.
+fn ordered_sites(view: View<'_>, fences: &[Site], path: &str, pins: &[Pin]) -> Vec<Site> {
     let scanned = view.scanned;
     let mut found = fences.to_vec();
     for ordering in bounded_iter(&ORDERING, scanned) {
@@ -613,10 +603,10 @@ fn ordered_sites(view: View<'_>, fences: &[Site], external: &[(&str, Op)]) -> Ve
                     .map(|found| call_op(view, found.get_match().start()))
                     .collect();
                 match ops.len() {
-                    0 => external
+                    0 => pins
                         .iter()
-                        .find(|&&(constant, _)| constant == name)
-                        .map_or(Op::Unread, |&(_, op)| op),
+                        .find(|&&(file, constant, _)| file == path && constant == name)
+                        .map_or(Op::Unread, |&(_, _, op)| op),
                     1 => ops.into_iter().next().expect("one op"),
                     _ => Op::Unread,
                 }
@@ -641,12 +631,13 @@ pub fn sites(scanned: &str) -> Vec<Site> {
         source: scanned,
         scanned,
     };
-    ordered_sites(view, &fence_calls(view).found, &[])
+    ordered_sites(view, &fence_calls(view).found, "", &[])
 }
 
 /// The reading of the scoped file at `path`, the path relative to the checkout's top, whose text is
-/// `text`.
-pub fn read(path: &str, text: &str) -> Reading {
+/// `text`. A strength constant with no `S::NAME` mention takes its op from the pin in `pins` for `path`
+/// and its name; the catalog's check passes [`EXTERNAL`].
+pub fn read(path: &str, text: &str, pins: &[Pin]) -> Reading {
     let analysis = analyzed(text);
     let view = View {
         source: text,
@@ -695,12 +686,7 @@ pub fn read(path: &str, text: &str) -> Reading {
             .into_iter()
             .map(|defect| format!("{path}: {defect}")),
     );
-    let external: Vec<(&str, Op)> = EXTERNAL
-        .iter()
-        .filter(|&&(file, _, _)| file == path)
-        .map(|&(_, name, op)| (name, op))
-        .collect();
-    let sites = ordered_sites(view, &fences.found, &external);
+    let sites = ordered_sites(view, &fences.found, path, pins);
     Reading {
         production: analysis.production().to_owned(),
         scanned: scanned.to_owned(),
