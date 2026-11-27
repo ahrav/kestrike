@@ -38,7 +38,8 @@ impl fmt::Display for Failure {
 }
 
 /// `run` gives the child `stdout` as its standard output; the child inherits standard input, standard error and
-/// the environment.
+/// the environment. On a wait error, `run` returns [`Failure::Wait`] at once, because the child may already
+/// have been reaped.
 pub fn run(
     program: &OsStr,
     args: &[OsString],
@@ -59,11 +60,7 @@ pub fn run(
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => return Err(Failure::Exit(status)),
             Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Failure::Wait(error));
-            }
+            Err(error) => return Err(Failure::Wait(error)),
         }
         let elapsed = start.elapsed();
         if elapsed >= limit {

@@ -229,7 +229,7 @@ pub(crate) fn generate(
             .ok_or_else(|| format!("{}: the trace has no key 'states'", file.display()))?;
         let count = python::len(states)
             .ok_or_else(|| format!("{}: 'states' has no length", file.display()))?;
-        if count != trace.steps + 1 {
+        if trace.steps.checked_add(1) != Some(count) {
             return Err(format!(
                 "{}: the trace stopped before its final action",
                 trace.name

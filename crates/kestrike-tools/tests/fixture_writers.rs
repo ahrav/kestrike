@@ -3,8 +3,10 @@
 //! trace on standard output, and refuses a call whose arguments belong to another trace.
 
 use std::ffi::OsStr;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, DirBuilder};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -233,18 +235,24 @@ fn top() -> PathBuf {
         .expect("the checkout's top level resolves")
 }
 
-/// `Scratch` owns the temporary directory and removes it on drop.
+/// `Scratch` owns a new directory of mode 0700 under the temporary directory and removes it on drop.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let at = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("kestrike-tools-test-{}-{at}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("the scratch directory is created");
-        Self(path)
+        loop {
+            let at = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("kestrike-tools-test-{}-{at}", std::process::id()));
+            match DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => {
+                    return Self(path.canonicalize().expect("the scratch directory resolves"));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", path.display()),
+            }
+        }
     }
 }
 
@@ -733,18 +741,29 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
 
 #[test]
 fn a_quint_that_exits_1_ends_the_run_with_exit_1() {
-    let scratch = Scratch::new();
-    let quint = scratch.0.join("quint");
-    write_script(&quint, "#!/bin/sh\nexit 1\n");
-    let output = scratch.0.join("out");
-    let result = write_traces(&WRITERS[1], &quint, &output);
-    assert_eq!(result.status.code(), Some(1));
-    assert_eq!(
-        stderr(&result),
-        "gate_fixtures: passes: Quint ended with exit status: 1\n"
-    );
-    assert!(!output.join("passes.itf.json").exists());
-    assert!(!output.join("busy_then_foreign_registrant").exists());
+    for writer in &WRITERS {
+        let scratch = Scratch::new();
+        let quint = scratch.0.join("quint");
+        write_script(&quint, "#!/bin/sh\necho stand-in: failing\nexit 1\n");
+        let output = scratch.0.join("out");
+        let result = write_traces(writer, &quint, &output);
+        assert_eq!(result.status.code(), Some(1), "{}", writer.tool);
+        let first = writer.recipes[0];
+        assert_eq!(
+            stderr(&result),
+            format!(
+                "{}: {first}: Quint ended with exit status: 1\n",
+                writer.tool
+            )
+        );
+        let printed = match writer.style {
+            Style::Format => "",
+            Style::Record => "stand-in: failing\n",
+        };
+        assert_eq!(result.stdout, printed.as_bytes(), "{}", writer.tool);
+        assert!(!output.join(format!("{first}.itf.json")).exists());
+        assert!(!output.join(writer.recipes[1]).exists(), "{}", writer.tool);
+    }
 }
 
 #[test]
@@ -884,4 +903,66 @@ fn a_refusal_on_a_full_standard_error_exits_120() {
         .output()
         .expect("the binary starts");
     assert_eq!(result.status.code(), Some(120));
+}
+
+/// When a record writer's rewritten trace exceeds the file size limit, the writer exits 1 and the trace file
+/// holds the rewritten trace cut at the limit.
+#[test]
+fn a_rewrite_that_passes_the_file_size_limit_exits_1_with_the_trace_cut_at_the_limit() {
+    let writer = &WRITERS[3];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let pad = fs::metadata(top().join(format!("quint/{}.qnt", writer.model)))
+        .expect("the model reads")
+        .len();
+    let padded = |trace: &Committed| {
+        let Ok(Value::Object(mut data)) = json::parse(&reply(trace)) else {
+            panic!("a reply is a JSON object");
+        };
+        data.remove("#meta");
+        let pad = "x".repeat(usize::try_from(pad).expect("the model's size fits usize"));
+        data.insert("pad", Value::String(pad.as_str().into()));
+        json::dump(&Value::Object(data))
+    };
+    let quint = stand_in(&scratch.0, writer, &output, padded);
+    let first = writer.recipes[0];
+    let raw = fs::read(scratch.0.join(format!("replies/{first}.reply"))).expect("the reply reads");
+    let limit = libc::rlim_t::try_from(raw.len() + 8).expect("the limit fits rlim_t");
+    let mut command = Command::new(BINARY);
+    command.arg(top()).arg(writer.tool).args([
+        "--quint".as_ref(),
+        quint.as_os_str(),
+        "--output".as_ref(),
+        output.as_os_str(),
+    ]);
+    // SAFETY: the closure makes two calls into libc, `setrlimit` and `signal`, each one system call that
+    // allocates nothing and takes no lock, and reads only the copied `limit`.
+    unsafe {
+        command.pre_exec(move || {
+            let bound = libc::rlimit {
+                rlim_cur: limit,
+                rlim_max: limit,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &bound) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let result = command.output().expect("the binary starts");
+    let file = output.join(format!("{first}.itf.json"));
+    assert_eq!(result.status.code(), Some(1), "{}", stderr(&result));
+    assert_eq!(
+        stderr(&result),
+        format!(
+            "{}: {}: File too large (os error 27)\n",
+            writer.tool,
+            file.display()
+        )
+    );
+    let left = fs::read(&file).expect("the trace file stays");
+    assert_eq!(left.len(), raw.len() + 8, "the rewrite stops at the limit");
+    assert_ne!(left, raw, "Quint's trace is overwritten");
+    assert!(!output.join(writer.recipes[1]).exists());
 }

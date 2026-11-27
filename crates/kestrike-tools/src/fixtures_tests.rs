@@ -1,9 +1,11 @@
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, DirBuilder};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::fixtures::quint::{Failure, run};
@@ -12,19 +14,47 @@ use crate::json::{Integer, Value, parse};
 use crate::python;
 use crate::tools;
 
+/// `Scratch` owns a new directory of mode 0700 under the temporary directory and removes it on drop.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(label: &str) -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        loop {
+            let at = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "kestrike-tools-{label}-{}-{at}",
+                std::process::id()
+            ));
+            match DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => {
+                    return Self(path.canonicalize().expect("the scratch directory resolves"));
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", path.display()),
+            }
+        }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn the_limit_ends_a_sleeping_child_with_sigkill() {
-    let directory =
-        std::env::temp_dir().join(format!("kestrike-tools-limit-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory).expect("the directory is made");
-    let script = "trap 'echo term > terminated; exit 7' TERM; sleep 5 & wait";
+    let scratch = Scratch::new("limit");
+    let directory = &scratch.0;
+    let script =
+        "trap 'echo term > terminated; exit 7' TERM; sleep 5 </dev/null >/dev/null 2>&1 & wait";
     let args: Vec<OsString> = ["-c", script].map(OsString::from).to_vec();
     let start = Instant::now();
     let outcome = run(
         OsStr::new("sh"),
         &args,
-        &directory,
+        directory,
         Stdio::null(),
         Duration::from_millis(300),
     );
@@ -45,7 +75,6 @@ fn the_limit_ends_a_sleeping_child_with_sigkill() {
         !directory.join("terminated").exists(),
         "the child's TERM trap never runs"
     );
-    fs::remove_dir_all(&directory).expect("the directory is removed");
 }
 
 #[test]
@@ -127,12 +156,8 @@ fn python_len_counts_characters_items_and_members() {
 #[test]
 fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() {
     for (name, style) in [("gate", Style::Format), ("grace", Style::Record)] {
-        let scratch = std::env::temp_dir().join(format!(
-            "kestrike-tools-writer-limit-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&scratch);
-        fs::create_dir_all(&scratch).expect("the directory is made");
+        let scratch = Scratch::new("writer-limit");
+        let scratch = &scratch.0;
         let quint = scratch.join("quint");
         fs::write(&quint, "#!/bin/sh\nexec sleep 5\n").expect("the stand-in is written");
         fs::set_permissions(&quint, fs::Permissions::from_mode(0o755))
@@ -163,6 +188,44 @@ fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() 
         );
         assert!(output.join("first/case.qnt").exists());
         assert!(!output.join("second").exists());
-        fs::remove_dir_all(&scratch).expect("the directory is removed");
     }
+}
+
+#[test]
+fn a_seeded_trace_of_usize_max_steps_fails_its_state_count() {
+    let scratch = Scratch::new("writer-count");
+    let quint = scratch.0.join("quint");
+    let script = "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out-itf ] && out=$2; shift; done\n\
+                  printf '{\"states\":[]}' > \"$out\"\n";
+    fs::write(&quint, script).expect("the stand-in is written");
+    fs::set_permissions(&quint, fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
+    let model = Model {
+        tool: "writer",
+        about: "About.",
+        name: "grace",
+        style: Style::Record,
+        limit: Duration::from_secs(120),
+    };
+    let traces = ["first", "second"]
+        .map(|name| Trace::new(name.to_owned(), 1, None, usize::MAX, case::gate, Vec::new()));
+    let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let output = scratch.0.join("out");
+    let outcome = generate(
+        &model,
+        &top,
+        Some(quint.as_os_str()),
+        &output,
+        &traces,
+        keep,
+    );
+    assert_eq!(
+        outcome,
+        Err("first: the trace stopped before its final action".to_owned())
+    );
+    assert_eq!(
+        fs::read(output.join("first.itf.json")).expect("Quint's trace stays"),
+        b"{\"states\":[]}"
+    );
+    assert!(!output.join("second").exists());
 }
