@@ -1,12 +1,20 @@
-//! A seed check's manifest: the sweep's manifest of the suspect's profile, read as text with `\r\n` and
+//! The seed check's manifest: the sweep's manifest of the suspect's profile, read as text with `\r\n` and
 //! `\r` read as `\n`, hashed with the suspect's seed as its root, and pinned to the base archive.
 
-use kestrike_tools::json::Value;
-use kestrike_tools::plants::seed::{SeedCheck, manifest};
-use kestrike_tools::plants::{Suspect, archive_pins};
-use kestrike_tools::text::Text;
+use std::fs;
 
-use super::repository::{Repository, write};
+use super::manifest;
+
+use crate::json::Value;
+use crate::paths::tests::Scratch;
+use crate::plants::output::archive_pins;
+use crate::plants::suspects::Suspect;
+use crate::text::Text;
+
+fn write(path: &std::path::Path, bytes: &[u8]) {
+    fs::create_dir_all(path.parent().expect("a parent")).expect("made");
+    fs::write(path, bytes).expect("written");
+}
 
 const ROWS: &[(&[u8], &str, &str)] = &[
     (
@@ -51,9 +59,9 @@ fn suspect() -> Suspect {
 /// pins; any other digest, a digest that is no text and a missing digest run nothing.
 #[test]
 fn a_manifest_runs_only_the_job_confirm_ran() {
-    let repository = Repository::new();
+    let scratch = Scratch::new("seed");
     let suspect = suspect();
-    let root = repository.scratch.join("root");
+    let root = scratch.0.join("root");
     let printed = r#"{"build": "B", "executable": "E", "platform": "P", "toolchain": "T"}"#;
     let pins = archive_pins(
         0,
@@ -62,9 +70,7 @@ fn a_manifest_runs_only_the_job_confirm_ran() {
         "base/archive.err".as_ref(),
     )
     .expect("pins");
-    let differs = SeedCheck::Nothing(Text::from(
-        "its manifest differs from the job `confirm` ran",
-    ));
+    let differs = Text::from("its manifest differs from the job `confirm` ran");
     for &(bytes, digest, pinned) in ROWS {
         write(&root.join("manifests/smoke.manifest"), bytes);
         let digest = Value::String(Text::from(digest));
@@ -90,12 +96,12 @@ fn a_manifest_runs_only_the_job_confirm_ran() {
 /// A manifest that is no UTF-8 text keeps the check from running, with the path and the reader's text.
 #[test]
 fn a_manifest_that_is_no_text_keeps_the_check_from_running() {
-    let repository = Repository::new();
+    let scratch = Scratch::new("seed");
     let suspect = suspect();
-    let root = repository.scratch.join("root");
+    let root = scratch.0.join("root");
     let path = root.join("manifests/smoke.manifest");
     write(&path, b"root = \xff\n");
     let failed = manifest(&root, &suspect, None).expect_err("no text");
     let reason = format!("{}: stream did not contain valid UTF-8", path.display());
-    assert_eq!(failed, SeedCheck::Failed(Text::from(reason.as_str())));
+    assert_eq!(failed, Text::from(reason.as_str()));
 }

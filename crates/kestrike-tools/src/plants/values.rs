@@ -14,6 +14,14 @@ pub(crate) fn natural(value: &Value, least: u64) -> bool {
     matches!(value, Value::Integer(number) if *number >= Integer::from(least))
 }
 
+/// `natural_integer` is the integer of a JSON integer of at least zero, and `None` for any other value.
+pub(crate) fn natural_integer(value: &Value) -> Option<&Integer> {
+    match value {
+        Value::Integer(number) if natural(value, 0) => Some(number),
+        _ => None,
+    }
+}
+
 /// `count` holds for a positive JSON integer.
 pub(crate) fn count(value: &Value) -> bool {
     natural(value, 1)

@@ -6,9 +6,8 @@
 //! newline.
 
 use super::entry::{Entry, Verdict};
-use super::words::words;
 use crate::json::{self, Integer, Object, Value};
-use crate::text::Text;
+use crate::text::{Text, text};
 
 /// `sentence` is `K of N plants at commit HEAD`.
 fn sentence(head: &str, entries: &[Entry]) -> Text {
@@ -26,7 +25,7 @@ fn sentence(head: &str, entries: &[Entry]) -> Text {
         count(&[Verdict::Caught]),
         count(&[Verdict::Caught, Verdict::Missed]),
     );
-    words!(caught, " of ", counted, " plants at commit ", head)
+    text!(caught, " of ", counted, " plants at commit ", head)
 }
 
 /// `score` is the score of `entries`, each settled, at commit `head`, with the run's `settings`.
@@ -85,7 +84,7 @@ pub fn lines(head: &str, entries: &[Entry]) -> Vec<Text> {
 pub fn result_line(entry: &Entry) -> Text {
     let verdict = entry.verdict().expect("a settled entry holds its result");
     let reason = entry.reason().expect("a settled entry holds its reason");
-    words!(entry.id(), ": ", verdict.as_str(), " (", reason, ")")
+    text!(entry.id(), ": ", verdict.as_str(), " (", reason, ")")
 }
 
 /// `exit_code` is 1 when a miss lacks its cause, else 3 when a plant has no verdict, does not apply or is

@@ -6,9 +6,10 @@ use std::path::Path;
 
 use kestrike_tools::json::{self, Value};
 use kestrike_tools::plants::score::{bytes, exit_code, lines, score};
-use kestrike_tools::plants::{Entry, NoVerdict, Outcome, Plant, Verdict};
+use kestrike_tools::plants::{Entry, NoVerdict, Options, Outcome, Plant};
 use kestrike_tools::text::Text;
 
+use super::judgment::{alpha, judged_row};
 use super::repository::{Repository, members, record};
 
 fn plants(repository: &Repository) -> Vec<Plant> {
@@ -116,17 +117,30 @@ fn each_result_leaves_its_members_in_order() {
     }
 }
 
-fn verdict(name: &str) -> Verdict {
-    [
-        Verdict::Caught,
-        Verdict::Missed,
-        Verdict::NoVerdict,
-        Verdict::DoesNotApply,
-        Verdict::NotLive,
-    ]
-    .into_iter()
-    .find(|verdict| verdict.as_str() == name)
-    .expect("a result")
+/// `settled` is a finished entry of `plant` with the result `result`, the way a run's steps set it: a
+/// catch through the judgment, a miss of a plant without a sweep, a proof that exits 1 twice, and any
+/// other result with the reason `the reason of NUMBER`.
+fn settled(result: &str, number: usize, plant: &(Plant, Options), work: &Path) -> Entry {
+    if result == "caught" {
+        let entry = judged_row(
+            "a_confirmed_suspect_whose_seed_passes_on_the_head_is_caught",
+            plant,
+            work,
+        );
+        fs::remove_dir_all(work).expect("removed");
+        return entry;
+    }
+    let mut entry = Entry::new(&plant.0);
+    let reason = Text::from(format!("the reason of {number}"));
+    match result {
+        "not live" => entry.prove(1, 1),
+        "missed" => entry.unswept(),
+        "does not apply" => entry.does_not_apply(reason),
+        "no verdict" => entry.no_verdict(&NoVerdict::plain(reason)),
+        other => panic!("no result {other}"),
+    }
+    entry.finish(work);
+    entry
 }
 
 /// The score tallies results in the order they first occur, counts the caught and the missed plants,
@@ -165,12 +179,12 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             &[
                 r#"2 of 3 plants at commit c0ffee"#,
                 r#"alpha: no verdict (the reason of 0)"#,
-                r#"beta: caught (the reason of 1)"#,
-                r#"alpha: not live (the reason of 2)"#,
-                r#"beta: caught (the reason of 3)"#,
-                r#"alpha: missed (the reason of 4)"#,
+                r#"beta: caught (violation: a in run 1 of smoke)"#,
+                r#"alpha: not live (its proof exits 1 on the head and 1 on the plant, where a live plant's proof exits 0 and 1)"#,
+                r#"beta: caught (violation: a in run 1 of smoke)"#,
+                r#"alpha: missed (no expected profile; no sweep ran)"#,
                 r#"beta: does not apply (the reason of 5)"#,
-                r#"alpha: not live (the reason of 6)"#,
+                r#"alpha: not live (its proof exits 1 on the head and 1 on the plant, where a live plant's proof exits 0 and 1)"#,
             ],
             3,
             None,
@@ -180,8 +194,8 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             r#"{"commit":"c0ffee","sentence":"1 of 2 plants at commit c0ffee","results":{"missed":1,"caught":1},"not_live":[],"settings":{"workers":28,"runs":300,"seconds":60,"rounds":10,"base_archive":null,"campaign_sha256":"0000000000000000000000000000000000000000000000000000000000000000","plants":["b","a"]},"plants":["alpha","beta"]}"#,
             &[
                 r#"1 of 2 plants at commit c0ffee"#,
-                r#"alpha: missed (the reason of 0)"#,
-                r#"beta: caught (the reason of 1)"#,
+                r#"alpha: missed (no expected profile; no sweep ran)"#,
+                r#"beta: caught (violation: a in run 1 of smoke)"#,
             ],
             1,
             None,
@@ -191,7 +205,7 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             r#"{"commit":"c0ffee","sentence":"0 of 1 plants at commit c0ffee","results":{"missed":1,"no verdict":1},"not_live":[],"settings":{"workers":28,"runs":300,"seconds":60,"rounds":10,"base_archive":null,"campaign_sha256":"0000000000000000000000000000000000000000000000000000000000000000","plants":["b","a"]},"plants":["alpha","beta"]}"#,
             &[
                 r#"0 of 1 plants at commit c0ffee"#,
-                r#"alpha: missed (the reason of 0)"#,
+                r#"alpha: missed (no expected profile; no sweep ran)"#,
                 r#"beta: no verdict (the reason of 1)"#,
             ],
             3,
@@ -202,8 +216,8 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             r#"{"commit":"c0ffee","sentence":"1 of 2 plants at commit c0ffee","results":{"missed":1,"caught":1},"not_live":[],"settings":{"workers":28,"runs":300,"seconds":60,"rounds":10,"base_archive":null,"campaign_sha256":"0000000000000000000000000000000000000000000000000000000000000000","plants":["b","a"]},"plants":["alpha","beta"]}"#,
             &[
                 r#"1 of 2 plants at commit c0ffee"#,
-                r#"alpha: missed (the reason of 0)"#,
-                r#"beta: caught (the reason of 1)"#,
+                r#"alpha: missed (no expected profile; no sweep ran)"#,
+                r#"beta: caught (violation: a in run 1 of smoke)"#,
             ],
             0,
             None,
@@ -213,11 +227,11 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             r#"{"commit":"c0ffee","sentence":"0 of 0 plants at commit c0ffee","results":{"not live":1},"not_live":["alpha"],"settings":{"workers":28,"runs":300,"seconds":60,"rounds":10,"base_archive":null,"campaign_sha256":"0000000000000000000000000000000000000000000000000000000000000000","plants":["b","a"]},"plants":["alpha"]}"#,
             &[
                 r#"0 of 0 plants at commit c0ffee"#,
-                r#"alpha: not live (the reason of 0)"#,
+                r#"alpha: not live (its proof exits 1 on the head and 1 on the plant, where a live plant's proof exits 0 and 1)"#,
             ],
             3,
             Some(
-                "{\n  \"commit\": \"c0ffee\",\n  \"sentence\": \"0 of 0 plants at commit c0ffee\",\n  \"results\": {\n    \"not live\": 1\n  },\n  \"not_live\": [\n    \"alpha\"\n  ],\n  \"settings\": {\n    \"workers\": 28,\n    \"runs\": 300,\n    \"seconds\": 60,\n    \"rounds\": 10,\n    \"base_archive\": null,\n    \"campaign_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n    \"plants\": [\n      \"b\",\n      \"a\"\n    ]\n  },\n  \"plants\": [\n    {\n      \"id\": \"alpha\",\n      \"row\": 7,\n      \"fix\": {\n        \"pull_request\": 12,\n        \"commit\": \"0123abc\"\n      },\n      \"files\": [\n        \"src/lib.rs\"\n      ],\n      \"proof\": \"tests::the_proof\",\n      \"campaign\": \"plant-alpha\",\n      \"profiles\": [\n        \"smoke\",\n        \"crash-loop\"\n      ],\n      \"proof_exits\": null,\n      \"commit\": null,\n      \"tree\": null,\n      \"archive\": null,\n      \"counts\": null,\n      \"runs\": {},\n      \"controls\": null,\n      \"histories\": null,\n      \"keys\": {},\n      \"head_failures\": [],\n      \"result\": \"not live\",\n      \"reason\": \"the reason of 0\"\n    }\n  ]\n}\n",
+                "{\n  \"commit\": \"c0ffee\",\n  \"sentence\": \"0 of 0 plants at commit c0ffee\",\n  \"results\": {\n    \"not live\": 1\n  },\n  \"not_live\": [\n    \"alpha\"\n  ],\n  \"settings\": {\n    \"workers\": 28,\n    \"runs\": 300,\n    \"seconds\": 60,\n    \"rounds\": 10,\n    \"base_archive\": null,\n    \"campaign_sha256\": \"0000000000000000000000000000000000000000000000000000000000000000\",\n    \"plants\": [\n      \"b\",\n      \"a\"\n    ]\n  },\n  \"plants\": [\n    {\n      \"id\": \"alpha\",\n      \"row\": 7,\n      \"fix\": {\n        \"pull_request\": 12,\n        \"commit\": \"0123abc\"\n      },\n      \"files\": [\n        \"src/lib.rs\"\n      ],\n      \"proof\": \"tests::the_proof\",\n      \"campaign\": \"plant-alpha\",\n      \"profiles\": [\n        \"smoke\",\n        \"crash-loop\"\n      ],\n      \"proof_exits\": {\n        \"head\": 1,\n        \"plant\": 1\n      },\n      \"commit\": null,\n      \"tree\": null,\n      \"archive\": null,\n      \"counts\": null,\n      \"runs\": {},\n      \"controls\": null,\n      \"histories\": null,\n      \"keys\": {},\n      \"head_failures\": [],\n      \"result\": \"not live\",\n      \"reason\": \"its proof exits 1 on the head and 1 on the plant, where a live plant's proof exits 0 and 1\"\n    }\n  ]\n}\n",
             ),
         ),
         (
@@ -226,14 +240,15 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             &[
                 r#"0 of 1 plants at commit c0ffee"#,
                 r#"alpha: does not apply (the reason of 0)"#,
-                r#"beta: missed (the reason of 1)"#,
+                r#"beta: missed (no expected profile; no sweep ran)"#,
             ],
             1,
             None,
         ),
     ];
-    let (plain, caused) = (Repository::new(), caused());
-    let (plain, caused) = (plants(&plain), plants(&caused));
+    let (repository, with_causes) = (Repository::new(), caused());
+    let options = alpha(&repository).1;
+    let (plain, caused) = (plants(&repository), plants(&with_causes));
     let json::Value::Object(settings) = json::parse(
         r#"{"workers": 28, "runs": 300, "seconds": 60, "rounds": 10, "base_archive": null,
             "campaign_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -242,6 +257,7 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
     .expect("JSON") else {
         panic!("an object");
     };
+    let scratch = &repository.scratch;
     for &(results, expected, printed, code, written) in rows {
         let entries: Vec<Entry> = results
             .iter()
@@ -252,13 +268,8 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
                 } else {
                     &plain[number % 2]
                 };
-                let mut entry = Entry::new(plant);
-                entry.settle(
-                    verdict(result),
-                    Text::from(format!("the reason of {number}")),
-                );
-                entry.finish(Path::new("/work"));
-                entry
+                let work = scratch.join(format!("work-{number}"));
+                settled(result, number, &(plant.clone(), options.clone()), &work)
             })
             .collect();
         let scored = score("c0ffee", &entries, settings.clone());

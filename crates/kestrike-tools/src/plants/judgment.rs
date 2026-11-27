@@ -1,79 +1,100 @@
 //! The judgment of a live plant after its sweeps, from the last sweep's exit, its `sweep-status`
-//! document and the root's `suspects.jsonl`, with the two children it needs asked of its caller.
+//! document and the files of the plant's directory, with the two children it needs asked of its caller.
 //!
 //! The checks run in the order of the results: a catch first, then each of the thirteen causes of no
 //! verdict in turn, the first present one being the reason, then the miss. A catch is a suspect of a catch
 //! class in an expected profile that `campaign confirm` turned into a finding of that class, whose replay
 //! the sweep neither lists nor may hide as differing, and whose seed passes on the unpatched head. The seed
-//! of every confirmed suspect that passes both replay tests is checked, in the list's order, so the entry
-//! lists each one that fails on the head, beside a catch too.
+//! of every confirmed suspect that passes both replay tests is checked, in the list's order, once the
+//! sweep's manifest hashes to the confirmed job's digest, so the entry lists each seed that fails on the
+//! head, beside a catch too.
+//!
+//! The plant's directory holds `root/` (the sweep's root, with `suspects.jsonl` and `manifests/`) and
+//! `confirm.err`, the error output of `campaign confirm`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::entry::{Entry, Verdict};
-use super::output::Confirmed;
-use super::seed::SeedCheck;
-use super::status::{held_suspects, profile_runs, unlisted_replay};
+use super::options::Options;
+use super::output::{Confirmed, confirmed};
+use super::seed::{Manifest, SeedCheck, ending, manifest};
+use super::status::{Runs, held_suspects, profile_runs, unlisted_replay};
 use super::suspects::{Suspect, finding_of, listing};
 use super::values::natural;
 use super::verdict::NoVerdict;
-use super::words::words;
 use crate::json::{Integer, Object, Value};
-use crate::python::{repr, str_of};
-use crate::text::Text;
+use crate::python::{repr, str_of, truthy};
+use crate::text::{Text, text};
 
 /// The verdict keys a root's status can hold, each making its sweep exit 1;
 /// crates/campaign-supervisor/src/campaign/seeds.rs reads the same four keys.
 const VERDICT_KEYS: [&str; 4] = ["alarm", "no_pass", "unreached", "no_window"];
 
-/// The children the judgment asks of its caller.
+/// The children the judgment asks of its caller. Each returns the child's exit and its output as a text
+/// read of its output file gives it.
 pub trait Ask {
-    /// `confirm` runs `campaign confirm` for the root and reads it with [`super::confirmed`]. The judgment
-    /// asks it once, when `suspects.jsonl` lists a suspect of a catch class in an expected profile.
+    /// `confirm` runs `campaign confirm` for the root, with its error output in the plant directory's
+    /// `confirm.err`. The judgment asks it once, when `suspects.jsonl` lists a suspect of a catch class in
+    /// an expected profile.
     ///
     /// # Errors
     ///
-    /// The no verdict that `campaign confirm` leaves.
-    fn confirm(&mut self) -> Result<Confirmed, NoVerdict>;
+    /// The no verdict of a `confirm` that did not run.
+    fn confirm(&mut self) -> Result<(i32, String), NoVerdict>;
 
-    /// `seed` checks the suspect's seed on the unpatched head; `digest` is the `manifest_sha256` of the
-    /// job that confirmed it, as `campaign confirm` printed it.
-    fn seed(&mut self, suspect: &Suspect, digest: Option<&Value>) -> SeedCheck;
+    /// `run_seed` runs the suspect's seed on the unpatched head's archive with `manifest` pinned to that
+    /// archive ([`Manifest::pinned`]). The judgment asks it only once the manifest's digest is the
+    /// confirmed job's.
+    ///
+    /// # Errors
+    ///
+    /// Why the check did not run: the base archive's failure, or a manifest that cannot be written.
+    fn run_seed(&mut self, suspect: &Suspect, manifest: &Manifest) -> Result<(i32, String), Text>;
 }
 
-/// The plant's sweeps as they ended: the last sweep's exit, 0 or 1, its status, the root, the work
-/// directory, and the floor of runs a profile and the sweeps a plant at most of the run's options.
+/// The plant's sweeps as they ended: the last sweep's exit, 0 or 1, its status, the plant's directory, the
+/// work directory, and the runs each profile must reach (`--runs`) and the most sweeps a plant gets
+/// (`--rounds`).
 #[derive(Clone, Copy, Debug)]
 pub struct Sweep<'a> {
-    code: i32,
+    exited_1: bool,
     status: &'a Object,
-    root: &'a Path,
+    place: &'a Path,
     work: &'a Path,
-    floor: &'a Integer,
-    rounds: &'a Integer,
+    options: &'a Options,
 }
 
 impl<'a> Sweep<'a> {
+    /// `new` returns `None` for an exit other than 0 and 1, which leaves the plant's sweeps no verdict
+    /// before any judgment.
     pub fn new(
         code: i32,
         status: &'a Object,
-        root: &'a Path,
+        place: &'a Path,
         work: &'a Path,
-        floor: &'a Integer,
-        rounds: &'a Integer,
-    ) -> Self {
-        Self {
-            code,
+        options: &'a Options,
+    ) -> Option<Self> {
+        let exited_1 = match code {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Self {
+            exited_1,
             status,
-            root,
+            place,
             work,
-            floor,
-            rounds,
-        }
+            options,
+        })
+    }
+
+    fn root(&self) -> PathBuf {
+        self.place.join("root")
     }
 }
 
-/// `judge` sets the result of the swept plant of `entry`: caught, missed or no verdict.
+/// `judge` sets the result of the swept plant of `entry`: caught, missed or no verdict. The entry's plant
+/// expects a profile; a plant without one is settled by [`Entry::unswept`] once its archive builds.
 pub fn judge(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) {
     if let Err(ending) = judged(entry, sweep, ask) {
         entry.no_verdict(&ending);
@@ -84,26 +105,31 @@ fn member(status: &Object, name: &str) -> Value {
     status.get(name).cloned().unwrap_or(Value::Null)
 }
 
-/// What the suspect loop found: the catch, and the reasons of the first three causes apart from the head
-/// failures, which the entry holds.
-#[derive(Default)]
+/// What the suspect loop found: the catch, the reasons of the first three causes and of the unconfirmed
+/// suspects, with the hold of `confirm` and the count of complete records of `suspects.jsonl`.
 struct Suspects {
     caught: Option<(Text, Object)>,
-    unconfirmed: Vec<Text>,
     differing: Vec<Text>,
+    failures: Vec<Text>,
     unchecked: Vec<Text>,
+    unconfirmed: Vec<Text>,
+    hold: Option<Text>,
+    complete: usize,
 }
 
 fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<(), NoVerdict> {
     let status = sweep.status;
-    let profiles = entry.profiles();
+    let profiles = entry.profiles().to_vec();
     entry.set("counts", member(status, "counts"));
-    let mut runs = Object::new();
+    let mut runs = Vec::with_capacity(profiles.len());
     for profile in &profiles {
-        let counted = profile_runs(status, profile)?;
-        runs.insert(profile.clone(), Value::Object(counted.members().clone()));
+        runs.push((profile.clone(), profile_runs(status, profile)?));
     }
-    entry.set("runs", Value::Object(runs.clone()));
+    let mut members = Object::new();
+    for (profile, counted) in &runs {
+        members.insert(profile.clone(), Value::Object(counted.members().clone()));
+    }
+    entry.set("runs", Value::Object(members));
     entry.set("controls", member(status, "controls"));
     entry.set("histories", member(status, "histories"));
     let mut keys = Object::new();
@@ -113,11 +139,13 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
         }
     }
     entry.set("keys", Value::Object(keys.clone()));
-    let listing = listing(&sweep.root.join("suspects.jsonl"), &profiles, sweep.work)?;
+    let root = sweep.root();
+    let listing = listing(&root.join("suspects.jsonl"), &profiles, sweep.work)?;
     let confirmed = if listing.listed.is_empty() {
-        Confirmed::default()
+        Confirmed::none()
     } else {
-        ask.confirm()?
+        let (code, out) = ask.confirm()?;
+        confirmed(code, &out, &sweep.place.join("confirm.err"), sweep.work)?
     };
     let mut hidden: Vec<(&Text, Option<Text>)> = Vec::new();
     for suspect in &listing.listed {
@@ -129,22 +157,25 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
             hidden.push((suspect.profile(), reason));
         }
     }
-    let mut found = Suspects::default();
+    let mut found = Suspects {
+        caught: None,
+        differing: Vec::new(),
+        failures: Vec::new(),
+        unchecked: Vec::new(),
+        unconfirmed: Vec::new(),
+        hold: confirmed.hold().cloned(),
+        complete: listing.complete,
+    };
     for suspect in &listing.listed {
         let named = suspect.named();
         let Some(finding) = finding_of(confirmed.findings(), suspect) else {
             found
                 .unconfirmed
-                .push(words!("`campaign confirm` made no finding of ", named));
+                .push(text!("`campaign confirm` made no finding of ", named));
             continue;
         };
-        let identity = (
-            suspect.profile().clone(),
-            suspect.run().clone(),
-            suspect.seed().clone(),
-        );
-        if listing.replayed.contains(&identity) {
-            found.differing.push(words!(
+        if listing.replayed.contains(&suspect.identity()) {
+            found.differing.push(text!(
                 "the sweep's replay of ",
                 named,
                 " differs, so its seed does not determine the run"
@@ -155,7 +186,7 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
             .iter()
             .find(|(profile, _)| *profile == suspect.profile());
         if let Some((_, Some(why))) = hides {
-            found.differing.push(words!(
+            found.differing.push(text!(
                 why,
                 ", so a differing replay of ",
                 named,
@@ -163,33 +194,39 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
             ));
             continue;
         }
-        let (code, ending) = match ask.seed(suspect, finding.manifest_sha256.as_ref()) {
-            SeedCheck::Failed(why) | SeedCheck::Nothing(why) => {
+        let checked = manifest(&root, suspect, finding.manifest_sha256.as_ref())
+            .and_then(|manifest| ask.run_seed(suspect, &manifest))
+            .map(|(code, out)| ending(code, &out));
+        let (code, ending) = match checked {
+            Err(why) | Ok(SeedCheck::NotRun(why)) => {
                 found
                     .unchecked
-                    .push(words!("the seed check of ", named, " did not run: ", why));
+                    .push(text!("the seed check of ", named, " did not run: ", why));
                 continue;
             }
-            SeedCheck::Ran { code, ending } => (code, ending),
+            Ok(SeedCheck::Ran { code, ending }) => (code, ending),
         };
         let mut members = suspect.members();
         members.insert("finding", Value::String(finding.id.clone()));
         members.insert("head", ending.clone());
-        if code == 0 && found.caught.is_none() {
-            found.caught = Some((named, members));
-        } else if code == 1 || code == 4 {
-            members.insert(
-                "reason",
-                Value::String(words!(
+        match code {
+            0 => {
+                if found.caught.is_none() {
+                    found.caught = Some((named, members));
+                }
+            }
+            1 | 4 => {
+                let reason = text!(
                     "the seed of ",
                     named,
                     " does not pass on the unpatched head: ",
                     str_of(&ending)
-                )),
-            );
-            entry.push_head_failure(members);
-        } else if code != 0 {
-            found.unchecked.push(words!(
+                );
+                members.insert("reason", Value::String(reason.clone()));
+                entry.push_head_failure(members);
+                found.failures.push(reason);
+            }
+            _ => found.unchecked.push(text!(
                 "the seed check of ",
                 named,
                 " on the unpatched head exited ",
@@ -197,7 +234,7 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
                 " (",
                 str_of(&ending),
                 ")"
-            ));
+            )),
         }
     }
     if let Some((reason, caught)) = found.caught {
@@ -205,35 +242,17 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
         entry.set("suspect", Value::Object(caught));
         return Ok(());
     }
-    let reason = cause(
-        entry,
-        sweep,
-        &runs,
-        &keys,
-        (&found, listing.complete),
-        &confirmed,
-    )?;
-    match reason {
+    match cause(entry, sweep, &runs, &keys, &found)? {
         Some(reason) => Err(NoVerdict::plain(reason)),
         None => {
-            let reason = words!(
+            let reason = text!(
                 "each expected profile reached ",
-                sweep.floor,
+                sweep.options.runs(),
                 " runs and the root holds no suspect"
             );
             entry.settle(Verdict::Missed, reason);
             Ok(())
         }
-    }
-}
-
-fn counter<'a>(runs: &'a Object, profile: &Text, name: &str) -> &'a Integer {
-    match runs.get_text(profile) {
-        Some(Value::Object(counted)) => match counted.get(name) {
-            Some(Value::Integer(number)) => number,
-            _ => panic!("a profile's checked counters hold {name}"),
-        },
-        _ => panic!("the entry's runs hold each expected profile"),
     }
 }
 
@@ -246,71 +265,57 @@ fn counter<'a>(runs: &'a Object, profile: &Text, name: &str) -> &'a Integer {
 fn cause(
     entry: &Entry,
     sweep: &Sweep<'_>,
-    runs: &Object,
+    runs: &[(Text, Runs)],
     keys: &Object,
-    (found, complete): (&Suspects, usize),
-    confirmed: &Confirmed,
+    found: &Suspects,
 ) -> Result<Option<Text>, NoVerdict> {
     let status = sweep.status;
+    let (floor, rounds) = (sweep.options.runs(), sweep.options.rounds());
     let zero = Integer::from(0u64);
     let mut held: Vec<(Text, Integer)> = held_suspects(status)?
         .into_iter()
         .filter(|(_, number)| *number != zero)
         .collect();
     held.sort_by(|left, right| left.0.cmp(&right.0));
-    let profiles = entry.profiles();
-    let short: Vec<&Text> = profiles
+    let short: Vec<&Text> = runs
         .iter()
-        .filter(|profile| counter(runs, profile, "next") < sweep.floor)
+        .filter(|(_, counted)| counted.next() < floor)
+        .map(|(profile, _)| profile)
         .collect();
     let total = member(status, "suspects");
-    let failures: Vec<Text> = match entry.members().get("head_failures") {
-        Some(Value::Array(failures)) => failures
-            .iter()
-            .map(|failure| match failure {
-                Value::Object(failure) => str_of(failure.get("reason").unwrap_or(&Value::Null)),
-                _ => panic!("a head failure is an object"),
-            })
-            .collect(),
-        _ => panic!("an entry holds its head failures"),
-    };
     let campaign =
         matches!(status.get("campaign"), Some(Value::String(name)) if name == entry.campaign());
-    let counts = matches!(status.get("counts"), Some(Value::Object(counts)) if counts.is_empty());
+    let no_counts =
+        matches!(status.get("counts"), Some(Value::Object(counts)) if counts.is_empty());
     let causes: [Option<Text>; 13] = [
         found.differing.first().cloned(),
-        failures.first().cloned(),
+        found.failures.first().cloned(),
         found.unchecked.first().cloned(),
         (!keys.is_empty()).then(|| {
             let names: Vec<Text> = keys.iter().map(|(key, _)| key.clone()).collect();
-            words!("the root holds ", Text::join(", ", &names))
+            text!("the root holds ", Text::join(", ", &names))
         }),
-        confirmed.hold().cloned(),
+        found.hold.clone(),
         found.unconfirmed.first().cloned(),
         (!held.is_empty()).then(|| {
             let listed: Vec<Text> = held
                 .iter()
-                .map(|(profile, number)| words!(profile, " (", number, ")"))
+                .map(|(profile, number)| text!(profile, " (", number, ")"))
                 .collect();
-            words!("the root holds suspects in ", Text::join(", ", &listed))
+            text!("the root holds suspects in ", Text::join(", ", &listed))
         }),
-        (!natural(&total, 0) || total != Value::Integer(zero.clone())).then(|| {
-            words!(
+        (!natural(&total, 0) || truthy(&total)).then(|| {
+            text!(
                 "`campaign sweep-status` counts ",
                 repr(&total),
                 " suspects at the root"
             )
         }),
-        (complete > 0).then(|| words!("`suspects.jsonl` lists ", complete, " suspects")),
-        (sweep.code == 1 && keys.is_empty()).then(|| {
-            words!(
-                "the last sweep exited ",
-                sweep.code,
-                " and the root holds no verdict key"
-            )
-        }),
-        (!(campaign && counts)).then(|| {
-            words!(
+        (found.complete > 0).then(|| text!("`suspects.jsonl` lists ", found.complete, " suspects")),
+        (sweep.exited_1 && keys.is_empty())
+            .then(|| text!("the last sweep exited 1 and the root holds no verdict key")),
+        (!(campaign && no_counts)).then(|| {
+            text!(
                 "`campaign sweep-status` names campaign ",
                 repr(&member(status, "campaign")),
                 " and counts ",
@@ -318,19 +323,18 @@ fn cause(
             )
         }),
         (!short.is_empty()).then(|| {
-            words!(
+            text!(
                 Text::join(", ", short.iter().copied()),
                 " stayed below ",
-                sweep.floor,
+                floor,
                 " runs after ",
-                sweep.rounds,
+                rounds,
                 " sweeps"
             )
         }),
-        profiles
-            .iter()
-            .find(|profile| *counter(runs, profile, "runs") == zero)
-            .map(|profile| words!(profile, " has no run counted")),
+        runs.iter()
+            .find(|(_, counted)| *counted.runs() == zero)
+            .map(|(profile, _)| text!(profile, " has no run counted")),
     ];
     Ok(causes.into_iter().flatten().next())
 }

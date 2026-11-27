@@ -14,7 +14,6 @@ use std::process::{Command, Output, Stdio};
 use super::config::debug_assertions;
 use super::options::{Options, TOOL};
 use super::outcomes::{Judgment, Listed, Outcome, Outcomes, judge, read_listing, read_outcomes};
-use super::pieces::text;
 use super::preflight::{CONFIG, GitError, Prepared, git, is_file, preflight};
 use super::process::{INTERRUPT, ignore_signals, install_handlers, supervise};
 use super::rundir::{self, OpenError, make_temp_dir};
@@ -23,6 +22,7 @@ use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
 use crate::python::{hexdigest, say};
 use crate::text::Text;
+use crate::text::text;
 
 const PACKAGE: &str = "kestrike";
 const SOURCE: &str = "crates/kestrike/src";

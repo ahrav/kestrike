@@ -5,8 +5,7 @@ use std::io;
 use std::path::Path;
 
 use super::files::strerror;
-use super::words::words;
-use crate::text::Text;
+use crate::text::{Text, text};
 
 /// What a no verdict means for the plants after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,7 +40,7 @@ impl NoVerdict {
     /// `failed` is the plain no verdict `the run failed: WORDS` of a step that met a value of another
     /// shape than it reads.
     pub fn failed(words: impl Into<Text>) -> Self {
-        Self::plain(words!("the run failed: ", words.into()))
+        Self::plain(text!("the run failed: ", words.into()))
     }
 
     /// `unreadable` is the plain no verdict of a file at `path` that a step cannot read: `the run failed:
@@ -52,7 +51,7 @@ impl NoVerdict {
             .ok()
             .filter(|rest| !rest.as_os_str().is_empty());
         let named = Text::from_os(named.unwrap_or(path).as_os_str());
-        Self::failed(words!(strerror(error), " (", named, ")"))
+        Self::failed(text!(strerror(error), " (", named, ")"))
     }
 
     pub fn kind(&self) -> Kind {

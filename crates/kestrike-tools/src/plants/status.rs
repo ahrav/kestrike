@@ -8,12 +8,11 @@
 use std::collections::BTreeMap;
 
 use super::suspects::REPLAY_DIFFERS;
-use super::values::natural;
+use super::values::natural_integer;
 use super::verdict::NoVerdict;
-use super::words::words;
 use crate::json::{Integer, Object, Value};
 use crate::python::{repr, truthy};
-use crate::text::Text;
+use crate::text::{Text, text};
 
 /// The counters of a profile, in the order its record lists them.
 const COUNTERS: [&str; 4] = ["next", "runs", "pass", "suspects"];
@@ -45,7 +44,7 @@ impl Runs {
     }
 
     /// The members `next`, `runs`, `pass`, `suspects`, `range`, `replays` and `uncredited`, in that order.
-    pub fn members(&self) -> &Object {
+    pub(crate) fn members(&self) -> &Object {
         &self.0
     }
 }
@@ -64,27 +63,23 @@ fn profiles(status: &Object) -> Option<&Object> {
 /// The status names no such profile, a counter is no integer of at least zero, or the counters are out
 /// of order.
 pub fn profile_runs(status: &Object, profile: &Text) -> Result<Runs, NoVerdict> {
-    let named = words!("`campaign sweep-status` ");
+    let named = "`campaign sweep-status` ";
     let totals = match profiles(status).and_then(|profiles| profiles.get_text(profile)) {
         Some(Value::Object(totals)) => totals,
         _ => {
-            return Err(NoVerdict::plain(words!(
-                named,
-                "names no profile ",
-                profile
-            )));
+            return Err(NoVerdict::plain(text!(named, "names no profile ", profile)));
         }
     };
     let mut values = Object::new();
     let mut numbers = Vec::with_capacity(COUNTERS.len());
     for name in COUNTERS {
-        match totals.get(name) {
-            Some(value @ Value::Integer(number)) if natural(value, 0) => {
+        match totals.get(name).and_then(natural_integer) {
+            Some(number) => {
                 numbers.push(number);
-                values.insert(name, value.clone());
+                values.insert(name, Value::Integer(number.clone()));
             }
             _ => {
-                return Err(NoVerdict::plain(words!(
+                return Err(NoVerdict::plain(text!(
                     named,
                     "gives ",
                     profile,
@@ -98,7 +93,7 @@ pub fn profile_runs(status: &Object, profile: &Text) -> Result<Runs, NoVerdict> 
         unreachable!("each counter was read");
     };
     if !(passed <= ran && ran <= following) {
-        return Err(NoVerdict::plain(words!(
+        return Err(NoVerdict::plain(text!(
             named,
             "gives ",
             profile,
@@ -145,16 +140,14 @@ pub(crate) fn held_suspects(status: &Object) -> Result<Vec<(Text, Integer)>, NoV
             Value::Object(totals) => totals.get("suspects"),
             _ => None,
         };
-        match count {
-            Some(value @ Value::Integer(number)) if natural(value, 0) => {
-                held.push((name.clone(), number.clone()))
-            }
+        match count.and_then(natural_integer) {
+            Some(number) => held.push((name.clone(), number.clone())),
             _ => unread.push(name),
         }
     }
     if !unread.is_empty() {
         unread.sort();
-        return Err(NoVerdict::plain(words!(
+        return Err(NoVerdict::plain(text!(
             "`campaign sweep-status` gives ",
             Text::join(", ", unread),
             " no suspect count"
@@ -190,21 +183,18 @@ pub(crate) fn unlisted_replay(
         _ => None,
     };
     let Some(Value::Object(totals)) = totals else {
-        return Ok(Some(words!(named, "names no profile ", profile)));
+        return Ok(Some(text!(named, "names no profile ", profile)));
     };
     let total = totals.get("suspects").unwrap_or(&Value::Null);
     let keys: Option<Vec<(&Text, &Integer)>> = match totals.get("suspect_keys") {
         Some(Value::Object(counted)) => counted
             .iter()
-            .map(|(key, number)| match number {
-                Value::Integer(count) if natural(number, 0) => Some((key, count)),
-                _ => None,
-            })
+            .map(|(key, number)| Some((key, natural_integer(number)?)))
             .collect(),
         _ => None,
     };
     let Some(mut keys) = keys else {
-        return Ok(Some(words!(
+        return Ok(Some(text!(
             named,
             "gives ",
             profile,
@@ -215,7 +205,7 @@ pub(crate) fn unlisted_replay(
         NoVerdict::failed("the sum of the suspects by key has more digits than an integer holds")
     })?;
     if Value::Integer(sum.clone()) != *total {
-        return Ok(Some(words!(
+        return Ok(Some(text!(
             named,
             "counts ",
             repr(total),
@@ -233,7 +223,7 @@ pub(crate) fn unlisted_replay(
     };
     for ((name, key), lines) in shown {
         if name == profile && Integer::from(*lines) > counted(key) {
-            return Ok(Some(words!(
+            return Ok(Some(text!(
                 "`suspects.jsonl` lists ",
                 *lines,
                 " suspects of ",
@@ -253,7 +243,7 @@ pub(crate) fn unlisted_replay(
             .copied()
             .unwrap_or(0);
         if (*key == OTHER || key.starts_with(&differs)) && *number > Integer::from(lines) {
-            return Ok(Some(words!(
+            return Ok(Some(text!(
                 named,
                 "counts ",
                 number,

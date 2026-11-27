@@ -2,29 +2,30 @@
 //! object of an output line, the pins `campaign sim archive` prints, and the findings and the backlog hold
 //! `campaign confirm` prints.
 //!
-//! Output text breaks at `\n` alone, and every document is read with [`json::parse_unique`], which refuses
-//! a repeated member.
+//! An output is the text a read of the command's output file as text gives, with `\r\n` and `\r` read as
+//! `\n` ([`crate::text::newlines`]); it breaks at `\n` alone. Every document is read with
+//! [`json::parse_unique`], which refuses a repeated member.
 
 use std::fs;
 use std::path::Path;
 
 use super::verdict::NoVerdict;
-use super::words::words;
 use crate::json::{self, Object, UniqueError, Value};
 use crate::python::repr;
-use crate::text::{Text, strip_str};
+use crate::text::{Text, strip_str, text};
 
 /// The pins of an archive, in the order a manifest names them; crates/campaign-supervisor/src/sim/input.rs
 /// holds the same four names.
-pub const PINS: [&str; 4] = ["build", "executable", "platform", "toolchain"];
-/// The dispatch of a `confirm` that settled every job; crates/sim-host/src/runner.rs holds the same word.
+const PINS: [&str; 4] = ["build", "executable", "platform", "toolchain"];
+/// The dispatch of a `confirm` that settled every job; crates/sim-host/src/runner.rs holds the same
+/// word.
 const QUEUE_EMPTY: &str = "queue_empty";
 /// The dispatch of a `confirm` a refusal stopped; crates/campaign-supervisor/src/campaign/dispatch/mod.rs
 /// writes the same word for `State::Held`.
 const HELD: &str = "held";
-/// The prefix and the suffix of a backlog hold's refusal; crates/sim-host/src/runner.rs holds the same
-/// words.
+/// The prefix of a backlog hold's refusal; crates/sim-host/src/runner.rs holds the same words.
 const BACKLOG: &str = "backlog holds ";
+/// The suffix of a backlog hold's refusal; crates/sim-host/src/runner.rs holds the same words.
 const BACKLOG_END: &str = "; dispose findings or raise backlog";
 /// The words a `confirm` writes to its error output when it prints only some of its refusals;
 /// crates/sim-host/src/runner.rs holds the same words.
@@ -32,18 +33,16 @@ const OMITTED: &str = "omitted refusals:";
 
 /// `object` reads `line` of the output of `campaign WHAT` as one JSON object.
 fn object(line: &str, what: &str) -> Result<Object, NoVerdict> {
-    let printed = words!("`campaign ", what, "` printed no JSON object");
+    let printed = text!("`campaign ", what, "` printed no JSON object");
     match json::parse_unique(line) {
         Ok(Value::Object(object)) => Ok(object),
         Ok(_) => Err(NoVerdict::plain(printed)),
         Err(UniqueError::Syntax(error)) => {
-            Err(NoVerdict::plain(words!(printed, ": ", error.to_string())))
+            Err(NoVerdict::plain(text!(printed, ": ", error.to_string())))
         }
-        Err(UniqueError::Repeated(name)) => Err(NoVerdict::plain(words!(
-            printed,
-            ": repeated member ",
-            name
-        ))),
+        Err(UniqueError::Repeated(name)) => {
+            Err(NoVerdict::plain(text!(printed, ": repeated member ", name)))
+        }
     }
 }
 
@@ -77,7 +76,7 @@ impl Pins {
     }
 
     /// Each of the [`PINS`] with its value, in that order.
-    pub fn named(&self) -> impl Iterator<Item = (&'static str, &Text)> {
+    pub(crate) fn named(&self) -> impl Iterator<Item = (&'static str, &Text)> {
         PINS.into_iter().zip(self.0.iter())
     }
 }
@@ -91,19 +90,19 @@ impl Pins {
 /// pin is missing or no text.
 pub fn archive_pins(code: i32, out: &str, what: &str, err: &Path) -> Result<Pins, NoVerdict> {
     if code == 3 {
-        return Err(NoVerdict::plain(words!(
+        return Err(NoVerdict::plain(text!(
             what,
             " does not build: `campaign sim archive` exited 3"
         )));
     }
     if code != 0 {
-        return Err(NoVerdict::plain(words!(
+        return Err(NoVerdict::plain(text!(
             "`campaign sim archive` of ",
             what,
             " exited ",
             code,
             "; its error is in ",
-            Text::from_os(err.as_os_str())
+            err
         )));
     }
     let printed = last_object(out, "sim archive")?;
@@ -124,19 +123,27 @@ pub fn archive_pins(code: i32, out: &str, what: &str, err: &Path) -> Result<Pins
 
 /// What a `campaign confirm` printed: its findings, each an object, and the backlog hold that stopped
 /// it, if one did.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Confirmed {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Confirmed {
     findings: Vec<Object>,
     hold: Option<Text>,
 }
 
 impl Confirmed {
-    pub fn findings(&self) -> &[Object] {
+    /// `none` is what a root without a listed suspect gets, where `confirm` does not run.
+    pub(crate) fn none() -> Self {
+        Self {
+            findings: Vec::new(),
+            hold: None,
+        }
+    }
+
+    pub(crate) fn findings(&self) -> &[Object] {
         &self.findings
     }
 
     /// The reason `` `campaign confirm` held its queue: REFUSAL `` of a backlog hold.
-    pub fn hold(&self) -> Option<&Text> {
+    pub(crate) fn hold(&self) -> Option<&Text> {
         self.hold.as_ref()
     }
 }
@@ -157,9 +164,14 @@ fn backlog(refusal: &Value) -> bool {
 /// Another exit than 0 or 4; a first line that is no JSON object; an exit 4 of another hold; an exit 0
 /// whose dispatch is not `queue_empty`; no list of finding objects; and an error file that cannot be read
 /// at an exit 4.
-pub fn confirmed(code: i32, out: &str, errors: &Path, work: &Path) -> Result<Confirmed, NoVerdict> {
+pub(crate) fn confirmed(
+    code: i32,
+    out: &str,
+    errors: &Path,
+    work: &Path,
+) -> Result<Confirmed, NoVerdict> {
     if code != 0 && code != 4 {
-        return Err(NoVerdict::plain(words!("`campaign confirm` exited ", code)));
+        return Err(NoVerdict::plain(text!("`campaign confirm` exited ", code)));
     }
     let printed = first_object(out, "confirm")?;
     let dispatch = || repr(printed.get("dispatch").unwrap_or(&Value::Null));
@@ -181,17 +193,17 @@ pub fn confirmed(code: i32, out: &str, errors: &Path, work: &Path) -> Result<Con
                     && !omitted
                     && refusals.iter().all(backlog) =>
             {
-                hold = Some(words!("`campaign confirm` held its queue: ", first));
+                hold = Some(text!("`campaign confirm` held its queue: ", first));
             }
             _ => {
-                return Err(NoVerdict::plain(words!(
+                return Err(NoVerdict::plain(text!(
                     "`campaign confirm` exited 4 at dispatch ",
                     dispatch()
                 )));
             }
         }
     } else if !is("dispatch", QUEUE_EMPTY) {
-        return Err(NoVerdict::plain(words!(
+        return Err(NoVerdict::plain(text!(
             "`campaign confirm` left its queue at dispatch ",
             dispatch()
         )));

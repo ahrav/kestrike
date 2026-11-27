@@ -1,18 +1,14 @@
 //! The readers of a finished command's output: the JSON object of its first or last line, the verdict
-//! of a proof rerun, the pins of an archive and what `campaign confirm` printed. Where a reason carries a
+//! of a proof rerun and the pins of an archive. Where a reason carries a
 //! JSON reader's text, it is this crate's reader's text after the reason's own words.
 
-use std::fs;
 use std::path::Path;
 
 use kestrike_tools::json::{self, Value};
 use kestrike_tools::plants::{
-    HelperVerdict, Kind, NoVerdict, Rerun, archive_pins, confirmed, first_object, judge_rerun,
-    last_object,
+    HelperVerdict, Kind, NoVerdict, Rerun, archive_pins, first_object, judge_rerun, last_object,
 };
 use kestrike_tools::text::Text;
-
-use super::repository::{Repository, chmod, is_root, write};
 
 enum Line {
     First,
@@ -239,22 +235,28 @@ fn a_proof_rerun_is_judged_in_the_order_of_its_checks() {
     let proof = Text::from("net::the_test");
     for &(holds, code, out, counted, asked, expected) in rows {
         let mut calls = Vec::new();
-        let rerun = Rerun::new(
-            &proof,
-            Path::new("proof/head-0"),
-            Path::new("proof/artifacts/head-0"),
-            holds,
+        let rerun = Rerun {
+            proof: &proof,
+            log: Path::new("proof/head-0"),
+            kept: Path::new("proof/artifacts/head-0"),
+            holds_lock: holds,
             code,
             out,
-        );
-        let expected_text = Text::from(if code == 0 {
+        };
+        let expected_line = Text::from(if code == 0 {
             "not reproduced"
         } else {
             "reproduced"
         });
         let got = judge_rerun(&rerun, |exit, line| {
             calls.push((exit, line.to_string()));
-            Ok(HelperVerdict::new(counted, expected_text.clone()))
+            Ok(if counted {
+                HelperVerdict::Counted
+            } else {
+                HelperVerdict::Uncounted {
+                    expected: expected_line,
+                }
+            })
         });
         let got = got.map_err(|ending| (ending.kind(), ending.reason().to_string()));
         let expected = expected.map_err(|(kind, reason)| (kind, reason.to_owned()));
@@ -271,14 +273,14 @@ fn a_proof_rerun_is_judged_in_the_order_of_its_checks() {
 #[test]
 fn a_verdict_the_helper_cannot_give_is_the_reruns_ending() {
     let proof = Text::from("net::the_test");
-    let rerun = Rerun::new(
-        &proof,
-        Path::new("l"),
-        Path::new("k"),
-        true,
-        1,
-        "reproduced",
-    );
+    let rerun = Rerun {
+        proof: &proof,
+        log: Path::new("l"),
+        kept: Path::new("k"),
+        holds_lock: true,
+        code: 1,
+        out: "reproduced",
+    };
     let refused = NoVerdict::plain("the head's verdict check failed");
     assert_eq!(
         judge_rerun(&rerun, |_, _| Err(refused.clone())),
@@ -338,19 +340,9 @@ fn an_archive_prints_its_four_pins_as_text() {
     for &(code, out, expected) in rows {
         let got = archive_pins(code, out, "the planted tree", err);
         match (got, expected) {
-            (Ok(pins), Ok(object)) => {
-                let json::Value::Object(printed) = json::parse(object).expect("JSON") else {
-                    panic!("an object");
-                };
-                let named: Vec<(&str, &Text)> = pins.named().collect();
-                for (name, pin) in named {
-                    assert_eq!(
-                        printed.get(name),
-                        Some(&Value::String(pin.clone())),
-                        "{out:?}"
-                    );
-                }
-                assert_eq!(pins.build(), &Text::from("b"));
+            (Ok(pins), Ok(_)) => {
+                assert_eq!(pins.build(), &Text::from("b"), "{out:?}");
+                assert_eq!(format!("{pins:?}"), "Pins(['b', 'e', 'p', 't'])", "{out:?}");
             }
             (Err(ending), Err(Some(reason))) => assert_eq!(ending.reason(), &Text::from(reason)),
             (Err(ending), Err(None)) => {
@@ -361,38 +353,4 @@ fn an_archive_prints_its_four_pins_as_text() {
             (got, expected) => panic!("{out:?}: {got:?} where the row expects {expected:?}"),
         }
     }
-}
-
-/// At an exit 4, an error output that cannot be read is the run's failure, named from the work
-/// directory; at an exit 0 it is not read.
-#[test]
-fn an_unreadable_confirm_error_output_fails_the_run_at_an_exit_4_alone() {
-    let repository = Repository::new();
-    let work = repository.scratch.join("work");
-    let errors = work.join("plants/alpha/confirm.err");
-    let held = r#"{"dispatch":"held","rejections":[],"refusals":["backlog holds 1; dispose findings or raise backlog"],"findings":{"findings":[]}}"#;
-    let missing = confirmed(4, held, &errors, &work).expect_err("no error output");
-    assert_eq!(
-        missing.reason(),
-        &Text::from("the run failed: No such file or directory (plants/alpha/confirm.err)")
-    );
-    let empty = r#"{"dispatch":"queue_empty","findings":{"findings":[]}}"#;
-    assert!(confirmed(0, empty, &errors, &work).is_ok());
-    write(&errors, "held\n");
-    assert!(
-        confirmed(4, held, &errors, &work)
-            .expect("held")
-            .hold()
-            .is_some()
-    );
-    if !is_root() {
-        chmod(&errors, 0o000);
-        let denied = confirmed(4, held, &errors, &work).expect_err("unreadable");
-        assert_eq!(
-            denied.reason(),
-            &Text::from("the run failed: Permission denied (plants/alpha/confirm.err)")
-        );
-        chmod(&errors, 0o600);
-    }
-    fs::remove_dir_all(&work).expect("removed");
 }

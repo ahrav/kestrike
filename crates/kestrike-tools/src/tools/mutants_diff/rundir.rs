@@ -8,10 +8,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::pieces::text;
 use super::stop::{Fault, Stop};
 use crate::ownership::{PrivateError, make_private, real_uid};
 use crate::temp_dir::{self, TempDirError};
+use crate::text::text;
 
 /// `make_temp_dir` creates `parent/PREFIX` and eight random letters as a directory of mode 0700, drawing
 /// a new name while one is taken.

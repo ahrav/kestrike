@@ -17,5 +17,4 @@ mod outputs;
 mod plants;
 mod repository;
 mod scores;
-mod seeds;
 mod store;

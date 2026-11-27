@@ -275,7 +275,8 @@ fn join_separates_each_two_items() {
 }
 
 /// `starts_with`, `ends_with` and `replace` match whole code points, a lone surrogate included, as
-/// `str.startswith`, `str.endswith` and `str.replace` do.
+/// `str.startswith`, `str.endswith` and `str.replace` do; an empty pattern leaves the text as it is, where
+/// `str.replace` writes the replacement between every two code points.
 #[test]
 fn texts_match_and_replace_by_code_points() {
     let surrogate = text(&[0x61, 0xdc80, 0x62]);

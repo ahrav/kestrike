@@ -9,32 +9,29 @@
 use std::fs;
 use std::path::Path;
 
-use super::git::newlines;
 use super::output::{Pins, last_object};
 use super::suspects::Suspect;
-use super::words::words;
-use crate::json::Value;
+use crate::json::{Integer, Value};
 use crate::ownership::PathError;
 use crate::python::{hexdigest, str_of, truthy};
-use crate::text::Text;
+use crate::text::{Text, newlines, text};
 
 /// The class of a run that passes; crates/campaign-supervisor/src/exit.rs names the same class.
 const COUNTS: &str = "counts";
 
-/// What a seed check gave: the exit of the seed's run on the unpatched head with its ending, the reason it
-/// ran nothing on the head, or the error that kept it from running.
+/// What a seed check gave: the exit of the seed's run on the unpatched head with its ending, or why it
+/// ran nothing on the head.
 #[derive(Clone, Debug, PartialEq)]
-pub enum SeedCheck {
+pub(crate) enum SeedCheck {
     /// `campaign sim run` exited `code` with the worker's ending: the class, or the reason with the class
     /// before it.
     Ran { code: i32, ending: Value },
     /// The check ran nothing on the head; the text says why.
-    Nothing(Text),
-    /// The check did not run; the text is the error.
-    Failed(Text),
+    NotRun(Text),
 }
 
-/// The lines of a profile's manifest, as the sweep wrote it.
+/// The lines of a profile's manifest, as the sweep wrote it; only [`manifest`] makes one, once its
+/// digest is the confirmed job's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest(Vec<String>);
 
@@ -42,24 +39,24 @@ pub struct Manifest(Vec<String>);
 fn rewrite(line: &str, values: &[(&str, &Text)]) -> Text {
     let key = line.split(" = ").next().unwrap_or_default();
     match values.iter().find(|(name, _)| *name == key) {
-        Some((_, value)) => words!(key, " = ", value),
+        Some((_, value)) => text!(key, " = ", value),
         None => Text::from(line),
     }
 }
 
 impl Manifest {
     fn rewritten(&self, values: &[(&str, &Text)]) -> Text {
-        let mut text = Text::new();
+        let mut written = Text::new();
         for line in &self.0 {
-            text.push_text(&rewrite(line, values));
-            text.push_str("\n");
+            written.push_text(&rewrite(line, values));
+            written.push_str("\n");
         }
-        text
+        written
     }
 
     /// `pinned` is the manifest the seed check runs: the root set to `seed` and each of the pins to the
     /// base archive's.
-    pub fn pinned(&self, pins: &Pins, seed: &crate::json::Integer) -> Text {
+    pub fn pinned(&self, pins: &Pins, seed: &Integer) -> Text {
         let seed = Text::from(seed.to_string());
         let mut values: Vec<(&str, &Text)> = pins.named().collect();
         values.push(("root", &seed));
@@ -73,18 +70,20 @@ impl Manifest {
 ///
 /// # Errors
 ///
-/// [`SeedCheck::Failed`] with the path and the error of a manifest that cannot be read or is no UTF-8, and
-/// [`SeedCheck::Nothing`] for a digest of other text.
-pub fn manifest(
+/// The reason the check runs nothing: a profile that names no file, a manifest that cannot be read or is
+/// no UTF-8 (its path and the reader's error), or a digest of other text.
+pub(crate) fn manifest(
     root: &Path,
     suspect: &Suspect,
     digest: Option<&Value>,
-) -> Result<Manifest, SeedCheck> {
-    let mut name = suspect.profile().to_os().expect("a profile name is ASCII");
+) -> Result<Manifest, Text> {
+    let Some(mut name) = suspect.profile().to_os() else {
+        return Err(text!(suspect.profile().repr(), " names no manifest file"));
+    };
     name.push(".manifest");
     let path = root.join("manifests").join(name);
     let read = fs::read_to_string(&path)
-        .map_err(|error| SeedCheck::Failed(Text::from(PathError::new(&path, error).to_string())))?;
+        .map_err(|error| Text::from(PathError::new(&path, error).to_string()))?;
     let mut lines: Vec<String> = newlines(read).split('\n').map(str::to_owned).collect();
     if lines.last().is_some_and(String::is_empty) {
         lines.pop();
@@ -95,9 +94,9 @@ pub fn manifest(
     let hashed = Text::from(hexdigest(seeded.as_bytes()));
     match digest {
         Some(Value::String(digest)) if *digest == hashed => Ok(manifest),
-        _ => Err(SeedCheck::Nothing(Text::from(
+        _ => Err(Text::from(
             "its manifest differs from the job `confirm` ran",
-        ))),
+        )),
     }
 }
 
@@ -105,27 +104,28 @@ pub fn manifest(
 /// whose last line holds the worker's result. The ending is the result's `reason` when its text begins
 /// with the class and `: `, else `CLASS: REASON`, or the class alone for a false or missing reason; each
 /// is read as Python's `str` writes the value.
-pub fn ending(code: i32, out: &str) -> SeedCheck {
-    let printed = match last_object(out, "sim run") {
-        Ok(printed) => printed,
-        Err(_) => return SeedCheck::Nothing(words!("exit ", code, " with no result")),
-    };
-    let Some(class) = printed.get("class") else {
-        return SeedCheck::Nothing(words!("exit ", code, " with no result"));
+pub(crate) fn ending(code: i32, out: &str) -> SeedCheck {
+    let printed = last_object(out, "sim run").ok();
+    let Some(class) = printed.as_ref().and_then(|printed| printed.get("class")) else {
+        return SeedCheck::NotRun(text!("exit ", code, " with no result"));
     };
     let kind = str_of(class);
-    let ending = match printed.get("reason") {
+    let ending = match printed.as_ref().and_then(|printed| printed.get("reason")) {
         Some(reason) if truthy(reason) => {
-            if str_of(reason).starts_with(&words!(kind, ": ")) {
+            if str_of(reason).starts_with(&text!(kind, ": ")) {
                 reason.clone()
             } else {
-                Value::String(words!(kind, ": ", str_of(reason)))
+                Value::String(text!(kind, ": ", str_of(reason)))
             }
         }
         _ => Value::String(kind.clone()),
     };
     if code == 0 && kind != COUNTS {
-        return SeedCheck::Nothing(words!("exit 0 with the class ", kind));
+        return SeedCheck::NotRun(text!("exit 0 with the class ", kind));
     }
     SeedCheck::Ran { code, ending }
 }
+
+#[cfg(test)]
+#[path = "seed_tests.rs"]
+mod tests;

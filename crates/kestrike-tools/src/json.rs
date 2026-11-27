@@ -679,25 +679,29 @@ impl fmt::Display for NonFinite {
 impl std::error::Error for NonFinite {}
 
 /// How a writer lays a value out: `depth` is `None` in the compact layout and the nesting depth of the
-/// value in an indented one; `sorted` sorts object keys and refuses non-finite floats.
+/// value in an indented one, `sort_keys` sorts object keys, and `finite_only` refuses non-finite floats.
 #[derive(Clone, Copy)]
 struct Layout {
     depth: Option<usize>,
-    sorted: bool,
+    sort_keys: bool,
+    finite_only: bool,
 }
 
 impl Layout {
     const COMPACT: Self = Self {
         depth: None,
-        sorted: false,
+        sort_keys: false,
+        finite_only: false,
     };
     const SORTED: Self = Self {
         depth: Some(0),
-        sorted: true,
+        sort_keys: true,
+        finite_only: true,
     };
     const IN_ORDER: Self = Self {
         depth: Some(0),
-        sorted: false,
+        sort_keys: false,
+        finite_only: false,
     };
 
     fn inner(self) -> Self {
@@ -710,7 +714,7 @@ impl Layout {
 
 fn write(value: &Value, out: &mut String, layout: Layout) -> Result<(), NonFinite> {
     match value {
-        Value::Object(object) if layout.sorted => {
+        Value::Object(object) if layout.sort_keys => {
             let mut members: Vec<&(Text, Value)> = object.iter().collect();
             members.sort_by(|left, right| left.0.cmp(&right.0));
             write_items(&members, ('{', '}'), layout, out, |member, out, inner| {
@@ -722,7 +726,7 @@ fn write(value: &Value, out: &mut String, layout: Layout) -> Result<(), NonFinit
         Value::String(text) => write_string(text, out),
         Value::Integer(integer) => out.push_str(&integer.to_string()),
         Value::Float(value) if value.is_finite() => out.push_str(&repr_float(*value)),
-        Value::Float(value) if layout.sorted => return Err(NonFinite(*value)),
+        Value::Float(value) if layout.finite_only => return Err(NonFinite(*value)),
         Value::Float(value) if value.is_nan() => out.push_str("NaN"),
         Value::Float(value) if *value > 0.0 => out.push_str("Infinity"),
         Value::Float(_) => out.push_str("-Infinity"),

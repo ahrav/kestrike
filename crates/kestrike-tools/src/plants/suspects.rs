@@ -12,19 +12,21 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use super::files::{is_file, is_link};
-use super::values::{natural, text};
+use super::values::{natural_integer, text};
 use super::verdict::NoVerdict;
-use super::words::words;
 use crate::json::{self, Integer, Object, Value};
 use crate::ownership::status;
-use crate::text::Text;
+use crate::text::{Text, text};
 
-/// The classes of a suspect that can catch a plant; crates/campaign-supervisor/src/campaign/seeds.rs
-/// writes the same two words.
+/// The classes of a suspect that can catch a plant;
+/// crates/campaign-supervisor/src/campaign/seeds.rs writes the same two words.
 pub(crate) const CATCH_CLASSES: [&str; 2] = ["violation", "panic"];
-/// The class of a suspect whose replay ran otherwise than its run; crates/campaign-supervisor/src/campaign/
-/// seeds.rs writes the same words.
+/// The class of a suspect whose replay ran otherwise than its run;
+/// crates/campaign-supervisor/src/campaign/seeds.rs writes the same words.
 pub(crate) const REPLAY_DIFFERS: &str = "replay differs";
+
+/// A suspect's profile, run and seed.
+pub(crate) type Identity = (Text, Integer, Integer);
 
 /// One suspect of `suspects.jsonl`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -49,20 +51,13 @@ impl Suspect {
         &self.seed
     }
 
-    pub fn class(&self) -> &Text {
-        &self.class
-    }
-
-    pub fn key(&self) -> &Text {
-        &self.key
-    }
-
     /// The suspect as a reason names it: `KEY in run RUN of PROFILE`.
     pub(crate) fn named(&self) -> Text {
-        words!(self.key, " in run ", self.run, " of ", self.profile)
+        text!(self.key, " in run ", self.run, " of ", self.profile)
     }
 
-    fn identity(&self) -> (Text, Integer, Integer) {
+    /// The suspect's identity: its profile, run and seed.
+    pub(crate) fn identity(&self) -> Identity {
         (self.profile.clone(), self.run.clone(), self.seed.clone())
     }
 
@@ -86,10 +81,7 @@ impl Suspect {
             Value::String(text) => Some(text.clone()),
             _ => None,
         };
-        let number = |name| match object.get(name)? {
-            value @ Value::Integer(number) if natural(value, 0) => Some(number.clone()),
-            _ => None,
-        };
+        let number = |name| object.get(name).and_then(natural_integer).cloned();
         Some(Self {
             profile: string("profile")?,
             run: number("run")?,
@@ -107,7 +99,7 @@ impl Suspect {
 pub(crate) struct Listing {
     pub(crate) listed: Vec<Suspect>,
     pub(crate) complete: usize,
-    pub(crate) replayed: BTreeSet<(Text, Integer, Integer)>,
+    pub(crate) replayed: BTreeSet<Identity>,
     pub(crate) shown: BTreeMap<(Text, Text), usize>,
 }
 
@@ -145,7 +137,7 @@ pub(crate) fn listing(path: &Path, profiles: &[Text], work: &Path) -> Result<Lis
         }
         listing.complete += 1;
         let suspect = Suspect::from_line(&line).ok_or_else(|| {
-            NoVerdict::plain(words!("suspects.jsonl line ", number, " is no suspect"))
+            NoVerdict::plain(text!("suspects.jsonl line ", number, " is no suspect"))
         })?;
         *listing
             .shown

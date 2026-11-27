@@ -51,10 +51,10 @@ fn text_is_a_string_with_a_code_point_outside_the_whitespace() {
     }
 }
 
-/// `unlisted_replay` on a status and the lines of each profile and key, recorded from the script's own
-/// function: every reason it gives, in its order of checks, and `None` where the status accounts for
-/// every suspect of the profile. A truthy `profiles` of another shape is the run's failure, and a total of
-/// another number type than an integer reads as unequal to the sum by key.
+/// `unlisted_replay` on a status and the lines of each profile and key: every reason it gives, in its
+/// order of checks, and `None` where the status accounts for every suspect of the profile. A truthy
+/// `profiles` of another shape and a sum by key of more digits than an integer holds are the run's
+/// failure, and a total of another number type than an integer reads as unequal to the sum by key.
 #[test]
 fn a_status_may_hide_a_differing_replay_for_each_of_its_reasons() {
     use std::collections::BTreeMap;
@@ -64,6 +64,7 @@ fn a_status_may_hide_a_differing_replay_for_each_of_its_reasons() {
 
     let named = "`campaign sweep-status` names no profile smoke";
     let no_keys = "`campaign sweep-status` gives smoke no count of its suspects by key";
+    const NINES: &str = "two keys of the most nines an integer holds";
     type Lines = &'static [(&'static str, &'static str, usize)];
     type Reason = Result<Option<&'static str>, &'static str>;
     let rows: &[(&str, Lines, Reason)] = &[
@@ -134,9 +135,24 @@ fn a_status_may_hide_a_differing_replay_for_each_of_its_reasons() {
             &[],
             Err("the run failed: `campaign sweep-status` profiles is no object"),
         ),
+        (
+            NINES,
+            &[],
+            Err(
+                "the run failed: the sum of the suspects by key has more digits than an integer holds",
+            ),
+        ),
     ];
     for (status, shown, expected) in rows {
-        let Value::Object(status) = value(status) else {
+        let status = if *status == NINES {
+            let nines = "9".repeat(crate::json::MAX_INTEGER_DIGITS);
+            format!(
+                r#"{{"profiles": {{"smoke": {{"suspects": 1, "suspect_keys": {{"a": {nines}, "b": {nines}}}}}}}}}"#
+            )
+        } else {
+            (*status).to_owned()
+        };
+        let Value::Object(status) = value(&status) else {
             panic!("an object");
         };
         let shown: BTreeMap<(Text, Text), usize> = shown

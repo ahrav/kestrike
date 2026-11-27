@@ -11,9 +11,8 @@ use std::path::Path;
 
 use super::record::Plant;
 use super::verdict::NoVerdict;
-use super::words::words;
 use crate::json::{Integer, Object, Value};
-use crate::text::Text;
+use crate::text::{Text, text};
 
 /// The five results of a plant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,10 +48,12 @@ impl fmt::Display for Verdict {
 pub struct Entry {
     members: Object,
     verdict: Option<Verdict>,
+    campaign: Text,
+    profiles: Vec<Text>,
     miss_cause: Value,
 }
 
-fn text(value: &Text) -> Value {
+fn string(value: &Text) -> Value {
     Value::String(value.clone())
 }
 
@@ -67,10 +68,12 @@ impl Entry {
                 .unwrap_or_else(|| panic!("a checked record holds {name}"));
             members.insert(name, value.clone());
         }
-        members.insert("campaign", Value::String(words!("plant-", plant.id())));
+        let campaign = text!("plant-", plant.id());
+        let profiles: Vec<Text> = plant.expected().into_iter().cloned().collect();
+        members.insert("campaign", Value::String(campaign.clone()));
         members.insert(
             "profiles",
-            Value::Array(plant.expected().into_iter().map(text).collect()),
+            Value::Array(profiles.iter().map(string).collect()),
         );
         for name in ["proof_exits", "commit", "tree", "archive", "counts"] {
             members.insert(name, Value::Null);
@@ -86,6 +89,8 @@ impl Entry {
         Self {
             members,
             verdict: None,
+            campaign,
+            profiles,
             miss_cause,
         }
     }
@@ -117,29 +122,20 @@ impl Entry {
     }
 
     /// The campaign name, `plant-<id>`.
-    pub(crate) fn campaign(&self) -> &Text {
-        self.text("campaign").expect("an entry holds its campaign")
+    pub(super) fn campaign(&self) -> &Text {
+        &self.campaign
     }
 
-    /// The expected profiles, in the record's order.
-    pub(crate) fn profiles(&self) -> Vec<Text> {
-        match self.members.get("profiles") {
-            Some(Value::Array(items)) => items
-                .iter()
-                .map(|item| match item {
-                    Value::String(name) => name.clone(),
-                    _ => panic!("an entry's profiles are text"),
-                })
-                .collect(),
-            _ => panic!("an entry holds its profiles"),
-        }
+    /// The expected profiles, in the record's order, each once.
+    pub(super) fn profiles(&self) -> &[Text] {
+        &self.profiles
     }
 
-    pub(crate) fn set(&mut self, name: &str, value: Value) {
+    pub(super) fn set(&mut self, name: &str, value: Value) {
         self.members.insert(name, value);
     }
 
-    pub(crate) fn push_head_failure(&mut self, failure: Object) {
+    pub(super) fn push_head_failure(&mut self, failure: Object) {
         match self.members.get_mut("head_failures") {
             Some(Value::Array(failures)) => failures.push(Value::Object(failure)),
             _ => panic!("an entry holds its head failures"),
@@ -147,7 +143,7 @@ impl Entry {
     }
 
     /// `settle` sets the result and its reason.
-    pub fn settle(&mut self, verdict: Verdict, reason: Text) {
+    pub(super) fn settle(&mut self, verdict: Verdict, reason: Text) {
         self.verdict = Some(verdict);
         self.members
             .insert("result", Value::String(Text::from(verdict.as_str())));
@@ -155,16 +151,16 @@ impl Entry {
     }
 
     pub fn set_commit(&mut self, commit: &Text) {
-        self.set("commit", text(commit));
+        self.set("commit", string(commit));
     }
 
     pub fn set_tree(&mut self, tree: &Text) {
-        self.set("tree", text(tree));
+        self.set("tree", string(tree));
     }
 
     /// `set_archive` records the build digest of the planted tree's archive.
     pub fn set_archive(&mut self, build: &Text) {
-        self.set("archive", text(build));
+        self.set("archive", string(build));
     }
 
     /// `does_not_apply` is the result of a patch Git refuses, with Git's reason.
@@ -201,13 +197,14 @@ impl Entry {
     }
 
     /// `finish` adds the record's miss cause to a miss and writes `<work>` in place of each occurrence of
-    /// the work directory `work` in the reason, since the score is a tracked file.
+    /// the work directory `work` in the reason, since the score is a tracked file. A run finishes each
+    /// entry once, after its last step, and before it scores the entries.
     pub fn finish(&mut self, work: &Path) {
         if self.verdict == Some(Verdict::Missed) {
             self.members.insert("miss_cause", self.miss_cause.clone());
         }
         if let Some(reason) = self.reason() {
-            let replaced = reason.replace(&Text::from_os(work.as_os_str()), &Text::from("<work>"));
+            let replaced = reason.replace(&text!(work), &Text::from("<work>"));
             self.members.insert("reason", Value::String(replaced));
         }
     }

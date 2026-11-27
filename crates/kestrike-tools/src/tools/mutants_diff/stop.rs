@@ -9,8 +9,8 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 
-use super::pieces::text;
 use crate::text::Text;
+use crate::text::text;
 
 pub const COMPLETE: u8 = 0;
 pub const INCOMPLETE: u8 = 1;
