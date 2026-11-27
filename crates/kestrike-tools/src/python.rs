@@ -1,4 +1,5 @@
-//! Python-style `len` and `int` for JSON values and `repr` for floats.
+//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, and [`say`], which writes one
+//! line with its control characters and surrogates escaped.
 
 use std::io::{self, Write};
 
@@ -146,7 +147,8 @@ pub fn repr_float(value: f64) -> String {
 
 /// `round` rounds the exact binary value of a finite float to `digits` decimal places, breaking ties to
 /// even, as Python's `round(value, digits)` does. When `digits` exceeds [`MAX_ROUND_DIGITS`], the rounded
-/// decimal converts back to the original `f64`.
+/// decimal converts back to the original `f64`. An integer stays as it is, a boolean becomes the integer 0
+/// or 1, a non-finite float stays as it is, and a string, an array, an object or `null` gives `None`.
 pub fn round(value: &Value, digits: usize) -> Option<Value> {
     match value {
         Value::Integer(integer) => Some(Value::Integer(integer.clone())),

@@ -78,6 +78,12 @@ fn absent(error: &io::Error) -> bool {
 /// `shared_directories` returns, in lineage order, each existing member that a user other than this user
 /// and root owns or that has a [`SHARED`] bit. `stat` judges a link by its target.
 ///
+/// The lineage is `path` and its lexical parents, spelled as given, with `..` and links left unresolved: it
+/// ends at `/` (or `//`) for an absolute path and at `.` for a relative one, and a link member is judged by
+/// its target alone, not by the target's parents. The result covers the directories the kernel traverses
+/// for `path` only when `path` is absolute with its links resolved; [`make_private`] and
+/// [`foreign_toolchain_paths`] judge the same lineage.
+///
 /// # Errors
 ///
 /// A `stat` fails with an error other than `ENOENT` and `ENOTDIR`.
@@ -204,7 +210,12 @@ fn ignored(error: &io::Error) -> bool {
     )
 }
 
+/// `status` returns `Ok(None)` for a path absent by [`ignored`] and for a path that holds a NUL byte, which
+/// names no file.
 fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Ok(None);
+    }
     match fs::metadata(path) {
         Ok(status) => Ok(Some(status)),
         Err(error) if ignored(&error) => Ok(None),

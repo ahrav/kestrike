@@ -1,4 +1,11 @@
 //! A JSON reader that preserves document order, and the writers [`text`], [`dump`] and [`indented`].
+//!
+//! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
+//! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
+//! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
+//! last value, and `-0` reads as the integer zero. The reader refuses nesting past [`MAX_DEPTH`] and an integer
+//! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
+//! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -189,7 +196,9 @@ impl std::error::Error for Error {}
 ///
 /// # Errors
 ///
-/// `parse` returns an error when nesting exceeds [`MAX_DEPTH`] or a non-whitespace byte follows the value.
+/// `parse` returns an error for text that is no JSON value of the forms the module states, for nesting past
+/// [`MAX_DEPTH`], for an integer token of more than [`MAX_INTEGER_DIGITS`] digits, and when a
+/// non-whitespace byte follows the value. A successful parse can hold a non-finite float.
 pub fn parse(text: &str) -> Result<Value, Error> {
     let mut reader = Reader {
         text: text.as_bytes(),
@@ -462,12 +471,16 @@ fn error_at(offset: usize, reason: &'static str) -> Error {
     Error { offset, reason }
 }
 
+/// `dump` writes what [`text`] writes, then a newline.
 pub fn dump(value: &Value) -> String {
     let mut out = text(value);
     out.push('\n');
     out
 }
 
+/// `text` uses the layout of Python's `json.dumps(value, separators=(",", ":"))`: members in document order,
+/// `,` between items, `:` after a key, non-ASCII code points as `\uXXXX` escapes, and non-finite floats as
+/// `NaN`, `Infinity` and `-Infinity`.
 pub fn text(value: &Value) -> String {
     let mut out = String::new();
     write(value, &mut out, None).expect("the compact layout writes every float");

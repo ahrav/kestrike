@@ -6,12 +6,15 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::text::Text;
 
+/// A check judges one value an option takes; its `Err` text follows `argument <names>: ` in the refusal.
 pub type Check = fn(&Text) -> Result<(), String>;
 
 pub fn any(_: &Text) -> Result<(), String> {
     Ok(())
 }
 
+/// One row of an option table: the names that select it, long names of the form `--name` and, on the help
+/// row alone, `-h`, and what it takes. [`Values::get`] looks a row up by any of its names.
 #[derive(Clone, Copy, Debug)]
 pub struct Opt {
     pub names: &'static [&'static str],
@@ -22,7 +25,13 @@ pub struct Opt {
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Help,
-    Value { required: bool, check: Check },
+    /// An option that takes one value. `required` asks only that the option appear: an explicit `--`
+    /// satisfies it without a call of `check`, and every other value, the empty string included, is checked
+    /// at each occurrence `parse` reaches.
+    Value {
+        required: bool,
+        check: Check,
+    },
 }
 
 impl Opt {
@@ -107,6 +116,11 @@ enum HelpRefusal<'a> {
 }
 
 impl<'t> Reader<'t> {
+    /// `tool` and `usage` open each refusal of code 2, which writes `usage`, a newline, then
+    /// `<tool>: error: <message>`; `help` is returned unchanged in [`Parsed::Help`]. When `abbrev` holds, a
+    /// unique prefix of a long name selects its row; an exact long name and the `-h` cluster rules apply
+    /// whatever `abbrev` says.
+    ///
     /// # Panics
     ///
     /// `new` panics on any violation of these requirements: each row lists at least one name; each option
@@ -360,6 +374,9 @@ impl<'t> Reader<'t> {
     }
 }
 
+/// `help_explicit` judges the text attached to a help name: any text after `--help=` is ignored and
+/// refused, an empty attachment to `-h` (as in `-h=`) is the code-1 refusal, and an attachment of `h`s alone
+/// (as in `-hh`) is help.
 fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusal<'a>> {
     let short = string[1] != b'-';
     if !short {
