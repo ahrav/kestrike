@@ -34,9 +34,7 @@ const fn sorted<const N: usize>(mut names: [&'static str; N]) -> [&'static str; 
     while at < N {
         let mut place = at;
         while place > 0 && precedes(names[place], names[place - 1]) {
-            let moved = names[place];
-            names[place] = names[place - 1];
-            names[place - 1] = moved;
+            names.swap(place, place - 1);
             place -= 1;
         }
         at += 1;

@@ -2,17 +2,14 @@
 //! `<case>/` with a `mod.rs`. The generated `cases.rs` declares each case module and the constant `CASES`,
 //! the entry names listed when the package was built.
 
-use std::fs;
-use std::path::Path;
-
 include!(concat!(env!("OUT_DIR"), "/cases.rs"));
 
 /// The entries of `tests/` at run time, other than this file, are exactly `CASES`, so a case that the last
 /// listing missed fails this test.
 #[test]
 fn every_entry_of_tests_is_a_case() {
-    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let mut entries: Vec<String> = fs::read_dir(&tests)
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut entries: Vec<String> = std::fs::read_dir(&tests)
         .expect("tests/ lists")
         .map(|entry| {
             let name = entry.expect("tests/ lists").file_name();

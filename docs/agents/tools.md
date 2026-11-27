@@ -76,29 +76,39 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
    module names.
 2. Put a function that two tools share in a library module, declared with one `pub mod` line in
    `crates/kestrike-tools/src/lib.rs`, kept sorted.
-3. Declare a unit test file in its owner with `#[cfg(test)] #[path = "<m>_tests.rs"] mod tests;`, or
-   `#[path = "../<m>_tests.rs"]` from a `mod.rs`. rustc reads a tool root through `#[path]` and resolves a
-   `mod` line inside it as it does in a `mod.rs`, beside the root, so a tool with unit test files of its
-   own is a directory.
+3. Declare a unit test file in its owner with `#[cfg(test)] #[path = "<m>_tests.rs"] mod tests;`. From a
+   library module's `mod.rs` the path is `"../<m>_tests.rs"`. A tool's own files, its unit test files
+   included, stand inside its directory: rustc reads a tool root through `#[path]` and resolves a `mod`
+   line or a relative `#[path]` inside it beside the root, and every `<id>.rs` directly under
+   `src/tools/` is a tool. A tool with unit test files of its own is therefore a directory, whose
+   `mod.rs` declares them with `#[cfg(test)] mod tests;` or `#[path = "<m>_tests.rs"]`.
 4. Add an integration case under `crates/kestrike-tools/tests/`: a file `<case>.rs`, or a directory
-   `<case>/` with `mod.rs` and its helpers beside it. Every case is a module of the one test executable
-   `tools`, built from `crates/kestrike-tools/tests/tools.rs`, so a test `<rest>` of a case has the id
-   `<case>::<rest>`, and one process runs every case. `scripts/test-inventory.json` lists the package's
-   targets, `doc:kestrike_tools`, `kestrike_tools` and `tools`, and a case adds no line there.
+   `<case>/` with `mod.rs` and its helpers beside it. A file case holds no `mod` line, since its
+   `mod h;` would read `tests/h.rs`, itself a case. A helper that several cases share is a case
+   directory of its own, which the others reach as `crate::<helper>`. Every case is a module of the one
+   test executable `tools`, built from `crates/kestrike-tools/tests/tools.rs`, so a test `<rest>` of a
+   case has the id `<case>::<rest>`, and one process runs every case. `scripts/test-inventory.json` lists
+   the package's targets, `doc:kestrike_tools`, `kestrike_tools` and `tools`, and a case adds no line
+   there.
 
 In both directories an entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular file
 `mod.rs`, with `<id>` matching `[a-z][a-z0-9_]*`; the directory's own root (`src/tools/mod.rs`,
 `tests/tools.rs`) is skipped. Any other entry stops the build with its path: a directory without
-`mod.rs`, a file of another type or name, a link, `<id>.rs` beside `<id>/`, or a name outside the
-pattern. The build script reads listings, so an untracked file counts. A tool root without `NAME` or
-`run` is rustc's unresolved-name error, and two tools of one name are rustc's `unreachable pattern` error.
+`mod.rs`, a file of another type or name, a link, `<id>.rs` beside `<id>/`, a name outside the
+pattern, a Rust keyword, or a name the including file already uses (`core`, `std` and `tests` under
+`src/tools/`; `core`, `kestrike_tools` and `std` under `tests/`). The build script reads listings, so an
+untracked file counts, an editor's swap or lock file among them: while one stands in either directory,
+every build of the package stops. A tool root without `NAME` or `run` is rustc's unresolved-name error,
+and two tools of one name are rustc's `unreachable pattern` error.
 
 A change under either directory reruns the build script, so the next call of `scripts/tool.sh`
-rebuilds the binary. Cargo compares file times for that, so an entry added under an older time, as
-in an archive unpacked with its times, is missed: a missed tool's call exits 2 with the binary's
+rebuilds the binary. Cargo compares the times of the directories and their entries with its last run,
+so an entry is missed when the directory and its entries all carry older times, as when an archive
+that holds the directory is unpacked with its times: a missed tool's call exits 2 with the binary's
 refusal, and a missed case fails `every_entry_of_tests_is_a_case` in
 `crates/kestrike-tools/tests/tools.rs`. Removing `target/tools` repairs a missed tool, and removing the
-test run's own target directory repairs a missed case.
+test run's own target directory repairs a missed case. The generated declarations name each file by its
+absolute path, so a copy of the checkout builds into a target directory of its own.
 
 The change that makes a tool startable deletes its script and the script's self-test with `git rm`, and
 edits each caller's command text.
