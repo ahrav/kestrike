@@ -96,22 +96,24 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
    that applies to the whole process (the umask, the working directory, the environment, a signal
    disposition, a resource limit) is made in a child process the case starts, or it holds for every case.
    `scripts/test-inventory.json` lists the package's targets, `doc:kestrike_tools`, `kestrike_tools` and
-   `tools`, and a case adds no line there.
+   `tools`, and a case adds no line there. The test selection therefore counts the `tools` executable as a
+   whole: a deleted case module is found by review and by the weakened-test scan's report line. The
+   reader of a regression target in `scripts/verify-receipts.py admit` resolves no case id of `tools`,
+   so an intake record that names such a test waits for that script's own port.
 
 In both directories the build script checks each entry whose name starts with a byte other than `.` and
 that is a directory, a link to one, or named `*.rs`; the directory's own root (`src/tools/mod.rs`,
-`tests/tools.rs`) is skipped. It passes over every other entry, so an editor's swap or lock file, a
-backup `x.rs~`, a merge's `x.rs.orig`, `.gitkeep` and `README.md` change no generated list; a newer
-time on one still reruns the build script and rebuilds the binary, so build output and links into it
-stand outside both directories. A checked
-entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular file `mod.rs`, with `<id>`
-matching `[a-z][a-z0-9_]*`. Any other checked entry stops the build with its path: a directory without
-`mod.rs`, a link, a `*.rs` entry of another file type (a fifo, a socket, a device), `<id>.rs` beside
-`<id>/`, a name outside the pattern, a Rust keyword, or a name the build reserves: `std` and `tests`
-under `src/tools/`, which `src/tools/mod.rs` uses, and `std` and `tools` under `tests/`, the path that
-`tests/tools.rs` uses and the test executable's own name. The build script reads listings, so an
-untracked file counts. A tool root without `NAME` or `run` is rustc's unresolved-name error, and two
-tools of one name are rustc's `unreachable pattern` error.
+`tests/tools.rs`) is skipped. It passes over every other entry, so an editor's swap or lock file, a backup
+`x.rs~`, a merge's `x.rs.orig`, `.gitkeep` and `README.md` change no generated list; a newer time on one
+still reruns the build script and rebuilds the binary, so build output and links into it stand outside
+both directories. A checked entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular
+file `mod.rs`, with `<id>` matching `[a-z][a-z0-9_]*`. Any other checked entry stops the build with its
+path: a directory without `mod.rs`, a link, a `*.rs` entry of another file type (a fifo, a socket, a
+device), `<id>.rs` beside `<id>/`, a name outside the pattern, a Rust keyword, or a name the build
+reserves: `std` and `tests` under `src/tools/`, which `src/tools/mod.rs` uses, and `std` and `tools` under
+`tests/`: `std` is the path that `tests/tools.rs` uses, and `tools` is the name of that root file. The
+build script reads listings, so an untracked file counts. A tool root without `NAME` or `run` is rustc's
+unresolved-name error, and two tools of one name are rustc's `unreachable pattern` error.
 
 `cargo fmt --all -- --check` reaches neither the tool roots nor the case files, since they are declared
 through `include!`. The `rust-format` job and the rustfmt over every tracked Rust file that `AGENTS.md`
@@ -125,8 +127,11 @@ refusal, and a missed case fails `every_entry_of_tests_is_a_case` in
 `crates/kestrike-tools/tests/tools.rs`. Removing `target/tools` repairs a missed tool, and removing the
 test run's own build directory (Cargo's `build.build-dir`, the target directory unless it is set apart)
 repairs a missed case. The generated declarations name each file by its
-absolute path, so a copy of the checkout builds into a target directory of its own, and rustc's
-diagnostics and a panic's location name a tool or case file by its absolute path.
+absolute path, and rustc's diagnostics and a panic's location name a tool or case file by it. The build
+script watches the two directories by their absolute paths, so a checkout moved or copied with its
+build directory reruns it at the next build, and each generated list asserts at compile time that
+`CARGO_MANIFEST_DIR` is the package path it was written for: a list left from another place stops the
+build with `the package moved after its build script ran; remove the build directory`.
 
 The change that makes a tool startable deletes its script and the script's self-test with `git rm`, and
 edits each caller's command text.
