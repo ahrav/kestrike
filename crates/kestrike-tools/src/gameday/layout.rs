@@ -25,6 +25,16 @@ pub const VERSION_FIELDS: [(&str, Schema); 5] = [
 
 pub const VERSION: Schema = Schema::Object(&VERSION_FIELDS);
 
+/// The schema of a line of `records/<shard>.jsonl`: the version's time, then its fields.
+pub(super) const RECORD: Schema = Schema::Object(&[
+    ("time", s(Scalar::Time)),
+    VERSION_FIELDS[0],
+    VERSION_FIELDS[1],
+    VERSION_FIELDS[2],
+    VERSION_FIELDS[3],
+    VERSION_FIELDS[4],
+]);
+
 pub const REQUEST: Schema = Schema::Object(&[
     ("instance", s(Scalar::Name)),
     ("time", s(Scalar::Time)),

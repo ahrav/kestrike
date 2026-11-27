@@ -283,7 +283,7 @@ fn check_windows<'a>(field: &impl Fn(&str) -> &'a Value) -> Result<(), Refusal> 
 }
 
 /// The exact value of a number the schema checked.
-fn number(value: &Value) -> Decimal {
+pub(super) fn number(value: &Value) -> Decimal {
     exact(value).expect("the schema made the value a finite number")
 }
 
