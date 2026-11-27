@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::path::Path;
 
 use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::git::{blob_texts, git, git_text, merge_base};
 use crate::json::Integer;
+use crate::stream::emit;
 use crate::text::strip_str;
 
 use super::declarations::{conditions, declarations, plain};
@@ -313,7 +315,7 @@ fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
 }
 
 fn complain(text: &str) -> Result<(), io::Error> {
-    io::stderr().write_all(text.as_bytes())
+    emit(io::stderr().as_fd(), text)
 }
 
 fn fail(text: &str, code: u8) -> u8 {
@@ -325,13 +327,12 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let values = match reader.parse(args) {
         Parsed::Run(values) => values,
         Parsed::Help(text) => {
-            let mut stdout = io::stdout().lock();
-            return match stdout
-                .write_all(text.as_bytes())
-                .and_then(|()| stdout.flush())
-            {
+            return match emit(io::stdout().as_fd(), &text) {
                 Ok(()) => 0,
-                Err(_) => STREAM_FAILED,
+                Err(error) => fail(
+                    &format!("{TOOL}: standard output: {error}\n"),
+                    STREAM_FAILED,
+                ),
             };
         }
         Parsed::Refused { code, text } => return fail(&text, code),
@@ -372,11 +373,7 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
     let range = format!("{}..{}", short(&scanned.base), short(&scanned.head));
     let mut code = u8::from(!unacknowledged.is_empty());
     if !lines.is_empty() {
-        let mut stdout = io::stdout().lock();
-        if let Err(error) = stdout
-            .write_all(lines.as_bytes())
-            .and_then(|()| stdout.flush())
-        {
+        if let Err(error) = emit(io::stdout().as_fd(), &lines) {
             complain(&format!("{TOOL}: standard output: {error}\n"))?;
             return Ok(STREAM_FAILED);
         }

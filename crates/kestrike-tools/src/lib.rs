@@ -13,6 +13,7 @@ pub mod paths;
 pub mod python;
 pub mod rust_text;
 pub mod shell;
+pub mod stream;
 pub mod text;
 pub mod tools;
 
