@@ -1,6 +1,6 @@
 {
  "record": "frame",
- "version": 3,
+ "version": 4,
  "parent": {
   "digest": "the SHA-256 of the UTF-8 bytes of the issue's body field as the GitHub REST API returns it",
   "specification": {"issue": "#91", "body_sha256": "e83c0becc0459e39bb6f81b2cf3e0f2ac4882bf02af4c4b91c0f28ea8b8e9865"},

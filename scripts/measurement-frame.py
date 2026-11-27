@@ -348,9 +348,9 @@ POLICY_KEYS = {"record", "version", "frame", "statistics", "family", "outcomes",
 CAMPAIGN_KEYS = {"campaign", "policy", "frame", "statistics", "revision", "header", "hosts", "controls", "cells",
                  "hit_gate", "contrast", "baseline", "safety", "calibration", "blocks", "target"}
 FIELD_KEYS = {"unit", "direction", "estimand", "evidence", "sources", "levels", "samples"}
-FIXED = {"frame": "91fb0d721a97c0ae36790f750edd17d116bf0ad587ad49dc58dc7c0e7352063a",
+FIXED = {"frame": "0bdfd5a1ada7ab53f14d93ac32dbc406edbae01c74f6f88d58da09047c900be8",
          "statistics": "48308613b41895c3e24e44fa4503bf63665a2af325c8af31be224069f99a0d29",
-         "policy": "e6fc60176a95f306fe750909c6990ca67852cf5023a729b227e67c10c2c64f35"}
+         "policy": "4065d325ccee8ec68dd39dd2531afb3d38bc74cda0edb41ae6419b3ce7287b71"}
 COMMIT = re.compile(r"[0-9a-f]{40}")
 TICKET = re.compile(r"#[1-9][0-9]*")
 SNAKE = re.compile(r"[a-z][a-z0-9]*(_[a-z0-9]+)*")
