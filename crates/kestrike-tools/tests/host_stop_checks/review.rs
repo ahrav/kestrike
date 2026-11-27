@@ -450,7 +450,7 @@ fn restore_refuses_a_stopped_mark_that_does_not_show_the_stop() {
 /// record with a repeated key, a named pipe, a malformed abort mark and an unreadable or malformed
 /// `stopped.json` are refused with their sentences, the pipe without waiting for a writer.
 #[test]
-fn an_input_that_is_a_named_pipe_or_a_link_is_refused_without_waiting() {
+fn a_review_through_a_link_a_loop_or_a_pipe_or_an_unreadable_mark_is_refused() {
     use std::os::unix::fs::symlink;
     let scratch = Scratch::new("review-links");
     let evidence = scratch.0.join("evidence");

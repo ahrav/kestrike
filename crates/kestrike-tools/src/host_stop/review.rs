@@ -76,7 +76,6 @@ impl Request {
 /// the abort off the judge's layout; a guardrail named without cause `guardrail` or none with it;
 /// another abort's digest; a detail that does not end with a steps digest; other steps; an abort dated
 /// before the stop; a record dated before the abort or after `now`.
-///
 pub fn check_reviewed(
     reviewed: Option<&Path>,
     abort_path: &Path,
@@ -173,7 +172,6 @@ pub fn check_reviewed(
 ///
 /// Each read of the file; the mark off the judge's layout; a mark of another instance, state or
 /// request, or read before the request; a mark read after `now`.
-///
 pub fn check_stopped(
     stopped_path: &Path,
     stop: &Request,

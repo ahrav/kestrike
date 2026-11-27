@@ -47,6 +47,13 @@ fn read_row(change: Change) -> Result<(), Refusal> {
                 b' ',
                 usize::try_from(limit).expect("a limit fits"),
             ));
+            for path in [
+                crate::host_stop_support::tree().join("verification/readiness/gamedays.json"),
+                crate::host_stop_support::fixtures().join("operator.json"),
+            ] {
+                read_bytes(&path, &Text::from("a file within the limit"), limit)
+                    .expect("the catalog and the operator file are read within the limit");
+            }
             let path = scratch.write("package.json", &raw);
             return read_bytes(&path, &Text::from("the package"), limit).map(drop);
         }
@@ -149,8 +156,16 @@ fn the_committed_fixtures_say_they_are_synthetic() {
         (run.package_sha256(), run.instance().to_string()),
         (digest, TARGET.to_owned())
     );
-    let names = check_package(run.package(), &bounds()).expect("the package check admits it");
-    assert_eq!(*run.names(), names);
+    let named = |kind: &str| {
+        let names = run
+            .names()
+            .get(kind)
+            .unwrap_or_else(|| panic!("the names of {kind}"));
+        names.iter().map(ToString::to_string).collect::<Vec<_>>()
+    };
+    assert_eq!(named("host"), ["h1", "h2", "h3", "h4"]);
+    assert_eq!(named("shard"), ["s1", "s2", "s3", "s4", "s5"]);
+    assert_eq!(named("key"), ["img/k1", "img/k2", "img/k3"]);
 }
 
 /// Every bound a reader checks admits a value exactly at it: 100 instances, an alarm name of 255
@@ -451,7 +466,7 @@ fn values_exactly_at_their_bounds_are_admitted_and_one_past_each_is_refused() {
 
 /// The roles mark names each standby of a shard the target owns whose instance the statuses hold,
 /// with that status's state and its host's report word, `no report` for a null report; a standby whose
-/// instance the statuses lack is left out. The values are the controller's for the same snapshot.
+/// instance the statuses lack is left out, and so is the standby of a shard another host owns. The values are the controller's for the same snapshot.
 #[test]
 fn too_few_roles_or_an_unhealthy_or_unread_standby_aborts_on_reach_with_no_stop() {
     let scratch = Scratch::new("standbys");
@@ -473,16 +488,27 @@ fn too_few_roles_or_an_unhealthy_or_unread_standby_aborts_on_reach_with_no_stop(
     )
     .expect("the snapshot is admitted");
     let reply = object(value(
-        r#"{"InstanceStatuses": [{"InstanceId": "i-h2", "InstanceState": {"Name": "running"}},
-            {"InstanceId": "i-h3", "InstanceState": {"Name": "stopping"}}]}"#,
+        r#"{"InstanceStatuses": [{"InstanceId": "i-h1", "InstanceState": {"Name": "running"}},
+            {"InstanceId": "i-h2", "InstanceState": {"Name": "running"}},
+            {"InstanceId": "i-h3", "InstanceState": {"Name": "stopping"}},
+            {"InstanceId": "i-h4", "InstanceState": {"Name": "running"}}]}"#,
     ));
-    let asked = [Text::from("i-h2"), Text::from("i-h3")];
-    let mut states = read_statuses(&reply, &asked).expect("the statuses read");
+    let asked: Vec<Text> = ["i-h1", "i-h2", "i-h3", "i-h4"].map(Text::from).to_vec();
+    let read_states = read_statuses(&reply, &asked).expect("the statuses read");
     let rows = [
-        r#"{"h2":{"instance":"i-h2","instance_state":"running","host_report":"no report"},"h3":{"instance":"i-h3","instance_state":"stopping","host_report":"healthy"}}"#,
-        r#"{"h3":{"instance":"i-h3","instance_state":"stopping","host_report":"healthy"}}"#,
+        (
+            &["i-h2", "i-h3"][..],
+            r#"{"h2":{"instance":"i-h2","instance_state":"running","host_report":"no report"},"h3":{"instance":"i-h3","instance_state":"stopping","host_report":"healthy"}}"#,
+        ),
+        (
+            &["i-h3"][..],
+            r#"{"h3":{"instance":"i-h3","instance_state":"stopping","host_report":"healthy"}}"#,
+        ),
+        (&["i-h1", "i-h4"][..], "{}"),
     ];
-    for expected in rows {
+    for (held, expected) in rows {
+        let mut states = read_states.clone();
+        states.retain(|instance, _| held.iter().any(|id| instance == id));
         let roles = build_roles(
             run.package(),
             run.names(),
@@ -496,7 +522,10 @@ fn too_few_roles_or_an_unhealthy_or_unread_standby_aborts_on_reach_with_no_stop(
         let Value::Object(roles) = roles else {
             panic!("the mark is an object")
         };
-        assert_eq!(json(roles.get("standbys").expect("standbys")), expected);
-        states.remove(&Text::from("i-h2"));
+        assert_eq!(
+            json(roles.get("standbys").expect("standbys")),
+            expected,
+            "{held:?}"
+        );
     }
 }
