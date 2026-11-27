@@ -26,6 +26,8 @@ pub const SEEDS: [(&str, u64); 6] = [
     ("step_a", 0x3b01), ("step_b", 0x3b02), ("step_c", 0x3b03), ("step_d", 0x3b04), ("step_e", 0x3b05), ("step_f", 0x3b06),
 ];
 
+/// The first three recipes equal `RUNS` of `quint/register_check.py`, which `quint/check.py` runs as checked
+/// runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 5] = [
     ("closeRacesAnEntry", &["register", "interval(0)", "intervalRacingClose(0)", "interval(0)", "register"]),
