@@ -97,7 +97,9 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
    disposition, a resource limit) is made in a child process the case starts, or it holds for every case.
    `scripts/test-inventory.json` lists the package's targets, `doc:kestrike_tools`, `kestrike_tools` and
    `tools`, and a case adds no line there. The test selection therefore counts the `tools` executable as a
-   whole: a deleted case module is found by review and by the weakened-test scan's report line. The
+   whole: a deleted case module is found by the weakened-test scan, whose blocking class `case-removed`
+   names a case of the base that the head lacks (see
+   [the pre-push checks](ci.md#pre-push-checks)), and whose report line names removed assertions. The
    reader of a regression target in `scripts/verify-receipts.py admit` resolves no case id of `tools`,
    so an intake record that names such a test waits for that script's own port.
 
