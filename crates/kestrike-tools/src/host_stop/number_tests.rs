@@ -35,6 +35,11 @@ fn an_integer_and_a_float_compare_by_exact_value() {
             Some(Ordering::Equal),
         ),
         (Number::from(1), Number::from(f64::NAN), None),
+        (
+            Number::from(i64::MAX).plus(Number::from(i64::MAX)),
+            Number::from(1.8e19),
+            Some(Ordering::Greater),
+        ),
     ];
     for (integer, float, order) in cases {
         assert_eq!(
@@ -59,6 +64,12 @@ fn a_sum_keeps_the_kind_python_gives_it() {
     assert_eq!(shown(Number::from(104.2).minus(Number::from(60))), "44.2");
     assert_eq!(shown(Number::from(10).minus(Number::from(0.5))), "9.5");
     assert_eq!(shown(Number::from(1e16)), "1e+16");
+    let past = Number::from(i64::MAX).plus(Number::from(1));
+    assert_eq!(
+        (shown(past), past.is_integer()),
+        ("9223372036854775808".into(), true)
+    );
+    assert!(!Number::from(1.0).is_integer());
 }
 
 /// A JSON number of at most 2^53 in magnitude reads as its kind; a boolean and a larger number read

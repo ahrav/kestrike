@@ -10,9 +10,16 @@
 //! [`Seam`]; a command takes each as a value, so a test substitutes one step. The module starts `aws`
 //! and no other program. A signal raises at a read of the [`Record`], which a command makes between
 //! its steps and which a wait or a sleep makes at least once a [`SLICE`].
+//!
+//! The controller's checks take the bytes, the decoded value or the reply they check, with the wall
+//! readings, the size limits and the package's list bounds as arguments, and return a value, a
+//! [`Refusal`](crate::gameday::Refusal) that holds the controller's sentence, or a [`FailedCall`].
+//! [`reply`] makes the one call through the [`Seam`] and reads its output as one strict JSON object;
+//! every other check reads files alone.
 
 mod calendar;
 mod call;
+mod checked;
 mod constants;
 mod encoded;
 mod evidence;
@@ -47,11 +54,11 @@ pub use launch::{AWS, Call, CallFailed, Ended, Failure, launch};
 pub use mark::{Step, Unwritten, publish, sync_directory};
 pub use number::Number;
 pub use operator::{Approval, Operator, read_operator};
-pub use preflight::{Run, check_run, gd2_of};
+pub use preflight::{Gd2, Run, check_run, gd2_of};
 pub use record::{DELIVERED, Delivered, Interrupted, Record, SLICE, Signal, install};
 pub use replies::{
     Alarm, FailedCall, InstanceRecord, Status, launch_time, read_alarms, read_record, read_statuses,
 };
-pub use review::{check_reviewed, check_stopped};
+pub use review::{Request, check_reviewed, check_stopped};
 pub use seam::{Seam, System, sleep};
-pub use snapshot::{HostLine, InstanceState, Report, Snapshot, build_roles, read_snapshot};
+pub use snapshot::{HostLine, Report, Snapshot, build_roles, read_snapshot};

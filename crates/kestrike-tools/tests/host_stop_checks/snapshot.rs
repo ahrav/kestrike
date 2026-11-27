@@ -6,8 +6,10 @@ use std::fs;
 use std::os::unix::fs::symlink;
 
 use kestrike_tools::gameday::{FILE_LIMIT, Refusal};
-use kestrike_tools::host_stop::{Snapshot, check_run, gd2_of, read_operator, read_snapshot};
-use kestrike_tools::json::{Object, Value};
+use kestrike_tools::host_stop::{
+    Number, Snapshot, check_run, gd2_of, read_operator, read_snapshot,
+};
+use kestrike_tools::json::Value;
 
 use crate::host_stop_support::{
     START, Scratch, bounds, json, met, operator, package, rewrite, set, value,
@@ -31,14 +33,15 @@ fn read_at(scratch: &Scratch, change_package: fn(&mut Value)) -> Result<Snapshot
     let catalog = met();
     let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
     let path = scratch.write("operator.json", json(&operator()).as_bytes());
-    let o = read_operator(&path, gd2, FILE_LIMIT).expect("the fixture operator file is admitted");
-    let run = check_run(&package(), &o, START, &bounds()).expect("the held package is admitted");
+    let o = read_operator(&path, &gd2, FILE_LIMIT).expect("the fixture operator file is admitted");
+    let run = check_run(&package(), &o, Number::from(START), &bounds())
+        .expect("the held package is admitted");
     let mut p = Value::Object(run.package().clone());
     change_package(&mut p);
     let Value::Object(p) = p else {
         unreachable!("an object stays one")
     };
-    read_snapshot(&o, &p, run.names(), NOW, FILE_LIMIT)
+    read_snapshot(&o, &p, run.names(), Number::from(NOW), FILE_LIMIT)
 }
 
 fn held(_: &mut Value) {}
@@ -211,6 +214,30 @@ const REFUSED: &[(&str, &str, Lines, &str)] = &[
         "hosts.jsonl line 5 holds other keys than host, instance and report",
     ),
     (
+        "a report time that is a boolean",
+        "hosts.jsonl",
+        |rows| set(&mut rows[1], &["report", "time"], value("true")),
+        "hosts.jsonl line 2 report is neither null nor {time, healthy}",
+    ),
+    (
+        "a report time past 2^53",
+        "hosts.jsonl",
+        |rows| set(&mut rows[1], &["report", "time"], value("9007199254740993")),
+        "hosts.jsonl line 2 report is neither null nor {time, healthy}",
+    ),
+    (
+        "a health of 1",
+        "hosts.jsonl",
+        |rows| set(&mut rows[1], &["report", "healthy"], value("1")),
+        "hosts.jsonl line 2 report is neither null nor {time, healthy}",
+    ),
+    (
+        "a shard record ahead of the clock",
+        "shards.jsonl",
+        |rows| each(rows, "time", "104.5"),
+        "shards.jsonl line 1 time 104.5 lies outside [44.2, 104.2]: the snapshot is stale or ahead",
+    ),
+    (
         "no host lines",
         "hosts.jsonl",
         Vec::clear,
@@ -280,13 +307,8 @@ fn mkfifo(path: &std::path::Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn version(records: &Object, shard: &str) -> String {
-    json(
-        records
-            .get(shard)
-            .unwrap_or_else(|| panic!("{shard} has a version")),
-    )
-}
+/// The committed snapshot's versions as the controller's read returned them.
+const RECORDS: &str = r#"{"s1":{"owner":"h1","standby":"h2","generation":7,"volume":"vol-s1","attempts":1},"s2":{"owner":"h1","standby":"h3","generation":4,"volume":"vol-s2","attempts":2},"s3":{"owner":"h1","standby":"h2","generation":9,"volume":"vol-s3","attempts":1},"s4":{"owner":"h2","standby":"h1","generation":3,"volume":"vol-s4","attempts":1},"s5":{"owner":"h3","standby":"h4","generation":5,"volume":"vol-s5","attempts":1}}"#;
 
 /// The committed snapshot reads as its versions in line order with the layout's keys, its host lines,
 /// the cut and the earliest time; an equal time of another kind keeps the first line's kind, a null
@@ -300,8 +322,7 @@ fn a_snapshot_reads_as_its_versions_lines_cut_and_earliest_time() {
         .map(|(shard, _)| shard.to_string())
         .collect();
     assert_eq!(shards, ["s1", "s2", "s3", "s4", "s5"]);
-    let s1 = r#"{"owner":"h1","standby":"h2","generation":7,"volume":"vol-s1","attempts":1}"#;
-    assert_eq!(version(got.records(), "s1"), s1);
+    assert_eq!(json(&Value::Object(got.records().clone())), RECORDS);
     let hosts: Vec<(String, String, Option<String>)> = got
         .reports()
         .iter()

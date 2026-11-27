@@ -50,9 +50,9 @@ pub(crate) enum Change {
     PackageBytes(&'static str),
     /// GD-2's entry changes.
     Catalog(fn(&mut Object)),
-    /// The package grows past a file size limit of `limit` bytes by that many spaces; the row's
-    /// limit exceeds the catalog and the operator file.
-    PackagePastLimit(u64),
+    /// The package grows past a file size limit by that many spaces, the limit being
+    /// [`super::past_limit`], one byte more than the catalog and the operator file hold.
+    PackagePastLimit,
     Evidence(Evidence),
 }
 
@@ -63,8 +63,9 @@ pub(crate) struct Row {
     pub(crate) reader: Reader,
     /// The part of the refusal's line the self-test checks.
     pub(crate) reason: &'static str,
-    /// The sentence the reader returns; `None` for a row the run decides. The words after
-    /// `is not strict JSON: ` are the library's reader's.
+    /// The sentence the reader returns; `None` for a row the run decides and for the package past
+    /// the limit, whose sentence names the limit. The words after `is not strict JSON: ` are the
+    /// library's reader's.
     pub(crate) sentence: Option<&'static str>,
 }
 
@@ -473,10 +474,10 @@ pub(crate) const ROWS: &[Row] = &[
     ),
     row(
         "a package past the judge's file size",
-        Change::PackagePastLimit(4000),
+        Change::PackagePastLimit,
         Reader::PackageRead,
-        "the package holds more than 4000 bytes",
-        Some("the package holds more than 4000 bytes"),
+        "the package holds more than ",
+        None,
     ),
     row(
         "an existing injection directory",

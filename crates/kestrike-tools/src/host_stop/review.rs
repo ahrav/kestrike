@@ -4,12 +4,13 @@
 
 use std::path::Path;
 
+use super::checked::{number_at, object, object_at, text_at};
 use super::constants::{STEPS_PREFIX, STEPS_TAIL};
 use super::forms::{matches, steps_tail};
 use super::inputs::read_bytes;
 use super::number::Number;
 use super::words::sentence;
-use crate::gameday::{Names, Refusal, Scalar, Schema, conform, layout, need, parsed};
+use crate::gameday::{Names, REQUEST, Refusal, Scalar, Schema, conform, layout, need, parsed};
 use crate::json::{Object, Value};
 use crate::paths::resolve;
 use crate::plants::files::strerror;
@@ -23,6 +24,44 @@ const REVIEWED: Schema = Schema::Object(&[
     ("reviewer", Schema::scalar(Scalar::Name)),
     ("time", Schema::scalar(Scalar::Time)),
 ]);
+
+/// A stop request as `stop.json` holds it, checked against the judge's request schema.
+#[derive(Clone, Debug)]
+pub struct Request {
+    value: Value,
+}
+
+impl Request {
+    /// `checked` is the request `value` once it has the judge's request schema; `what` names it in
+    /// the refusal.
+    ///
+    /// # Errors
+    ///
+    /// The refusal of `conform` for a value off the schema.
+    pub fn checked(value: &Value, what: &Text) -> Result<Self, Refusal> {
+        conform(value, &REQUEST, what, &Names::new())?;
+        Ok(Self {
+            value: value.clone(),
+        })
+    }
+
+    /// The request's value, as `stop.json` holds it.
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn instance(&self) -> &Text {
+        text_at(object(&self.value), "instance")
+    }
+
+    pub fn identity(&self) -> &Text {
+        text_at(object(&self.value), "identity")
+    }
+
+    pub fn time(&self) -> Number {
+        number_at(object(&self.value), "time")
+    }
+}
 
 /// `check_reviewed` is the SHA-256 of the reviewed record at `reviewed` and the abort's time. The
 /// record lies outside `evidence`, both paths resolved with their links, and names the bytes of the
@@ -38,15 +77,12 @@ const REVIEWED: Schema = Schema::Object(&[
 /// another abort's digest; a detail that does not end with a steps digest; other steps; an abort dated
 /// before the stop; a record dated before the abort or after `now`.
 ///
-/// # Panics
-///
-/// When `stop` is other than `stop.json`'s value checked against the judge's request schema.
 pub fn check_reviewed(
     reviewed: Option<&Path>,
     abort_path: &Path,
     evidence: &Path,
-    now: f64,
-    stop: &Object,
+    now: Number,
+    stop: &Request,
     limit: u64,
 ) -> Result<(String, Number), Refusal> {
     let Some(reviewed) = reviewed else {
@@ -78,9 +114,7 @@ pub fn check_reviewed(
     let abort = parsed(&abort_raw, &abort_name)?;
     let (schema, _) = layout("injection/abort.json").expect("the layout holds abort.json");
     conform(&abort, schema, &abort_name, &Names::new())?;
-    let (Value::Object(record), Value::Object(abort)) = (&record, &abort) else {
-        unreachable!("the schemas made both values objects")
-    };
+    let (record, abort) = (object(&record), object(&abort));
     let guardrail =
         matches!(abort.get("cause"), Some(Value::String(cause)) if *cause == "guardrail");
     need(
@@ -93,7 +127,7 @@ pub fn check_reviewed(
         },
     )?;
     need(
-        *text(record.get("abort_sha256")) == hexdigest(&abort_raw).as_str(),
+        *text_at(record, "abort_sha256") == hexdigest(&abort_raw).as_str(),
         || sentence!("the reviewed record names another abort"),
     )?;
     let detail = match abort.get("detail") {
@@ -107,20 +141,19 @@ pub fn check_reviewed(
              run printed, so no review can be compared with it"
         )
     })?;
-    let steps = text(record.get("steps"))
+    let steps = text_at(record, "steps")
         .to_str()
         .expect("a name has a UTF-8 form");
     need(tail == steps_tail(steps).as_str(), || {
         sentence!("the reviewed record names steps other than those the aborted run printed")
     })?;
-    let (aborted, reviewed_at) = (time(abort.get("time")), time(record.get("time")));
-    need(aborted >= time(stop.get("time")), || {
+    let (aborted, reviewed_at) = (number_at(abort, "time"), number_at(record, "time"));
+    need(aborted >= stop.time(), || {
         sentence!("injection/abort.json is dated before the stop it would close")
     })?;
     need(reviewed_at >= aborted, || {
         sentence!("the reviewed record is dated before the abort it reviews")
     })?;
-    let now = Number::from(now);
     need(reviewed_at <= now, || {
         sentence!(
             "the reviewed record is dated ",
@@ -141,33 +174,27 @@ pub fn check_reviewed(
 /// Each read of the file; the mark off the judge's layout; a mark of another instance, state or
 /// request, or read before the request; a mark read after `now`.
 ///
-/// # Panics
-///
-/// When `stop` is other than `stop.json`'s value checked against the judge's request schema.
 pub fn check_stopped(
     stopped_path: &Path,
-    stop: &Object,
-    now: f64,
+    stop: &Request,
+    now: Number,
     limit: u64,
 ) -> Result<Number, Refusal> {
     let name = Text::from("injection/stopped.json");
     let stopped = parsed(&read_bytes(stopped_path, &name, limit)?, &name)?;
     let (schema, _) = layout("injection/stopped.json").expect("the layout holds stopped.json");
     conform(&stopped, schema, &name, &Names::new())?;
-    let Value::Object(stopped) = &stopped else {
-        unreachable!("the schema made stopped.json an object")
-    };
-    let at = time(stopped.get("time"));
-    let shows = text(stopped.get("instance")) == text(stop.get("instance"))
-        && *text(stopped.get("state")) == "stopped"
-        && same_request(object(stopped.get("request")), stop)
-        && at >= time(stop.get("time"));
+    let stopped = object(&stopped);
+    let at = number_at(stopped, "time");
+    let shows = text_at(stopped, "instance") == stop.instance()
+        && *text_at(stopped, "state") == "stopped"
+        && same_request(object_at(stopped, "request"), stop)
+        && at >= stop.time();
     need(shows, || {
         sentence!(
             "injection/stopped.json shows no stop of injection/stop.json's request read at or after it"
         )
     })?;
-    let now = Number::from(now);
     need(at <= now, || {
         sentence!(
             "injection/stopped.json is dated ",
@@ -179,12 +206,12 @@ pub fn check_stopped(
     Ok(at)
 }
 
-/// Whether two requests of the judge's schema are equal as Python compares them: the same instance
+/// Whether a request of the judge's schema equals `stop` as Python compares them: the same instance
 /// and identity, and times of one value whatever their kinds.
-fn same_request(one: &Object, other: &Object) -> bool {
-    text(one.get("instance")) == text(other.get("instance"))
-        && text(one.get("identity")) == text(other.get("identity"))
-        && time(one.get("time")) == time(other.get("time"))
+fn same_request(one: &Object, stop: &Request) -> bool {
+    text_at(one, "instance") == stop.instance()
+        && text_at(one, "identity") == stop.identity()
+        && number_at(one, "time") == stop.time()
 }
 
 /// `path` resolved with its links and made absolute.
@@ -198,24 +225,4 @@ fn last(text: &Text, count: usize) -> Text {
     let codes: Vec<u32> = text.code_points().collect();
     Text::from_code_points(codes[codes.len().saturating_sub(count)..].iter().copied())
         .expect("code points of a text form a text")
-}
-
-fn time(value: Option<&Value>) -> Number {
-    value
-        .and_then(Number::of)
-        .unwrap_or_else(|| panic!("the schema made {value:?} a time"))
-}
-
-fn text(value: Option<&Value>) -> &Text {
-    match value {
-        Some(Value::String(text)) => text,
-        _ => panic!("the schema made {value:?} a string"),
-    }
-}
-
-fn object(value: Option<&Value>) -> &Object {
-    match value {
-        Some(Value::Object(object)) => object,
-        _ => panic!("the schema made {value:?} an object"),
-    }
 }

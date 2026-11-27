@@ -11,7 +11,6 @@ use super::calendar::posix_seconds;
 use super::constants::LAUNCH;
 use super::launch::CallFailed;
 use super::number::Number;
-use super::snapshot::InstanceState;
 use super::words::{sentence, sorted_texts};
 use crate::json::{Object, Value};
 use crate::python::repr;
@@ -21,7 +20,9 @@ use crate::text::Text;
 const CUT: usize = 400;
 
 /// A failed call: the launch's own failure, or a reply that is no JSON object of the shape the
-/// request asks for, with its sentence.
+/// request asks for, with its sentence. [`FailedCall::sentence`] is the sentence as a text, which
+/// keeps a lone surrogate of a reply's name for a mark's detail; `Display` writes it as a line does,
+/// each surrogate as `\udXXX`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FailedCall {
     Launch(CallFailed),
@@ -49,10 +50,6 @@ impl fmt::Display for FailedCall {
 
 impl std::error::Error for FailedCall {}
 
-fn failed(sentence: Text) -> FailedCall {
-    FailedCall::Reply(sentence)
-}
-
 /// `<what> is no <kind>: <repr>`, cut at [`CUT`] characters; an absent value reads `None`.
 fn off_type(value: Option<&Value>, kind: &str, what: &str) -> FailedCall {
     let shown = value.map_or_else(|| "None".to_owned(), repr);
@@ -60,7 +57,7 @@ fn off_type(value: Option<&Value>, kind: &str, what: &str) -> FailedCall {
         .chars()
         .take(CUT)
         .collect();
-    failed(Text::from(sentence))
+    FailedCall::Reply(Text::from(sentence))
 }
 
 fn list<'a>(value: Option<&'a Value>, what: &str) -> Result<&'a [Value], FailedCall> {
@@ -100,25 +97,41 @@ fn optional_text<'a>(row: &'a Object, key: &str) -> Result<Option<&'a Text>, Fai
     }
 }
 
-/// The text `row[outer][inner]`; `None` when `optional` and `row[outer]` is absent or null.
-fn nested(
-    row: &Object,
-    outer: &str,
-    inner: &str,
-    optional: bool,
-) -> Result<Option<Text>, FailedCall> {
-    if optional && matches!(row.get(outer), None | Some(Value::Null)) {
-        return Ok(None);
-    }
+/// The text `row[outer][inner]`.
+fn nested(row: &Object, outer: &str, inner: &str) -> Result<Text, FailedCall> {
     let object = dict(row.get(outer), outer)?;
-    text(object.get(inner), &format!("{outer}.{inner}")).map(|text| Some(text.clone()))
+    text(object.get(inner), &format!("{outer}.{inner}")).cloned()
+}
+
+/// The text `row[outer][inner]`, or `None` when `row[outer]` is absent or null.
+fn nested_optional(row: &Object, outer: &str, inner: &str) -> Result<Option<Text>, FailedCall> {
+    match row.get(outer) {
+        None | Some(Value::Null) => Ok(None),
+        _ => nested(row, outer, inner).map(Some),
+    }
+}
+
+/// The text `row[key]`, or `None` when `row[key]` is absent or null.
+fn text_or_null<'a>(row: &'a Object, key: &str) -> Result<Option<&'a Text>, FailedCall> {
+    match row.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        value => text(value, key).map(Some),
+    }
+}
+
+/// The text `row[key]`, or `default` when `row` holds no `key`.
+fn text_or<'a>(row: &'a Object, key: &str, default: &'a Text) -> Result<&'a Text, FailedCall> {
+    match row.get(key) {
+        None => Ok(default),
+        value => text(value, key),
+    }
 }
 
 fn whole(reply: &Object, what: &str) -> Result<(), FailedCall> {
     if matches!(reply.get("NextToken"), None | Some(Value::Null)) {
         Ok(())
     } else {
-        Err(failed(sentence!(
+        Err(FailedCall::Reply(sentence!(
             what,
             " holds a NextToken, so its listing is partial"
         )))
@@ -159,12 +172,6 @@ impl Status {
     }
 }
 
-impl InstanceState for Status {
-    fn state(&self) -> &Text {
-        &self.state
-    }
-}
-
 fn optional(text: Option<&Text>) -> Value {
     text.map_or(Value::Null, |text| Value::String(text.clone()))
 }
@@ -187,22 +194,22 @@ pub fn read_statuses(
         let row = dict(Some(row), "an instance status")?;
         let instance = text(row.get("InstanceId"), "InstanceId")?;
         if found.contains_key(instance) {
-            return Err(failed(sentence!(
+            return Err(FailedCall::Reply(sentence!(
                 "describe-instance-status names ",
                 instance,
                 " twice"
             )));
         }
         let status = Status {
-            state: nested(row, "InstanceState", "Name", false)?.expect("a required field reads"),
-            instance: nested(row, "InstanceStatus", "Status", true)?,
-            system: nested(row, "SystemStatus", "Status", true)?,
+            state: nested(row, "InstanceState", "Name")?,
+            instance: nested_optional(row, "InstanceStatus", "Status")?,
+            system: nested_optional(row, "SystemStatus", "Status")?,
         };
         found.insert(instance.clone(), status);
     }
     let asked: BTreeSet<&Text> = instances.iter().collect();
     if !found.keys().eq(asked.iter().copied()) {
-        return Err(failed(sentence!(
+        return Err(FailedCall::Reply(sentence!(
             "describe-instance-status names ",
             sorted_texts(found.keys()),
             ", not ",
@@ -269,27 +276,25 @@ pub fn read_record(reply: &Object, instance: &Text) -> Result<InstanceRecord, Fa
         let reservation = dict(Some(reservation), "a reservation")?;
         rows.extend(list(reservation.get("Instances"), "Instances")?);
     }
-    let alone = rows.len() == 1
-        && dict(Some(rows[0]), "an instance")?
-            .get("InstanceId")
-            .is_some_and(|id| matches!(id, Value::String(id) if id == instance));
-    if !alone {
-        return Err(failed(sentence!(
+    let row = match rows.as_slice() {
+        [row] => Some(dict(Some(row), "an instance")?),
+        _ => None,
+    };
+    let row = row
+        .filter(|row| matches!(row.get("InstanceId"), Some(Value::String(id)) if id == instance));
+    let Some(row) = row else {
+        return Err(FailedCall::Reply(sentence!(
             "describe-instances names ",
             rows.len().to_string(),
             " instances, not ",
             instance,
             " alone"
         )));
-    }
-    let row = dict(Some(rows[0]), "an instance")?;
+    };
     Ok(InstanceRecord {
-        state: nested(row, "State", "Name", false)?.expect("a required field reads"),
-        code: nested(row, "StateReason", "Code", true)?,
-        transition: match row.get("StateTransitionReason") {
-            None => Text::new(),
-            value => text(value, "StateTransitionReason")?.clone(),
-        },
+        state: nested(row, "State", "Name")?,
+        code: nested_optional(row, "StateReason", "Code")?,
+        transition: text_or(row, "StateTransitionReason", &Text::new())?.clone(),
         launch: optional_text(row, "LaunchTime")?.cloned(),
     })
 }
@@ -309,7 +314,7 @@ pub fn launch_time(text: Option<&Text>) -> Result<Number, FailedCall> {
         .and_then(Text::to_str)
         .and_then(|text| LAUNCH.captures(text));
     let Some(found) = found else {
-        return Err(failed(sentence!(
+        return Err(FailedCall::Reply(sentence!(
             "LaunchTime ",
             shown,
             " is no UTC time YYYY-MM-DDTHH:MM:SS[.fraction] ending in Z or +00:00"
@@ -320,7 +325,7 @@ pub fn launch_time(text: Option<&Text>) -> Result<Number, FailedCall> {
         .expect("the pattern captures the second")
         .as_str();
     let Some(seconds) = posix_seconds(second) else {
-        return Err(failed(sentence!(
+        return Err(FailedCall::Reply(sentence!(
             "LaunchTime ",
             shown,
             " is no calendar time"
@@ -402,7 +407,7 @@ fn query_kind(row: &Object) -> Result<Option<&'static str>, FailedCall> {
 pub fn read_alarms(reply: &Object, names: &[Text]) -> Result<BTreeMap<Text, Alarm>, FailedCall> {
     whole(reply, "describe-alarms")?;
     if !listed(reply, "CompositeAlarms")?.is_empty() {
-        return Err(failed(sentence!(
+        return Err(FailedCall::Reply(sentence!(
             "describe-alarms names a composite alarm, which can read OK while its children have no data"
         )));
     }
@@ -411,17 +416,14 @@ pub fn read_alarms(reply: &Object, names: &[Text]) -> Result<BTreeMap<Text, Alar
         let row = dict(Some(row), "an alarm")?;
         let name = text(row.get("AlarmName"), "AlarmName")?;
         if alarms.contains_key(name) || !names.contains(name) {
-            return Err(failed(sentence!(
+            return Err(FailedCall::Reply(sentence!(
                 "describe-alarms names ",
                 name,
                 " twice or unasked"
             )));
         }
         let state = text(row.get("StateValue"), "StateValue")?.clone();
-        let missing = match row.get("TreatMissingData") {
-            None | Some(Value::Null) => None,
-            value => Some(text(value, "TreatMissingData")?.clone()),
-        };
+        let missing = text_or_null(row, "TreatMissingData")?.cloned();
         let evaluation = optional_text(row, "EvaluationState")?.cloned();
         let kind = query_kind(row)?;
         let transitioned = text(

@@ -100,6 +100,19 @@ pub(crate) fn items_mut(value: &mut Value) -> &mut Vec<Value> {
     }
 }
 
+/// One byte more than the committed catalog and the fixture operator file each hold, the file size
+/// limit under which the package of the first step's table is read past its limit and those two are
+/// read within it.
+pub(crate) fn past_limit() -> u64 {
+    let size = |path: PathBuf| fs::metadata(path).expect("the file stands").len();
+    let catalog = size(tree().join("verification/readiness/gamedays.json"));
+    let compact = u64::try_from(json(&operator()).len()).expect("a length fits");
+    catalog
+        .max(size(fixtures().join("operator.json")))
+        .max(compact)
+        + 1
+}
+
 /// The fixture operator file's value.
 pub(crate) fn operator() -> Value {
     value(&fs::read_to_string(fixtures().join("operator.json")).expect("the operator file reads"))

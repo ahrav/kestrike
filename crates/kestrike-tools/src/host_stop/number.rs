@@ -10,10 +10,15 @@ use crate::gameday::finite;
 use crate::json::{Integer, Value};
 use crate::python::repr_float;
 
-/// `Number` is an integer or a float, as a JSON number or a clock reading holds it.
+/// `Number` is an integer or a float, as a JSON number or a clock reading holds it. An integer is made
+/// from an `i64` and held in an `i128`, so a sum or a difference of the integers a command handles
+/// stays exact.
 #[derive(Clone, Copy, Debug)]
-pub enum Number {
-    Integer(i64),
+pub struct Number(Kind);
+
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Integer(i128),
     Float(f64),
 }
 
@@ -25,22 +30,31 @@ impl Number {
             return None;
         }
         match value {
-            Value::Integer(integer) => integer.to_string().parse().ok().map(Self::Integer),
-            Value::Float(float) => Some(Self::Float(*float)),
+            Value::Integer(integer) => integer
+                .to_string()
+                .parse::<i64>()
+                .ok()
+                .map(|integer| Self(Kind::Integer(i128::from(integer)))),
+            Value::Float(float) => Some(Self(Kind::Float(*float))),
             _ => None,
         }
     }
 
+    /// Whether the number is an integer, as a file's integer and a sum of integers are.
+    pub fn is_integer(self) -> bool {
+        matches!(self.0, Kind::Integer(_))
+    }
+
     /// `value` is the JSON number of the same kind and value.
     pub fn value(self) -> Value {
-        match self {
-            Self::Integer(integer) => {
+        match self.0 {
+            Kind::Integer(integer) => {
                 let digits = integer.unsigned_abs().to_string();
                 Value::Integer(
-                    Integer::from_digits(integer < 0, &digits).expect("an i64 has few digits"),
+                    Integer::from_digits(integer < 0, &digits).expect("an i128 has few digits"),
                 )
             }
-            Self::Float(float) => Value::Float(float),
+            Kind::Float(float) => Value::Float(float),
         }
     }
 
@@ -48,15 +62,15 @@ impl Number {
     ///
     /// # Panics
     ///
-    /// When the sum of two integers passes an `i64`, which no sum of values of [`Number::of`] and the
-    /// controller's constants reaches.
+    /// When the sum of two integers passes an `i128`, which needs more than 2^64 sums of `i64` values.
     #[must_use]
     pub fn plus(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Integer(a), Self::Integer(b)) => {
-                Self::Integer(a.checked_add(b).expect("a sum of two times fits an i64"))
-            }
-            (a, b) => Self::Float(a.float() + b.float()),
+        match (self.0, other.0) {
+            (Kind::Integer(a), Kind::Integer(b)) => Self(Kind::Integer(
+                a.checked_add(b)
+                    .expect("a sum of i64 integers fits an i128"),
+            )),
+            _ => Self(Kind::Float(self.float() + other.float())),
         }
     }
 
@@ -64,42 +78,43 @@ impl Number {
     ///
     /// # Panics
     ///
-    /// When the difference of two integers passes an `i64`, as [`Number::plus`] states.
+    /// When the difference of two integers passes an `i128`, as [`Number::plus`] states.
     #[must_use]
     pub fn minus(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Integer(a), Self::Integer(b)) => Self::Integer(
+        match (self.0, other.0) {
+            (Kind::Integer(a), Kind::Integer(b)) => Self(Kind::Integer(
                 a.checked_sub(b)
-                    .expect("a difference of two times fits an i64"),
-            ),
-            (a, b) => Self::Float(a.float() - b.float()),
+                    .expect("a difference of i64 integers fits an i128"),
+            )),
+            _ => Self(Kind::Float(self.float() - other.float())),
         }
     }
 
     /// The nearest float, ties to even, as Python converts an integer in a sum with a float.
     fn float(self) -> f64 {
-        match self {
-            Self::Integer(integer) => integer as f64,
-            Self::Float(float) => float,
+        match self.0 {
+            Kind::Integer(integer) => integer as f64,
+            Kind::Float(float) => float,
         }
     }
 }
 
 impl From<f64> for Number {
     fn from(float: f64) -> Self {
-        Self::Float(float)
+        Self(Kind::Float(float))
     }
 }
 
 impl From<i64> for Number {
     fn from(integer: i64) -> Self {
-        Self::Integer(integer)
+        Self(Kind::Integer(i128::from(integer)))
     }
 }
 
 /// The order of an integer and a float by their exact values; `None` for a NaN.
-fn integer_against_float(integer: i64, float: f64) -> Option<Ordering> {
-    const PAST: f64 = 9_223_372_036_854_775_808.0;
+fn integer_against_float(integer: i128, float: f64) -> Option<Ordering> {
+    /// 2^127, the least float past every `i128`.
+    const PAST: f64 = 170_141_183_460_469_231_731_687_303_715_884_105_728.0;
     if float.is_nan() {
         return None;
     }
@@ -110,8 +125,8 @@ fn integer_against_float(integer: i64, float: f64) -> Option<Ordering> {
         return Some(Ordering::Greater);
     }
     let whole = float.trunc();
-    // `whole` lies in the range of an i64 and has no fraction, so the conversion is exact.
-    match integer.cmp(&(whole as i64)) {
+    // `whole` lies in the range of an i128 and has no fraction, so the conversion is exact.
+    match integer.cmp(&(whole as i128)) {
         Ordering::Equal => 0.0_f64.partial_cmp(&(float - whole)),
         unequal => Some(unequal),
     }
@@ -125,11 +140,11 @@ impl PartialEq for Number {
 
 impl PartialOrd for Number {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (*self, *other) {
-            (Self::Integer(a), Self::Integer(b)) => Some(a.cmp(&b)),
-            (Self::Float(a), Self::Float(b)) => a.partial_cmp(&b),
-            (Self::Integer(a), Self::Float(b)) => integer_against_float(a, b),
-            (Self::Float(a), Self::Integer(b)) => {
+        match (self.0, other.0) {
+            (Kind::Integer(a), Kind::Integer(b)) => Some(a.cmp(&b)),
+            (Kind::Float(a), Kind::Float(b)) => a.partial_cmp(&b),
+            (Kind::Integer(a), Kind::Float(b)) => integer_against_float(a, b),
+            (Kind::Float(a), Kind::Integer(b)) => {
                 integer_against_float(b, a).map(Ordering::reverse)
             }
         }
@@ -138,9 +153,9 @@ impl PartialOrd for Number {
 
 impl fmt::Display for Number {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Integer(integer) => write!(f, "{integer}"),
-            Self::Float(float) => f.write_str(&repr_float(*float)),
+        match self.0 {
+            Kind::Integer(integer) => write!(f, "{integer}"),
+            Kind::Float(float) => f.write_str(&repr_float(float)),
         }
     }
 }

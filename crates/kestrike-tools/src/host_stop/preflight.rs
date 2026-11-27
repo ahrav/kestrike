@@ -2,6 +2,7 @@
 //! this controller was written from, and the package against its approval, its windows and the
 //! declared set at the run's start.
 
+use super::checked::{get, number_at, object_at, text, text_at};
 use super::constants::{ACTION, RESTORATION, SKEW_SECONDS};
 use super::forms::{instance_id, iso_time};
 use super::number::Number;
@@ -14,6 +15,33 @@ use crate::json::{Object, Value};
 use crate::python::{hexdigest, repr};
 use crate::text::Text;
 
+/// GD-2's entry of a catalog that [`gd2_of`] admitted: the judge's texts, this controller's injection
+/// action and its restoration class with steps that are a plain text.
+#[derive(Clone, Copy, Debug)]
+pub struct Gd2<'a>(&'a Object);
+
+impl<'a> Gd2<'a> {
+    /// The entry as the catalog holds it.
+    pub fn entry(&self) -> &'a Object {
+        self.0
+    }
+
+    /// GD-2's guardrail texts, in the catalog's order.
+    pub fn guardrails(&self) -> Vec<&'a Text> {
+        super::checked::list(get(self.0, "guardrail"))
+            .iter()
+            .map(text)
+            .collect()
+    }
+
+    /// The restoration steps, a text with a UTF-8 form.
+    pub fn steps(&self) -> &'a str {
+        text_at(object_at(self.0, "restoration"), "steps")
+            .to_str()
+            .expect("the check made the steps encodable")
+    }
+}
+
 /// `gd2_of` is GD-2's entry of the decoded catalog while its injection action and its restoration
 /// are the ones this controller was written for.
 ///
@@ -22,21 +50,17 @@ use crate::text::Text;
 /// Each refusal of [`gd2_entry`]; `GD-2's injection action differs from the action this controller was
 /// written for`; `GD-2's restoration is not of class persistent-manual with its steps` for another
 /// class, or steps that are no text, blank, or hold a lone surrogate.
-pub fn gd2_of(catalog: &Value) -> Result<&Object, Refusal> {
+pub fn gd2_of(catalog: &Value) -> Result<Gd2<'_>, Refusal> {
     let gd2 = gd2_entry(catalog)?;
     let action = matches!(gd2.get("injection"), Some(Value::Object(injection))
         if is(injection.get("action"), ACTION));
     need(action, || {
         sentence!("GD-2's injection action differs from the action this controller was written for")
     })?;
-    let restored = match gd2.get("restoration") {
-        Some(Value::Object(restoration)) => {
-            is(restoration.get("class"), RESTORATION)
-                && matches!(restoration.get("steps"), Some(Value::String(steps))
-                    if !steps.strip().is_empty() && encodable(steps))
-        }
-        _ => false,
-    };
+    let restored = matches!(gd2.get("restoration"), Some(Value::Object(restoration))
+        if is(restoration.get("class"), RESTORATION)
+            && matches!(restoration.get("steps"), Some(Value::String(steps))
+                if !steps.strip().is_empty() && encodable(steps)));
     need(restored, || {
         sentence!(
             "GD-2's restoration is not of class ",
@@ -44,7 +68,7 @@ pub fn gd2_of(catalog: &Value) -> Result<&Object, Refusal> {
             " with its steps"
         )
     })?;
-    Ok(gd2)
+    Ok(Gd2(gd2))
 }
 
 fn is(value: Option<&Value>, text: &str) -> bool {
@@ -98,15 +122,14 @@ impl Run {
 pub fn check_run(
     raw: &[u8],
     operator: &Operator,
-    now: f64,
+    now: Number,
     bounds: &FleetBounds,
 ) -> Result<Run, Refusal> {
-    let p = parsed(raw, &Text::from("package.json"))?;
-    let Value::Object(p) = p else {
+    let Value::Object(p) = parsed(raw, &Text::from("package.json"))? else {
         return Err(Refusal::new(sentence!("the package is no object")));
     };
     let names = check_package(&p, bounds)?;
-    let kind = text(p.get("kind"));
+    let kind = text_at(&p, "kind");
     need(*kind == "staging", || {
         sentence!(
             "the package is of kind ",
@@ -115,14 +138,10 @@ pub fn check_run(
         )
     })?;
     let (package_sha256, approval) = (hexdigest(raw), operator.approval());
-    let Some(Value::Object(target)) = p.get("target") else {
-        unreachable!("the package check made the target an object")
-    };
     let instance = instance_id(
-        target.get("instance").unwrap_or(&Value::Null),
+        get(object_at(&p, "target"), "instance"),
         &Text::from("the package's target instance"),
     )?;
-    let now = Number::from(now);
     let end = now.plus(operator.deadline_seconds());
     need(
         *approval.package_sha256() == package_sha256.as_str(),
@@ -152,34 +171,28 @@ pub fn check_run(
             )
         },
     )?;
-    let window = |name: &str| match p.get(name) {
-        Some(window @ Value::Object(_)) => window,
-        _ => unreachable!("the package check made each window an object"),
-    };
-    let at = |name: &str, end: &str| match window(name) {
-        Value::Object(window) => {
-            Number::of(window.get(end).unwrap_or(&Value::Null)).expect("a window's end is a time")
-        }
-        _ => unreachable!("a window is an object"),
-    };
-    need(at("baseline", "end") <= now, || {
+    let (baseline, run) = (object_at(&p, "baseline"), object_at(&p, "run"));
+    need(number_at(baseline, "end") <= now, || {
         sentence!(
             "the run's start ",
             now,
             " lies inside the package's baseline window ",
-            repr(window("baseline"))
+            repr(get(&p, "baseline"))
         )
     })?;
-    need(at("run", "start") <= now && end <= at("run", "end"), || {
-        sentence!(
-            "the run from ",
-            now,
-            " to its deadline ",
-            end,
-            " lies outside the package's run window ",
-            repr(window("run"))
-        )
-    })?;
+    need(
+        number_at(run, "start") <= now && end <= number_at(run, "end"),
+        || {
+            sentence!(
+                "the run from ",
+                now,
+                " to its deadline ",
+                end,
+                " lies outside the package's run window ",
+                repr(get(&p, "run"))
+            )
+        },
+    )?;
     need(operator.instances().contains(&instance), || {
         sentence!("the target ", instance, " is outside the declared set")
     })?;
@@ -189,11 +202,4 @@ pub fn check_run(
         package_sha256,
         instance,
     })
-}
-
-fn text(value: Option<&Value>) -> &Text {
-    match value {
-        Some(Value::String(text)) => text,
-        _ => unreachable!("the package check made {value:?} a string"),
-    }
 }

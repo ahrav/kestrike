@@ -56,7 +56,7 @@ pub fn resolve(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// `join` appends `name` to `path` with one `/` between them; an absolute `name` replaces `path`.
-fn join(path: &[u8], name: &[u8]) -> Vec<u8> {
+pub(crate) fn join(path: &[u8], name: &[u8]) -> Vec<u8> {
     if name.starts_with(b"/") || path.is_empty() {
         return name.to_vec();
     }

@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use kestrike_tools::host_stop::{
-    AWS, Call, CallError, Delivered, FailedCall, Failure, Record, System, reply,
+    AWS, Call, CallError, Delivered, FailedCall, Record, System, reply,
 };
 use kestrike_tools::json::{Object, Value};
 
@@ -29,6 +29,7 @@ case "$FAKE_AWS_MODE" in
   list) echo '[]' ;;
   twice) echo '{"Arn": "a", "Arn": "b"}' ;;
   sleep) /usr/bin/sleep 5; echo '{"Arn": "a"}' ;;
+  long) printf 'x%.0s' $(/usr/bin/seq 100) >&2; printf 'y%.0s' $(/usr/bin/seq 400) >&2; printf ' \n' >&2; exit 1 ;;
 esac
 "#;
 
@@ -219,17 +220,24 @@ fn every_other_outcome_is_a_failed_call() {
     }
     let begun = Instant::now();
     match standin.call("sleep", &IDENTITY, true, Duration::from_millis(20)) {
-        Err(CallError::Failed(FailedCall::Launch(failed))) => {
-            assert!(
-                matches!(failed.failure(), Failure::NoAnswer(reason) if reason.starts_with("timed out"))
-            );
-        }
+        Err(CallError::Failed(failed @ FailedCall::Launch(_))) => assert_eq!(
+            failed.sentence(),
+            "sts get-caller-identity gave no answer: timed out after 20ms"
+        ),
         other => panic!("sleep: {other:?}"),
     }
     assert!(
         begun.elapsed() < Duration::from_secs(4),
         "the cut ends the call before the child's sleep"
     );
+    match standin.call("long", &IDENTITY, true, cut) {
+        Err(CallError::Failed(failed)) => assert_eq!(
+            failed.sentence(),
+            format!("sts get-caller-identity exited 1: {}", "y".repeat(400)).as_str(),
+            "the last 400 characters of the stripped standard error"
+        ),
+        other => panic!("long: {other:?}"),
+    }
     fs::remove_file(standin.started()).expect("the stand-in started for each call above");
     let empty = standin.scratch.0.join("empty");
     match called(&IDENTITY, true, cut, &standin.env("echo", &empty)) {

@@ -5,14 +5,21 @@
 use std::path::PathBuf;
 
 use kestrike_tools::gameday::{FILE_LIMIT, Refusal};
-use kestrike_tools::host_stop::{Number, check_reviewed, check_stopped, encoded, steps_tail};
+use kestrike_tools::host_stop::{
+    Number, Request, check_reviewed, check_stopped, encoded, steps_tail,
+};
 use kestrike_tools::json::{Object, Text, Value};
 use kestrike_tools::python::hexdigest;
 
-use crate::host_stop_support::{Scratch, gd2_mut, json, met, object, set, value};
+use crate::host_stop_support::{Scratch, gd2_mut, json, met, set, value};
 
 /// The stop request the marks close.
 const STOP: &str = r#"{"instance": "i-h1", "time": 105.0, "identity": "arn:aws:sts::account:assumed-role/gameday-operator/gd2-run"}"#;
+fn stop() -> Request {
+    Request::checked(&value(STOP), &Text::from("injection/stop.json"))
+        .expect("the request is on the layout")
+}
+
 /// Restore's start.
 const NOW: f64 = 200.0;
 
@@ -87,13 +94,12 @@ fn reviewed(
         std::fs::remove_file(&abort_path).expect("the mark goes");
     }
     let given = (place != Place::None).then_some(path.as_path());
-    let stop = object(value(STOP));
     let found = check_reviewed(
         given,
         &abort_path,
         &scratch.0.join("evidence"),
-        NOW,
-        &stop,
+        Number::from(NOW),
+        &stop(),
         FILE_LIMIT,
     );
     (found, hexdigest(&raw))
@@ -417,7 +423,7 @@ fn restore_refuses_a_stopped_mark_that_does_not_show_the_stop() {
             Err("injection/stopped.json is dated 201, after restore's start 200.0"),
         ),
     ];
-    let stop = object(value(STOP));
+    let stop = stop();
     for (name, key, new, now, expected) in rows {
         let scratch = Scratch::new("stopped");
         let mut mark = value(r#"{"instance": "i-h1", "state": "stopped", "time": 108.5}"#);
@@ -428,10 +434,136 @@ fn restore_refuses_a_stopped_mark_that_does_not_show_the_stop() {
             set(&mut mark, &key.split('/').collect::<Vec<_>>(), value(new));
         }
         let path = scratch.write("stopped.json", json(&mark).as_bytes());
-        match (check_stopped(&path, &stop, now, FILE_LIMIT), expected) {
+        match (
+            check_stopped(&path, &stop, Number::from(now), FILE_LIMIT),
+            expected,
+        ) {
             (Ok(time), Ok(expected)) => assert_eq!(time.to_string(), expected, "{name}"),
             (Err(refusal), Err(expected)) => assert_eq!(*refusal.message(), expected, "{name}"),
             (got, expected) => panic!("{name}: {got:?} against {expected:?}"),
         }
     }
+}
+
+/// A record that reaches the evidence directory through a link is inside it, as is one inside an
+/// evidence directory named through a link; a record whose path is a link loop cannot be resolved; a
+/// record with a repeated key, a named pipe, a malformed abort mark and an unreadable or malformed
+/// `stopped.json` are refused with their sentences, the pipe without waiting for a writer.
+#[test]
+fn an_input_that_is_a_named_pipe_or_a_link_is_refused_without_waiting() {
+    use std::os::unix::fs::symlink;
+    let scratch = Scratch::new("review-links");
+    let evidence = scratch.0.join("evidence");
+    let injection = evidence.join("injection");
+    std::fs::create_dir_all(&injection).expect("the evidence directory is made");
+    let data = encoded(&abort_mark(), &Text::from("abort.json"), FILE_LIMIT).expect("encodes");
+    let abort_path = injection.join("abort.json");
+    std::fs::write(&abort_path, &data).expect("the mark is written");
+    let mut record = value(r#"{"reviewer": "the operator", "time": 150.5}"#);
+    set(
+        &mut record,
+        &["abort_sha256"],
+        Value::String(Text::from(hexdigest(&data))),
+    );
+    set(&mut record, &["steps"], Value::String(Text::from(steps())));
+    let inside = evidence.join("reviewed.json");
+    std::fs::write(&inside, json(&record)).expect("the record is written");
+    let outside = scratch.0.join("reviewed.json");
+    symlink(&inside, &outside).expect("the link is made");
+    let linked_evidence = scratch.0.join("linked");
+    symlink(&evidence, &linked_evidence).expect("the link is made");
+    let loop_a = scratch.0.join("loop-a");
+    symlink(scratch.0.join("loop-b"), &loop_a).expect("the link is made");
+    symlink(&loop_a, scratch.0.join("loop-b")).expect("the link is made");
+    let repeated = scratch.write("repeated.json", br#"{"reviewer": "a", "reviewer": "b"}"#);
+    let pipe = scratch.0.join("pipe.json");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .is_ok_and(|status| status.success()),
+        "the pipe is made"
+    );
+    let within = "the reviewed record lies inside the evidence directory, where the judge admits no file \
+                  outside its layout; keep it outside";
+    let rows: [(&str, &std::path::Path, &std::path::Path, &str); 5] = [
+        (
+            "a record linked into the evidence directory",
+            &outside,
+            &evidence,
+            within,
+        ),
+        (
+            "an evidence directory named through a link",
+            &inside,
+            &linked_evidence,
+            within,
+        ),
+        (
+            "a record whose path is a link loop",
+            &loop_a,
+            &evidence,
+            "the reviewed record cannot be resolved: symlink loop from ",
+        ),
+        (
+            "a repeated key",
+            &repeated,
+            &evidence,
+            "the reviewed record is not strict JSON: an object repeats a key",
+        ),
+        (
+            "a named pipe",
+            &pipe,
+            &evidence,
+            "the reviewed record is no regular file",
+        ),
+    ];
+    for (name, path, root, sentence) in rows {
+        let refusal = check_reviewed(
+            Some(path),
+            &abort_path,
+            root,
+            Number::from(NOW),
+            &stop(),
+            FILE_LIMIT,
+        )
+        .expect_err(name);
+        assert!(
+            refusal.message().to_string().starts_with(sentence),
+            "{name}: {refusal}"
+        );
+        assert!(
+            name.contains("loop") || *refusal.message() == sentence,
+            "{name}: {refusal}"
+        );
+    }
+    std::fs::write(&abort_path, b"{").expect("the mark is rewritten");
+    let away = scratch.write("away.json", json(&record).as_bytes());
+    let refusal = check_reviewed(
+        Some(&away),
+        &abort_path,
+        &evidence,
+        Number::from(NOW),
+        &stop(),
+        FILE_LIMIT,
+    )
+    .expect_err("a malformed abort mark");
+    assert_eq!(
+        *refusal.message(),
+        "injection/abort.json is not strict JSON: expected a key at byte 1"
+    );
+    let stopped = injection.join("stopped.json");
+    let refusal =
+        check_stopped(&stopped, &stop(), Number::from(NOW), FILE_LIMIT).expect_err("no mark");
+    assert_eq!(
+        *refusal.message(),
+        "injection/stopped.json cannot be read: No such file or directory"
+    );
+    std::fs::write(&stopped, b"not json").expect("the mark is written");
+    let refusal =
+        check_stopped(&stopped, &stop(), Number::from(NOW), FILE_LIMIT).expect_err("no JSON");
+    assert_eq!(
+        *refusal.message(),
+        "injection/stopped.json is not strict JSON: expected a value at byte 0"
+    );
 }

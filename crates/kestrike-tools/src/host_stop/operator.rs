@@ -6,14 +6,16 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+use super::checked::{get, list, number, object_at, text, text_at};
 use super::constants::{ALARM_NAME_MAX, BOUNDS, LIMIT_SECONDS, MAX_INSTANCES, REGION};
 use super::forms::{instance_id, iso_time, matches, plain};
 use super::inputs::read_json;
 use super::number::Number;
+use super::preflight::Gd2;
 use super::words::sentence;
 use crate::gameday::{Each, Names, Refusal, Scalar, Schema, conform, need};
-use crate::json::{Object, Value};
-use crate::paths::normalize;
+use crate::json::Value;
+use crate::paths::{join, normalize};
 use crate::plants::files::strerror;
 use crate::text::Text;
 
@@ -149,8 +151,8 @@ impl Operator {
 }
 
 /// `read_operator` reads the operator file at `path`, at most `limit` bytes, against GD-2's entry
-/// `gd2`, whose `guardrail` texts key `alarms`. The snapshot path is joined to the directory of
-/// `path` made absolute against the working directory, which a relative `path` reads.
+/// `gd2`, whose guardrail texts key `alarms`. The snapshot path is joined to the directory of `path`
+/// made absolute against the working directory, which a relative `path` reads.
 ///
 /// # Errors
 ///
@@ -161,43 +163,29 @@ impl Operator {
 /// alarm name of more than 255 characters, with a leading `-` or outer white space; one alarm for two
 /// guardrails; the snapshot path and each alarm name with a control character; and
 /// `the working directory cannot be read: <reason>` for a relative `path`.
-///
-/// # Panics
-///
-/// When `gd2` holds no list of guardrail texts: the caller passes the entry `gd2_of` returned.
-pub fn read_operator(path: &Path, gd2: &Object, limit: u64) -> Result<Operator, Refusal> {
-    let o = read_json(path, &Text::from("the operator file"), limit)?;
+pub fn read_operator(path: &Path, gd2: &Gd2<'_>, limit: u64) -> Result<Operator, Refusal> {
+    let what = Text::from("the operator file");
+    let value = read_json(path, &what, limit)?;
     let shaped =
-        matches!(&o, Value::Object(o) if matches!(o.get("approval"), Some(Value::Object(_))));
+        matches!(&value, Value::Object(o) if matches!(o.get("approval"), Some(Value::Object(_))));
     need(shaped, || {
         sentence!("the operator file holds no approval of this run")
     })?;
     let mut names = Names::new();
-    names.insert("guardrail", guardrails(gd2));
-    conform(&o, &OPERATOR, &Text::from("the operator file"), &names)?;
-    let Value::Object(o) = o else {
-        unreachable!("the schema made the operator file an object")
-    };
-    let text = |key: &str| checked_text(o.get(key));
-    let region = text("region");
+    names.insert("guardrail", gd2.guardrails().into_iter().cloned().collect());
+    conform(&value, &OPERATOR, &what, &names)?;
+    let o = super::checked::object(&value);
+    let region = text_at(o, "region");
     need(matches(&REGION, region), || {
         sentence!("region ", region.repr(), " is no AWS region name")
     })?;
-    let Some(Value::Object(approval)) = o.get("approval") else {
-        unreachable!("the schema made the approval an object")
-    };
-    instance_id(
-        field(approval, "instance"),
-        &Text::from("approval instance"),
-    )?;
+    let approval = object_at(o, "approval");
+    let target = instance_id(get(approval, "instance"), &Text::from("approval instance"))?;
     iso_time(
-        field(approval, "not_after"),
+        get(approval, "not_after"),
         &Text::from("approval not_after"),
     )?;
-    let Some(Value::Array(listed)) = o.get("instances") else {
-        unreachable!("the schema made the instances a list")
-    };
-    let instances = listed
+    let instances = list(get(o, "instances"))
         .iter()
         .enumerate()
         .map(|(at, value)| instance_id(value, &sentence!("instances[", at.to_string(), "]")))
@@ -217,8 +205,7 @@ pub fn read_operator(path: &Path, gd2: &Object, limit: u64) -> Result<Operator, 
     need(distinct.len() == instances.len(), || {
         sentence!("instances repeats an instance")
     })?;
-    let bounds =
-        BOUNDS.map(|bound| Number::of(field(&o, bound)).expect("the schema made a bound a number"));
+    let bounds = BOUNDS.map(|bound| number(get(o, bound)));
     for (bound, value) in BOUNDS.iter().zip(bounds) {
         need(value <= Number::from(LIMIT_SECONDS), || {
             sentence!(
@@ -236,12 +223,9 @@ pub fn read_operator(path: &Path, gd2: &Object, limit: u64) -> Result<Operator, 
             "deadline_seconds holds less than effect_timeout_seconds and observe_seconds together"
         )
     })?;
-    let Some(Value::Object(keyed)) = o.get("alarms") else {
-        unreachable!("the schema made the alarms an object")
-    };
-    let alarms: Vec<(Text, Text)> = keyed
+    let alarms: Vec<(Text, Text)> = object_at(o, "alarms")
         .iter()
-        .map(|(key, alarm)| (key.clone(), checked_text(Some(alarm)).clone()))
+        .map(|(key, alarm)| (key.clone(), text(alarm).clone()))
         .collect();
     for (key, alarm) in &alarms {
         let named = alarm.len() <= ALARM_NAME_MAX
@@ -260,7 +244,7 @@ pub fn read_operator(path: &Path, gd2: &Object, limit: u64) -> Result<Operator, 
     need(distinct.len() == alarms.len(), || {
         sentence!("alarms names one alarm for two guardrails")
     })?;
-    let snapshot = text("snapshot");
+    let snapshot = text_at(o, "snapshot");
     let named = std::iter::once((Text::from("snapshot"), snapshot)).chain(
         alarms
             .iter()
@@ -275,89 +259,51 @@ pub fn read_operator(path: &Path, gd2: &Object, limit: u64) -> Result<Operator, 
             )
         })?;
     }
+    let snapshot = snapshot.to_str().expect("a plain text has a UTF-8 form");
+    let directory = dirname(&abspath(path.as_os_str().as_bytes())?);
     Ok(Operator {
         region: region.clone(),
-        identity: text("identity").clone(),
+        identity: text_at(o, "identity").clone(),
         approval: Approval {
-            approver: checked_text(approval.get("approver")).clone(),
-            package_sha256: checked_text(approval.get("package_sha256")).clone(),
-            instance: checked_text(approval.get("instance")).clone(),
-            not_after: checked_text(approval.get("not_after")).clone(),
+            approver: text_at(approval, "approver").clone(),
+            package_sha256: text_at(approval, "package_sha256").clone(),
+            instance: target,
+            not_after: text_at(approval, "not_after").clone(),
         },
         instances,
-        snapshot: snapshot_path(path, snapshot)?,
+        snapshot: PathBuf::from(OsStr::from_bytes(&join(&directory, snapshot.as_bytes()))),
         alarms,
         bounds,
     })
 }
 
-/// The guardrail texts of GD-2's entry.
-fn guardrails(gd2: &Object) -> BTreeSet<Text> {
-    let Some(Value::Array(texts)) = gd2.get("guardrail") else {
-        panic!("GD-2's entry holds its list of guardrail texts");
-    };
-    texts
-        .iter()
-        .map(|text| checked_text(Some(text)).clone())
-        .collect()
-}
-
-fn field<'a>(object: &'a Object, key: &str) -> &'a Value {
-    object
-        .get(key)
-        .unwrap_or_else(|| panic!("the schema holds the key {key}"))
-}
-
-fn checked_text(value: Option<&Value>) -> &Text {
-    match value {
-        Some(Value::String(text)) => text,
-        _ => panic!("the schema made {value:?} a string"),
+/// `path` made absolute against the working directory and normalized lexically, as
+/// `os.path.abspath` makes it; an absolute `path` reads no working directory.
+fn abspath(path: &[u8]) -> Result<Vec<u8>, Refusal> {
+    if path.starts_with(b"/") {
+        return Ok(normalize(path));
     }
+    let cwd = std::env::current_dir().map_err(|error| {
+        Refusal::new(sentence!(
+            "the working directory cannot be read: ",
+            strerror(&error)
+        ))
+    })?;
+    Ok(normalize(&join(&cwd.into_os_string().into_vec(), path)))
 }
 
-/// The snapshot path `snapshot` joined to the directory of the operator file at `path`, which is
-/// made absolute and normalized lexically first: an absolute `snapshot` stands for itself.
-fn snapshot_path(path: &Path, snapshot: &Text) -> Result<PathBuf, Refusal> {
-    let path = path.as_os_str().as_bytes();
-    let absolute = if path.starts_with(b"/") {
-        normalize(path)
-    } else {
-        let cwd = std::env::current_dir().map_err(|error| {
-            Refusal::new(sentence!(
-                "the working directory cannot be read: ",
-                strerror(&error)
-            ))
-        })?;
-        let mut joined = cwd.into_os_string().into_vec();
-        if !joined.ends_with(b"/") {
-            joined.push(b'/');
-        }
-        joined.extend_from_slice(path);
-        normalize(&joined)
-    };
-    let cut = absolute
+/// The directory part of `path` up to its last `/`, trailing slashes removed unless it is all
+/// slashes, as `os.path.dirname` gives it.
+fn dirname(path: &[u8]) -> Vec<u8> {
+    let cut = path
         .iter()
         .rposition(|&byte| byte == b'/')
         .map_or(0, |at| at + 1);
-    let mut directory = absolute[..cut].to_vec();
-    if directory.iter().any(|&byte| byte != b'/') {
-        while directory.ends_with(b"/") {
-            directory.pop();
+    let mut head = path[..cut].to_vec();
+    if head.iter().any(|&byte| byte != b'/') {
+        while head.ends_with(b"/") {
+            head.pop();
         }
     }
-    let snapshot = snapshot
-        .to_str()
-        .expect("a plain text has a UTF-8 form")
-        .as_bytes();
-    let joined = if snapshot.starts_with(b"/") {
-        snapshot.to_vec()
-    } else {
-        let mut joined = directory;
-        if !joined.is_empty() && !joined.ends_with(b"/") {
-            joined.push(b'/');
-        }
-        joined.extend_from_slice(snapshot);
-        joined
-    };
-    Ok(PathBuf::from(OsStr::from_bytes(&joined)))
+    head
 }

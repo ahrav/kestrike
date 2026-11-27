@@ -58,7 +58,7 @@ fn check<T>(
 
 /// A status reply names exactly the instances asked, each with a state and its two checks or none.
 #[test]
-fn a_status_reply_names_exactly_the_instances_asked() {
+fn a_declared_instance_not_running_or_an_unread_set_is_a_run_left_open() {
     let asked = texts(&["i-h1", "i-h2"]);
     for &(name, reply, expected) in STATUSES {
         let got = read_statuses(&object(value(reply)), &asked);
@@ -70,7 +70,7 @@ fn a_status_reply_names_exactly_the_instances_asked() {
 
 /// A record reply names one instance and the one asked, with its fields of their types.
 #[test]
-fn a_record_reply_names_the_one_instance_asked() {
+fn a_record_outside_the_request_and_the_stop_calls_end_or_of_two_instances_shows_no_stop() {
     for &(name, reply, expected) in RECORDS {
         let got = read_record(&object(value(reply)), &Text::from("i-h1"));
         check(name, got, expected, |record| text(&record.to_value()));
@@ -80,7 +80,7 @@ fn a_record_reply_names_the_one_instance_asked() {
 /// An alarm reply names no alarm twice or unasked and no composite alarm; an alarm it leaves out is
 /// absent from the result.
 #[test]
-fn an_alarm_reply_names_no_alarm_twice_or_unasked() {
+fn an_alarm_not_quiet_or_unread_before_the_stop_aborts_with_no_stop() {
     let asked = texts(&["gd2-guardrail-1", "gd2-guardrail-2"]);
     for &(name, reply, expected) in ALARMS {
         let got = read_alarms(&object(value(reply)), &asked);
@@ -436,6 +436,28 @@ const ALARMS: &[(&str, &str, Result<&str, &str>)] = &[
         "a state off its type before a bad expression",
         r#"{"MetricAlarms": [{"AlarmName": "gd2-guardrail-1", "StateValue": 1, "TreatMissingData": "missing", "StateTransitionedTimestamp": "1970-01-01T00:00:00.000Z", "Metrics": null}]}"#,
         Err("StateValue is no str: 1"),
+    ),
+    (
+        "metric alarms stated as null",
+        r#"{"MetricAlarms": null}"#,
+        Err("MetricAlarms is no list: None"),
+    ),
+    (
+        "an evaluation state stated as null before metrics stated as null",
+        r#"{"MetricAlarms": [{"AlarmName": "gd2-guardrail-1", "StateValue": "OK", "TreatMissingData": "missing", "StateTransitionedTimestamp": "t", "EvaluationState": null, "Metrics": null}]}"#,
+        Err("EvaluationState is no str: None"),
+    ),
+    (
+        "metrics stated as null before no transition time",
+        r#"{"MetricAlarms": [{"AlarmName": "gd2-guardrail-1", "StateValue": "OK", "TreatMissingData": "missing", "Metrics": null}]}"#,
+        Err("Metrics is no list: None"),
+    ),
+    (
+        "evaluation criteria before metrics stated as null",
+        r#"{"MetricAlarms": [{"AlarmName": "gd2-guardrail-1", "StateValue": "OK", "TreatMissingData": "missing", "StateTransitionedTimestamp": "t", "EvaluationCriteria": 1, "Metrics": null}]}"#,
+        Ok(
+            r#"{"gd2-guardrail-1": {"state": "OK", "missing": "missing", "evaluation": null, "kind": "a PromQL alarm", "transitioned": "t"}}"#,
+        ),
     ),
 ];
 

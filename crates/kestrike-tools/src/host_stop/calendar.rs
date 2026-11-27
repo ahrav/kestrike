@@ -19,8 +19,8 @@ pub fn posix_seconds(text: &str) -> Option<i64> {
         let part = text.get(at..at + digits)?;
         part.bytes()
             .all(|byte| byte.is_ascii_digit())
-            .then(|| part.parse().ok())
-            .flatten()
+            .then_some(())?;
+        part.parse().ok()
     };
     let (year, month, day) = (number(0, 4)?, number(5, 2)?, number(8, 2)?);
     let (hour, minute, second) = (number(11, 2)?, number(14, 2)?, number(17, 2)?);
