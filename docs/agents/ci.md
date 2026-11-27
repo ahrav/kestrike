@@ -1806,7 +1806,10 @@ records with `"outcome": "timeout"`, without a class:
 
 The review workflow uses the `pull_request_target` trigger, so each review runs
 the base branch's copy of the workflow, and it runs for pull requests into
-`main` from branches of this repository. Its model token is a secret of the
+`main` from branches of this repository. The pinned action runs the review for
+an event of a person with write access to the repository or of the GitHub App
+`kestrike-swarm`, the one name its `allowed_bots` input holds, and fails the
+job for an event of any other App or bot. Its model token is a secret of the
 `claude-review` environment, which admits `main` and no other ref. A pull
 request stacked on another branch is reviewed when it is retargeted to `main`.
 `.github/CODEOWNERS` names the owner of `.github/`, and a ruleset on `main`
