@@ -145,7 +145,7 @@ evidence, `ci` aside, or it is `unbound-input`; a cargo lane's is derived
 here and a checker lane's by its judge, which re-judges the recorded
 checker output, a profiled one under the credited profile, so a PR receipt
 never credits the scheduled domain), admits the catalog, then
-judges every record of the job and module (a `scheduled` GenMC or Kani
+judges every record of the job and module (a `scheduled` GenMC, Kani or TLC
 receipt also judges the `pr` records, whose cases its run judges) and writes
 `credit.json` beside the
 receipt: credit needs a catalog that `admit`'s record checks and the census
