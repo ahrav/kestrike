@@ -364,8 +364,8 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
 }
 
 /// `escaped` writes each code point U+0000 to U+001F and U+007F to U+009F of `text` as `repr` writes it and
-/// every other code point as it is, so a field of a report line starts no line of its own.
-fn escaped(text: &str) -> String {
+/// every other code point as it is, so a field of a report or refusal line starts no line of its own.
+pub(super) fn escaped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for code in text.chars() {
         if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {

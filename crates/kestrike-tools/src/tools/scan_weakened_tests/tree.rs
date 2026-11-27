@@ -7,27 +7,23 @@ use crate::text::Text;
 
 use super::Failure;
 use super::hunks::DIFF_BATCH;
-use super::scan::short;
+use super::scan::{escaped, short};
 
-/// `entries` returns `(mode, path)` for each record that `git ls-tree -z --full-tree` prints for `paths` at
-/// `commit`, every blob under them when `recursive` is set. A tree above a requested path is entered and not
-/// printed, so a requested path that is such a tree has no record. A record that is not
-/// `<mode> <type> <id>`, a tab and a path is refused.
+/// `entries` returns `(mode, path)` for each record that `git --literal-pathspecs ls-tree -z --full-tree`
+/// prints for `paths` at `commit`, every blob under them when `recursive` is set; each path names itself from
+/// the top level. A tree above a requested path is entered and not printed, so a requested path that is such
+/// a tree has no record. A record that is not `<mode> <type> <id>`, a tab and a path is refused.
 pub fn entries(
     commit: &str,
     paths: &[&str],
     recursive: bool,
 ) -> Result<Vec<(String, String)>, Failure> {
-    let mut args = vec![
-        "--no-literal-pathspecs".to_owned(),
-        "ls-tree".to_owned(),
-        "-z".to_owned(),
-    ];
+    let mut args = vec!["--literal-pathspecs", "ls-tree", "-z"];
     if recursive {
-        args.push("-r".to_owned());
+        args.push("-r");
     }
-    args.extend(["--full-tree", commit, "--"].map(str::to_owned));
-    args.extend(paths.iter().map(|path| format!(":(top,literal){path}")));
+    args.extend(["--full-tree", commit, "--"]);
+    args.extend(paths);
     let listed = git_text(&args)?;
     let mut found = Vec::new();
     for record in listed.split_terminator('\0') {
@@ -51,7 +47,8 @@ pub fn entries(
 }
 
 /// `files` returns the paths of `paths` that `commit` holds, and refuses the first whose entry has a mode
-/// other than `100644` and `100755` as `<path> at <short id> is not a file`. A path with no entry is an
+/// other than `100644` and `100755` as `<path> at <short id> is not a file`, the path written through
+/// [`escaped`]. A path with no entry is an
 /// added or deleted file. It lists the paths in batches of the diff's size.
 pub fn files<'p>(commit: &str, paths: &[&'p str]) -> Result<Vec<&'p str>, Failure> {
     let mut modes = HashMap::new();
@@ -69,7 +66,8 @@ pub fn files<'p>(commit: &str, paths: &[&'p str]) -> Result<Vec<&'p str>, Failur
             Some("100644" | "100755") => held.push(path),
             Some(_) => {
                 return Err(Failure::Refused(format!(
-                    "{path} at {} is not a file",
+                    "{} at {} is not a file",
+                    escaped(path),
                     short(commit)
                 )));
             }

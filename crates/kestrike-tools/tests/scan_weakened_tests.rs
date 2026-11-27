@@ -372,6 +372,7 @@ impl Repo {
         let object = String::from_utf8(output.stdout).expect("an object name is UTF-8");
         self.git(&[
             "update-index",
+            "--add",
             "--cacheinfo",
             &format!("120000,{},{path}", object.trim()),
         ]);
@@ -2530,7 +2531,8 @@ fn a_change_under_an_inventory_directory_exits_two() {
 
 /// A changed Rust path or timeout file whose entry at the base or the head is neither mode 100644 nor 100755
 /// is refused, naming that commit: a link whose target holds an ignored test stands where the scan would read
-/// the link's target path as Rust text.
+/// the link's target path as Rust text. A path that begins with a colon is read as itself, and a carriage
+/// return in the refused path is written `\r`.
 #[test]
 fn a_diffed_path_that_is_no_file_at_either_commit_exits_two() {
     let repo = Repo::new("not-a-file");
@@ -2545,10 +2547,13 @@ fn a_diffed_path_that_is_no_file_at_either_commit_exits_two() {
     let restored = repo.change(&[("tests/t.rs", &tests)]);
     repo.reset(&repo.base);
     let lane = repo.link("scripts/rust-lane.sh", "x", "lane link");
+    repo.reset(&repo.base);
+    let colon = repo.link(":t\r.rs", "ignored.txt", "colon link");
     for (base, head, named, path) in [
         (&file, &link, &link, "tests/t.rs"),
         (&link, &restored, &link, "tests/t.rs"),
         (&repo.base, &lane, &lane, "scripts/rust-lane.sh"),
+        (&repo.base, &colon, &colon, ":t\\r.rs"),
     ] {
         let run = repo.scan(&["--base", base, "--head", head]);
         assert_eq!(run.outcome(), (Some(2), ""), "{path}: {}", run.stderr);
