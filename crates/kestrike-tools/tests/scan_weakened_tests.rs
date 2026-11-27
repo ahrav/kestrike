@@ -2274,9 +2274,9 @@ fn the_arguments_read_as_the_option_table_states() {
 }
 
 #[test]
-fn a_full_standard_output_writes_the_summary_and_the_hint_and_exits_120() {
+fn a_full_standard_output_exits_120_before_the_summary_and_the_hints() {
     let repo = Repo::new("full-output");
-    let head = repo.ignore_second("ignore");
+    repo.ignore_second("ignore");
     let summary = repo.temp.join("summary.md");
     let full = fs::OpenOptions::new()
         .write(true)
@@ -2293,21 +2293,11 @@ fn a_full_standard_output_writes_the_summary_and_the_hint_and_exits_120() {
         .output()
         .expect("the tool starts"),
     );
-    let range = format!("{}..{}", &repo.base[..12], &head[..12]);
-    let line = format!("blocks {KEY} second: not ignored -> #[ignore]\n");
     assert_eq!(run.code, Some(120), "{}", run.stderr);
-    assert_eq!(
-        fs::read_to_string(&summary).expect("the summary reads"),
-        format!("Weakened-test scan of {range}:\n\n```text\n{line}```\n")
-    );
-    let hint = format!(
-        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {range}: Weakens-Test: {KEY}: <reason>\n"
-    );
+    assert!(!summary.exists());
     assert_eq!(
         run.stderr,
-        format!(
-            "{hint}scan-weakened-tests: standard output: No space left on device (os error 28)\n"
-        )
+        "scan-weakened-tests: standard output: No space left on device (os error 28)\n"
     );
 }
 
@@ -2326,7 +2316,8 @@ fn an_empty_summary_variable_or_an_empty_report_writes_no_summary() {
     repo.ignore_second("ignore");
     let run = repo.scan_env(&["--base", &repo.base], &[("GITHUB_STEP_SUMMARY", "")]);
     assert_eq!(run.code, Some(1));
-    assert!(!summary.exists());
+    assert!(!run.stderr.contains("step summary"), "{}", run.stderr);
+    assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
 }
 
 #[test]

@@ -98,7 +98,8 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         };
         push(path, ignores(old, new));
         let changes = hunks_of(path);
-        let valued = named_bounds(changes.clone(), old, new);
+        let removed = assertions(&changes);
+        let valued = named_bounds(changes, old, new);
         push(
             path,
             line_findings(
@@ -108,7 +109,7 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
                 |old, new| new < old,
             )?,
         );
-        push(path, assertions(&changes).into_iter().collect());
+        push(path, removed.into_iter().collect());
     }
     for path in TIMEOUT_FILES.iter().filter(|path| paths.contains(path)) {
         let changes = hunks_of(path);
@@ -344,8 +345,7 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     report(&scanned).unwrap_or(STREAM_FAILED)
 }
 
-/// If a standard output write fails, `report` finishes the remaining report output before returning
-/// [`STREAM_FAILED`]. It returns `Err` when standard error cannot be written.
+/// `report` returns `Err` when standard error cannot be written.
 fn report(scanned: &Scan) -> Result<u8, io::Error> {
     let mut lines = String::new();
     let mut unacknowledged: Vec<String> = Vec::new();
@@ -370,14 +370,16 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
         }
     }
     let range = format!("{}..{}", short(&scanned.base), short(&scanned.head));
-    let mut unwritten = None;
     let mut code = u8::from(!unacknowledged.is_empty());
     if !lines.is_empty() {
         let mut stdout = io::stdout().lock();
-        unwritten = stdout
+        if let Err(error) = stdout
             .write_all(lines.as_bytes())
             .and_then(|()| stdout.flush())
-            .err();
+        {
+            complain(&format!("{TOOL}: standard output: {error}\n"))?;
+            return Ok(STREAM_FAILED);
+        }
         if let Some(summary) =
             std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty())
         {
@@ -399,10 +401,6 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             "{TOOL}: {key} blocks; acknowledge it with a commit-message line in {range}: \
              Weakens-Test: {key}: <reason>\n"
         ))?;
-    }
-    if let Some(error) = unwritten {
-        complain(&format!("{TOOL}: standard output: {error}\n"))?;
-        return Ok(STREAM_FAILED);
     }
     Ok(code)
 }
