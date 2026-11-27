@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kestrike_tools::host_stop::{
-    AWS, Call, Delivered, Ended, Interrupted, Record, SLICE, Signal, launch,
+    AWS, Call, CallFailed, Delivered, Ended, Failure, Interrupted, Record, SLICE, Signal, launch,
 };
 
 use super::{MARKER_LIMIT, Scratch, gone, wait_for};
@@ -35,6 +35,7 @@ case "$HOST_STOP_MODE" in
     exit 254 ;;
   killed) printf 'dying\n' >&2; kill -KILL $$ ;;
   hang) exec /bin/sleep 600 ;;
+  gate) while [ ! -e "$HOST_STOP_PID.go" ]; do :; done; echo '{}' ;;
   invalid) printf '\377' ;;
   invalid-error) printf '\377' >&2; echo '{}' ;;
   invalid-failed) printf '\377'; exit 254 ;;
@@ -43,6 +44,10 @@ case "$HOST_STOP_MODE" in
     printf 'END\n' >&2
     echo '{}'
     [ "$HOST_STOP_MODE" = flood ] || exit 254 ;;
+  flood-out)
+    /usr/bin/head -c 262144 /dev/zero | /usr/bin/tr '\0' y
+    printf 'refused\n' >&2
+    exit 254 ;;
   wide)
     i=0
     while [ $i -lt 500 ]; do printf '\303\251' >&2; i=$((i + 1)); done
@@ -420,7 +425,8 @@ fn no_aws_on_the_path_starts_no_process() {
 }
 
 /// Both outputs are read at once: a child that writes 256 KiB to standard error before its reply
-/// answers, and when it fails, its call keeps the last 400 characters of that text.
+/// answers, and when it fails, its call keeps the last 400 characters of that text; a child that
+/// writes 256 KiB to standard output before its error text fails with that text.
 #[test]
 fn a_child_that_floods_standard_error_still_answers() {
     let standin = Standin::new("launch-flood");
@@ -441,6 +447,12 @@ fn a_child_that_floods_standard_error_still_answers() {
         message,
         format!("sts get-caller-identity exited 254: {}END", "x".repeat(397))
     );
+    let env = standin.env("flood-out");
+    let message = failed(launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(20), &env),
+    ));
+    assert_eq!(message, "sts get-caller-identity exited 254: refused");
 }
 
 /// Both outputs decode as UTF-8 before the exit code is read: standard error other than UTF-8 fails
@@ -499,4 +511,60 @@ fn the_child_stays_in_the_process_group_of_the_tool() {
     let after = own.rsplit_once(") ").expect("a stat line").1;
     let own_group = after.split(' ').nth(2).expect("the process group");
     assert_eq!(group, own_group);
+}
+
+/// A test's seam builds a failed call through the public constructors: the two words are the first two
+/// arguments, or the one there is, and an exited call keeps the last 400 characters of its stripped
+/// standard error.
+#[test]
+fn a_failed_call_builds_from_its_parts() {
+    let cut = CallFailed::no_answer(&IDENTITY, "timed out after 5 seconds");
+    assert_eq!(
+        cut.to_string(),
+        "sts get-caller-identity gave no answer: timed out after 5 seconds"
+    );
+    assert_eq!(cut.what(), "sts get-caller-identity");
+    let stderr = format!(" \n{}\t", "y".repeat(450));
+    let exited = CallFailed::exited(
+        &["ec2", "stop-instances", "--instance-ids", "i-1"],
+        254,
+        &stderr,
+    );
+    assert_eq!(exited.what(), "ec2 stop-instances");
+    assert_eq!(
+        exited.failure(),
+        &Failure::Exited {
+            code: 254,
+            tail: "y".repeat(400)
+        }
+    );
+    assert_eq!(CallFailed::no_answer(&["sts"], "x").what(), "sts");
+}
+
+/// A signal delivered while the child still runs raises even when the child has exited by the wait's
+/// next turn: the wait reads the record after it sees the child's end.
+#[test]
+fn a_signal_before_the_child_ends_raises_in_place_of_its_answer() {
+    let standin = Standin::new("launch-gate");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    record.arm();
+    let env = standin.env("gate");
+    let ended = thread::scope(|scope| {
+        scope.spawn(|| {
+            wait_for(&standin.pid);
+            delivered.deliver(Signal::Terminate);
+            fs::write(standin.pid.with_extension("go"), b"").expect("the gate opens");
+        });
+        launch(
+            &mut record,
+            &call(&IDENTITY, true, Duration::from_secs(30), &env),
+        )
+    });
+    assert_eq!(
+        ended,
+        Err(Ended::Interrupted(Interrupted(Signal::Terminate)))
+    );
+    assert!(!record.is_armed());
+    assert_eq!(record.pending(), None);
 }

@@ -1,12 +1,10 @@
 //! The evidence directory's lock, the probe for files with no name, and the lookup of an entry.
 
-use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use super::files::{Files, Links, proc_path};
-use super::mark::strerror;
 
 /// The exclusive `flock` of a directory, held until the value drops.
 #[derive(Debug)]
@@ -20,23 +18,6 @@ pub struct Lock {
 pub enum LockError {
     Open(io::Error),
     Taken(io::Error),
-}
-
-impl fmt::Display for LockError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Open(error) => write!(f, "the open failed: {}", strerror(error)),
-            Self::Taken(error) => write!(f, "the lock is held: {}", strerror(error)),
-        }
-    }
-}
-
-impl std::error::Error for LockError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Open(error) | Self::Taken(error) => Some(error),
-        }
-    }
 }
 
 /// Opens `directory` without following a link and takes its exclusive lock at once, so two runs,
@@ -60,24 +41,6 @@ pub fn lock(files: &impl Files, directory: &Path) -> Result<Lock, LockError> {
 pub enum ProbeError {
     Unnamed(io::Error),
     Unresolved(PathBuf),
-}
-
-impl fmt::Display for ProbeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unnamed(error) => write!(f, "no unnamed file opens: {}", strerror(error)),
-            Self::Unresolved(path) => write!(f, "{} does not resolve", path.display()),
-        }
-    }
-}
-
-impl std::error::Error for ProbeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Unnamed(error) => Some(error),
-            Self::Unresolved(_) => None,
-        }
-    }
 }
 
 /// Opens a file with no name in `root` by path and checks that its `/proc/self/fd` path resolves. The

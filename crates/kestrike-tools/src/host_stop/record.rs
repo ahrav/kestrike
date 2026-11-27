@@ -96,8 +96,6 @@ impl std::fmt::Display for Interrupted {
     }
 }
 
-impl std::error::Error for Interrupted {}
-
 /// A `Record` controls when a read can raise a stored signal.
 #[derive(Debug)]
 pub struct Record<'a> {

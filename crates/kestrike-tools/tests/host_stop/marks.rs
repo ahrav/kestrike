@@ -447,6 +447,11 @@ fn a_name_other_than_one_component_takes_no_step() {
             "{name:?}"
         );
         assert!(files.steps().is_empty(), "{name:?}");
+        let failed = failed.expect_err("refused");
+        assert_eq!(
+            failed.sentence(&scratch.0.join("x")),
+            "a mark's name is one path component"
+        );
     }
     assert_eq!(listing(&scratch.0), Vec::<String>::new());
 }

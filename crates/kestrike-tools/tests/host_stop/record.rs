@@ -173,12 +173,12 @@ fn a_signal_that_may_raise_ends_the_sleep_at_a_slice_end() {
 #[test]
 fn the_clocks_read_monotonic_and_wall_seconds() {
     let seam = System::new();
-    let first = seam.monotonic();
-    let other = System::new().monotonic();
-    assert!(first >= 0.0 && other >= first, "{first} {other}");
+    thread::sleep(Duration::from_millis(100));
+    let later = System::new();
+    let (first, other) = (seam.monotonic(), later.monotonic());
     assert!(
-        other - first < 1.0,
-        "two values read one clock: {first} {other}"
+        first >= 0.1 && other >= first && other - first < 0.05,
+        "two values made 100 ms apart read one clock: {first} {other}"
     );
     let mut last = first;
     for _ in 0..100 {

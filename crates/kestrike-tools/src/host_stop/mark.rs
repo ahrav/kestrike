@@ -10,7 +10,6 @@
 //! unsynced, or failed with the mark standing.
 
 use std::ffi::OsStr;
-use std::fmt;
 use std::io;
 use std::path::Path;
 
@@ -98,42 +97,6 @@ impl Unwritten {
     }
 }
 
-impl fmt::Display for Unwritten {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Failed { step, error } => write!(f, "{step:?}: {}", strerror(error)),
-            Self::Stalled => f.write_str("a write made no progress"),
-            Self::Removed { error } => {
-                write!(f, "removed after a failed sync: {}", strerror(error))
-            }
-            Self::RemovalUnsynced { error, removal } => write!(
-                f,
-                "removed after a failed sync ({}), the removal unsynced: {}",
-                strerror(error),
-                strerror(removal)
-            ),
-            Self::Stands { error, removal } => write!(
-                f,
-                "standing after a failed sync ({}), the removal failed: {}",
-                strerror(error),
-                strerror(removal)
-            ),
-        }
-    }
-}
-
-impl std::error::Error for Unwritten {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Failed { error, .. }
-            | Self::Removed { error }
-            | Self::RemovalUnsynced { error, .. }
-            | Self::Stands { error, .. } => Some(error),
-            Self::Stalled => None,
-        }
-    }
-}
-
 /// Writes `data` as the entry `name` of `directory` once, as the module states.
 ///
 /// # Errors
@@ -210,7 +173,7 @@ pub fn sync_directory(files: &impl Files, directory: &Path) -> io::Result<()> {
 }
 
 /// The operating system's text for `error`, without the code the standard library adds.
-pub(super) fn strerror(error: &io::Error) -> String {
+fn strerror(error: &io::Error) -> String {
     let shown = error.to_string();
     match error.raw_os_error() {
         Some(code) => shown

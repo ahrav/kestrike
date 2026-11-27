@@ -12,8 +12,9 @@
 //! [`Record`] at least once a [`SLICE`], and ends when the child has exited and both outputs have
 //! closed. At the cut, or at a read of the record that raises, the child alone gets SIGKILL and is
 //! reaped, with no bound on the reap, and the readers stop keeping the bytes they read. The wait
-//! reads the record once more after it sees the child's end, so a signal that may raise during the
-//! last slice raises in place of the answer. After an early end a reader thread ends at its next read
+//! reads the record once more after it sees the child's end, and the call reads it again after both
+//! outputs are decoded, so a signal that may raise before the call returns raises in place of the
+//! answer. After an early end a reader thread ends at its next read
 //! or at its pipe's close, so it outlives the call while a process the child left holds the pipe.
 
 use std::ffi::{OsStr, OsString};
@@ -115,24 +116,6 @@ pub enum Ended {
     Interrupted(Interrupted),
 }
 
-impl fmt::Display for Ended {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Failed(failed) => failed.fmt(f),
-            Self::Interrupted(raised) => write!(f, "signal {raised}"),
-        }
-    }
-}
-
-impl std::error::Error for Ended {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Failed(failed) => Some(failed),
-            Self::Interrupted(raised) => Some(raised),
-        }
-    }
-}
-
 /// The first two arguments of a call, joined by a space.
 fn what(argv: &[&str]) -> String {
     argv[..argv.len().min(2)].join(" ")
@@ -181,6 +164,7 @@ pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended>
     })?;
     let stdout = joined(out).map_err(|error| no_answer(&error))?;
     let stderr = joined(err).map_err(|error| no_answer(&error))?;
+    record.read().map_err(Ended::Interrupted)?;
     let code = exit_code(status);
     if code != 0 {
         return Err(Ended::Failed(CallFailed::exited(call.argv, code, &stderr)));

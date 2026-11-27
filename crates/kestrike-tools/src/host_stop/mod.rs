@@ -1,8 +1,10 @@
 //! The host stop controller's layer over the system: a mark's write, the evidence lock, the probe and
 //! the lookup, the one `aws` child of a call, the two clocks, the sleep and the signal record. Each
-//! failure is a typed value that carries the system's error and the step it ended. A command composes
-//! its refusal from that value; a failed call's sentence is the `Display` of [`CallFailed`], and a
-//! mark's write that fails after its link states what stands with [`Unwritten::sentence`].
+//! failure is a typed value. A file step's failure carries the system's error and the step it ended;
+//! a call that gives no answer carries its reason as text, and one that exits carries its code and
+//! the tail of its standard error. A command composes its refusal from that value; a failed call's
+//! sentence is the `Display` of [`CallFailed`], and a mark's write states its failure with
+//! [`Unwritten::sentence`].
 //!
 //! The file steps are the methods of [`Files`], and the call, the clocks and the sleep the methods of
 //! [`Seam`]; a command takes each as a value, so a test substitutes one step. The module starts `aws`
