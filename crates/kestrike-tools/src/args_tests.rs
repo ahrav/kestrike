@@ -74,7 +74,10 @@ fn refused(message: &str) -> Parsed {
     }
 }
 
-const PARSER: &str = "p = argparse.ArgumentParser(prog='tool', allow_abbrev=False); \
+const PARSER: &str = "def given(v):\n    if not v: raise argparse.ArgumentTypeError('a value')\n    return v\n\
+    def positive(v):\n    if not (v.isascii() and v.isdigit()) or int(v) == 0: \
+    raise argparse.ArgumentTypeError('a positive integer')\n    return int(v)\n\
+    p = argparse.ArgumentParser(prog='tool', allow_abbrev=False); \
     p.add_argument('--base', type=given); p.add_argument('--head', type=given); \
     p.add_argument('--max-mutants', type=positive); p.add_argument('--shard'); p.add_argument('--tests'); \
     p.add_argument('--artifacts', type=given); p.add_argument('--cargo', type=given)";

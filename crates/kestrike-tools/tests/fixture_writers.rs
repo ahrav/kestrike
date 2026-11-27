@@ -621,10 +621,15 @@ fn a_trace_with_null_and_a_float_keeps_both() {
     let written = fs::read_to_string(output.join("passes.itf.json")).expect("the trace is written");
     let expression = "json.dumps(json.loads('{\"x\":null,\"y\":1.5e-7}'), separators=(',', ':'))";
     let python = "{\"x\":null,\"y\":1.5e-07}";
-    assert!(
-        written.contains(&python[1..python.len() - 1]),
-        "{expression}: {written}"
-    );
+    let passes = committed_trace(writer, "passes");
+    let expected = std::str::from_utf8(&passes.bytes)
+        .expect("a committed trace is UTF-8")
+        .replacen(
+            "\"vars\"",
+            &format!("{},\"vars\"", &python[1..python.len() - 1]),
+            1,
+        );
+    assert_eq!(written, expected, "{expression}");
 }
 
 #[test]
@@ -784,6 +789,30 @@ fn the_format_is_copied_from_quints_meta_and_a_missing_one_exits_1() {
             .expect("the reply reads")
     );
     assert!(!output.join("acquire_conflict").exists());
+}
+
+#[test]
+fn a_trace_the_reader_refuses_exits_1_naming_its_file_and_the_byte() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        let mut text = reply(trace);
+        text.insert(text.len() - 1, ',');
+        text
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    let shown = stderr(&result);
+    let prefix = format!(
+        "gate_fixtures: {}: ",
+        output.join("passes.itf.json").display()
+    );
+    assert!(
+        shown.starts_with(&prefix) && shown.contains(" at byte ") && shown.ends_with('\n'),
+        "json.loads of a trace ending in ',}}' raises JSONDecodeError: {shown}"
+    );
+    assert_eq!(shown.lines().count(), 1, "{shown}");
 }
 
 #[test]
