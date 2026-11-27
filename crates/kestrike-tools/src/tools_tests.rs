@@ -14,4 +14,12 @@ fn the_tool_table_is_sorted_and_every_name_has_an_entry() {
         super::sorted(["b", "ab", "a_", "a", ""]),
         ["", "a", "a_", "ab", "b"]
     );
+    // The aliases put fixture names in reverse order so the `NAMES` assertion distinguishes fixture-name
+    // order from invocation order.
+    mod sample {
+        use super::super::{Entry, escrow_fixtures as zeta, gate_fixtures as alpha, sorted};
+        tools!(alpha, zeta);
+    }
+    assert_eq!(sample::NAMES, ["escrow_fixtures", "gate_fixtures"]);
+    assert!(sample::entry("gate_fixtures").is_some());
 }

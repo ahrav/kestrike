@@ -29,8 +29,6 @@ struct Module {
 }
 
 fn main() -> ExitCode {
-    println!("cargo::rerun-if-changed=src/tools");
-    println!("cargo::rerun-if-changed=tests");
     match write_lists() {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
@@ -43,9 +41,20 @@ fn main() -> ExitCode {
 fn write_lists() -> Result<(), String> {
     let package = PathBuf::from(variable("CARGO_MANIFEST_DIR")?);
     let out = PathBuf::from(variable("OUT_DIR")?);
+    for directory in ["src/tools", "tests"] {
+        println!(
+            "cargo::rerun-if-changed={}",
+            package.join(directory).display()
+        );
+    }
+    let moved = format!(
+        "const _: () = assert!(same(env!(\"CARGO_MANIFEST_DIR\"), {:?}), \"the package moved after its \
+         build script ran; remove the build directory\");\n",
+        package.to_str().expect("CARGO_MANIFEST_DIR reads as UTF-8")
+    );
 
     let tools = list(&package.join("src/tools"), "mod.rs", &["std", "tests"])?;
-    let mut text = String::new();
+    let mut text = moved.clone();
     for tool in &tools {
         text.push_str(&format!(
             "#[path = {:?}]\npub mod {};\n",
@@ -57,7 +66,7 @@ fn write_lists() -> Result<(), String> {
     write(&out.join("tools.rs"), &text)?;
 
     let cases = list(&package.join("tests"), "tools.rs", &["std", "tools"])?;
-    let mut text = String::new();
+    let mut text = moved;
     for case in &cases {
         text.push_str(&format!("#[path = {:?}]\nmod {};\n", case.root, case.id));
     }
@@ -88,14 +97,13 @@ const KEYWORDS: &[&str] = &[
 /// error with the path and the reason of the first that is invalid. `taken` holds the module names that
 /// the including file reserves.
 fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, String> {
-    let shown = directory.display();
     let prefix = directory
         .to_str()
         .expect("the directory joins UTF-8 names to CARGO_MANIFEST_DIR, which reads as UTF-8");
     let mut names = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|error| format!("{shown}: {error}"))? {
+    for entry in fs::read_dir(directory).map_err(|error| format!("{prefix}: {error}"))? {
         let name = entry
-            .map_err(|error| format!("{shown}: {error}"))?
+            .map_err(|error| format!("{prefix}: {error}"))?
             .file_name();
         if name != skip {
             names.push(name);
@@ -133,7 +141,7 @@ fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, Str
         }
         let refuse = |reason: &str| {
             format!(
-                "{}: {reason}; a directory, a link to one or a `*.rs` entry of {shown} is a regular file <id>.rs \
+                "{}: {reason}; a directory, a link to one or a `*.rs` entry of {prefix} is a regular file <id>.rs \
                  or a directory <id>/ that holds a regular file mod.rs, with <id> matching [a-z][a-z0-9_]*",
                 path.display()
             )
@@ -144,13 +152,11 @@ fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, Str
         let (id, root) = if kind.is_symlink() {
             return Err(refuse("a link"));
         } else if kind.is_dir() {
-            let root = path.join("mod.rs");
+            let root = format!("{prefix}/{name}/mod.rs");
             match fs::symlink_metadata(&root) {
-                Ok(metadata) if metadata.is_file() => {
-                    (name.clone(), format!("{prefix}/{name}/mod.rs"))
-                }
+                Ok(metadata) if metadata.is_file() => (name.clone(), root),
                 Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                    return Err(format!("{}: {error}", root.display()));
+                    return Err(format!("{root}: {error}"));
                 }
                 _ => return Err(refuse("a directory that holds no regular file mod.rs")),
             }

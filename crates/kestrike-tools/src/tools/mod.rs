@@ -55,6 +55,12 @@ const fn precedes(a: &str, b: &str) -> bool {
     a.len() < b.len()
 }
 
+/// The generated module list uses `same` to assert at compile time that `CARGO_MANIFEST_DIR` matches the
+/// path the build script recorded.
+const fn same(a: &str, b: &str) -> bool {
+    !precedes(a, b) && !precedes(b, a)
+}
+
 #[cfg(test)]
 #[path = "../tools_tests.rs"]
 mod tests;
