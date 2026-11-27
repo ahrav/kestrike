@@ -1434,8 +1434,9 @@ reaches, so a refused record in a commit the destination holds refuses no
 later push. The header of `scripts/pre-push-checks.py` lists
 the exact inputs, records and number forms.
 
-Before the worktree checks, the hook runs `scripts/scan-weakened-tests.py` over
-the pushed commits. The scan reads Git objects and has no worktree, so the hook
+Before the worktree checks, the hook runs
+`bash scripts/tool.sh scan-weakened-tests` over the pushed commits. The scan
+reads Git objects and has no worktree, so the hook
 runs the copy of the scanner beside `scripts/pre-push-checks.py` in the
 invoking checkout. CI runs the same scanner in the `Weakened-test scan` step of
 the `comment-policy` job, after `Obligation catalog admission`. On a pull

@@ -148,6 +148,10 @@ impl Text {
         self.0.extend_from_slice(text.as_bytes());
     }
 
+    pub fn push_text(&mut self, text: &Text) {
+        self.0.extend_from_slice(&text.0);
+    }
+
     /// `from_os` decodes as Python's `os.fsdecode` does under a UTF-8 locale with `surrogateescape`: each
     /// valid UTF-8 sequence becomes its scalar value and each other byte the surrogate U+DC00 plus the byte.
     pub fn from_os(bytes: &OsStr) -> Self {
@@ -179,6 +183,20 @@ impl Text {
     /// `to_str` returns `None` when the text holds a surrogate.
     pub fn to_str(&self) -> Option<&str> {
         std::str::from_utf8(&self.0).ok()
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// `rpartition` returns the text before the last `separator` and the text after it, or an empty text and
+    /// the whole text when `separator` is absent.
+    pub fn rpartition(&self, separator: u8) -> (Self, Self) {
+        assert!(separator.is_ascii(), "the separator is one ASCII byte");
+        match self.0.iter().rposition(|&byte| byte == separator) {
+            Some(at) => (self.slice(0, at), self.slice(at + 1, self.0.len())),
+            None => (Self::new(), self.clone()),
+        }
     }
 
     pub fn code_points(&self) -> impl Iterator<Item = u32> + '_ {

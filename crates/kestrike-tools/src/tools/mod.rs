@@ -24,4 +24,5 @@ tools! {
     "escrow_fixtures" => escrow_fixtures,
     "gate_fixtures" => gate_fixtures,
     "marklog_fixtures" => marklog_fixtures,
+    "scan-weakened-tests" => scan_weakened_tests,
 }

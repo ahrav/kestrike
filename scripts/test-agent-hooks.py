@@ -1043,9 +1043,9 @@ class PrePushChecks(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('blocks ignore-existing:crates/plain.rs churn: not ignored -> #[ignore = "slow"]',
                       result.stderr)
-        self.assertIn(f"failed: scripts/scan-weakened-tests.py --base {existing} --head {head}", result.stderr)
+        self.assertIn(f"failed: scripts/tool.sh scan-weakened-tests --base {existing} --head {head}", result.stderr)
         self.assertEqual(self.ran(), ["test-select-tests.py", "verify-receipts.py admit"])
-        self.assertLess(result.stderr.index("scan-weakened-tests.py --base"),
+        self.assertLess(result.stderr.index("tool.sh scan-weakened-tests --base"),
                         result.stderr.index(f"pre-push: {head[:12]}: python3 scripts/test-select-tests.py"))
 
     def test_a_blocking_finding_on_the_second_ref_line_fails_the_push(self):
@@ -1054,8 +1054,8 @@ class PrePushChecks(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('reports ignore-new:crates/plain.rs churn: absent -> #[ignore = "slow"]', result.stderr)
         self.assertIn("blocks ignore-existing:crates/plain.rs churn", result.stderr)
-        self.assertIn(f"failed: scripts/scan-weakened-tests.py --base {existing} --head {head}", result.stderr)
-        self.assertNotIn(f"failed: scripts/scan-weakened-tests.py --base {self.base}", result.stderr)
+        self.assertIn(f"failed: scripts/tool.sh scan-weakened-tests --base {existing} --head {head}", result.stderr)
+        self.assertNotIn(f"failed: scripts/tool.sh scan-weakened-tests --base {self.base}", result.stderr)
         self.assertEqual(self.ran(), ["test-select-tests.py", "verify-receipts.py admit"])
 
     def test_the_pushed_tip_and_not_the_checkout_is_scanned(self):
@@ -1072,7 +1072,7 @@ class PrePushChecks(unittest.TestCase):
         result = self.push(head, budget)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("blocks budget-lowered:crates/plain.rs SEEDS at line 1: 12 -> 11", result.stderr)
-        self.assertIn(f"failed: scripts/scan-weakened-tests.py --base {budget} --head {head}", result.stderr)
+        self.assertIn(f"failed: scripts/tool.sh scan-weakened-tests --base {budget} --head {head}", result.stderr)
         self.assertEqual(self.ran(), [])
 
     def test_an_inherited_step_summary_is_left_alone(self):
@@ -1139,7 +1139,7 @@ class PrePushChecks(unittest.TestCase):
         head = self.commit({"scripts/test-inventory.json": "not json"})
         result = self.push(head, self.base)
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn(f"failed: scripts/scan-weakened-tests.py --base {self.base} --head {head}", result.stderr)
+        self.assertIn(f"failed: scripts/tool.sh scan-weakened-tests --base {self.base} --head {head}", result.stderr)
         self.assertEqual(self.ran(), ["test-select-tests.py", "verify-receipts.py admit"])
 
     def test_an_acknowledged_ignore_of_an_existing_test_passes_the_push(self):

@@ -643,7 +643,8 @@
         "doc:kestrike_tools",
         "kestrike_tools",
         "fixture_writers",
-        "ownership"
+        "ownership",
+        "scan_weakened_tests"
       ]
     },
     "source-anchors": {

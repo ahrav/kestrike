@@ -458,7 +458,7 @@ fn an_unknown_tool_exits_2() {
     assert_eq!(result.status.code(), Some(2));
     assert_eq!(
         stderr(&result),
-        "kestrike-tools: no tool is named check; the tools are escrow_fixtures, gate_fixtures, marklog_fixtures\n"
+        "kestrike-tools: no tool is named check; the tools are escrow_fixtures, gate_fixtures, marklog_fixtures, scan-weakened-tests\n"
     );
 }
 
