@@ -58,17 +58,32 @@ pub fn int(value: &Value) -> Result<Integer, String> {
         Some(b'+') => (false, &trimmed[1..]),
         _ => (false, trimmed),
     };
-    if body.starts_with('_') || body.ends_with('_') || body.contains("__") {
+    let bytes = body.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() {
+        let joins =
+            bytes[end] == b'_' && end > 0 && bytes.get(end + 1).is_some_and(u8::is_ascii_digit);
+        if !bytes[end].is_ascii_digit() && !joins {
+            break;
+        }
+        end += 1;
+    }
+    if bytes.get(end) == Some(&b'_') {
         return Err(refused());
     }
-    let digits = body.replace('_', "");
-    if digits.len() > MAX_INTEGER_DIGITS {
+    let run = bytes[..end]
+        .iter()
+        .filter(|byte| byte.is_ascii_digit())
+        .count();
+    if run > MAX_INTEGER_DIGITS {
         return Err(format!(
-            "a string of {} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion",
-            digits.len()
+            "a string of {run} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion"
         ));
     }
-    Integer::from_digits(negative, &digits).ok_or_else(refused)
+    if end < bytes.len() || end == 0 {
+        return Err(refused());
+    }
+    Integer::from_digits(negative, &body.replace('_', "")).ok_or_else(refused)
 }
 
 /// `int_space` holds for the code points `int()` strips: ASCII space, tab, line feed, vertical tab, form

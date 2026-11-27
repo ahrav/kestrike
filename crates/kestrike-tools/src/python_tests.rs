@@ -110,7 +110,7 @@ fn int_truncates_a_finite_float_toward_zero() {
 
 #[test]
 fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
-    let rows: [(&str, String, Option<&str>); 6] = [
+    let rows: [(&str, String, Option<&str>); 10] = [
         (
             "int('\\x1c12') raises ValueError",
             "\u{1c}12".to_owned(),
@@ -127,6 +127,26 @@ fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
         (
             "int('1_' * 2150 + '1') has 2151 digits",
             format!("{}1", "1_".repeat(2150)),
+            Some("1"),
+        ),
+        (
+            "int('ab' * 3000) raises ValueError",
+            "ab".repeat(3000),
+            None,
+        ),
+        (
+            "int('1' * 4300 + 'x') raises ValueError",
+            format!("{}x", "1".repeat(4300)),
+            None,
+        ),
+        (
+            "int('1' * 4301 + '_') raises ValueError",
+            format!("{}_", "1".repeat(4301)),
+            None,
+        ),
+        (
+            "int(' ' + '1' * 4300 + ' ')",
+            format!(" {} ", "1".repeat(4300)),
             Some("1"),
         ),
     ];
@@ -146,4 +166,20 @@ fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
         Some(Value::Float(1.5)),
         "{expression}"
     );
+}
+
+#[test]
+fn int_reports_the_digit_limit_only_for_a_run_of_digits_past_it() {
+    #[rustfmt::skip]
+    let rows: [(&str, String, bool); 5] = [
+        ("int('1' * 4301 + 'x') raises 'Exceeds the limit (4300)'", format!("{}x", "1".repeat(4301)), true),
+        ("int('-' + '1' * 4301 + 'x') raises 'Exceeds the limit (4300)'", format!("-{}x", "1".repeat(4301)), true),
+        ("int('x' + '1' * 4301) raises 'invalid literal'", format!("x{}", "1".repeat(4301)), false),
+        ("int('1 ' * 3000) raises 'invalid literal'", "1 ".repeat(3000), false),
+        ("int('1' * 4301 + '__1') raises 'invalid literal'", format!("{}__1", "1".repeat(4301)), false),
+    ];
+    for (expression, given, limit) in rows {
+        let message = int(&Value::String(Text::from(given))).expect_err(expression);
+        assert_eq!(message.contains("limit"), limit, "{expression}: {message}");
+    }
 }

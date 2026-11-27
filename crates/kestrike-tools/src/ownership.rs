@@ -182,7 +182,14 @@ impl fmt::Display for PrivateError {
     }
 }
 
-impl std::error::Error for PrivateError {}
+impl std::error::Error for PrivateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::Shared(_) => None,
+        }
+    }
+}
 
 impl From<PathError> for PrivateError {
     fn from(error: PathError) -> Self {

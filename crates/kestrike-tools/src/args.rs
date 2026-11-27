@@ -118,10 +118,14 @@ impl<'t> Reader<'t> {
             .iter()
             .flat_map(|option| option.names.iter().copied())
             .collect();
+        assert!(
+            options.iter().all(|option| !option.names.is_empty()),
+            "each option has a name"
+        );
         for (at, name) in names.iter().enumerate() {
             assert!(
-                name.starts_with('-') && name.len() >= 2,
-                "the option name {name} starts with a dash"
+                name.starts_with('-') && name.len() >= 2 && *name != "--",
+                "the option name {name} starts with a dash and differs from --"
             );
             assert!(
                 !names[..at].contains(name),
