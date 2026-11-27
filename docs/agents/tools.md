@@ -81,11 +81,13 @@ The build prints nothing unless it fails. Cargo's fingerprint decides whether it
 Cargo's lock on `target/tools` makes a second caller wait for the first; that wait has no limit of its
 own, so the caller's deadline counts it. The launcher keeps no record of its own of a current binary and
 compares no file time: each call resolves the pinned toolchain, runs the one `cargo build` and starts the
-binary that build left, and a failed build starts none. Cargo's lock covers the build alone: where two
-calls at once in one checkout build different binaries for the same host, either can start the binary
-the other's build left. The fingerprint compares file times: a source changed under an older time keeps
-the old binary until `target/tools` is removed. A first build in a clone writes the untracked
-`Cargo.lock`.
+binary that build left, and a failed build starts none. Cargo's lock orders the builds of two calls at
+once in one checkout and covers the build alone. Where the two builds differ for the same host, the call
+whose build ended first can start the binary the other's build left, and the call whose build ended last
+starts its own. Two builds differ where the calls' `CARGO_HOME`, `HOME` or `RUSTUP_HOME` differ, or where
+the sources are edited between the two builds. The fingerprint compares file times: a source changed
+under an older time keeps the old binary until `target/tools` is removed. A first build in a clone writes
+the untracked `Cargo.lock`.
 
 The build reads Cargo configuration from the checkout, from each directory above it and from `CARGO_HOME`,
 as a script was read from the checkout, so a checkout that another user can write, or one below a
