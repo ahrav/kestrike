@@ -1,7 +1,6 @@
 //! A GenMC case build compiles the kernel package's files and the production files they include by
 //! `#[path]`; [`package_sources`] lists them. A transcription check compares Rust texts in their
 //! [`normalized`] form and finds an item's body by its header with [`bodies`].
-//! `scripts/judge-genmc.py` holds the same rules for its own callers.
 //!
 //! Offsets are byte offsets. [`read_text`] decodes a file as UTF-8 and reads `\r\n` and a lone `\r` as
 //! `\n`. [`walk`] lists every entry under a directory, hidden entries included, and enters each
