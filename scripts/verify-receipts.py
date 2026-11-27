@@ -145,7 +145,7 @@ evidence, `ci` aside, or it is `unbound-input`; a cargo lane's is derived
 here and a checker lane's by its judge, which re-judges the recorded
 checker output, a profiled one under the credited profile, so a PR receipt
 never credits the scheduled domain), admits the catalog, then
-judges every record of the job and module (a `scheduled` GenMC or Kani
+judges every record of the job and module (a `scheduled` GenMC, Kani or TLC
 receipt also judges the `pr` records, whose cases its run judges) and writes
 `credit.json` beside the
 receipt: credit needs a catalog that `admit`'s record checks and the census
@@ -499,17 +499,20 @@ def derive_checker_receipt(job, module, evidence, revision):
 def credited_modules(job, module):
     """Return the modules whose records a receipt for `module` credits.
 
-    A GenMC, Kani or TLC run judges every test of `profile_cases(module)`, so its receipt also credits each profile
-    whose declared tests that run judges: a `scheduled` receipt credits the `pr` records, and a `pr` receipt
-    never credits the scheduled domain. Every other lane credits its own module.
+    A GenMC, Kani or TLC run judges every test of `profile_cases(module)`, so its receipt credits its own profile
+    and each declared profile whose tests that run judges: a `scheduled` receipt credits the `pr` records, and a
+    `pr` receipt never credits the scheduled domain. The TLC declaration lists a tier only when the tier holds
+    cases, so the TLC profiles are the runner's `PROFILES`; the GenMC and Kani profiles are the declaration's. A
+    profile the lane lacks credits only itself, as every other lane's module does.
     """
     if job not in PROFILED:
         return {module}
     expected = checker_declaration(job)
-    if module not in expected["profiles"]:
+    profiles = judge_call("tlc", lambda judge: judge.runner().PROFILES) if job == "tlc" else expected["profiles"]
+    if module not in profiles:
         return {module}
     judged = set(judge_call(job, lambda judge: judge.profile_cases(expected, module)))
-    return {name for name, tests in expected["profiles"].items() if set(tests) <= judged}
+    return {module} | {name for name, tests in expected["profiles"].items() if set(tests) <= judged}
 
 
 def read_json(path):

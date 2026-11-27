@@ -1715,8 +1715,17 @@ class VerifyReceipts(unittest.TestCase):
         self.assertEqual(verify.credited_modules("verus", None), {None})
 
     def test_a_scheduled_tlc_receipt_credits_the_pr_records_and_a_pr_receipt_its_own(self):
-        self.assertEqual(verify.credited_modules("tlc", "scheduled"), {"scheduled"})
+        """The TLC declaration lists the `pr` tier alone, and the runner's `scheduled` profile judges every `pr`
+        case, so a `scheduled` receipt judges the `pr` records. A profile the runner lacks credits no record."""
+        self.assertEqual(verify.credited_modules("tlc", "scheduled"), {"pr", "scheduled"})
         self.assertEqual(verify.credited_modules("tlc", "pr"), {"pr"})
+        self.assertEqual(verify.credited_modules("tlc", "nightly"), {"nightly"})
+        receipt = {"job": "tlc", "module": "scheduled", "revision": REVISION, "completion": "completed", "inputs": {},
+                   "selection": {"credited": True}}
+        records, refusals = verify.credit(CATALOG, receipt, "tlc", "scheduled", REVISION, str(self.dir), INVENTORY)
+        self.assertEqual([r["id"] for r in records], [r["id"] for r in CATALOG["records"] if r["job"] == "tlc"])
+        self.assertTrue(records)
+        self.assertNotIn("uncovered-lane", {r["code"] for r in refusals})
 
     def test_a_scheduled_genmc_receipt_credits_every_record_its_run_judges(self):
         evidence = self.genmc_evidence(profile="scheduled")
