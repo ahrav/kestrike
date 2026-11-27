@@ -7,6 +7,7 @@ pub mod args;
 pub mod classes;
 pub mod fixtures;
 pub mod git;
+pub mod host_stop;
 pub mod json;
 pub mod ownership;
 pub mod paths;

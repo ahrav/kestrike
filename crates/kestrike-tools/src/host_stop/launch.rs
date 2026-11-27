@@ -1,0 +1,288 @@
+//! The one `aws` child of a call, cut at a deadline on the monotonic clock.
+//!
+//! [`launch`] finds `aws` as the first executable regular file named so in a directory of the given
+//! `PATH` (an empty entry is the working directory) and starts it with the call's arguments, then
+//! `--no-paginate --output json --cli-read-timeout N --cli-connect-timeout N`, N the cut in whole
+//! seconds rounded up and at least 1. The child runs under the given environment alone, plus
+//! `AWS_PAGER` empty, `AWS_CLI_AUTO_PROMPT=off`, `AWS_IGNORE_CONFIGURED_ENDPOINT_URLS=true` and, for a
+//! call without retries, `AWS_MAX_ATTEMPTS=1` and `AWS_RETRY_MODE=standard`. Its standard input is
+//! `/dev/null`, and it stays in the tool's process group. A thread reads each of its two outputs.
+//!
+//! The cut counts from the return of the spawn. The wait reads the child, both outputs and the
+//! [`Record`] at least once a [`SLICE`], and ends when the child has exited and both outputs have
+//! closed. At the cut, or at a read of the record that raises, the child alone gets SIGKILL and is
+//! reaped, with no bound on the reap, and the readers stop keeping the bytes they read.
+
+use std::ffi::{OsStr, OsString};
+use std::fmt;
+use std::fs;
+use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::PathBuf;
+use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+use super::record::{Interrupted, Record, SLICE};
+use crate::text::strip_str;
+
+/// The program a call starts, found on the given `PATH`.
+pub const AWS: &str = "aws";
+
+/// The characters of a failed child's standard error that its failed call keeps.
+const TAIL: usize = 400;
+
+/// One call: the arguments after `aws`, whether the CLI's own retries apply, the cut, and the
+/// environment the child runs under, a later entry of one name replacing an earlier one.
+#[derive(Clone, Copy, Debug)]
+pub struct Call<'a> {
+    pub argv: &'a [&'a str],
+    pub retry: bool,
+    pub cut: Duration,
+    pub env: &'a [(OsString, OsString)],
+}
+
+/// A call whose outcome is unknown, with its sentence: `<two words> gave no answer: <reason>`, or
+/// `<two words> exited <code>: <tail>`, the two words the call's first two arguments, the code
+/// negative for a child a signal ended, and the tail the last 400 characters of the child's standard
+/// error stripped of Python's whitespace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallFailed(String);
+
+impl CallFailed {
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for CallFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for CallFailed {}
+
+/// Why a call returned no output.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ended {
+    Failed(CallFailed),
+    Interrupted(Interrupted),
+}
+
+type Reader = JoinHandle<io::Result<Vec<u8>>>;
+
+/// Runs the call's `aws` child as the module states and returns its standard output, read as UTF-8
+/// with `\r\n` and `\r` as `\n`. A read of the record that raises before the child would start ends
+/// the call with no process started.
+///
+/// # Errors
+///
+/// [`Ended::Interrupted`] for a signal the record raised; [`Ended::Failed`] for no `aws` on the
+/// `PATH`, a start, a reader thread, a wait or a read that fails, output other than UTF-8, the cut,
+/// or an exit other than 0.
+pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
+    let what = call
+        .argv
+        .iter()
+        .take(2)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let no_answer = |reason: &dyn fmt::Display| {
+        Ended::Failed(CallFailed(format!("{what} gave no answer: {reason}")))
+    };
+    record.read().map_err(Ended::Interrupted)?;
+    let Some(program) = find(call.env) else {
+        return Err(no_answer(&"no directory of PATH holds an executable aws"));
+    };
+    let cut = whole_seconds(call.cut).to_string();
+    let mut command = Command::new(program);
+    command
+        .arg0(AWS)
+        .args(call.argv)
+        .args([
+            "--no-paginate",
+            "--output",
+            "json",
+            "--cli-read-timeout",
+            &cut,
+        ])
+        .args(["--cli-connect-timeout", &cut])
+        .env_clear()
+        .envs(call.env.iter().map(|(name, value)| (name, value)))
+        .env("AWS_PAGER", "")
+        .env("AWS_CLI_AUTO_PROMPT", "off")
+        .env("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS", "true");
+    if !call.retry {
+        command
+            .env("AWS_MAX_ATTEMPTS", "1")
+            .env("AWS_RETRY_MODE", "standard");
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| no_answer(&error))?;
+    let started = Instant::now();
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let readers = start_readers(&mut child, &abandoned);
+    let (out, err) = match readers {
+        Ok(readers) => readers,
+        Err(error) => {
+            stop(&mut child, None);
+            abandoned.store(true, Ordering::SeqCst);
+            return Err(no_answer(&error));
+        }
+    };
+    let status = match wait(record, &mut child, [&out, &err], started, call.cut) {
+        Ok(status) => status,
+        Err(end) => {
+            abandoned.store(true, Ordering::SeqCst);
+            return Err(match end {
+                Waited::Raised(raised) => Ended::Interrupted(raised),
+                Waited::Cut => no_answer(&format_args!("timed out after {:?}", call.cut)),
+                Waited::Failed(error) => no_answer(&error),
+            });
+        }
+    };
+    let decoded = joined(out).and_then(|stdout| Ok((stdout, joined(err)?)));
+    let (stdout, stderr) = decoded.map_err(|error| no_answer(&error))?;
+    let code = exit_code(status);
+    if code != 0 {
+        let stderr = strip_str(&stderr);
+        let start = stderr
+            .char_indices()
+            .rev()
+            .nth(TAIL - 1)
+            .map_or(0, |(at, _)| at);
+        let message = format!("{what} exited {code}: {}", &stderr[start..]);
+        return Err(Ended::Failed(CallFailed(message)));
+    }
+    Ok(stdout)
+}
+
+enum Waited {
+    Raised(Interrupted),
+    Cut,
+    Failed(io::Error),
+}
+
+fn wait(
+    record: &mut Record<'_>,
+    child: &mut Child,
+    readers: [&Reader; 2],
+    started: Instant,
+    cut: Duration,
+) -> Result<ExitStatus, Waited> {
+    let end = started.checked_add(cut);
+    let mut status = None;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(exited) => status = exited,
+                Err(error) => {
+                    stop(child, status);
+                    return Err(Waited::Failed(error));
+                }
+            }
+        }
+        if let Some(status) = status
+            && readers.iter().all(|reader| reader.is_finished())
+        {
+            return Ok(status);
+        }
+        if let Err(raised) = record.read() {
+            stop(child, status);
+            return Err(Waited::Raised(raised));
+        }
+        let now = Instant::now();
+        let left = end.map_or(SLICE, |end| end.saturating_duration_since(now));
+        if left.is_zero() {
+            stop(child, status);
+            return Err(Waited::Cut);
+        }
+        thread::sleep(left.min(SLICE));
+    }
+}
+
+/// Kills a child that has not been reaped with SIGKILL and reaps it.
+fn stop(child: &mut Child, status: Option<ExitStatus>) {
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn start_readers(child: &mut Child, abandoned: &Arc<AtomicBool>) -> io::Result<(Reader, Reader)> {
+    let (stdout, stderr): (Option<ChildStdout>, Option<ChildStderr>) =
+        (child.stdout.take(), child.stderr.take());
+    let out = read_all(stdout, Arc::clone(abandoned))?;
+    let err = read_all(stderr, Arc::clone(abandoned))?;
+    Ok((out, err))
+}
+
+/// A thread that reads `stream` to its end; once `abandoned` holds, the thread returns at its next
+/// read and drops the bytes.
+fn read_all(
+    stream: Option<impl Read + Send + 'static>,
+    abandoned: Arc<AtomicBool>,
+) -> io::Result<Reader> {
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        let Some(mut stream) = stream else {
+            return Ok(bytes);
+        };
+        let mut buffer = [0; 8192];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => return Ok(bytes),
+                Ok(read) if !abandoned.load(Ordering::SeqCst) => {
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                Ok(_) => return Ok(Vec::new()),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+    })
+}
+
+fn joined(reader: Reader) -> io::Result<String> {
+    let bytes = reader.join().expect("a reader thread returns its bytes")?;
+    let text = String::from_utf8(bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
+}
+
+fn find(env: &[(OsString, OsString)]) -> Option<PathBuf> {
+    let (_, path) = env.iter().rev().find(|(name, _)| name == "PATH")?;
+    path.as_bytes()
+        .split(|&byte| byte == b':')
+        .map(|directory| match directory {
+            b"" => PathBuf::from("."),
+            directory => PathBuf::from(OsStr::from_bytes(directory)),
+        })
+        .map(|directory| directory.join(AWS))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+        })
+}
+
+fn whole_seconds(cut: Duration) -> u64 {
+    cut.as_secs()
+        .saturating_add(u64::from(cut.subsec_nanos() > 0))
+        .max(1)
+}
+
+fn exit_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| -signal))
+        .expect("a reaped child has an exit code or a signal")
+}
