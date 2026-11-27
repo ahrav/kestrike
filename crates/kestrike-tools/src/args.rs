@@ -40,15 +40,20 @@ pub enum Given {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Values(Vec<(&'static str, Given)>);
+pub struct Values(Vec<(&'static [&'static str], Given)>);
 
 impl Values {
+    /// Returns what the command line gave for the row that lists `name`; any of a row's names selects it.
+    ///
+    /// # Panics
+    ///
+    /// `get` panics when no row of the option table lists `name`.
+    #[track_caller]
     pub fn get(&self, name: &str) -> &Given {
-        self.0
-            .iter()
-            .find(|(first, _)| *first == name)
-            .map(|(_, given)| given)
-            .unwrap_or_else(|| panic!("the option table names {name}"))
+        match self.0.iter().find(|(names, _)| names.contains(&name)) {
+            Some((_, given)) => given,
+            None => panic!("the option table names {name}"),
+        }
     }
 }
 
@@ -104,9 +109,10 @@ enum HelpRefusal<'a> {
 impl<'t> Reader<'t> {
     /// # Panics
     ///
-    /// `new` panics on any violation of these requirements: each option name starts with `-`, spans at least
-    /// two bytes, and occurs exactly once; the table holds exactly one `Kind::Help` row;
-    /// `-h` on the help row is the only permitted short name.
+    /// `new` panics on any violation of these requirements: each row lists at least one name; each option
+    /// name starts with `-`, spans at least two bytes, differs from `--`, and occurs exactly once in the
+    /// table; the table holds exactly one `Kind::Help` row; `-h`, permitted on the help row alone, is the
+    /// only short name.
     pub fn new(
         tool: &'t str,
         usage: &'t str,
@@ -264,7 +270,7 @@ impl<'t> Reader<'t> {
             let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
             return self.refuse(format!("unrecognized arguments: {}", shown.join(" ")));
         }
-        let names = self.options.iter().map(|option| option.names[0]);
+        let names = self.options.iter().map(|option| option.names);
         Parsed::Run(Values(names.zip(values).collect()))
     }
 

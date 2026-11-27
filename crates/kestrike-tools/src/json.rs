@@ -9,6 +9,7 @@ pub use crate::text::Text;
 /// The deepest nesting of arrays and objects the reader takes.
 pub const MAX_DEPTH: usize = 1000;
 
+/// The most decimal digits an integer token of [`parse`] and an [`Integer`] hold.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -22,7 +23,8 @@ pub enum Value {
     Null,
 }
 
-/// An integer of any length, held as its sign and its decimal digits without leading zeros.
+/// An integer of at most [`MAX_INTEGER_DIGITS`] decimal digits, held as its sign and its digits without
+/// leading zeros, so each writer emits only integers that [`parse`] reads back.
 ///
 /// Zero has `negative == false` and `digits == "0"`, so each integer has one representation and [`Ord`]
 /// compares integers numerically.
@@ -34,13 +36,16 @@ pub struct Integer {
 
 impl Integer {
     /// The integer that `negative` and the ASCII decimal `digits` spell, or `None` when `digits` is empty or
-    /// holds a byte other than a digit. `from_digits` strips leading zeros and maps all-zero digits to zero
-    /// whatever `negative` says.
+    /// holds a byte other than a digit, or when more than [`MAX_INTEGER_DIGITS`] digits remain after
+    /// `from_digits` strips leading zeros. All-zero digits give zero whatever `negative` says.
     pub fn from_digits(negative: bool, digits: &str) -> Option<Self> {
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
         let digits = digits.trim_start_matches('0');
+        if digits.len() > MAX_INTEGER_DIGITS {
+            return None;
+        }
         Some(if digits.is_empty() {
             Self {
                 negative: false,

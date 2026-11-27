@@ -81,6 +81,28 @@ fn integers_keep_their_digits_up_to_the_conversion_limit() {
 }
 
 #[test]
+fn an_integer_holds_no_more_digits_than_the_reader_takes() {
+    let digits = "9".repeat(4300);
+    for negative in [false, true] {
+        let sign = if negative { "-" } else { "" };
+        let held = Integer::from_digits(negative, &format!("000{digits}")).expect("4,300 digits");
+        let value = Value::Array(vec![Value::Integer(held)]);
+        let expression = format!("json.dumps([int('{sign}' + '9' * 4300)])");
+        assert_eq!(dump(&value), format!("[{sign}{digits}]\n"), "{expression}");
+        assert_eq!(
+            indented(&value).expect("an integer writes"),
+            format!("[\n  {sign}{digits}\n]"),
+            "{expression}"
+        );
+        assert_eq!(
+            Integer::from_digits(negative, &format!("{digits}9")),
+            None,
+            "int('{sign}' + '9' * 4301) raises ValueError"
+        );
+    }
+}
+
+#[test]
 fn each_form_python_refuses_is_refused_with_its_reason() {
     #[rustfmt::skip]
     let refused: &[(&str, usize, &str)] = &[
@@ -118,17 +140,28 @@ fn each_form_python_refuses_is_refused_with_its_reason() {
 
 #[test]
 fn nesting_past_the_limit_is_refused_without_exhausting_the_stack() {
-    let deep = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-    assert!(matches!(parse(&deep(MAX_DEPTH)), Ok(Value::Array(_))));
-    let error = parse(&deep(MAX_DEPTH + 1)).expect_err("one level past the limit");
-    assert_eq!(error.reason(), "nesting deeper than the reader takes");
+    let arrays = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    let objects = |depth: usize| format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth));
+    assert!(matches!(parse(&arrays(1000)), Ok(Value::Array(_))));
+    assert!(matches!(parse(&objects(1000)), Ok(Value::Object(_))));
+    for (text, offset) in [(arrays(1001), 1000), (objects(1001), 5000)] {
+        let error = parse(&text).expect_err("one level past the limit");
+        assert_eq!(
+            (error.offset(), error.reason()),
+            (offset, "nesting deeper than the reader takes")
+        );
+    }
     let error = parse(&"[".repeat(200_000)).expect_err("200,000 open brackets");
     assert_eq!(
         (error.offset(), error.reason()),
-        (MAX_DEPTH, "nesting deeper than the reader takes")
+        (1000, "nesting deeper than the reader takes")
     );
     let error = parse(&"{\"a\":".repeat(200_000)).expect_err("200,000 open objects");
-    assert_eq!(error.reason(), "nesting deeper than the reader takes");
+    assert_eq!(
+        (error.offset(), error.reason()),
+        (5000, "nesting deeper than the reader takes")
+    );
+    assert_eq!(MAX_DEPTH, 1000);
 }
 
 #[test]
@@ -172,4 +205,36 @@ fn integers_order_by_sign_then_magnitude() {
     integers.sort();
     let sorted: Vec<String> = integers.iter().map(ToString::to_string).collect();
     assert_eq!(sorted, ["-10", "-2", "0", "0", "2", "9", "10", "100"]);
+}
+
+#[test]
+fn an_escaped_surrogate_pair_joins_and_other_surrogates_stand_alone() {
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &[u32])] = &[
+        ("[hex(ord(c)) for c in json.loads(r'\"\\ud800\\udc00\"')] == ['0x10000']", r#""\ud800\udc00""#, &[0x10000]),
+        ("[hex(ord(c)) for c in json.loads(r'\"\\udbff\\udfff\"')] == ['0x10ffff']", r#""\udbff\udfff""#, &[0x10_ffff]),
+        ("[hex(ord(c)) for c in json.loads(r'\"\\udc00\\ud800\"')] == ['0xdc00', '0xd800']", r#""\udc00\ud800""#, &[0xdc00, 0xd800]),
+        ("[hex(ord(c)) for c in json.loads(r'\"\\ud800\\u0041\"')] == ['0xd800', '0x41']", r#""\ud800\u0041""#, &[0xd800, 0x41]),
+    ];
+    for &(python, text, codes) in rows {
+        let Ok(Value::String(found)) = parse(text) else {
+            panic!("{python}");
+        };
+        assert_eq!(found.code_points().collect::<Vec<u32>>(), codes, "{python}");
+    }
+}
+
+#[test]
+fn the_digit_limit_counts_digits_and_leaves_floats_alone() {
+    let digits = "9".repeat(4300);
+    let expression = "json.loads('-' + '9' * 4300) == -int('9' * 4300)";
+    let Ok(Value::Integer(found)) = parse(&format!("-{digits}")) else {
+        panic!("{expression}");
+    };
+    assert_eq!(found.to_string(), format!("-{digits}"), "{expression}");
+    let expression = "json.loads('9' * 4301 + '.5') == float('inf')";
+    assert!(
+        matches!(parse(&format!("{digits}9.5")), Ok(Value::Float(value)) if value == f64::INFINITY),
+        "{expression}"
+    );
 }

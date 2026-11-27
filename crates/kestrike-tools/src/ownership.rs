@@ -120,13 +120,12 @@ fn dirname(path: &[u8]) -> Vec<u8> {
 ///
 /// Reading a link fails.
 pub fn traversed(path: &Path) -> Result<Vec<PathBuf>, PathError> {
-    let lineage = lineage(path);
-    let full = lineage[0].as_os_str().as_bytes();
-    let mut pending: std::collections::VecDeque<Vec<u8>> = full
+    let bytes = path.as_os_str().as_bytes();
+    let mut pending: std::collections::VecDeque<Vec<u8>> = bytes
         .split(|&byte| byte == b'/')
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && *name != b".")
         .map(<[u8]>::to_vec)
-        .skip(usize::from(!full.starts_with(b"/")))
+        .skip(usize::from(!bytes.starts_with(b"/")))
         .collect();
     let mut current = b"/".to_vec();
     let mut passed = Vec::new();
@@ -215,8 +214,9 @@ fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
 
 /// `make_private` creates each member of `path`'s lineage for which `status` returns `Ok(None)`,
 /// outermost first, as a directory of mode 0700 under the umask, then refuses with
-/// [`PrivateError::Shared`] when [`shared_directories`] returns a member. Existing directories retain their
-/// modes and owners.
+/// [`PrivateError::Shared`] when [`shared_directories`] returns a member. An existing member, a file or
+/// another non-directory included, keeps its type, mode and owner, so `Ok(())` shows that no member is
+/// shared and does not show that `path` is a directory.
 ///
 /// # Errors
 ///
@@ -249,10 +249,11 @@ pub fn make_private(path: &Path) -> Result<(), PrivateError> {
     }
 }
 
-/// `foreign_toolchain_paths` returns flagged Cargo and rustup configuration paths under `root`: first what
-/// [`shared_directories`] returns for `root`, then, for each member of the lineage and each name of
-/// [`TOOLCHAIN_FILES`], the entry when its `lstat` succeeds and its `stat` fails, or when the entry or its
-/// target has an owner other than this user, root included, the target has a [`SHARED`] bit, or a
+/// `foreign_toolchain_paths` returns the flagged Cargo and rustup configuration entries of `root` and of
+/// each of its lexical parents: first what [`shared_directories`] returns for `root`, then, for each member
+/// of the lineage from `root` outward and each name of [`TOOLCHAIN_FILES`] in order, the entry when its
+/// `lstat` succeeds and its `stat` fails, or when the entry or its target has an owner other than the
+/// process's real uid (a root-owned entry or target is flagged), the target has a [`SHARED`] bit, or a
 /// directory [`traversed`] returns for the entry is itself shared.
 ///
 /// # Errors

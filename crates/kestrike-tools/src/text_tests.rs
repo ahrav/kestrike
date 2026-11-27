@@ -166,6 +166,18 @@ fn an_undecodable_byte_reads_as_a_surrogate_and_writes_back_as_the_byte() {
         None,
         "os.fsencode('\\ud800') raises UnicodeEncodeError"
     );
+    for code in [0xdc00, 0xdc7f, 0xdd00, 0xdfff] {
+        assert_eq!(
+            text(&[code]).to_os(),
+            None,
+            "os.fsencode(chr({code:#x})) raises UnicodeEncodeError"
+        );
+    }
+    assert_eq!(
+        text(&[0xdc80, 0xdcff]).to_os(),
+        Some(OsString::from_vec(b"\x80\xff".to_vec())),
+        "os.fsencode('\\udc80\\udcff') == b'\\x80\\xff'"
+    );
     assert_eq!(Text::from("\u{e9}").to_str(), Some("\u{e9}"));
     assert_eq!(text(&[0x61, 0xdcff]).len(), 2);
 }

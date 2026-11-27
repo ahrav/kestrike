@@ -141,3 +141,119 @@ fn a_negative_number_in_other_decimal_digits_reads_as_an_option() {
         "{PARSER}; {expression} gives {python}; the reader takes ASCII digits"
     );
 }
+
+#[test]
+fn every_name_of_a_row_selects_its_value() {
+    const NAMED: [Opt; 2] = [
+        Opt {
+            names: &["-h", "--help"],
+            kind: Kind::Help,
+        },
+        value(&["--out", "--output"], given),
+    ];
+    let parser = "p = argparse.ArgumentParser(prog='tool', allow_abbrev=False); \
+        p.add_argument('--out', '--output', type=given)";
+    let reader = Reader::new("tool", "usage: tool [options]", "help\n", false, &NAMED);
+    for args in [
+        ["--output", "a", "--out", "b"],
+        ["--out", "a", "--output", "b"],
+    ] {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        let Parsed::Run(values) = reader.parse(&args) else {
+            panic!("{parser}; p.parse_args({args:?}) gives Namespace(out='b')");
+        };
+        for name in ["--out", "--output"] {
+            assert_eq!(
+                values.get(name),
+                &Given::Value(OsString::from("b")),
+                "{parser}; p.parse_args({args:?}) gives Namespace(out='b')"
+            );
+        }
+        assert_eq!(values.get("--help"), &Given::Absent);
+    }
+    let Parsed::Run(values) = reader.parse(&[]) else {
+        panic!("{parser}; p.parse_args([]) gives Namespace(out=None)");
+    };
+    assert_eq!(values.get("--output"), &Given::Absent);
+}
+
+#[test]
+#[should_panic(expected = "the option table names --missing")]
+fn a_name_no_row_lists_panics() {
+    let Parsed::Run(values) = read(&[]) else {
+        panic!("{PARSER}; p.parse_args([]) runs");
+    };
+    values.get("--missing");
+}
+
+const HELP: Opt = Opt {
+    names: &["-h", "--help"],
+    kind: Kind::Help,
+};
+
+fn table(options: &[Opt]) {
+    Reader::new("tool", "usage", "help\n", true, options);
+}
+
+#[test]
+#[should_panic(expected = "each option has a name")]
+fn a_row_without_a_name_is_refused() {
+    table(&[HELP, value(&[], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the option name base starts with a dash")]
+fn a_name_without_a_dash_is_refused() {
+    table(&[HELP, value(&["base"], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the option name - starts with a dash")]
+fn a_one_byte_name_is_refused() {
+    table(&[HELP, value(&["-"], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the option name -- starts with a dash and differs from --")]
+fn the_name_double_dash_is_refused() {
+    table(&[HELP, value(&["--"], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the option name --base appears once")]
+fn a_repeated_name_is_refused() {
+    table(&[HELP, value(&["--base"], any), value(&["--base"], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the table holds one help row")]
+fn a_table_without_a_help_row_is_refused() {
+    table(&[value(&["--base"], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the table holds one help row")]
+fn a_table_with_two_help_rows_is_refused() {
+    table(&[
+        HELP,
+        Opt {
+            names: &["--usage"],
+            kind: Kind::Help,
+        },
+    ]);
+}
+
+#[test]
+#[should_panic(expected = "the help row holds the one short name, -h; -b breaks it")]
+fn a_short_name_other_than_h_is_refused() {
+    table(&[HELP, value(&["-b", "--base"], any)]);
+}
+
+#[test]
+#[should_panic(expected = "the help row holds the one short name, -h; -x breaks it")]
+fn a_short_name_other_than_h_on_the_help_row_is_refused() {
+    table(&[Opt {
+        names: &["-x", "--help"],
+        kind: Kind::Help,
+    }]);
+}

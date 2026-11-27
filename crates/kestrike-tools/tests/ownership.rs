@@ -1,7 +1,8 @@
-use std::fs;
+use std::fs::{self, DirBuilder};
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kestrike_tools::ownership::{
     PrivateError, foreign_toolchain_paths, make_private, shared_directories, traversed,
@@ -26,31 +27,32 @@ struct Layout {
 }
 
 impl Layout {
+    /// `new` checks the scratch directory's lineage with [`shared_directories`], against the process's
+    /// real uid, then creates the layout's root with mode 0700 under a fresh name, so no other account
+    /// reaches the shared entries the layout holds. A name that already exists is left as it is and the
+    /// next name is tried.
     fn new(name: &str) -> Self {
         let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-        let uid = fs::metadata(&scratch)
-            .expect("the scratch directory exists")
-            .uid();
-        let shared: Vec<&Path> = scratch
-            .ancestors()
-            .filter(|ancestor| {
-                let status =
-                    fs::metadata(ancestor).expect("an ancestor of the scratch directory exists");
-                ![uid, 0].contains(&status.uid()) || status.mode() & 0o022 != 0
-            })
-            .collect();
         assert_eq!(
             fs::canonicalize(&scratch).ok().as_ref(),
             Some(&scratch),
             "the scratch directory's ancestors hold no link"
         );
+        let shared = shared_directories(&scratch).expect("the scratch lineage reads");
         assert!(
             shared.is_empty(),
             "another user owns or can write {shared:?}; run the tests under a private directory"
         );
-        let base = scratch.join(format!("ownership-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        directory(&base, 0o755);
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let base = loop {
+            let at = NEXT.fetch_add(1, Ordering::Relaxed);
+            let base = scratch.join(format!("ownership-{name}-{}-{at}", std::process::id()));
+            match DirBuilder::new().mode(0o700).create(&base) {
+                Ok(()) => break base,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", base.display()),
+            }
+        };
         let at = |relative: &str| base.join(relative);
         directory(&at("group"), 0o775);
         directory(&at("group/inner"), 0o755);
@@ -58,15 +60,20 @@ impl Layout {
         symlink("group", at("link")).expect("the link is made");
         directory(&at("private"), 0o755);
         symlink("private", at("link2")).expect("the link is made");
+        directory(&at("into"), 0o755);
         directory(&at("into/work"), 0o755);
         symlink("../group/cargo", at("into/.cargo")).expect("the link is made");
+        directory(&at("cfgfile"), 0o755);
         directory(&at("cfgfile/work"), 0o755);
         directory(&at("cfgfile/.cargo"), 0o755);
         file(&at("cfgfile/.cargo/config.toml"), 0o666);
+        directory(&at("cfgdir"), 0o755);
         directory(&at("cfgdir/work"), 0o755);
         directory(&at("cfgdir/.cargo"), 0o777);
+        directory(&at("dangle"), 0o755);
         directory(&at("dangle/work"), 0o755);
         symlink("missing", at("dangle/rust-toolchain")).expect("the link is made");
+        directory(&at("clean"), 0o755);
         directory(&at("clean/work"), 0o755);
         directory(&at("clean/.cargo"), 0o755);
         file(&at("clean/.cargo/config.toml"), 0o644);
@@ -225,6 +232,19 @@ fn make_private_creates_missing_directories_and_refuses_a_shared_one() {
         assert_eq!(mode(&layout.at(path)), python, "{expression}");
     }
     assert!(layout.at("file").is_file(), "(BASE/file).is_file() is True");
+    #[rustfmt::skip]
+    let links: &[(&str, &str, &str, u32)] = &[
+        ("os.readlink(BASE/link2), oct(os.stat(BASE/private).st_mode & 0o7777)", "link2", "private", 0o755),
+        ("os.readlink(BASE/link), oct(os.stat(BASE/group).st_mode & 0o7777)", "link", "group", 0o775),
+    ];
+    for &(expression, link, target, python) in links {
+        assert_eq!(
+            fs::read_link(layout.at(link)).ok(),
+            Some(PathBuf::from(target)),
+            "{expression}"
+        );
+        assert_eq!(mode(&layout.at(target)), python, "{expression}");
+    }
 }
 
 #[test]
@@ -245,6 +265,15 @@ fn make_private_refuses_a_name_a_dangling_link_holds() {
     assert!(
         fs::symlink_metadata(layout.at("dangle/rust-toolchain"))
             .is_ok_and(|status| status.is_symlink())
+    );
+    assert_eq!(
+        fs::read_link(layout.at("dangle/rust-toolchain")).ok(),
+        Some(PathBuf::from("missing")),
+        "os.readlink(BASE/dangle/rust-toolchain) == 'missing'"
+    );
+    assert!(
+        fs::symlink_metadata(layout.at("dangle/missing")).is_err(),
+        "os.path.lexists(BASE/dangle/missing) is False"
     );
 }
 
