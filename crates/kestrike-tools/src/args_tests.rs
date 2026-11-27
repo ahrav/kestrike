@@ -285,3 +285,75 @@ fn a_short_name_other_than_h_on_the_help_row_is_refused() {
         kind: Kind::Help,
     }]);
 }
+
+const REPEATED: [Opt; 3] = [
+    HELP,
+    value(&["--base"], given),
+    Opt {
+        names: &["--plant"],
+        kind: Kind::Repeated { check: given },
+    },
+];
+
+fn repeated(args: &[&str]) -> Parsed {
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &REPEATED,
+    );
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    reader.parse(&args)
+}
+
+/// `p.add_argument('--plant', action='append', default=[], type=given)` keeps each value in order, a repeat
+/// included, in both forms; each value meets the check; `get` reads the last. An option of one value
+/// given twice keeps the last alone.
+#[test]
+fn a_repeated_option_keeps_every_occurrence_in_order() {
+    let Parsed::Run(values) = repeated(&[
+        "--plant",
+        "b",
+        "--base",
+        "w",
+        "--plant=a",
+        "--plant",
+        "b",
+        "--base",
+        "x",
+        "--plant",
+        "c",
+    ]) else {
+        panic!("the arguments read");
+    };
+    let all: Vec<&OsStr> = values
+        .all("--plant")
+        .iter()
+        .map(OsString::as_os_str)
+        .collect();
+    assert_eq!(all, ["b", "a", "b", "c"].map(OsStr::new));
+    assert_eq!(values.get("--plant"), Some(OsStr::new("c")));
+    let all: Vec<&OsStr> = values
+        .all("--base")
+        .iter()
+        .map(OsString::as_os_str)
+        .collect();
+    assert_eq!(all, [OsStr::new("x")]);
+    let Parsed::Run(none) = repeated(&[]) else {
+        panic!("no argument reads");
+    };
+    assert!(none.all("--plant").is_empty());
+    assert_eq!(
+        repeated(&["--plant", "a", "--plant="]),
+        refused("argument --plant: a value")
+    );
+    assert_eq!(
+        repeated(&["--plant=", "--plant", "a"]),
+        refused("argument --plant: a value")
+    );
+    assert_eq!(
+        repeated(&["--plant"]),
+        refused("argument --plant: expected one argument")
+    );
+}

@@ -84,6 +84,28 @@ pub fn blank(text: &str) -> String {
         .collect()
 }
 
+/// The offset `count` code points of `source` before `at`, or 0 when fewer stand there. `at` is a code
+/// point boundary of `source`.
+pub fn back(source: &str, at: usize, count: usize) -> usize {
+    match count.checked_sub(1) {
+        None => at,
+        Some(last) => source[..at]
+            .char_indices()
+            .rev()
+            .nth(last)
+            .map_or(0, |(offset, _)| offset),
+    }
+}
+
+/// The offset `count` code points of `source` after `at`, or the end of `source` when fewer stand there.
+/// `at` is a code point boundary of `source`.
+pub fn ahead(source: &str, at: usize, count: usize) -> usize {
+    source[at..]
+        .char_indices()
+        .nth(count)
+        .map_or(source.len(), |(offset, _)| at + offset)
+}
+
 pub fn code(text: &str) -> String {
     let mut view = String::with_capacity(text.len());
     let mut index = 0;
