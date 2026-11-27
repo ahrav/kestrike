@@ -303,6 +303,13 @@ fn make_private_refuses_a_name_a_dangling_link_holds() {
                 "{expression}"
             );
             assert_eq!(error.path(), layout.at("dangle/rust-toolchain"));
+            let reason = error.error().to_string();
+            let wrapped = PrivateError::Io(error);
+            assert!(std::error::Error::source(&wrapped).is_none());
+            assert_eq!(
+                wrapped.to_string(),
+                format!("{}: {reason}", layout.at("dangle/rust-toolchain").display())
+            );
         }
         found => panic!("{expression}: {found:?}"),
     }

@@ -248,3 +248,23 @@ fn python_len_counts_characters_items_and_members() {
     assert_eq!(len("7"), None);
     assert_eq!(python::len(&Value::Bool(true)), None);
 }
+
+#[test]
+fn int_refuses_a_surrogate_at_an_edge_and_a_string_of_spaces_naming_the_whole_text() {
+    #[rustfmt::skip]
+    let rows: [(&str, &[u32], &str); 4] = [
+        ("int('\\ud800 1') raises ValueError", &[0xd800, 0x20, 0x31], "invalid literal for int() with base 10: '\\ud800 1'"),
+        ("int(' 1\\udc80') raises ValueError", &[0x20, 0x31, 0xdc80], "invalid literal for int() with base 10: ' 1\\udc80'"),
+        ("int('   ') raises ValueError", &[0x20, 0x20, 0x20], "invalid literal for int() with base 10: '   '"),
+        ("int('') raises ValueError", &[], "invalid literal for int() with base 10: ''"),
+    ];
+    for (expression, codes, python) in rows {
+        let text =
+            Text::from_code_points(codes.iter().copied()).expect("each code is at most U+10FFFF");
+        assert_eq!(
+            int(&Value::String(text)),
+            Err(python.to_owned()),
+            "{expression}"
+        );
+    }
+}

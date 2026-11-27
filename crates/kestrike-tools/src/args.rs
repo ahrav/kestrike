@@ -215,49 +215,46 @@ impl<'t> Reader<'t> {
                 continue;
             };
             let option = &self.options[found.option];
-            let value = match (option.kind, found.explicit) {
-                (Kind::Help, Some(explicit)) => match help_explicit(found.string, explicit) {
-                    Ok(()) => None,
-                    Err(HelpRefusal::Ignored(rest)) => {
-                        return self.refuse(format!(
+            let check = match option.kind {
+                Kind::Help => {
+                    let Some(explicit) = found.explicit else {
+                        return Parsed::Help(self.help.to_owned());
+                    };
+                    return match help_explicit(found.string, explicit) {
+                        Ok(()) => Parsed::Help(self.help.to_owned()),
+                        Err(HelpRefusal::Ignored(rest)) => self.refuse(format!(
                             "argument {}: ignored explicit argument {}",
                             option.name(),
                             Text::from_os(OsStr::from_bytes(rest)).repr()
-                        ));
-                    }
-                    Err(HelpRefusal::IndexError) => {
-                        let text = format!(
-                            "{}: argument {}: string index out of range\n",
-                            self.tool,
-                            option.name()
-                        );
-                        return Parsed::Refused { code: 1, text };
-                    }
-                },
-                (Kind::Help, None) => None,
-                (Kind::Value { .. }, Some(explicit)) => Some(explicit),
-                (Kind::Value { .. }, None) => match kinds.get(at + 1) {
-                    Some(Arg::Value) => {
-                        at += 1;
-                        Some(args[at])
-                    }
-                    _ => {
-                        return self
-                            .refuse(format!("argument {}: expected one argument", option.name()));
-                    }
-                },
+                        )),
+                        Err(HelpRefusal::IndexError) => Parsed::Refused {
+                            code: 1,
+                            text: format!(
+                                "{}: argument {}: string index out of range\n",
+                                self.tool,
+                                option.name()
+                            ),
+                        },
+                    };
+                }
+                Kind::Value { check, .. } => check,
+            };
+            let value = match (found.explicit, kinds.get(at + 1)) {
+                (Some(explicit), _) => explicit,
+                (None, Some(Arg::Value)) => {
+                    at += 1;
+                    args[at]
+                }
+                (None, _) => {
+                    return self
+                        .refuse(format!("argument {}: expected one argument", option.name()));
+                }
             };
             at += 1;
-            let Some(value) = value else {
-                return Parsed::Help(self.help.to_owned());
-            };
             values[found.option] = if value == b"--" {
                 Given::Empty
             } else {
                 let value = OsStr::from_bytes(value);
-                let Kind::Value { check, .. } = option.kind else {
-                    unreachable!("a help option returns before it reaches a value");
-                };
                 if let Err(message) = check(&Text::from_os(value)) {
                     return self.refuse(format!("argument {}: {message}", option.name()));
                 }

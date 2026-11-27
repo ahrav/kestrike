@@ -103,6 +103,11 @@ fn long_options_without_prefixes_keep_the_last_value_and_check_each_occurrence()
         ("argument --base: expected one argument", &["--base", "--head", "h"], Outcome::Refused(refused("argument --base: expected one argument"))),
         ("argument --tests: expected one argument", &["--tests", "--"], Outcome::Refused(refused("argument --tests: expected one argument"))),
         ("argument --cargo: expected one argument", &["--cargo", "a b", "--cargo", "-c"], Outcome::Refused(refused("argument --cargo: expected one argument"))),
+        ("{'max_mutants': []}", &["--max-mutants=--"], Outcome::Run(run(&[(3, None)]))),
+        ("{'shard': '-.5'}", &["--shard", "-.5"], Outcome::Run(run(&[(4, Some("-.5"))]))),
+        ("argument --max-mutants: a positive integer", &["--max-mutants", "0", "-h"], Outcome::Refused(refused("argument --max-mutants: a positive integer"))),
+        ("argument --max-mutants: a positive integer", &["--max-mutants", "0", "--base"], Outcome::Refused(refused("argument --max-mutants: a positive integer"))),
+        ("help", &["-hh"], Outcome::Help),
         ("help", &["-h"], Outcome::Help),
         ("help", &["--help"], Outcome::Help),
     ];

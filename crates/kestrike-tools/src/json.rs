@@ -521,23 +521,14 @@ impl std::error::Error for NonFinite {}
 /// `depth` is `None` in the compact layout and the nesting depth of `value` in the indented layout.
 fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), NonFinite> {
     match value {
-        Value::Object(object) => {
+        Value::Object(object) if depth.is_some() => {
             let mut members: Vec<&(Text, Value)> = object.iter().collect();
-            if depth.is_some() {
-                members.sort_by(|left, right| left.0.cmp(&right.0));
-            }
-            write_items(
-                &members,
-                ('{', '}'),
-                depth,
-                out,
-                |(key, member), out, inner| {
-                    write_string(key, out);
-                    out.push_str(if inner.is_some() { ": " } else { ":" });
-                    write(member, out, inner)
-                },
-            )?;
+            members.sort_by(|left, right| left.0.cmp(&right.0));
+            write_items(&members, ('{', '}'), depth, out, |member, out, inner| {
+                write_member(member, out, inner)
+            })?;
         }
+        Value::Object(object) => write_items(&object.0, ('{', '}'), depth, out, write_member)?,
         Value::Array(items) => {
             write_items(items, ('[', ']'), depth, out, |item, out, inner| {
                 write(item, out, inner)
@@ -555,6 +546,16 @@ fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), No
         Value::Null => out.push_str("null"),
     }
     Ok(())
+}
+
+fn write_member(
+    (key, member): &(Text, Value),
+    out: &mut String,
+    inner: Option<usize>,
+) -> Result<(), NonFinite> {
+    write_string(key, out);
+    out.push_str(if inner.is_some() { ": " } else { ":" });
+    write(member, out, inner)
 }
 
 fn write_items<T>(

@@ -102,21 +102,6 @@ pub fn shared_directories(path: &Path) -> Result<Vec<PathBuf>, PathError> {
     Ok(found)
 }
 
-fn dirname(path: &[u8]) -> Vec<u8> {
-    let head = &path[..path
-        .iter()
-        .rposition(|&byte| byte == b'/')
-        .map_or(0, |at| at + 1)];
-    if head.iter().all(|&byte| byte == b'/') {
-        return head.to_vec();
-    }
-    let end = head
-        .iter()
-        .rposition(|&byte| byte != b'/')
-        .map_or(0, |at| at + 1);
-    head[..end].to_vec()
-}
-
 /// `traversed` returns each directory in which resolving an absolute `path` looks a name up, from the root
 /// down. It takes `..` as the lexical parent and replaces each of the first [`MAX_LINKS`] links it meets by
 /// its target's names, from `/` for an absolute target. For a path with no root it drops the first name and
@@ -138,7 +123,10 @@ pub fn traversed(path: &Path) -> Result<Vec<PathBuf>, PathError> {
     let mut links = 0;
     while let Some(part) = pending.pop_front() {
         if part == b".." {
-            current = dirname(&current);
+            // `current` is absolute with single slashes and no trailing slash past the root, so its parent
+            // ends before its last slash, and the parent of `/` and of `/name` is `/`.
+            let last = current.iter().rposition(|&byte| byte == b'/').unwrap_or(0);
+            current.truncate(last.max(1));
             continue;
         }
         passed.push(path_of(&current));
@@ -187,14 +175,9 @@ impl fmt::Display for PrivateError {
     }
 }
 
-impl std::error::Error for PrivateError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::Shared(_) => None,
-        }
-    }
-}
+/// The `Display` text of `Io` is its [`PathError`]'s, which holds the I/O error's text, so the error reports
+/// no `source`.
+impl std::error::Error for PrivateError {}
 
 impl From<PathError> for PrivateError {
     fn from(error: PathError) -> Self {
@@ -339,8 +322,6 @@ impl fmt::Display for PathError {
     }
 }
 
-impl std::error::Error for PathError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
-    }
-}
+/// The `Display` text holds the path and the I/O error's text, so the error reports no `source`;
+/// [`PathError::error`] gives the I/O error itself.
+impl std::error::Error for PathError {}

@@ -44,18 +44,10 @@ pub fn int(value: &Value) -> Result<Integer, String> {
         }
     };
     let refused = || format!("invalid literal for int() with base 10: {}", text.repr());
-    let codes: Vec<u32> = text.code_points().collect();
-    let start = codes
-        .iter()
-        .position(|&code| !int_space(code))
-        .unwrap_or(codes.len());
-    let end = codes
-        .iter()
-        .rposition(|&code| !int_space(code))
-        .map_or(start, |at| at + 1);
-    let trimmed = Text::from_code_points(codes[start..end].iter().copied())
-        .expect("the code points of a text are at most U+10FFFF");
-    let trimmed = trimmed.to_str().ok_or_else(refused)?;
+    let trimmed = text
+        .to_str()
+        .ok_or_else(refused)?
+        .trim_matches(|code: char| int_space(u32::from(code)));
     let (negative, body) = match trimmed.as_bytes().first() {
         Some(b'-') => (true, &trimmed[1..]),
         Some(b'+') => (false, &trimmed[1..]),
