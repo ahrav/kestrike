@@ -1,4 +1,4 @@
-use crate::json::{MAX_DEPTH, MAX_INTEGER_DIGITS, Text, Value, dump, indented, parse};
+use crate::json::{Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, Value, dump, indented, parse};
 
 fn round_trip(text: &str) -> String {
     dump(&parse(text).unwrap_or_else(|error| panic!("{text:?} parses: {error}")))
@@ -158,4 +158,18 @@ fn indented_writes_sorted_keys_two_spaces_deep() {
     }
     let refused = indented(&Value::Float(f64::INFINITY)).expect_err("infinity has no JSON form");
     assert_eq!(refused.value(), f64::INFINITY);
+}
+
+#[test]
+fn integers_order_by_sign_then_magnitude() {
+    let mut integers: Vec<Integer> = ["10", "-2", "9", "0", "-10", "100", "-0", "2"]
+        .iter()
+        .map(|text| match parse(text) {
+            Ok(Value::Integer(integer)) => integer,
+            other => panic!("{text} reads as an integer: {other:?}"),
+        })
+        .collect();
+    integers.sort();
+    let sorted: Vec<String> = integers.iter().map(ToString::to_string).collect();
+    assert_eq!(sorted, ["-10", "-2", "0", "0", "2", "9", "10", "100"]);
 }

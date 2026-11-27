@@ -16,19 +16,29 @@ runs `bash scripts/tool.sh <tool> <arguments>` and changes nothing else.
 
 ## The launcher
 
-`scripts/tool.sh` finds the checkout's top level from its own path, so it runs from any directory and
-leaves the caller's working directory as it is. On every call it:
+`scripts/tool.sh` finds the checkout's top level from its own file, with every link to the file or to a
+directory above it resolved, so it runs from any directory and leaves the caller's working directory as it
+is. The preparation below runs in a subshell, so its working variables stay out of the environment of the
+final step. On every call it:
 
 1. Reads the stable toolchain that `.github/workflows/agent-checks.yml` pins as `STABLE`, and checks
-   that `rustup toolchain list` names it for the host. The launcher installs nothing.
-2. Runs `cargo build` for the `kestrike-tools` binary into `target/tools`, with the top level as the
-   build's working directory, `RUSTUP_TOOLCHAIN` set to the pin and `RUSTUP_AUTO_INSTALL=0`. For this
-   build it clears `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`,
-   every `CARGO_PROFILE_*`, every `CARGO_BUILD_*` except `CARGO_BUILD_JOBS`, every `CARGO_TARGET_*`
-   (`CARGO_TARGET_DIR` included), `RUSTC`, `RUSTDOC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER`, and
-   keeps the rest. A tool is then the same program whatever lane starts it.
+   that `rustup toolchain list` names `<pin>-<host>` as the first word of a line. The launcher installs
+   nothing.
+2. Runs the pinned toolchain's own `cargo`, which `rustup which --toolchain <pin> cargo` names, with
+   `RUSTC` set to the `rustc` beside it, so neither a `cargo` earlier on `PATH` nor a `build.rustc` in
+   a Cargo configuration file replaces the pin. It builds the `kestrike-tools` binary for the host
+   (`--target <host>`, which also takes the place of a configured `build.target`) into
+   `target/tools/<host>/debug`, with the top level as the build's working directory, `RUSTUP_TOOLCHAIN`
+   set to the pin and `RUSTUP_AUTO_INSTALL=0`. For this build it clears `RUSTFLAGS`,
+   `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`, every `CARGO_PROFILE_*`,
+   every `CARGO_BUILD_*` except `CARGO_BUILD_JOBS`, every `CARGO_TARGET_*` (`CARGO_TARGET_DIR`
+   included), `RUSTDOC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER`, and keeps the rest. A wrapper
+   that a Cargo configuration file names still wraps the pinned `rustc`. With `--target`, the
+   repository's `target.<cfg>.rustflags` apply to the binary and its dependencies and not to build
+   scripts. A tool is then the same program whatever lane starts it.
 3. Replaces itself with the binary, started as `kestrike-tools <top> <tool> <arguments>`. The binary gets
-   the caller's environment unchanged.
+   the caller's environment as bash passes it on: bash, which runs the launcher, may set `PWD`,
+   `OLDPWD`, `SHLVL` and `_`, and leaves every other variable as the caller set it.
 
 The build prints nothing unless it fails. Cargo's fingerprint decides whether it compiles anything, and
 Cargo's lock on `target/tools` makes a second caller wait for the first; that wait has no limit of its
@@ -40,11 +50,12 @@ untracked `Cargo.lock`.
 
 | Exit | Cause | Output |
 | --- | --- | --- |
-| 127 | `STABLE` is missing from the workflow, rustup names no host, or the pin is not installed | `tool.sh: <reason>` on standard error |
+| 127 | `STABLE` is missing from the workflow, rustup names no single host, or the pin or its `cargo` or `rustc` is not installed | `tool.sh: <reason>` on standard error |
 | 127 | The build fails, a first dependency resolution without network included | Cargo's output, then `tool.sh: the build of kestrike-tools failed`; the next call builds again |
 | 2 | The tool name is missing or names no tool | the binary's `kestrike-tools:` line on standard error |
 
-Every other exit code is the tool's own, and no tool returns 127.
+Every other exit code is the tool's own, and no tool returns 127. The launcher exits 127 on its own
+failures even when standard error is closed or full.
 
 ## Adding a tool
 
@@ -56,8 +67,10 @@ Every other exit code is the tool's own, and no tool returns 127.
    its dispatch entry.
 3. Put a function that two tools share in a library module, declared with one `pub mod` line in
    `crates/kestrike-tools/src/lib.rs`, kept sorted.
-4. Add one target line to the `kestrike-tools` entry of `scripts/test-inventory.json` for each new file
-   under `crates/kestrike-tools/tests/`.
+4. Add one target line to the `kestrike-tools` entry of `scripts/test-inventory.json` for each new test
+   target that Cargo lists for the package: a file directly under `crates/kestrike-tools/tests/`, named
+   by its stem, or a directory there with a `main.rs`, named by the directory. A helper module that a
+   test target includes adds no line. A target's name is unique across the workspace's crates.
 
 The change that makes a tool startable deletes its script and the script's self-test with `git rm`, and
 edits each caller's command text.

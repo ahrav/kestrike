@@ -5579,7 +5579,8 @@ cancel that refunds twice (`RefundOnce`); and a placement that completes
 one extent early (`CompleteAtLast`). These are finite checks at the stated
 bounds. The replay against the Rust code is
 `storage::builder_tests::escrow_replay`, which replays committed traces
-that `bash scripts/tool.sh escrow_fixtures` regenerates.
+that `bash scripts/tool.sh escrow_fixtures --quint QUINT --output DIR`
+regenerates.
 
 ## Allowance model
 

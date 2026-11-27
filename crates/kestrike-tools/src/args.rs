@@ -347,12 +347,6 @@ impl<'t> Reader<'t> {
                         string,
                         explicit: Some(&arg[2..]),
                     });
-                } else if string.starts_with(arg) {
-                    matches.push(Match {
-                        option,
-                        string,
-                        explicit: None,
-                    });
                 }
             }
         }

@@ -8,6 +8,8 @@ use crate::text::{Text, is_space, push_backslashed, push_repr};
 /// The smallest positive `f64` is 2⁻¹⁰⁷⁴, giving `MAX_ROUND_DIGITS` = ⌊1074 × log10(2)⌋.
 pub const MAX_ROUND_DIGITS: usize = 323;
 
+/// `len` counts a string's Unicode scalar values, an array's items and an object's members, and returns
+/// `None` for an integer, a float, a boolean or `null`.
 pub fn len(value: &Value) -> Option<usize> {
     match value {
         Value::String(text) => Some(text.len()),
