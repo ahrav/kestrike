@@ -602,6 +602,8 @@ fn a_relative_output_resolves_against_the_working_directory() {
     assert!(output.join("step_6b0d.itf.json").exists());
 }
 
+/// With `--quint=--`, the fixture writer creates the first trace directory, writes the model copy and `case.qnt`
+/// there, then exits with status 1, the behavior kept from the script; issue #363 holds its fix.
 #[test]
 fn an_empty_quint_value_exits_1_after_the_first_trace_directory_is_written() {
     let scratch = Scratch::new();

@@ -49,6 +49,8 @@ fn values_follow_an_equals_sign_a_prefix_or_the_next_argument_and_the_last_wins(
     );
 }
 
+/// For `-h=`, the reader returns `string index out of range` with status 1, the behavior kept from the script;
+/// issue #363 holds its fix.
 #[test]
 fn each_refusal_carries_the_message_argparse_prints() {
     let required = "the following arguments are required: --quint, --output";
