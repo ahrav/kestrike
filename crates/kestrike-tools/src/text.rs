@@ -129,7 +129,7 @@ pub(crate) fn push_repr(code: u32, out: &mut String) {
 pub(crate) fn escaped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for code in text.chars() {
-        if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {
+        if is_unprintable(u32::from(code)) {
             push_repr(u32::from(code), &mut out);
         } else {
             out.push(code);

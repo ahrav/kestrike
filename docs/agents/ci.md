@@ -1457,9 +1457,21 @@ prints and a nonempty reason:
 Weakens-Test: CLASS:PATH: REASON
 ```
 
-The report and the hint write each control character of a key as `\r` or
-`\x7f`; the acknowledging line carries the character itself, as Git stores
-the path.
+The report, the hint and each refusal line write each code point that
+`Text::repr` in `crates/kestrike-tools/src/text.rs` escapes, such as a
+control character, a bidirectional control, a line or paragraph separator or a
+byte order mark, as `repr` writes it (`\r`, `\x7f`, `\u202e`); a backslash
+stays. The acknowledging line carries the character itself, as Git stores
+the path. The CI step stops the runner's workflow commands before the scan,
+with a token it draws at each run, and resumes them after the scan exits, so
+no line of the scan's output runs as a command in the `::name::` form or the
+`##[name]` form.
+
+The scan refuses a range, exit 2, where a changed Rust path, a timeout file,
+the inventory or `crates/kestrike-tools/tests` has no entry at the merge base
+or the head and a directory above it is a link or a submodule there; a
+checkout reads the path through that entry. It checks the inventory, the
+timeout files and the test directory on every range.
 
 The scanner reads its rule for a case from the Git trees of the merge base and
 the head, apart from the build's check of the directory that

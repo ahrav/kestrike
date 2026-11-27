@@ -6,13 +6,22 @@
 
 use std::collections::HashSet;
 
-use super::tree::{entries, regular};
+use super::finding::short;
+use super::tree::{entries, modes, redirect, regular};
 use super::{Change, Class, Failure, Finding, Shown};
 
 pub const CASES: &str = "crates/kestrike-tools/tests";
 
-/// `cases` returns the id and the entry path of each case at `commit`, in tree order.
+/// `cases` returns the id and the entry path of each case at `commit`, in tree order. It refuses a test
+/// directory that is a link or a submodule, or that lies under one, by [`modes`]: a checkout reads the cases
+/// through that entry.
 fn cases(commit: &str) -> Result<Vec<(String, String)>, Failure> {
+    if let Some(kind) = redirect(modes(commit, &[CASES])?.get(CASES)) {
+        return Err(Failure::Refused(format!(
+            "{CASES} at {} is {kind}",
+            short(commit)
+        )));
+    }
     let listed = entries(commit, &[CASES], true)?;
     let single = listed
         .iter()

@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::git::blob_texts;
 use crate::json::{self, Value};
-use crate::text::{Text, escaped};
+use crate::text::Text;
 
 use super::digits::{integer, is_digits};
 use super::finding::short;
@@ -40,8 +40,6 @@ impl<'v> Document<'v> {
                     if key.is_empty() || ALIASING.is_match(key.as_bytes()) {
                         let under = if path.is_empty() {
                             "the root".to_owned()
-                        } else if key.is_empty() {
-                            escaped(&path.to_string())
                         } else {
                             path.to_string()
                         };
@@ -152,8 +150,7 @@ pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, 
             }
         {
             return Err(Failure::Refused(format!(
-                "{INVENTORY}: the value at {} changes from {} to {}",
-                escaped(&name),
+                "{INVENTORY}: the value at {name} changes from {} to {}",
                 kind(before),
                 kind(later)
             )));

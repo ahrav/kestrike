@@ -7,7 +7,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::process::{Command, Output, Stdio};
 
-use crate::text::{Text, escaped, strip_str};
+use crate::text::{Text, strip_str};
 
 const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
     ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_DIFF_OPTS"];
@@ -161,14 +161,12 @@ pub(crate) fn batch_texts(data: &[u8], specs: &[String]) -> Result<Vec<String>, 
     for spec in specs {
         let ends = || {
             GitError::Truncated(format!(
-                "git cat-file --batch: the reply ends before its answer for {}",
-                escaped(spec)
+                "git cat-file --batch: the reply ends before its answer for {spec}"
             ))
         };
         let other = || {
             GitError::Truncated(format!(
-                "git cat-file --batch: the answer for {} has another form",
-                escaped(spec)
+                "git cat-file --batch: the answer for {spec} has another form"
             ))
         };
         let at = rest

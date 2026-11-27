@@ -11,7 +11,7 @@ use crate::json::Integer;
 use crate::stream::emit;
 use crate::text::{escaped, strip_str};
 
-use super::cases::{CASES, removed};
+use super::cases::removed;
 use super::declarations::{conditions, declarations, plain};
 use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
@@ -26,6 +26,8 @@ const HELP: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\
                     a Rust test or its budget.\n\noptional arguments:\n  -h, --help   show this help message \
                     and exit\n  --base BASE\n  --head HEAD\n";
 const TIMEOUT_FILES: [&str; 2] = [".github/workflows/agent-checks.yml", "scripts/rust-lane.sh"];
+/// The inputs the scan reads at fixed paths. Every range checks each of them at both commits.
+const FIXED: [&str; 3] = [INVENTORY, TIMEOUT_FILES[0], TIMEOUT_FILES[1]];
 const STREAM_FAILED: u8 = 120;
 
 const OPTIONS: [Opt; 3] = [
@@ -76,9 +78,12 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .copied()
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
-    // A diffed path that is a link, a tree or a submodule at either commit is refused here.
-    files(base, &diffed)?;
-    files(head, &diffed)?;
+    // A diffed path or a fixed input that is no file, or that is absent under a link or a submodule, at either
+    // commit is refused here.
+    let mut checked = diffed.clone();
+    checked.extend(FIXED.iter().filter(|path| !diffed.contains(path)));
+    files(base, &checked)?;
+    files(head, &checked)?;
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])
@@ -141,9 +146,7 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         let new = inventory_text(head)?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
-    if paths.iter().any(within(CASES)) {
-        found.extend(removed(base, head)?);
-    }
+    found.extend(removed(base, head)?);
     Ok(found)
 }
 
@@ -350,7 +353,7 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let scanned = match scan(&rev("--base", ""), &rev("--head", "HEAD")) {
         Ok(Some(scanned)) => scanned,
         Ok(None) => return 0,
-        Err(error) => return fail(&format!("{TOOL}: {error}\n"), 2),
+        Err(error) => return fail(&format!("{TOOL}: {}\n", escaped(&error.to_string())), 2),
     };
     report(&scanned).unwrap_or(STREAM_FAILED)
 }
