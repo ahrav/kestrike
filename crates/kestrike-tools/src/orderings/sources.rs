@@ -28,6 +28,9 @@
 //! distinct sentence once. Offsets are byte offsets of the source, which its scanned texts share, and
 //! each window before a bracket spans 40 code points of the source. A word edge of a pattern stands
 //! where [`is_word`] holds on one side only, a letter, a number or `_` of any script.
+//!
+//! Each function trusts the directories its caller names, the kernel package, the checkout root and
+//! the crate tree, and reads every link in them as it stands.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -43,6 +46,7 @@ use crate::json::{Text, Value};
 use crate::paths::resolve;
 use crate::production_text::blanked;
 use crate::rust_text::{Lexeme, back, blank, code, lexemes};
+use crate::text::is_space;
 
 /// The crate whose module tree holds the model sources and the included production files.
 const CRATE: &str = "crates/kestrike/src";
@@ -458,16 +462,7 @@ pub fn module_file(test: &str, read: Reader<'_>) -> Option<(String, String)> {
             .filter(|(_, names)| names.contains(first))
             .map(|(target, _)| target.as_str())
             .collect();
-        let inline = if !first.is_empty() && first.chars().all(is_word) {
-            bounded_iter(&INLINE, &scanned)
-                .any(|block| block.get(1).is_some_and(|name| name.as_str() == first))
-        } else {
-            Regex::new(&format!(
-                r"mod{SPACE}+(?:r#)?{}{SPACE}*\{{",
-                regex::escape(first)
-            ))
-            .is_ok_and(|pattern| captures_bounded(&pattern, &scanned, 0).is_some())
-        };
+        let inline = opens_inline(&scanned, first);
         let bare = declared
             .bare
             .contains(&joined(&home, &format!("{first}.rs")));
@@ -500,6 +495,34 @@ pub fn module_file(test: &str, read: Reader<'_>) -> Option<(String, String)> {
         names = rest;
     }
     text.map(|text| (path, text))
+}
+
+/// Whether `scanned` opens an inline module named `name`: `mod` with no word character before it, white
+/// space, an optional `r#`, `name` as written, optional white space and `{`. The white space after `mod`
+/// may end inside `name` when `name` opens with white space.
+fn opens_inline(scanned: &str, name: &str) -> bool {
+    scanned.match_indices("mod").any(|(at, _)| {
+        if scanned[..at].chars().next_back().is_some_and(is_word) {
+            return false;
+        }
+        let rest = &scanned[at + 3..];
+        let spaces: Vec<usize> = rest
+            .char_indices()
+            .take_while(|&(_, c)| is_space(u32::from(c)))
+            .map(|(offset, c)| offset + c.len_utf8())
+            .collect();
+        spaces.iter().any(|&after| {
+            let tail = &rest[after..];
+            [tail.strip_prefix("r#"), Some(tail)]
+                .into_iter()
+                .flatten()
+                .filter_map(|tail| tail.strip_prefix(name))
+                .any(|tail| {
+                    tail.trim_start_matches(|c: char| is_space(u32::from(c)))
+                        .starts_with('{')
+                })
+        })
+    })
 }
 
 /// The text of the model source [`module_file`] finds for loom test `test`.

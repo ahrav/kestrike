@@ -1654,3 +1654,55 @@ fn a_record_of_tests_names_each_member_it_iterates() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A module the crate root opens inline is found by its name as written, whatever its length or its
+/// characters: a name of 1 MiB of word characters, one of 1 MiB of `-`, one that opens with white space
+/// and one that opens with `r#`; `r#r#x` opens no module `x`.
+#[test]
+fn an_inline_module_is_found_by_its_name_as_written() {
+    let long = "a".repeat(1 << 20);
+    let dashes = "-".repeat(1 << 20);
+    let rows: [(&str, String, String, bool); 5] = [
+        (
+            "1 MiB of word characters",
+            long.clone(),
+            format!("mod {long} {{\n}}\n"),
+            true,
+        ),
+        (
+            "1 MiB of `-`",
+            dashes.clone(),
+            format!("mod {dashes} {{\n}}\n"),
+            true,
+        ),
+        (
+            "a name that opens with white space",
+            " x".to_owned(),
+            "mod  x {}\n".to_owned(),
+            true,
+        ),
+        (
+            "a name that opens with `r#`",
+            "r#x".to_owned(),
+            "mod r#x {}\n".to_owned(),
+            true,
+        ),
+        (
+            "`r#` twice",
+            "x".to_owned(),
+            "mod r#r#x {}\n".to_owned(),
+            false,
+        ),
+    ];
+    for (label, name, root, found) in rows {
+        let read = move |path: &str| {
+            if path == TREE {
+                Ok(root.clone())
+            } else {
+                Err(io::Error::from(io::ErrorKind::NotFound))
+            }
+        };
+        let path = super::module_file(&format!("{name}::t"), &read).map(|(path, _)| path);
+        assert_eq!(path.as_deref(), found.then_some(TREE), "{label}");
+    }
+}
