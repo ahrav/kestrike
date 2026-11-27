@@ -25,7 +25,7 @@ use kestrike_tools::json::{self, Object, Value};
 use kestrike_tools::ownership::shared_directories;
 use kestrike_tools::text::Text;
 
-use crate::standins::{CARGO, GIT, RECORDED, SLEEPER};
+use super::standins::{CARGO, GIT, RECORDED, SLEEPER};
 
 pub const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
 pub const SOURCE: &str = "crates/kestrike/src";

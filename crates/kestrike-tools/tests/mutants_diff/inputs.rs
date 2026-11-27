@@ -6,7 +6,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 
-use crate::fixture::{self, CONFIG, Fixture, Plan, SOURCE, WORKFLOW, lib_rs, listed, registered};
+use super::fixture::{self, CONFIG, Fixture, Plan, SOURCE, WORKFLOW, lib_rs, listed, registered};
 
 fn three() -> Vec<(kestrike_tools::text::Text, kestrike_tools::text::Text)> {
     let names: Vec<String> = (0..3)

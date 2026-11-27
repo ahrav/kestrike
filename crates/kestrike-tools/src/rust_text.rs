@@ -242,3 +242,7 @@ fn lifetime(text: &str, at: usize) -> Option<usize> {
     }
     open(start)
 }
+
+#[cfg(test)]
+#[path = "rust_text_tests.rs"]
+mod tests;

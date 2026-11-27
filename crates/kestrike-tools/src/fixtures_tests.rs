@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::fixtures::quint::{Failure, run};
 use crate::fixtures::{Model, Style, Trace, case, generate, keep, replace};
 use crate::json::{Value, parse};
-use crate::paths_tests::Scratch;
+use crate::paths::tests::Scratch;
 use crate::tools;
 
 /// Writes the executable stand-in at `path` through a child process, the one process that holds the file open

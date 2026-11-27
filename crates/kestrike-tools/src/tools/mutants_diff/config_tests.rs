@@ -37,7 +37,7 @@ fn a_debug_assertion_value_is_ascii_word_characters_and_commas_are_optional() {
 
 #[test]
 fn the_pin_files_read_their_line_ends_as_line_feeds() {
-    let scratch = crate::paths_tests::Scratch::new("pins");
+    let scratch = crate::paths::tests::Scratch::new("pins");
     let directory = &scratch.0;
     let (config, workflow) = (
         directory.join("mutants.toml"),

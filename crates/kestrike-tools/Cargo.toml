@@ -6,6 +6,7 @@ description = "The repository's tools, each a module of one binary that `scripts
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ahrav/kestrike"
 publish = false
+autotests = false
 
 [dependencies]
 libc = "0.2.189"
@@ -20,3 +21,8 @@ signal-hook = { version = "0.3.18", default-features = false }
 [[bin]]
 name = "kestrike-tools"
 test = false
+
+# One test executable runs every case under `tests/`, which `build.rs` lists for `tests/tools.rs`.
+[[test]]
+name = "tools"
+path = "tests/tools.rs"

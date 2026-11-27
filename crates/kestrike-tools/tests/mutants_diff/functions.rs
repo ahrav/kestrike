@@ -7,7 +7,7 @@ use std::process::Command;
 use kestrike_tools::text::is_space;
 use kestrike_tools::tools::mutants_diff::{debug_assertions, pins, stables};
 
-use crate::fixture::CONFIG;
+use super::fixture::CONFIG;
 
 #[test]
 fn the_debug_assertion_entry_is_read_from_the_array_and_not_from_a_comment() {

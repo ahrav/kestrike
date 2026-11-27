@@ -54,6 +54,7 @@ untracked `Cargo.lock`.
 | --- | --- | --- |
 | 127 | `STABLE` is missing from the workflow, rustup names no single host, or the pin or its `cargo` or `rustc` is not installed | `tool.sh: <reason>` on standard error |
 | 127 | The build fails, a first dependency resolution without network included | Cargo's output, then `tool.sh: the build of kestrike-tools failed`; the next call builds again |
+| 127 | An entry of `src/tools/` or `tests/` is outside the rules of [Adding a tool](#adding-a-tool), a tool root lacks `NAME` or `run`, or two tools share a name | the build script's `kestrike-tools build script: <path>: <reason>` line or rustc's error, then the line above |
 | 2 | The tool name is missing or names no tool | the binary's `kestrike-tools:` line on standard error |
 
 Every other exit code is the tool's own, and no tool returns 127. The launcher exits 127 on its own
@@ -61,18 +62,76 @@ failures even when standard error is closed or full.
 
 ## Adding a tool
 
-1. Write the tool as one module under `crates/kestrike-tools/src/tools/`, a file or a directory with
-   `mod.rs`, with the entry `pub fn run(top: &Path, args: &[OsString]) -> u8`. `top` is the checkout's
-   top level, which a script took from its own path.
-2. Register it with one line `"<tool>" => <module>,` in the `tools!` table of
-   `crates/kestrike-tools/src/tools/mod.rs`, kept sorted by tool name. The macro declares the module and
-   its dispatch entry.
-3. Put a function that two tools share in a library module, declared with one `pub mod` line in
+A port adds files. The package's `build.rs` lists `crates/kestrike-tools/src/tools/` and
+`crates/kestrike-tools/tests/` whenever Cargo runs it and declares a module for each tool and case entry,
+and each unit test file is declared by its owner, so no tool, case or
+unit test file has a registration line. A port still adds one sorted `pub mod` line to
+`crates/kestrike-tools/src/lib.rs` for a new library module and a line under `[dependencies]` of
+`crates/kestrike-tools/Cargo.toml` for a dependency it needs.
+
+1. Write the tool as one module under `crates/kestrike-tools/src/tools/`: a file `<module>.rs`, or a
+   directory `<module>/` with `mod.rs`. Its root holds `pub const NAME: &str = "<tool>";` and the entry
+   `pub fn run(top: &Path, args: &[OsString]) -> u8`, its own or re-exported with `pub use`. A root that
+   needs its name in another constant takes it from `NAME`. `top` is the checkout's top level, which a
+   script took from its own path. `NAMES` lists the names in ascending order of their bytes, whatever the
+   module names.
+2. Put a function that two tools share in a library module, declared with one `pub mod` line in
    `crates/kestrike-tools/src/lib.rs`, kept sorted.
-4. Add one target line to the `kestrike-tools` entry of `scripts/test-inventory.json` for each new test
-   target that Cargo lists for the package: a file directly under `crates/kestrike-tools/tests/`, named
-   by its stem, or a directory there with a `main.rs`, named by the directory. A helper module that a
-   test target includes adds no line. A target's name is unique across the workspace's crates.
+3. Declare a unit test file in its owner with `#[cfg(test)] #[path = "<m>_tests.rs"] mod tests;`. From a
+   library module's `mod.rs` the path is `"../<m>_tests.rs"`. A tool's own files, its unit test files
+   included, stand inside its directory: rustc reads a tool root through `#[path]` and resolves a `mod`
+   line or a relative `#[path]` inside it beside the root, and every `<id>.rs` directly under
+   `src/tools/` is a tool. A tool with unit test files of its own is therefore a directory, whose
+   `mod.rs` declares them with `#[cfg(test)] mod tests;` or
+   `#[cfg(test)] #[path = "<m>_tests.rs"] mod tests;`. A test module
+   whose items another test file uses is declared `pub(crate) mod tests;`, as
+   `crates/kestrike-tools/src/paths.rs` declares the one that holds `Scratch`.
+4. Add an integration case under `crates/kestrike-tools/tests/`: a file `<case>.rs`, or a directory
+   `<case>/` with `mod.rs` and its helpers beside it. A file case declares no module file, since
+   its `mod h;` would read `tests/h.rs`, itself a case; an inline `mod h { ... }` is fine. A helper
+   that several cases share is a case directory of its own, which the others reach as `crate::<helper>`.
+   Every case is a module of the one test executable `tools`, built from
+   `crates/kestrike-tools/tests/tools.rs`, so a test `<rest>` of a case has the id `<case>::<rest>`, and
+   one process runs every case: the tests of all cases run as threads of one libtest process, so a setting
+   that applies to the whole process (the umask, the working directory, the environment, a signal
+   disposition, a resource limit) is made in a child process the case starts, or it holds for every case.
+   `scripts/test-inventory.json` lists the package's targets, `doc:kestrike_tools`, `kestrike_tools` and
+   `tools`, and a case adds no line there. The test selection therefore counts the `tools` executable as a
+   whole: a deleted case module is found by review and by the weakened-test scan's report line. The
+   reader of a regression target in `scripts/verify-receipts.py admit` resolves no case id of `tools`,
+   so an intake record that names such a test waits for that script's own port.
+
+In both directories the build script checks each entry whose name starts with a byte other than `.` and
+that is a directory, a link to one, or named `*.rs`; the directory's own root (`src/tools/mod.rs`,
+`tests/tools.rs`) is skipped. It passes over every other entry, so an editor's swap or lock file, a backup
+`x.rs~`, a merge's `x.rs.orig`, `.gitkeep` and `README.md` change no generated list; a newer time on one
+still reruns the build script and rebuilds the binary, so build output and links into it stand outside
+both directories. A checked entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular
+file `mod.rs`, with `<id>` matching `[a-z][a-z0-9_]*`. Any other checked entry stops the build with its
+path: a directory without `mod.rs`, a link, a `*.rs` entry of another file type (a fifo, a socket, a
+device), `<id>.rs` beside `<id>/`, a name outside the pattern, a Rust keyword, or a name the build
+reserves: `std` and `tests` under `src/tools/`, which `src/tools/mod.rs` uses, and `std` and `tools` under
+`tests/`: `std` is the path that `tests/tools.rs` uses, and `tools` is the name of that root file. The
+build script reads listings, so an untracked file counts. A tool root without `NAME` or `run` is rustc's
+unresolved-name error, and two tools of one name are rustc's `unreachable pattern` error.
+
+`cargo fmt --all -- --check` reaches neither the tool roots nor the case files, since they are declared
+through `include!`. The `rust-format` job and the rustfmt over every tracked Rust file that `AGENTS.md`
+names format them.
+
+A change under either directory reruns the build script, so the next call of `scripts/tool.sh`
+rebuilds the binary. Cargo compares the times of the directories and their entries with its last run,
+so an entry is missed when the directory and its entries all carry older times, as when an archive
+that holds the directory is unpacked with its times: a missed tool's call exits 2 with the binary's
+refusal, and a missed case fails `every_entry_of_tests_is_a_case` in
+`crates/kestrike-tools/tests/tools.rs`. Removing `target/tools` repairs a missed tool, and removing the
+test run's own build directory (Cargo's `build.build-dir`, the target directory unless it is set apart)
+repairs a missed case. The generated declarations name each file by its
+absolute path, and rustc's diagnostics and a panic's location name a tool or case file by it. The build
+script watches the two directories by their absolute paths, so a checkout moved or copied with its
+build directory reruns it at the next build, and each generated list asserts at compile time that
+`CARGO_MANIFEST_DIR` is the package path it was written for: a list left from another place stops the
+build with `the package moved after its build script ran; remove the build directory`.
 
 The change that makes a tool startable deletes its script and the script's self-test with `git rm`, and
 edits each caller's command text.

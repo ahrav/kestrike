@@ -17,7 +17,7 @@ use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
 use super::{Change, Class, Failure, Finding, Shown};
 
-const TOOL: &str = "scan-weakened-tests";
+const TOOL: &str = super::NAME;
 const USAGE: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]";
 const HELP: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\nReport changes that weaken \
                     a Rust test or its budget.\n\noptional arguments:\n  -h, --help   show this help message \
