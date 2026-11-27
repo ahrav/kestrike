@@ -13,7 +13,7 @@ use super::Failure;
 use super::digits::integer;
 use super::patterns::{CONSTANT, CONSTANT_END, DIGITS, HUNK, NAMED_BOUND, Pattern, text_of};
 
-const DIFF_BATCH: usize = 256;
+pub const DIFF_BATCH: usize = 256;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Hunk {
@@ -60,15 +60,21 @@ fn patch(base: &str, head: &str, paths: &[&str]) -> Result<String, Failure> {
     Ok(git_text(&args)?)
 }
 
+/// `hunks` reads the hunks of a zero-context diff in order. A `diff --git ` line closes the open hunk, and
+/// `hunks` resumes collecting changes at the next hunk header.
 pub fn hunks<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Vec<Hunk>, Failure> {
     let mut found = Vec::new();
     let mut hunk = Hunk::default();
     let mut number: Option<u64> = None;
     for line in lines {
-        if let Some(header) = HUNK.captures(line.as_bytes()).next() {
-            if !hunk.is_empty() {
-                found.push(std::mem::take(&mut hunk));
-            }
+        let header = HUNK.captures(line.as_bytes()).next();
+        let section = line.starts_with("diff --git ");
+        if (section || header.is_some()) && !hunk.is_empty() {
+            found.push(std::mem::take(&mut hunk));
+        }
+        if section {
+            number = None;
+        } else if let Some(header) = header {
             let start = text_of(header.get(1).expect("the hunk pattern captures its start"));
             number = Some(integer(start)?.to_string().parse().map_err(|_| {
                 Failure::Refused(format!("the hunk header {line} names a line past 2^64"))

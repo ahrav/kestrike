@@ -1028,6 +1028,81 @@ fn a_refusal_on_a_full_standard_error_exits_120() {
     assert_eq!(result.status.code(), Some(120));
 }
 
+/// `limited` runs `writer` with the file size limit `limit`, soft and hard, and `SIGXFSZ` at `disposition`.
+fn limited(
+    writer: &Writer,
+    quint: &Path,
+    output: &Path,
+    limit: usize,
+    disposition: libc::sighandler_t,
+) -> Output {
+    let limit = libc::rlim_t::try_from(limit).expect("the limit fits rlim_t");
+    let mut command = Command::new(BINARY);
+    command.arg(top()).arg(writer.tool).args([
+        "--quint".as_ref(),
+        quint.as_os_str(),
+        "--output".as_ref(),
+        output.as_os_str(),
+    ]);
+    // SAFETY: the closure makes two calls into libc, `setrlimit` and `signal`, each one system call that
+    // allocates nothing and takes no lock, and reads only the copied `limit` and `disposition`.
+    unsafe {
+        command.pre_exec(move || {
+            let bound = libc::rlimit {
+                rlim_cur: limit,
+                rlim_max: limit,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &bound) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            libc::signal(libc::SIGXFSZ, disposition);
+            Ok(())
+        });
+    }
+    command.output().expect("the binary starts")
+}
+
+/// A model copy one byte over the file size limit is refused before its write: the writer exits 1 with one
+/// line naming the copy, with `SIGXFSZ` at its default action and ignored, and the trace's directory stays
+/// empty. At a limit equal to the model's size the copy is written whole.
+#[test]
+fn a_model_copy_over_the_file_size_limit_exits_1_and_writes_no_byte_of_it() {
+    let writer = &WRITERS[1];
+    let model =
+        fs::read(top().join(format!("quint/{}.qnt", writer.model))).expect("the model reads");
+    let first = writer.recipes[0];
+    for disposition in [libc::SIG_DFL, libc::SIG_IGN] {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out");
+        let quint = stand_in(&scratch.0, writer, &output, reply);
+        let result = limited(writer, &quint, &output, model.len() - 1, disposition);
+        let copy = output.join(format!("{first}/{}.qnt", writer.model));
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert_eq!(
+            stderr(&result),
+            format!(
+                "{}: {}: File too large (os error 27)\n",
+                writer.tool,
+                copy.display()
+            )
+        );
+        let left: Vec<_> = fs::read_dir(output.join(first))
+            .expect("the trace's directory stays")
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let listed: Vec<_> = fs::read_dir(&output).expect("the output lists").collect();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+    }
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, reply);
+    let result = limited(writer, &quint, &output, model.len(), libc::SIG_DFL);
+    let copy =
+        fs::read(output.join(format!("{first}/{}.qnt", writer.model))).expect("the copy reads");
+    assert!(copy == model, "the copy is whole");
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+}
+
 /// When the rewritten trace exceeds the file size limit, the writer exits 1 with one line naming the rewrite's
 /// new file, removes that file, and leaves Quint's trace at the trace path, with `SIGXFSZ` ignored and with
 /// its default action.
@@ -1059,30 +1134,7 @@ fn a_rewrite_that_passes_the_file_size_limit_exits_1_and_leaves_quints_trace() {
         let first = writer.recipes[0];
         let raw =
             fs::read(scratch.0.join(format!("replies/{first}.reply"))).expect("the reply reads");
-        let limit = libc::rlim_t::try_from(raw.len() + 8).expect("the limit fits rlim_t");
-        let mut command = Command::new(BINARY);
-        command.arg(top()).arg(writer.tool).args([
-            "--quint".as_ref(),
-            quint.as_os_str(),
-            "--output".as_ref(),
-            output.as_os_str(),
-        ]);
-        // SAFETY: the closure makes two calls into libc, `setrlimit` and `signal`, each one system call that
-        // allocates nothing and takes no lock, and reads only the copied `limit` and `disposition`.
-        unsafe {
-            command.pre_exec(move || {
-                let bound = libc::rlimit {
-                    rlim_cur: limit,
-                    rlim_max: limit,
-                };
-                if libc::setrlimit(libc::RLIMIT_FSIZE, &bound) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                libc::signal(libc::SIGXFSZ, disposition);
-                Ok(())
-            });
-        }
-        let result = command.output().expect("the binary starts");
+        let result = limited(writer, &quint, &output, raw.len() + 8, disposition);
         let staged = output.join(format!("{first}/{first}.itf.json.new"));
         assert_eq!(result.status.code(), Some(1), "{}", stderr(&result));
         assert_eq!(
