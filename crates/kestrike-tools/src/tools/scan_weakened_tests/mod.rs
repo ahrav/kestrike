@@ -1,3 +1,5 @@
+pub const NAME: &str = "scan-weakened-tests";
+
 mod declarations;
 mod digits;
 mod failure;

@@ -8,7 +8,7 @@ use crate::json::{Integer, MAX_INTEGER_DIGITS};
 use crate::shell;
 use crate::text::Text;
 
-pub(super) const TOOL: &str = "mutants-diff";
+pub(super) const TOOL: &str = super::NAME;
 const USAGE: &str = "usage: mutants-diff [-h] [--base REV] [--head REV] [--max-mutants N] [--shard K/N] \
                      [--tests=ARGS] [--artifacts DIR] [--cargo PATH]";
 const OPTIONS_HELP: &str = "options:

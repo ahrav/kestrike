@@ -1,5 +1,7 @@
 #![doc = include_str!("help.md")]
 
+pub const NAME: &str = "mutants-diff";
+
 #[cfg(target_os = "linux")]
 mod config;
 #[cfg(target_os = "linux")]

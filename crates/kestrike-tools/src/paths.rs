@@ -179,3 +179,7 @@ fn normalize(path: &[u8]) -> Vec<u8> {
     }
     normalized
 }
+
+#[cfg(test)]
+#[path = "paths_tests.rs"]
+pub(crate) mod tests;

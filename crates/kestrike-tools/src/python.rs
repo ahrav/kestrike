@@ -181,3 +181,7 @@ pub fn hexdigest(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+
+#[cfg(test)]
+#[path = "python_tests.rs"]
+mod tests;

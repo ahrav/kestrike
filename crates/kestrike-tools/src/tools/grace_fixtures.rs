@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use crate::fixtures::{self, Model, Style};
 
+pub const NAME: &str = "grace_fixtures";
+
 pub(crate) const MODEL: Model = Model {
-    tool: "grace_fixtures",
+    tool: NAME,
     about: "Grace model traces for the replay against the `grace` module: the directed recipes and seeded runs of `step`.",
     name: "grace",
     style: Style::Record,

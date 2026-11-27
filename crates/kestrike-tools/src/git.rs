@@ -168,3 +168,7 @@ pub(crate) fn label<S: AsRef<OsStr>>(args: &[S]) -> String {
     }
     line
 }
+
+#[cfg(test)]
+#[path = "git_tests.rs"]
+mod tests;

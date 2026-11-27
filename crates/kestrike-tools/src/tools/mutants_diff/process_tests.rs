@@ -7,7 +7,7 @@ use super::process::{Interrupt, capture};
 #[test]
 fn a_recorded_signal_kills_a_captured_child_and_returns_the_interruption() {
     let interrupt = Interrupt::new();
-    let scratch = crate::paths_tests::Scratch::new("capture");
+    let scratch = crate::paths::tests::Scratch::new("capture");
     let marker = scratch.0.join("marker");
     let mut command = Command::new("sh");
     command
@@ -74,7 +74,7 @@ fn a_capture_waits_for_the_child_and_its_output() {
 
 #[test]
 fn an_empty_command_fails_and_leaves_both_output_files_unchanged() {
-    let scratch = crate::paths_tests::Scratch::new("empty-command");
+    let scratch = crate::paths::tests::Scratch::new("empty-command");
     let (stdout, stderr) = (scratch.0.join("out"), scratch.0.join("err"));
     std::fs::write(&stdout, "out before").expect("written");
     std::fs::write(&stderr, "err before").expect("written");

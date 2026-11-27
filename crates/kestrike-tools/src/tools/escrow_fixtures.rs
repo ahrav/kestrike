@@ -12,8 +12,10 @@ use std::time::Duration;
 use crate::fixtures::{self, Model, Style, Trace, case};
 use crate::json::{Integer, Value};
 
+pub const NAME: &str = "escrow_fixtures";
+
 pub(crate) const MODEL: Model = Model {
-    tool: "escrow_fixtures",
+    tool: NAME,
     about: "Builder-escrow model traces for the replay against `Storage`: the directed recipes and seeded runs of `step`.",
     name: "escrow",
     style: Style::Format,

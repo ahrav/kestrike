@@ -96,3 +96,7 @@ pub fn split(text: &Text) -> Result<Vec<Text>, Error> {
         State::Space => Ok(words),
     }
 }
+
+#[cfg(test)]
+#[path = "shell_tests.rs"]
+mod tests;

@@ -609,3 +609,7 @@ fn write_string(text: &Text, out: &mut String) {
     }
     out.push('"');
 }
+
+#[cfg(test)]
+#[path = "json_tests.rs"]
+mod tests;

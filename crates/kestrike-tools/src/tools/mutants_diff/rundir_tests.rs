@@ -21,7 +21,7 @@ fn the_stamp_is_the_utc_calendar_time_of_its_seconds() {
 
 #[test]
 fn a_new_directory_takes_eight_letters_and_mode_0700() {
-    let scratch = crate::paths_tests::Scratch::new("rundir");
+    let scratch = crate::paths::tests::Scratch::new("rundir");
     let made = make_temp_dir("worktree-", &scratch.0).expect("the directory is made");
     let name = made
         .file_name()

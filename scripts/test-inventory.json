@@ -642,10 +642,7 @@
       "targets": [
         "doc:kestrike_tools",
         "kestrike_tools",
-        "fixture_writers",
-        "mutants_diff",
-        "ownership",
-        "scan_weakened_tests"
+        "tools"
       ]
     },
     "source-anchors": {

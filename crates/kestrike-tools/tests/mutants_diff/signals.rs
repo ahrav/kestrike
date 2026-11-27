@@ -14,7 +14,7 @@ use kestrike_tools::args::Parsed;
 use kestrike_tools::json::Value;
 use kestrike_tools::tools::mutants_diff::{self, INTERRUPT, Run};
 
-use crate::fixture::{
+use super::fixture::{
     self, Fixture, HANGUP_PAUSE, MARKER_LIMIT, Plan, RUN_LIMIT, SOURCE, lib_rs, listed, two_mutants,
 };
 
@@ -345,7 +345,7 @@ fn a_signal_during_a_spawn_stops_the_new_process() {
     let env = fixture::with(&fx.env, &[(PLACE, fx.state.as_os_str())]);
     for window in ["before", "after"] {
         start_window(
-            "signals::a_signal_during_a_spawn_stops_the_new_process",
+            "mutants_diff::signals::a_signal_during_a_spawn_stops_the_new_process",
             window,
             &fx.state,
             &env,
@@ -407,7 +407,7 @@ fn a_first_signal_at_the_hand_off_to_cleanup_still_removes_the_worktree_and_writ
     ]
     .join("\n");
     let env = fixture::with(&fx.env, &[(ARGS, OsStr::new(&args))]);
-    let name = "signals::a_first_signal_at_the_hand_off_to_cleanup_still_removes_the_worktree_and_writes_the_report";
+    let name = "mutants_diff::signals::a_first_signal_at_the_hand_off_to_cleanup_still_removes_the_worktree_and_writes_the_report";
     start_window(name, "hand-off", &fx.repo, &env);
     let report = fx.report(None);
     assert_eq!(
