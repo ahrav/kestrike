@@ -212,7 +212,9 @@ pub(crate) fn generate(
             ("case.qnt".to_owned(), &trace.case),
         ] {
             let path = directory.join(name);
-            fs::write(&path, text).map_err(at(&path))?;
+            fits(text.len())
+                .and_then(|()| fs::write(&path, text))
+                .map_err(at(&path))?;
         }
         clear(&file).map_err(at(&file))?;
         let args = arguments(model, trace, &Path::new("..").join(&leaf));
