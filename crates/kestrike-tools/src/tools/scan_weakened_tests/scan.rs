@@ -9,12 +9,15 @@ use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::git::{blob_texts, git, git_text, merge_base};
 use crate::json::Integer;
 use crate::stream::emit;
-use crate::text::strip_str;
+use crate::text::{escaped, strip_str};
 
+use super::cases::{CASES, removed};
 use super::declarations::{conditions, declarations, plain};
+use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
+use super::tree::files;
 use super::{Change, Class, Failure, Finding, Shown};
 
 const TOOL: &str = super::NAME;
@@ -51,6 +54,7 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         "diff",
         "--no-relative",
         "--no-renames",
+        "--ignore-submodules=none",
         "--name-only",
         "-z",
         base,
@@ -67,6 +71,14 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
             "a changed Rust path holds a newline, which the blob reader cannot name".to_owned(),
         ));
     }
+    let diffed: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
+        .collect();
+    // A diffed path that is a link, a tree or a submodule at either commit is refused here.
+    files(base, &diffed)?;
+    files(head, &diffed)?;
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])
@@ -76,11 +88,6 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
     } else {
         blob_texts(&specs)?
     };
-    let diffed: Vec<&str> = paths
-        .iter()
-        .copied()
-        .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
-        .collect();
     let diffs = path_hunks(base, head, &diffed)?;
     let hunks_of = |path: &str| {
         diffs
@@ -123,10 +130,19 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
             })?,
         );
     }
-    if paths.contains(&INVENTORY) {
+    let within = |root: &'static str| {
+        move |path: &&str| {
+            path.strip_prefix(root)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        }
+    };
+    if paths.iter().any(within(INVENTORY)) {
         let old = inventory_text(base)?;
         let new = inventory_text(head)?;
         push(INVENTORY, inventory_changes(&old, &new)?);
+    }
+    if paths.iter().any(within(CASES)) {
+        found.extend(removed(base, head)?);
     }
     Ok(found)
 }
@@ -267,13 +283,6 @@ fn resolve(rev: &OsStr) -> Result<String, Failure> {
     Ok(strip_str(&git(&args)?).to_owned())
 }
 
-pub(super) fn short(commit: &str) -> &str {
-    commit
-        .char_indices()
-        .nth(12)
-        .map_or(commit, |(at, _)| &commit[..at])
-}
-
 struct Scan {
     base: String,
     head: String,
@@ -346,7 +355,8 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     report(&scanned).unwrap_or(STREAM_FAILED)
 }
 
-/// `report` returns `Err` when standard error cannot be written.
+/// `report` writes each field of a line through [`escaped`]. It returns `Err` when standard error cannot be
+/// written.
 fn report(scanned: &Scan) -> Result<u8, io::Error> {
     let mut lines = String::new();
     let mut unacknowledged: Vec<String> = Vec::new();
@@ -358,10 +368,11 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             old,
             new,
         } = &found.change;
-        let line = format!("{key} {name}: {old} -> {new}");
+        let line = escaped(&format!("{key} {name}: {old} -> {new}"));
         if !class.blocks() {
             lines.push_str(&format!("reports {line}\n"));
         } else if let Some(reason) = scanned.reasons.get(&key) {
+            let reason = escaped(reason);
             lines.push_str(&format!("acknowledged {line} (Weakens-Test: {reason})\n"));
         } else {
             lines.push_str(&format!("blocks {line}\n"));
@@ -397,7 +408,7 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             }
         }
     }
-    for key in &unacknowledged {
+    for key in unacknowledged.iter().map(|key| escaped(key)) {
         complain(&format!(
             "{TOOL}: {key} blocks; acknowledge it with a commit-message line in {range}: \
              Weakens-Test: {key}: <reason>\n"
