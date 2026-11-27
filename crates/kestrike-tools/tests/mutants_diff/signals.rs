@@ -39,13 +39,24 @@ fn reason(report: &kestrike_tools::json::Object) -> (bool, String) {
 fn a_signal_while_a_mutant_runs_stops_the_tool_and_removes_the_worktree() {
     let fx = Fixture::new("signal-run");
     let before = fx.snapshot();
-    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+    // The fourth run starts the tool with SIGINT, SIGTERM and SIGHUP blocked; its SIGTERM stops the run
+    // and reaches the stand-in as in the first three.
+    let blocked = [false, false, false, true];
+    for (signal, blocked) in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGTERM]
+        .into_iter()
+        .zip(blocked)
+    {
         fx.clear();
         fx.plan(&Plan {
             hang: true,
             ..Plan::caught(&two_mutants())
         });
-        let mut runner = fx.start_until_ready(fx.start(), "ready");
+        let start = if blocked {
+            fx.start().blocked()
+        } else {
+            fx.start()
+        };
+        let mut runner = fx.start_until_ready(start, "ready");
         runner.signal(signal);
         let out = runner.communicate(RUN_LIMIT);
         assert_eq!(out.code, 1, "{signal}: {}", out.all());

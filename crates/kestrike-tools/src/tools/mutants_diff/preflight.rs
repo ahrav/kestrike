@@ -151,8 +151,14 @@ pub(super) fn git(git_env: &Environ, top: &OsStr, args: &[&OsStr]) -> Result<Vec
     Err(GitError::Failed(text!(call, ": ", detail)))
 }
 
-fn hex(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).trim().to_owned()
+/// `hex` decodes Git's output as strict UTF-8 and strips the whitespace `str.strip` strips; output that is
+/// no UTF-8 is refused as rejected input.
+fn hex(bytes: &[u8]) -> Result<String, Stop> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| rejected_fault(&Fault::library("Utf8Error", &error)))?;
+    Ok(text
+        .trim_matches(|c: char| crate::text::is_space(u32::from(c)))
+        .to_owned())
 }
 
 fn commit(git_env: &Environ, top: &Path, revision: &OsStr) -> Result<String, Stop> {
@@ -161,7 +167,7 @@ fn commit(git_env: &Environ, top: &Path, revision: &OsStr) -> Result<String, Sto
     let args = ["rev-parse", "--verify", "--quiet", "--end-of-options"].map(OsStr::new);
     let args: Vec<&OsStr> = args.into_iter().chain([spec.as_os_str()]).collect();
     match git(git_env, top.as_os_str(), &args) {
-        Ok(output) => Ok(hex(&output)),
+        Ok(output) => hex(&output),
         Err(GitError::Failed(_)) => Err(Stop::rejected(text!(
             "unknown revision ",
             Text::from_os(revision).repr()
@@ -185,9 +191,7 @@ fn base_commit(
         OsStr::new(head),
         OsStr::new("origin/main"),
     ];
-    Ok(hex(
-        &git(git_env, top.as_os_str(), &args).map_err(GitError::rejected)?
-    ))
+    hex(&git(git_env, top.as_os_str(), &args).map_err(GitError::rejected)?)
 }
 
 /// `rejected_fault` is the refusal `<Kind>: <text>` of an unexpected error in the input checks.

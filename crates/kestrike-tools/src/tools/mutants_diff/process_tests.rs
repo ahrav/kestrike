@@ -7,15 +7,16 @@ use super::process::{Interrupt, capture};
 #[test]
 fn a_recorded_signal_kills_a_captured_child_and_returns_the_interruption() {
     let interrupt = Interrupt::new();
-    let marker =
-        std::env::temp_dir().join(format!("kestrike-tools-capture-{}", std::process::id()));
-    let _ = std::fs::remove_file(&marker);
-    let script = format!(
-        "echo $$ > '{}.tmp' && mv '{0}.tmp' '{0}'; exec sleep 600",
-        marker.display()
-    );
+    let scratch = crate::paths_tests::Scratch::new("capture");
+    let marker = scratch.0.join("marker");
     let mut command = Command::new("sh");
-    command.args(["-c", &script]);
+    command
+        .args([
+            "-c",
+            "echo $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; exec sleep 600",
+            "sh",
+        ])
+        .arg(&marker);
     let (stop, elapsed) = std::thread::scope(|scope| {
         scope.spawn(|| {
             let start = Instant::now();
@@ -45,7 +46,6 @@ fn a_recorded_signal_kills_a_captured_child_and_returns_the_interruption() {
         "the child {pid} is killed and reaped"
     );
     assert!(elapsed.elapsed() < Duration::from_secs(1));
-    std::fs::remove_file(&marker).expect("the marker is removed");
 }
 
 #[test]
@@ -63,5 +63,23 @@ fn a_capture_waits_for_the_child_and_its_output() {
             output.stderr.as_slice()
         ),
         (Some(3), &b"out"[..], &b"err"[..])
+    );
+}
+
+#[test]
+fn an_empty_command_fails_and_leaves_both_output_files_unchanged() {
+    let scratch = crate::paths_tests::Scratch::new("empty-command");
+    let (stdout, stderr) = (scratch.0.join("out"), scratch.0.join("err"));
+    std::fs::write(&stdout, "out before").expect("written");
+    std::fs::write(&stderr, "err before").expect("written");
+    let stop = super::process::supervise(&Interrupt::new(), &[], &stdout, &stderr, None, &[])
+        .expect_err("an empty command fails");
+    assert_eq!(stop.code(), 1);
+    assert_eq!(
+        (
+            std::fs::read_to_string(&stdout).expect("read"),
+            std::fs::read_to_string(&stderr).expect("read")
+        ),
+        ("out before".to_owned(), "err before".to_owned())
     );
 }

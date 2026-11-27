@@ -133,8 +133,9 @@ exit "$code"
 "#;
 
 /// `GIT` runs the real Git named in place of `__REAL__`, or in the mode `FAKE_GIT_MODE` names: `fail-add`
-/// exits 3 on a worktree add, `fail-remove` refuses a worktree removal with `fatal: refused`, and `hang-add`
-/// adds a locked worktree, publishes `ready` and sleeps.
+/// exits 3 on a worktree add, `fail-remove` refuses a worktree removal with `fatal: refused`, `hang-add`
+/// adds a locked worktree, publishes `ready` and sleeps, and `bad-rev` and `bad-base` make a successful
+/// `rev-parse --verify` or `merge-base` print the byte 0xff and a line feed.
 pub const GIT: &str = r#"#!/bin/sh
 real=__REAL__
 state=$FAKE_STATE
@@ -148,6 +149,11 @@ has() {
   return 1
 }
 if has worktree "$@" && has add "$@" && [ "$mode" = fail-add ]; then exit 3; fi
+if { has rev-parse "$@" && has --verify "$@" && [ "$mode" = bad-rev ]; } ||
+  { has merge-base "$@" && [ "$mode" = bad-base ]; }; then
+  printf '\377\n'
+  exit 0
+fi
 if has worktree "$@" && has remove "$@" && [ "$mode" = fail-remove ]; then
   echo 'fatal: refused' >&2
   exit 1

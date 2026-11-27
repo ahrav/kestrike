@@ -493,6 +493,7 @@ fn start_tool(
     cwd: &Path,
     env: &Env,
     ignore_hangup: bool,
+    blocked: bool,
     state: &Path,
 ) -> Runner {
     let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -507,16 +508,26 @@ fn start_tool(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, which is
-    // async-signal-safe.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, `sigemptyset`,
+    // `sigaddset` and `sigprocmask`, which are async-signal-safe; the set it passes is a local value that
+    // `sigemptyset` initializes.
     unsafe {
         command.pre_exec(move || {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
             for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
                 libc::signal(signal, libc::SIG_DFL);
+                libc::sigaddset(&mut set, signal);
             }
             if ignore_hangup {
                 libc::signal(libc::SIGHUP, libc::SIG_IGN);
             }
+            let how = if blocked {
+                libc::SIG_BLOCK
+            } else {
+                libc::SIG_UNBLOCK
+            };
+            libc::sigprocmask(how, &set, std::ptr::null_mut());
             Ok(())
         });
     }
@@ -542,6 +553,7 @@ pub struct Start<'a> {
     cwd: Option<PathBuf>,
     raw: bool,
     ignore_hangup: bool,
+    blocked: bool,
 }
 
 impl Start<'_> {
@@ -587,6 +599,12 @@ impl Start<'_> {
         self
     }
 
+    /// `blocked` starts the tool with SIGINT, SIGTERM and SIGHUP blocked.
+    pub fn blocked(mut self) -> Self {
+        self.blocked = true;
+        self
+    }
+
     fn argv(&self) -> Vec<OsString> {
         if self.raw {
             return self.args.clone();
@@ -619,7 +637,14 @@ impl Start<'_> {
         let fixture = self.fixture;
         let cwd = self.cwd.clone().unwrap_or_else(|| fixture.repo.clone());
         let env = self.env.clone().unwrap_or_else(|| fixture.env.clone());
-        start_tool(&self.argv(), &cwd, &env, self.ignore_hangup, &fixture.state)
+        start_tool(
+            &self.argv(),
+            &cwd,
+            &env,
+            self.ignore_hangup,
+            self.blocked,
+            &fixture.state,
+        )
     }
 
     /// `run` starts the tool and waits up to [`RUN_LIMIT`] for it.
@@ -828,6 +853,7 @@ impl Fixture {
             cwd: None,
             raw: false,
             ignore_hangup: false,
+            blocked: false,
         }
     }
 

@@ -420,3 +420,40 @@ fn a_live_run_holds_its_artifacts_directory() {
         out.all()
     );
 }
+
+/// A Git whose successful `rev-parse --verify` or `merge-base` prints the byte 0xff exits 2 with a
+/// `Utf8Error` refusal, and no report or build follows.
+#[test]
+fn revision_output_that_is_not_utf_8_is_refused() {
+    let fx = Fixture::new("bad-revision");
+    let mutants = listed(&lib_rs(), &[format!("{SOURCE}/lib.rs:1:1: m")]);
+    fx.plan(&Plan::new(&mutants, &[]));
+    let head = fx.head.clone();
+    let artifacts = fx.artifacts.clone();
+    let cargo = fx.cargo.clone();
+    let rows = [
+        (fx.start().env(fx.git_wrapper("bad-rev")), "bad-rev"),
+        (
+            fx.start()
+                .raw()
+                .args([OsStr::new("--head"), OsStr::new(&head)])
+                .args([OsStr::new("--artifacts"), artifacts.as_os_str()])
+                .args([OsStr::new("--cargo"), cargo.as_os_str()])
+                .env(fx.git_wrapper("bad-base")),
+            "bad-base",
+        ),
+    ];
+    for (start, mode) in rows {
+        let out = start.run();
+        assert_eq!(out.code, 2, "{mode}: {}", out.all());
+        assert!(
+            out.stderr.contains(
+                "mutants rejected: Utf8Error: invalid utf-8 sequence of 1 bytes from index 0"
+            ),
+            "{mode}: {}",
+            out.all()
+        );
+        assert!(fx.builds().is_empty(), "{mode}");
+        assert!(fx.reports().is_empty(), "{mode}");
+    }
+}

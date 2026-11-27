@@ -3,8 +3,9 @@
 //! The handlers of SIGINT, SIGTERM and SIGHUP record the first of them in [`INTERRUPT`]; a later signal
 //! changes nothing. The run reads the record between its steps and while it waits for a child, so a signal
 //! that arrives while a child is being started is acted on once that child has started. A supervised child
-//! leads a new session and group, starts with no signal blocked, and receives SIGTERM when the thread that
-//! started it ends; the run starts every child from its main thread.
+//! leads a new session and group, starts with the three signals unblocked and each handled one at its
+//! default action, and receives SIGTERM when the thread that started it ends; the run starts every child
+//! from its main thread.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -73,12 +74,28 @@ fn ignored(signal: i32) -> io::Result<bool> {
     Ok(current.sa_sigaction == libc::SIG_IGN)
 }
 
-/// `install_handlers` makes each of [`SIGNALS`] that is not ignored record into [`INTERRUPT`]. A signal
+/// `handled_set` is the signal set that holds each of [`SIGNALS`].
+fn handled_set() -> libc::sigset_t {
+    // SAFETY: `sigemptyset` initializes the set that `set` points to, and `sigaddset` adds a valid signal
+    // number to that initialized set; neither can fail on these arguments.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for signal in SIGNALS {
+            libc::sigaddset(&mut set, signal);
+        }
+        set
+    }
+}
+
+/// `install_handlers` makes each of [`SIGNALS`] that is not ignored record into [`INTERRUPT`], then
+/// unblocks the three in the calling thread, so a run started with one of them blocked still receives it
+/// and the threads and children started from that thread start with none of the three blocked. A signal
 /// ignored at the start stays ignored, so a run under `nohup` outlives its terminal.
 ///
 /// # Errors
 ///
-/// Reading a disposition or installing a handler fails.
+/// Reading a disposition, installing a handler or changing the signal mask fails.
 pub fn install_handlers() -> io::Result<()> {
     for signal in SIGNALS {
         if ignored(signal)? {
@@ -87,6 +104,14 @@ pub fn install_handlers() -> io::Result<()> {
         // SAFETY: the action only calls `Interrupt::record`, one atomic compare-exchange on a static,
         // which is async-signal-safe.
         unsafe { signal_hook::low_level::register(signal, move || INTERRUPT.record(signal)) }?;
+    }
+    let handled = handled_set();
+    // SAFETY: `handled` is an initialized signal set that outlives the call, and a null old set makes
+    // `pthread_sigmask` write nothing back.
+    let status =
+        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &handled, std::ptr::null_mut()) };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status));
     }
     Ok(())
 }
@@ -186,17 +211,43 @@ fn stop_group(child: &mut Child) -> Result<(), Fault> {
     signal_group(group, libc::SIGKILL).map(drop)
 }
 
-/// `lead_new_session` makes the child started by `command` lead a new session and receive SIGTERM when
-/// the starting thread ends; a child whose parent already changed exits 1 before it runs the program.
+/// `lead_new_session` makes the child started by `command` lead a new session, return each of [`SIGNALS`]
+/// that has a handler to its default action, unblock the three and receive SIGTERM when the starting thread
+/// ends. A failed `setsid`, signal-mask change or `prctl` fails the start; a child whose parent already
+/// changed exits 1 before it runs the program.
 fn lead_new_session(command: &mut Command) {
     // SAFETY: `getpid` takes no argument and cannot fail.
     let parent = unsafe { libc::getpid() };
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, `prctl`, `getppid`
-    // and `_exit`, which are async-signal-safe and touch no memory shared with the parent.
+    let handled = handled_set();
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, `sigaction`,
+    // `sigprocmask`, `prctl`, `getppid` and `_exit`, which are async-signal-safe. It reads `handled`, its
+    // own copy of an initialized set, and writes only `current`, a local all-zero `sigaction` (a valid
+    // value) that each `sigaction` call overwrites.
     unsafe {
         command.pre_exec(move || {
-            libc::setsid();
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            for signal in SIGNALS {
+                let mut current: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if current.sa_sigaction != libc::SIG_IGN && current.sa_sigaction != libc::SIG_DFL {
+                    current.sa_sigaction = libc::SIG_DFL;
+                    if libc::sigaction(signal, &current, std::ptr::null_mut()) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+            }
+            if libc::sigprocmask(libc::SIG_UNBLOCK, &handled, std::ptr::null_mut()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let (death, unused): (libc::c_ulong, libc::c_ulong) =
+                (libc::SIGTERM as libc::c_ulong, 0);
+            if libc::prctl(libc::PR_SET_PDEATHSIG, death, unused, unused, unused) != 0 {
+                return Err(io::Error::last_os_error());
+            }
             if libc::getppid() != parent {
                 libc::_exit(1);
             }
@@ -213,7 +264,8 @@ fn lead_new_session(command: &mut Command) {
 ///
 /// # Errors
 ///
-/// A recorded signal, or an output file, the start, the wait or a stop of the group that fails.
+/// An empty `argv`, a recorded signal, or an output file, the start, the wait or a stop of the group that
+/// fails. An empty `argv` fails before either output file is opened.
 pub fn supervise(
     interrupt: &Interrupt,
     argv: &[&OsStr],
@@ -225,10 +277,14 @@ pub fn supervise(
     let create = |path: &Path| {
         File::create(path).map_err(|error| Stop::failed(&Fault::os(&error, Some(path.as_os_str()))))
     };
+    let Some((&program, args)) = argv.split_first() else {
+        let error = io::Error::new(io::ErrorKind::InvalidInput, "an empty command");
+        return Err(Stop::failed(&Fault::os(&error, None)));
+    };
     let (out, err) = (create(stdout)?, create(stderr)?);
-    let mut command = Command::new(argv[0]);
+    let mut command = Command::new(program);
     command
-        .args(&argv[1..])
+        .args(args)
         .stdin(Stdio::null())
         .stdout(out)
         .stderr(err)
@@ -240,7 +296,7 @@ pub fn supervise(
     lead_new_session(&mut command);
     let mut child = command
         .spawn()
-        .map_err(|error| Stop::failed(&Fault::os(&error, Some(argv[0]))))?;
+        .map_err(|error| Stop::failed(&Fault::os(&error, Some(program))))?;
     let ended = interrupt.check().and_then(|()| {
         match exited_within(&mut child, Duration::MAX, Some(interrupt)) {
             Ok(Some(status)) => Ok(exit_code(status)),

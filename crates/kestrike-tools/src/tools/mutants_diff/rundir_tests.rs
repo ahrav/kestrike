@@ -21,10 +21,8 @@ fn the_stamp_is_the_utc_calendar_time_of_its_seconds() {
 
 #[test]
 fn a_new_directory_takes_eight_letters_and_mode_0700() {
-    let parent = std::env::temp_dir().join(format!("kestrike-tools-rundir-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&parent);
-    std::fs::create_dir_all(&parent).expect("the parent is made");
-    let made = make_temp_dir("worktree-", &parent).expect("the directory is made");
+    let scratch = crate::paths_tests::Scratch::new("rundir");
+    let made = make_temp_dir("worktree-", &scratch.0).expect("the directory is made");
     let name = made
         .file_name()
         .and_then(|name| name.to_str())
@@ -43,5 +41,4 @@ fn a_new_directory_takes_eight_letters_and_mode_0700() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o700);
-    std::fs::remove_dir_all(&parent).expect("the parent is removed");
 }
