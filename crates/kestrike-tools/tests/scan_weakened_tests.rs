@@ -2379,3 +2379,17 @@ fn a_budget_of_more_than_4300_digits_exits_two() {
         "scan-weakened-tests: a run of 4301 digits passes the limit of 4300 for integer conversion\n"
     );
 }
+
+#[test]
+fn a_summary_path_with_a_trailing_separator_names_its_file() {
+    let repo = Repo::new("summary-separator");
+    repo.ignore_second("ignore");
+    let path = format!("{}//summary.md/", repo.temp.display());
+    let run = repo.scan_env(&["--base", &repo.base], &[("GITHUB_STEP_SUMMARY", &path)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let text = fs::read_to_string(repo.temp.join("summary.md")).expect("the summary reads");
+    assert!(
+        text.contains(&format!("blocks {KEY} second: not ignored -> #[ignore]\n")),
+        "{text}"
+    );
+}

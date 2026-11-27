@@ -1437,8 +1437,8 @@ the exact inputs, records and number forms.
 Before the worktree checks, the hook runs
 `bash scripts/tool.sh scan-weakened-tests` over the pushed commits. The scan
 reads Git objects and has no worktree, so the hook
-runs the copy of the scanner beside `scripts/pre-push-checks.py` in the
-invoking checkout. CI runs the same scanner in the `Weakened-test scan` step of
+runs the launcher beside `scripts/pre-push-checks.py`, which builds the tool of
+the invoking checkout. CI runs the same scanner in the `Weakened-test scan` step of
 the `comment-policy` job, after `Obligation catalog admission`. On a pull
 request that step scans from the first parent of the test merge, so its range
 holds the pull request's commits alone. The hook's range starts at the remote

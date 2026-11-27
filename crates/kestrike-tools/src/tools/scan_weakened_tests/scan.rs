@@ -387,7 +387,11 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             let written = OpenOptions::new()
                 .append(true)
                 .create(true)
-                .open(&summary)
+                .open(
+                    Path::new(&summary)
+                        .components()
+                        .collect::<std::path::PathBuf>(),
+                )
                 .and_then(|mut file| file.write_all(text.as_bytes()));
             if let Err(error) = written {
                 complain(&format!("{TOOL}: step summary: {error}\n"))?;
