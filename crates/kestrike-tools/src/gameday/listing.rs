@@ -17,7 +17,7 @@ use crate::plants::files::strerror;
 use crate::text::Text;
 
 /// An empty `name` identifies `dir` itself.
-pub(super) fn in_dir(dir: BorrowedFd<'_>, name: &Path) -> PathBuf {
+fn in_dir(dir: BorrowedFd<'_>, name: &Path) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name)
 }
 
@@ -37,8 +37,8 @@ pub fn open_dir(
         return Err(ReadError::Nul);
     }
     let at = match dir {
-        Some(dir) => in_dir(dir, path),
-        None => path.to_path_buf(),
+        Some(dir) if !path.as_os_str().is_empty() => in_dir(dir, path),
+        _ => path.to_path_buf(),
     };
     OpenOptions::new()
         .read(true)
@@ -50,7 +50,7 @@ pub fn open_dir(
 
 /// `entries` maps each prefixed name to `true` for a directory or `false` for a regular file. It checks
 /// the names in [`Text`] order, reports the first refusal in that order, and classifies each entry by
-/// the file type reported in the listing.
+/// an `lstat` of its name in the open directory, taken in that order once the listing ends.
 ///
 /// # Errors
 ///
@@ -68,17 +68,17 @@ pub fn entries(dir: BorrowedFd<'_>, prefix: &Text) -> Result<BTreeMap<Text, bool
         };
         Refusal::new(said!(whom, " cannot be listed: ", strerror(error)))
     };
-    let mut listed = Vec::new();
+    let mut names = Vec::new();
     for entry in std::fs::read_dir(in_dir(dir, Path::new(""))).map_err(|error| listing(&error))? {
-        let entry = entry.map_err(|error| listing(&error))?;
-        listed.push((Text::from_os(&entry.file_name()), entry.file_type()));
+        names.push(entry.map_err(|error| listing(&error))?.file_name());
     }
-    listed.sort_by(|(left, _), (right, _)| left.cmp(right));
+    names.sort_by_key(|name| Text::from_os(name));
     let mut found = BTreeMap::new();
-    for (name, kind) in listed {
-        let rel = said!(prefix, name);
-        let kind =
-            kind.map_err(|error| Refusal::new(said!(rel, " cannot be read: ", strerror(&error))))?;
+    for name in names {
+        let rel = said!(prefix, Text::from_os(&name));
+        let kind = std::fs::symlink_metadata(in_dir(dir, Path::new(&name)))
+            .map_err(|error| Refusal::new(said!(rel, " cannot be read: ", strerror(&error))))?
+            .file_type();
         need(kind.is_dir() || kind.is_file(), || {
             said!(rel, " is a link or a special file")
         })?;

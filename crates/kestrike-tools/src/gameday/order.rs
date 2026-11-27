@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::exact::exact;
+use super::evidence::shards;
 use super::layout::VERSION_FIELDS;
 use super::package::number;
 use super::refusal::{Refusal, need, said};
@@ -51,7 +51,7 @@ pub fn ends_observation(p: &Object, time: Option<&Value>) -> bool {
     let Some(time) = time else {
         return false;
     };
-    let time = exact(time).expect("a mark's time is a finite number");
+    let time = number(time);
     let run = p.get("run").expect("the package names its run window");
     let error = number(
         p.get("clock_error_seconds")
@@ -98,7 +98,7 @@ pub(super) fn check_order(
     }
     if let Some(restoration) = file("injection/restoration.json") {
         let stopped = file("injection/stopped.json");
-        check_restoration(package("target"), restoration, [stop, stopped, abort], &end)?;
+        check_restoration(package("target"), restoration, stop, stopped, abort, &end)?;
     }
     let witness = checked_list(required("witness.jsonl"));
     need(ordered(witness), || {
@@ -143,11 +143,11 @@ pub(super) fn check_order(
     need(hosts.len() == activations.len(), || {
         said!("activations.jsonl repeats a host")
     })?;
-    let named = |abort: &Value| {
-        let cause = *checked_field(abort, "cause") == Value::String(Text::from("guardrail"));
-        cause == (*checked_field(abort, "guardrail") != Value::Null)
+    let consistent = |abort: &Value| {
+        let is_guardrail = *checked_field(abort, "cause") == Value::String(Text::from("guardrail"));
+        is_guardrail == (*checked_field(abort, "guardrail") != Value::Null)
     };
-    need(abort.is_none_or(named), || {
+    need(abort.is_none_or(consistent), || {
         said!(
             "injection/abort.json guardrail is not a GD-2 guardrail text with cause guardrail and null \
              otherwise"
@@ -169,8 +169,7 @@ fn check_roles(
         .expect("the layout requires the roles");
     let read_at = checked_field(roles, "time");
     let mut anchors = BTreeMap::new();
-    for shard in checked_list(p.get("shards").expect("the package names its shards")) {
-        let shard = checked_text(shard);
+    for shard in shards(p) {
         let rel = said!("records/", shard, ".jsonl");
         let rows = checked_list(
             files
@@ -185,18 +184,14 @@ fn check_roles(
             .filter(|row| later(read_at, checked_field(row, "time"), error) == Some(true))
             .count();
         let last = before.checked_sub(1);
-        let read: Vec<usize> = (0..rows.len())
-            .filter(|&at| {
-                let row = &rows[at];
-                let near =
-                    !error.is_zero() && later(checked_field(row, "time"), read_at, error).is_none();
-                (Some(at) == last || near)
-                    && VERSION_FIELDS
-                        .iter()
-                        .all(|(key, _)| checked_field(row, key) == checked_field(pin, key))
-            })
-            .collect();
-        need(last.is_none() || !read.is_empty(), || {
+        let anchor = rows.iter().enumerate().position(|(at, row)| {
+            let near = later(checked_field(row, "time"), read_at, error).is_none();
+            (Some(at) == last || near)
+                && VERSION_FIELDS
+                    .iter()
+                    .all(|(key, _)| checked_field(row, key) == checked_field(pin, key))
+        });
+        need(last.is_none() || anchor.is_some(), || {
             said!(
                 "injection/roles.json reads shard ",
                 shard,
@@ -204,7 +199,7 @@ fn check_roles(
                  error of it",
             )
         })?;
-        anchors.insert(shard.clone(), read.first().copied());
+        anchors.insert(shard.clone(), anchor);
     }
     Ok(anchors)
 }
@@ -212,7 +207,9 @@ fn check_roles(
 fn check_restoration(
     target: &Value,
     restoration: &Value,
-    [stop, stopped, abort]: [Option<&Value>; 3],
+    stop: Option<&Value>,
+    stopped: Option<&Value>,
+    abort: Option<&Value>,
     end: &Decimal,
 ) -> Result<(), Refusal> {
     let reviewed = *checked_field(restoration, "reviewed_sha256") != Value::Null;

@@ -42,17 +42,18 @@ pub(super) fn check_seal(
     let seal = values
         .get(&Text::from("injection/collected.json"))
         .expect("the layout requires the seal");
-    let bound = checked_object(checked_field(seal, "files"));
-    let named = |rel: &Text| bound.iter().any(|(key, _)| key == rel);
-    let mut spanned: Vec<&Text> = observed.iter().chain([&coverage]).collect();
-    spanned.sort();
+    let bound: BTreeMap<&Text, &Value> = checked_object(checked_field(seal, "files"))
+        .iter()
+        .map(|(key, digest)| (key, digest))
+        .collect();
+    let named = |rel: &Text| bound.contains_key(rel);
+    let spanned: BTreeSet<&Text> = observed.iter().chain([&coverage]).collect();
     for rel in spanned {
         need(named(rel), || {
             said!("injection/collected.json seals no ", rel)
         })?;
     }
-    let sealed: BTreeSet<&Text> = bound.iter().map(|(key, _)| key).collect();
-    for rel in &sealed {
+    for rel in bound.keys() {
         need(files.contains_key(*rel), || {
             said!("injection/collected.json seals ", rel, ", which is missing")
         })?;
@@ -94,13 +95,7 @@ pub(super) fn check_seal(
         .chain([coverage]);
     for rel in compared {
         let held = hexdigest(files.get(&rel).expect("each compared file stands"));
-        let digest = checked_text(
-            bound
-                .iter()
-                .find(|(key, _)| *key == rel)
-                .map(|(_, digest)| digest)
-                .expect("each compared file is sealed"),
-        );
+        let digest = checked_text(bound.get(&rel).expect("each compared file is sealed"));
         need(*digest == held.as_str(), || {
             said!(
                 rel,

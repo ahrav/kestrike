@@ -2,7 +2,7 @@
 //! checks the seal and the order of the records and marks.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
 use super::constants::{COLLECTED, MARKS, OBSERVATION_FILES};
@@ -20,7 +20,7 @@ use crate::python::hexdigest;
 use crate::text::Text;
 
 /// `Evidence` holds the validated contents of an evidence directory.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct Evidence {
     package: Object,
     package_sha256: String,
@@ -75,6 +75,15 @@ fn absent(p: &Object) -> BTreeSet<Text> {
         .collect()
 }
 
+pub(super) fn shards(p: &Object) -> impl Iterator<Item = &Text> {
+    checked_list(p.get("shards").expect("the package names its shards"))
+        .iter()
+        .map(checked_text)
+}
+
+/// # Panics
+///
+/// `collected` panics if `p` lacks `outside`.
 pub fn collected(p: &Object) -> BTreeSet<Text> {
     let absent = absent(p);
     shards(p)
@@ -83,12 +92,6 @@ pub fn collected(p: &Object) -> BTreeSet<Text> {
         .chain(COLLECTED.iter().map(|rel| Text::from(*rel)))
         .filter(|rel| !absent.contains(rel))
         .collect()
-}
-
-fn shards(p: &Object) -> impl Iterator<Item = &Text> {
-    checked_list(p.get("shards").expect("the package names its shards"))
-        .iter()
-        .map(checked_text)
 }
 
 /// `layout_of` returns a relative path, schema, and optional flag for each shard record file, in the
@@ -204,51 +207,52 @@ pub fn read_evidence(root: &Path, limit: u64, bounds: &FleetBounds) -> Result<Ev
         return Err(Refusal::new(said!("no evidence directory is named")).into());
     }
     let normal: PathBuf = root.components().collect();
-    let top = open_dir(&normal, None, &Text::from_os(root.as_os_str()))?;
-    let mut dirs: Vec<OwnedFd> = Vec::new();
-    let mut place: BTreeMap<Text, (Option<usize>, Text)> = BTreeMap::new();
-    for (rel, is_dir) in entries(top.as_fd(), &Text::new())? {
+    let mut dirs = vec![open_dir(&normal, None, &Text::from_os(root.as_os_str()))?];
+    let mut place: BTreeMap<Text, (usize, Text)> = BTreeMap::new();
+    for (rel, is_dir) in entries(dirs[0].as_fd(), &Text::new())? {
         if !is_dir {
-            place.insert(rel.clone(), (None, rel));
+            place.insert(rel.clone(), (0, rel));
             continue;
         }
         let name = rel.to_os().expect("a layout directory's name is ASCII");
-        let dir = open_dir(Path::new(&name), Some(top.as_fd()), &rel)?;
+        let dir = open_dir(Path::new(&name), Some(dirs[0].as_fd()), &rel)?;
         for sub in entries(dir.as_fd(), &said!(rel, "/"))?.into_keys() {
             let (_, name) = sub.rpartition(b'/');
-            place.insert(sub, (Some(dirs.len()), name));
+            place.insert(sub, (dirs.len(), name));
         }
         dirs.push(dir);
     }
     let manifest = Text::from("package.json");
-    need(place.contains_key(&manifest), || {
+    let listed: BTreeSet<Text> = place.keys().cloned().collect();
+    need(listed.contains(&manifest), || {
         said!("package.json is missing")
     })?;
     let package = read_file(
         Path::new("package.json"),
-        Some(top.as_fd()),
+        Some(dirs[0].as_fd()),
         &manifest,
         limit,
         false,
     )?;
-    admit(
-        &package_of(&package, bounds)?.0,
-        &place.keys().cloned().collect(),
-    )?;
+    admit(&package_of(&package, bounds)?.0, &listed)?;
     let mut files = BTreeMap::new();
     for (rel, (dir, name)) in place {
-        let data = if rel == manifest {
-            package.clone()
-        } else {
-            let dir = dir.map_or_else(|| top.as_fd(), |at| dirs[at].as_fd());
+        if rel != manifest {
             let name = name
                 .to_os()
                 .expect("a listed name encodes as it was listed");
-            read_file(Path::new(&name), Some(dir), &rel, limit, false)?
-        };
-        files.insert(rel, data);
+            let data = read_file(
+                Path::new(&name),
+                Some(dirs[dir].as_fd()),
+                &rel,
+                limit,
+                false,
+            )?;
+            files.insert(rel, data);
+        }
     }
-    drop((dirs, top));
+    drop(dirs);
+    files.insert(manifest, package);
     Ok(load_evidence(&files, bounds)?)
 }
 
