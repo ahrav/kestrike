@@ -9,9 +9,9 @@ use crate::json::{self, Value};
 use crate::text::Text;
 
 use super::digits::{integer, is_digits};
+use super::finding::{escaped, short};
 use super::hunks::paired;
 use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
-use super::scan::short;
 use super::tree::files;
 use super::{Change, Class, Failure, Shown};
 
@@ -142,18 +142,16 @@ pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, 
             _ => None,
         };
         let name = path.to_string();
-        let same_type = match (before, after) {
-            (Value::Integer(_), Some(later)) if budget || timeout => {
-                matches!(later, Value::Integer(_))
+        if let Some(later) = after
+            && match before {
+                Value::Integer(_) => (budget || timeout) && !matches!(later, Value::Integer(_)),
+                Value::String(_) => TEXTS.contains(&field) && !matches!(later, Value::String(_)),
+                _ => false,
             }
-            (Value::String(_), Some(later)) if TEXTS.contains(&field) => {
-                matches!(later, Value::String(_))
-            }
-            _ => true,
-        };
-        if let (false, Some(later)) = (same_type, after) {
+        {
             return Err(Failure::Refused(format!(
-                "{INVENTORY}: the value at {name} changes from {} to {}",
+                "{INVENTORY}: the value at {} changes from {} to {}",
+                escaped(&name),
                 kind(before),
                 kind(later)
             )));

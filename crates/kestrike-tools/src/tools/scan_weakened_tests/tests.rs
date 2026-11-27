@@ -408,6 +408,15 @@ fn a_count_or_a_bound_text_that_changes_its_type_is_refused() {
             )
         );
     }
+    let error = inventory_changes(
+        r#"{"a\n::x": {"seeds": 4}}"#,
+        r#"{"a\n::x": {"seeds": "4"}}"#,
+    )
+    .expect_err("the type changes");
+    assert_eq!(
+        error.to_string(),
+        "scripts/test-inventory.json: the value at a\\n::x.seeds changes from an integer to a text"
+    );
     let old = r#"{"seeds": true, "seconds": 2.0, "executions": 3, "bound": "depth: 4"}"#;
     let new = r#"{"seeds": 1, "seconds": 1, "executions": {"x": 1}, "bound": ["depth: 1"]}"#;
     let found: Vec<String> = inventory_changes(old, new)
@@ -435,7 +444,7 @@ fn duplicate_keys_keep_the_last_value_at_the_first_place() {
 
 #[test]
 fn a_short_commit_name_takes_its_first_twelve_code_points() {
-    use super::scan::short;
+    use super::finding::short;
     assert_eq!(short("0123456789abcdef"), "0123456789ab");
     assert_eq!(short("\u{e9}".repeat(13).as_str()), "\u{e9}".repeat(12));
     assert_eq!(short("abc"), "abc");

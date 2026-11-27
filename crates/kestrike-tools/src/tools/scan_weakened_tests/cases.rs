@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use super::tree::entries;
+use super::tree::{entries, regular};
 use super::{Change, Class, Failure, Finding, Shown};
 
 pub const CASES: &str = "crates/kestrike-tools/tests";
@@ -14,7 +14,6 @@ pub const CASES: &str = "crates/kestrike-tools/tests";
 /// `cases` returns the id and the entry path of each case at `commit`, in tree order.
 fn cases(commit: &str) -> Result<Vec<(String, String)>, Failure> {
     let listed = entries(commit, &[CASES], true)?;
-    let regular = |mode: &str| matches!(mode, "100644" | "100755");
     let single = listed
         .iter()
         .any(|(mode, path)| regular(mode) && *path == format!("{CASES}/tools.rs"));

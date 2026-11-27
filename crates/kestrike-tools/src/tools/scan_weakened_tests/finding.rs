@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::json::Integer;
+use crate::text::push_repr;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
@@ -81,4 +82,26 @@ impl Finding {
     pub fn key(&self) -> String {
         format!("{}:{}", self.change.class.as_str(), self.path)
     }
+}
+
+/// `short` is the first twelve code points of a commit name, as the report and the refusals write it.
+pub(super) fn short(commit: &str) -> &str {
+    commit
+        .char_indices()
+        .nth(12)
+        .map_or(commit, |(at, _)| &commit[..at])
+}
+
+/// `escaped` writes each code point U+0000 to U+001F and U+007F to U+009F of `text` as `repr` writes it and
+/// every other code point as it is, so a field of a report or refusal line starts no line of its own.
+pub(super) fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for code in text.chars() {
+        if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {
+            push_repr(u32::from(code), &mut out);
+        } else {
+            out.push(code);
+        }
+    }
+    out
 }

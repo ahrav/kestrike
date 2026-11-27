@@ -67,15 +67,14 @@ pub fn hunks<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Vec<Hunk>, 
     let mut hunk = Hunk::default();
     let mut number: Option<u64> = None;
     for line in lines {
-        if line.starts_with("diff --git ") {
-            if !hunk.is_empty() {
-                found.push(std::mem::take(&mut hunk));
-            }
+        let header = HUNK.captures(line.as_bytes()).next();
+        let section = line.starts_with("diff --git ");
+        if (section || header.is_some()) && !hunk.is_empty() {
+            found.push(std::mem::take(&mut hunk));
+        }
+        if section {
             number = None;
-        } else if let Some(header) = HUNK.captures(line.as_bytes()).next() {
-            if !hunk.is_empty() {
-                found.push(std::mem::take(&mut hunk));
-            }
+        } else if let Some(header) = header {
             let start = text_of(header.get(1).expect("the hunk pattern captures its start"));
             number = Some(integer(start)?.to_string().parse().map_err(|_| {
                 Failure::Refused(format!("the hunk header {line} names a line past 2^64"))

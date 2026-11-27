@@ -46,12 +46,13 @@ fn a_reply_that_ends_before_an_answer_is_truncated() {
 #[test]
 fn a_reply_of_another_form_is_truncated() {
     for (reply, name) in [
-        (&b"1111 blob 99\nab"[..], "HEAD:a"),
-        (b"1111 blob 2\nab", "HEAD:a"),
+        (&b"1111 blob 2\nab"[..], "HEAD:a"),
         (b"1111 blob 2\nabc\n", "HEAD:a"),
         (b"1111 blob\nab\n", "HEAD:a"),
         (b"1111\x0bblob\x0c2\nhi\n", "HEAD:a"),
         (b"1111  blob 2\nhi\n", "HEAD:a"),
+        (b"1111  2\nhi\n", "HEAD:a"),
+        (b" blob 2\nhi\n", "HEAD:a"),
         (b"1111 blob -2\nhi\n", "HEAD:a"),
         (b"HEAD:b missing\n", "HEAD:a"),
         (b"HEAD:a  missing\n", "HEAD:a"),
@@ -77,9 +78,9 @@ fn a_reply_of_another_form_is_truncated() {
     );
 }
 
-/// A name that holds a line feed would be two requests, so `blob_texts` refuses it before Git starts.
+/// A name that holds a line feed would be two requests, so `blob_texts` refuses it as a name.
 #[test]
-fn a_name_that_holds_a_line_feed_is_refused_before_git_starts() {
+fn a_name_that_holds_a_line_feed_is_refused_as_a_name() {
     let error = blob_texts(&specs(&["HEAD:a", "HEAD:a\nb"])).expect_err("the name is refused");
     assert!(matches!(error, GitError::Name(_)), "{error:?}");
     assert_eq!(

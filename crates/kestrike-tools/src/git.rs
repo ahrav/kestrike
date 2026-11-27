@@ -1,5 +1,5 @@
 //! These functions pass argument vectors to Git and read its standard output as strict UTF-8. Every Git
-//! child starts from [`command`], which sets `GIT_NO_REPLACE_OBJECTS=1`, so Git reads each object as the
+//! child of this module starts from [`command`], which sets `GIT_NO_REPLACE_OBJECTS=1`, so Git reads each object as the
 //! repository stores it and no `refs/replace` entry stands in for one.
 
 use std::ffi::OsStr;
@@ -21,7 +21,7 @@ pub enum GitError {
     /// a child's output or status failed: `git cat-file --batch: ` and the system's error.
     Io(io::Error),
     /// Git exited with a failure: the command as `git <arguments>`, `: ` and Git's standard error with white
-    /// space stripped at both ends, otherwise as Git wrote it.
+    /// space stripped at both ends and each byte sequence that is not UTF-8 replaced by U+FFFD.
     Failed(String),
     /// Git's output is not UTF-8: the decoder's message, after the command or the request's name where the
     /// function names one.
@@ -55,8 +55,8 @@ fn command() -> Command {
 }
 
 /// `git` returns the standard output of `git args` in the caller's environment, which [`command`] extends.
-/// A failed command is [`GitError::Failed`], and its [`GitError::NotUtf8`] holds the decoder's message
-/// verbatim.
+/// Git that does not start is [`GitError::Start`], a failed command is [`GitError::Failed`], and its
+/// [`GitError::NotUtf8`] holds the decoder's message verbatim.
 pub fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
     let output = captured(command().args(args), args)?;
     String::from_utf8(output).map_err(|error| GitError::NotUtf8(error.utf8_error().to_string()))
@@ -64,8 +64,8 @@ pub fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
 
 /// `git_text` returns the standard output of `git args` with `GIT_ICASE_PATHSPECS`, `GIT_GLOB_PATHSPECS` and
 /// `GIT_DIFF_OPTS` removed from the caller's environment, so a pathspec and a diff read as the arguments state.
-/// A failed command is [`GitError::Failed`], and output that is not UTF-8 is [`GitError::NotUtf8`] after the
-/// command.
+/// Git that does not start is [`GitError::Start`], a failed command is [`GitError::Failed`], and output that
+/// is not UTF-8 is [`GitError::NotUtf8`] after the command.
 pub fn git_text<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
     let mut git = command();
     git.args(args);
@@ -79,8 +79,8 @@ pub fn git_text<S: AsRef<OsStr>>(args: &[S]) -> Result<String, GitError> {
 
 /// `merge_base` returns the output of `git merge-base one other` with white space stripped at both ends, and
 /// `None` when Git exits 1 with no output, as it does for two commits that share no history. It removes
-/// nothing from the caller's environment. Any other failed exit is [`GitError::Failed`], and output that is
-/// not UTF-8 is [`GitError::NotUtf8`].
+/// nothing from the caller's environment. Git that does not start is [`GitError::Start`], any other failed
+/// exit is [`GitError::Failed`], and output that is not UTF-8 is [`GitError::NotUtf8`].
 pub fn merge_base(one: &str, other: &str) -> Result<Option<String>, GitError> {
     let args = ["merge-base", one, other];
     let output = command().args(args).output().map_err(GitError::Start)?;
@@ -98,7 +98,8 @@ pub fn merge_base(one: &str, other: &str) -> Result<Option<String>, GitError> {
 /// `blob_texts` returns the text of each `<rev>:<path>` name of `specs` in order, read by one
 /// `git cat-file --batch`: a blob's bytes, and an empty text for a name Git reports missing and for an object
 /// other than a blob. It removes nothing from the caller's environment. A name that holds a line feed is
-/// [`GitError::Name`] before Git starts. A failed exit is [`GitError::Failed`], a reply that leaves the batch
+/// [`GitError::Name`] before Git starts. Git that does not start is [`GitError::Start`], a failed write or
+/// read is [`GitError::Io`], a failed exit is [`GitError::Failed`], a reply that leaves the batch
 /// framing is [`GitError::Truncated`], and a blob that is not UTF-8 is [`GitError::NotUtf8`] after its name.
 pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
     if let Some(spec) = specs.iter().find(|spec| spec.contains('\n')) {

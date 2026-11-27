@@ -6,19 +6,20 @@ use crate::git::git_text;
 use crate::text::Text;
 
 use super::Failure;
+use super::finding::{escaped, short};
 use super::hunks::DIFF_BATCH;
-use super::scan::{escaped, short};
 
-/// `entries` returns `(mode, path)` for each record that `git --literal-pathspecs ls-tree -z --full-tree`
-/// prints for `paths` at `commit`, every blob under them when `recursive` is set; each path names itself from
-/// the top level. A tree above a requested path is entered and not printed, so a requested path that is such
-/// a tree has no record. A record that is not `<mode> <type> <id>`, a tab and a path is refused.
+/// `entries` returns `(mode, path)` for each record that `git --literal-pathspecs ls-tree -t -z --full-tree`
+/// prints for `paths` at `commit`, every entry under them when `recursive` is set; each path names itself
+/// from the top level. `-t` prints each tree that Git enters on the way to a deeper requested path, so a
+/// requested path that is a tree has its record whatever else the batch requests. A record that is not
+/// `<mode> <type> <id>`, a tab and a path is refused.
 pub fn entries(
     commit: &str,
     paths: &[&str],
     recursive: bool,
 ) -> Result<Vec<(String, String)>, Failure> {
-    let mut args = vec!["--literal-pathspecs", "ls-tree", "-z"];
+    let mut args = vec!["--literal-pathspecs", "ls-tree", "-t", "-z"];
     if recursive {
         args.push("-r");
     }
@@ -46,6 +47,11 @@ pub fn entries(
     Ok(found)
 }
 
+/// `regular` holds for the modes of a regular file, `100644` and `100755`.
+pub fn regular(mode: &str) -> bool {
+    matches!(mode, "100644" | "100755")
+}
+
 /// `files` returns the paths of `paths` that `commit` holds, and refuses the first whose entry has a mode
 /// other than `100644` and `100755` as `<path> at <short id> is not a file`, the path written through
 /// [`escaped`]. A path with no entry is an
@@ -63,7 +69,7 @@ pub fn files<'p>(commit: &str, paths: &[&'p str]) -> Result<Vec<&'p str>, Failur
     for &path in paths {
         match modes.get(path).map(String::as_str) {
             None => {}
-            Some("100644" | "100755") => held.push(path),
+            Some(mode) if regular(mode) => held.push(path),
             Some(_) => {
                 return Err(Failure::Refused(format!(
                     "{} at {} is not a file",

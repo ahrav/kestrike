@@ -1460,11 +1460,12 @@ Weakens-Test: CLASS:PATH: REASON
 A case is a top-level entry of `crates/kestrike-tools/tests` that
 [the tools guide](tools.md#adding-a-tool) names, read from the Git trees of the
 merge base and the head: a regular file `<id>.rs`, or a directory `<id>` with
-`mod.rs` (or `main.rs` at a commit without `tests/tools.rs`), where `<id>`
-matches `[a-z][a-z0-9_]*` and is not `tools`. A case of the base blocks when the
-head has neither `<id>.rs` nor `<id>/mod.rs`; a change of shape for the same id
-passes, and a rename to another id is the absence of the old one. Its key names
-the base entry's path, such as
+a regular `mod.rs`, where `<id>` matches `[a-z][a-z0-9_]*` and is not `tools`.
+A tree without a regular `tools.rs`, the root of the one test executable, also
+recognizes `<id>/main.rs`, at the base and at the head alike. A case of the base
+blocks when the head holds no case of the same id; a change of shape for the
+same id passes, and a rename to another id is the absence of the old one. Its
+key names the base entry's path, such as
 `case-removed:crates/kestrike-tools/tests/mutants_diff`. Unit test files under
 `src/` are not cases.
 

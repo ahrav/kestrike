@@ -9,10 +9,11 @@ use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::git::{blob_texts, git, git_text, merge_base};
 use crate::json::Integer;
 use crate::stream::emit;
-use crate::text::{push_repr, strip_str};
+use crate::text::strip_str;
 
 use super::cases::{CASES, removed};
 use super::declarations::{conditions, declarations, plain};
+use super::finding::{escaped, short};
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
@@ -75,6 +76,7 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
     if !diffed.is_empty() {
+        // A diffed path that is a link, a tree or a submodule at either commit is refused here.
         files(base, &diffed)?;
         files(head, &diffed)?;
     }
@@ -129,20 +131,18 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
             })?,
         );
     }
-    let inventory = |path: &&str| {
-        path.strip_prefix(INVENTORY)
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    let within = |root: &'static str| {
+        move |path: &&str| {
+            path.strip_prefix(root)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        }
     };
-    if paths.iter().any(inventory) {
+    if paths.iter().any(within(INVENTORY)) {
         let old = inventory_text(base)?;
         let new = inventory_text(head)?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
-    let under_cases = |path: &&str| {
-        path.strip_prefix(CASES)
-            .is_some_and(|rest| rest.starts_with('/'))
-    };
-    if paths.iter().any(under_cases) {
+    if paths.iter().any(within(CASES)) {
         found.extend(removed(base, head)?);
     }
     Ok(found)
@@ -284,13 +284,6 @@ fn resolve(rev: &OsStr) -> Result<String, Failure> {
     Ok(strip_str(&git(&args)?).to_owned())
 }
 
-pub(super) fn short(commit: &str) -> &str {
-    commit
-        .char_indices()
-        .nth(12)
-        .map_or(commit, |(at, _)| &commit[..at])
-}
-
 struct Scan {
     base: String,
     head: String,
@@ -361,20 +354,6 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
         Err(error) => return fail(&format!("{TOOL}: {error}\n"), 2),
     };
     report(&scanned).unwrap_or(STREAM_FAILED)
-}
-
-/// `escaped` writes each code point U+0000 to U+001F and U+007F to U+009F of `text` as `repr` writes it and
-/// every other code point as it is, so a field of a report or refusal line starts no line of its own.
-pub(super) fn escaped(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for code in text.chars() {
-        if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {
-            push_repr(u32::from(code), &mut out);
-        } else {
-            out.push(code);
-        }
-    }
-    out
 }
 
 /// `report` writes each field of a line through [`escaped`]. It returns `Err` when standard error cannot be

@@ -2208,11 +2208,12 @@ fn a_path_that_git_quotes_leaves_each_later_file_its_own_hunks() {
         ("src/b.rs", "    b.max_branches = 10;\n"),
     ]);
     let head = repo.change(&[
-        ("src/a\"q.rs", "    b.max_branches = 12;\n"),
+        ("src/a\"q.rs", "    b.max_branches = 8;\n"),
         ("src/b.rs", "    b.max_branches = 9;\n"),
     ]);
     let run = repo.scan_parent(&head);
-    let expected = "blocks budget-lowered:src/b.rs max_branches at line 1: 10 -> 9\n";
+    let expected = "blocks budget-lowered:src/a\"q.rs max_branches at line 1: 10 -> 8\n\
+                    blocks budget-lowered:src/b.rs max_branches at line 1: 10 -> 9\n";
     assert_eq!(run.outcome(), (Some(1), expected), "{}", run.stderr);
 }
 
@@ -2687,6 +2688,93 @@ fn an_acknowledged_case_removal_passes() {
     assert_eq!(
         run.outcome(),
         (Some(0), expected.as_str()),
+        "{}",
+        run.stderr
+    );
+}
+
+/// A Rust path that is a file at the base and a tree at the head is refused whatever the tree holds: a
+/// changed `.rs` file under the tree, listed in the same batch, leaves the tree's own record in place.
+#[test]
+fn a_rust_path_that_becomes_a_tree_exits_two_whatever_it_holds() {
+    let repo = Repo::new("becomes-tree");
+    for inner in ["x.rs", "x.txt"] {
+        let file = repo.change(&[("src/foo.rs", "fn f() {}\n")]);
+        repo.git(&["rm", "-q", "--", "src/foo.rs"]);
+        let tree = repo.change(&[(&format!("src/foo.rs/{inner}"), "fn g() {}\n")]);
+        let run = repo.scan(&["--base", &file, "--head", &tree]);
+        assert_eq!(run.outcome(), (Some(2), ""), "{inner}: {}", run.stderr);
+        assert_eq!(
+            run.stderr,
+            format!(
+                "scan-weakened-tests: src/foo.rs at {} is not a file\n",
+                &tree[..12]
+            )
+        );
+        repo.reset(&repo.base);
+    }
+}
+
+/// A carriage return in an acknowledgement's reason is written `\r` in the acknowledged line on standard
+/// output and in the step summary.
+#[test]
+fn a_carriage_return_in_an_acknowledgement_is_written_escaped() {
+    let repo = Repo::new("reason-carriage-return");
+    let head = repo.ignore_second(&format!(
+        "Ignore it\n\nWeakens-Test: {KEY}: x\r::error::y\n"
+    ));
+    let summary = repo.temp.join("summary.md");
+    let path = summary.to_str().expect("the path is UTF-8");
+    let run = repo.scan_env(
+        &["--base", &repo.base, "--head", &head],
+        &[("GITHUB_STEP_SUMMARY", path)],
+    );
+    let line = format!(
+        "acknowledged {KEY} second: not ignored -> #[ignore] (Weakens-Test: x\\r::error::y)\n"
+    );
+    assert_eq!(run.outcome(), (Some(0), line.as_str()), "{}", run.stderr);
+    let text = fs::read_to_string(&summary).expect("the summary reads");
+    assert!(text.contains(&line), "{text}");
+}
+
+/// A directory whose root is `main.rs` is a case at a commit whose test directory holds no regular
+/// `tools.rs`, at the base and at the head alike; where the head holds `tools.rs`, its roots are `<id>.rs`
+/// and `<id>/mod.rs` alone. A directory with both roots is one case.
+#[test]
+fn a_main_rs_root_is_a_case_at_a_commit_without_tools_rs() {
+    let repo = Repo::new("case-main-root");
+    let path = |name: &str| format!("{CASES}/{name}");
+    let base = repo.change(&[
+        (&path("two/main.rs"), "fn two() {}\n"),
+        (&path("three/main.rs"), "fn three() {}\n"),
+        (&path("three/mod.rs"), "fn three() {}\n"),
+        (&path("one.rs"), "fn one() {}\n"),
+    ]);
+    let kept = repo.change(&[(&path("one.rs"), "fn one() { }\n")]);
+    let harness = repo.change(&[(&path("tools.rs"), "mod one;\n")]);
+    let block =
+        |id: &str| format!("blocks case-removed:{CASES}/{id} case {id}: present -> absent\n");
+    let run = repo.scan(&["--base", &base, "--head", &kept]);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    let run = repo.scan(&["--base", &kept, "--head", &harness]);
+    let expected = block("two");
+    assert_eq!(
+        run.outcome(),
+        (Some(1), expected.as_str()),
+        "{}",
+        run.stderr
+    );
+    repo.reset(&base);
+    let gone = repo.commit(
+        &[],
+        "change",
+        &[&path("three/main.rs"), &path("three/mod.rs")],
+    );
+    let run = repo.scan(&["--base", &base, "--head", &gone]);
+    let expected = block("three");
+    assert_eq!(
+        run.outcome(),
+        (Some(1), expected.as_str()),
         "{}",
         run.stderr
     );
