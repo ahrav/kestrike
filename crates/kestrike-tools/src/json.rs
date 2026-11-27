@@ -3,7 +3,7 @@
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
-//! last value, and `-0` reads as the integer zero. The reader refuses nesting past [`MAX_DEPTH`] and an integer
+//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead. The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
 //! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
 
@@ -133,6 +133,13 @@ impl Object {
             .map(|(_, value)| value)
     }
 
+    fn get_text(&self, key: &Text) -> Option<&Value> {
+        self.0
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         self.0
             .iter_mut()
@@ -200,25 +207,76 @@ impl std::error::Error for Error {}
 /// [`MAX_DEPTH`], for an integer token of more than [`MAX_INTEGER_DIGITS`] digits, and when a
 /// non-whitespace byte follows the value. A successful parse can hold a non-finite float.
 pub fn parse(text: &str) -> Result<Value, Error> {
-    let mut reader = Reader {
-        text: text.as_bytes(),
-        at: 0,
-    };
-    reader.space();
-    let value = reader.value(0)?;
-    reader.space();
-    if reader.at != reader.text.len() {
-        return Err(reader.error("text after the value"));
+    Reader::new(text, false).document()
+}
+
+/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UniqueError {
+    Syntax(Error),
+    Repeated(Text),
+}
+
+impl fmt::Display for UniqueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Syntax(error) => error.fmt(f),
+            Self::Repeated(name) => write!(f, "repeated member {name}"),
+        }
     }
-    Ok(value)
+}
+
+impl std::error::Error for UniqueError {}
+
+/// `parse_unique` reads what [`parse`] reads and refuses an object that holds a key twice.
+///
+/// Each object is judged when its closing `}` is read, so a syntax error inside an object, and a repeat
+/// in an object nested within it, comes first. The name refused is the first key of the object that
+/// repeats an earlier one.
+///
+/// # Errors
+///
+/// `parse_unique` returns [`UniqueError::Syntax`] where [`parse`] fails and [`UniqueError::Repeated`] for
+/// the first object to close that repeats a key.
+pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
+    let mut reader = Reader::new(text, true);
+    reader
+        .document()
+        .map_err(|error| match reader.repeated.take() {
+            Some(name) => UniqueError::Repeated(name),
+            None => UniqueError::Syntax(error),
+        })
 }
 
 struct Reader<'a> {
     text: &'a [u8],
     at: usize,
+    /// Whether a repeated key ends the read.
+    unique: bool,
+    /// The repeated key behind the error a read returned, when `unique` holds.
+    repeated: Option<Text>,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
+    fn new(text: &'a str, unique: bool) -> Self {
+        Self {
+            text: text.as_bytes(),
+            at: 0,
+            unique,
+            repeated: None,
+        }
+    }
+
+    fn document(&mut self) -> Result<Value, Error> {
+        self.space();
+        let value = self.value(0)?;
+        self.space();
+        if self.at != self.text.len() {
+            return Err(self.error("text after the value"));
+        }
+        Ok(value)
+    }
+
     fn error(&self, reason: &'static str) -> Error {
         error_at(self.at, reason)
     }
@@ -301,6 +359,7 @@ impl Reader<'_> {
             self.at += 1;
             return Ok(Value::Object(object));
         }
+        let mut repeated = None;
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -313,9 +372,16 @@ impl Reader<'_> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
+            if self.unique && repeated.is_none() && object.get_text(&key).is_some() {
+                repeated = Some(key.clone());
+            }
             object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
+                if let Some(name) = repeated {
+                    self.repeated = Some(name);
+                    return Err(self.error("a repeated member"));
+                }
                 return Ok(Value::Object(object));
             }
         }

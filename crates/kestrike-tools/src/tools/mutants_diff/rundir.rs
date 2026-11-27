@@ -1,47 +1,17 @@
-//! The run directory: the lock of the artifacts directory, and the directories named as Python's
-//! `tempfile.mkdtemp` names them, mode 0700 with eight letters of `a` to `z`, `0` to `9` and `_` drawn from
-//! the kernel's random bytes and drawn again while a name is taken.
+//! The run directory: the lock of the artifacts directory, and the directories that
+//! [`crate::temp_dir::make_temp_dir`] names, whose failures become the run's faults.
 
-use std::ffi::OsStr;
-use std::fs::{DirBuilder, File, OpenOptions};
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::pieces::text;
 use super::stop::{Fault, Stop};
 use crate::ownership::{PrivateError, make_private, real_uid};
-
-const NAME_LETTERS: &[u8; 37] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
-const NAME_LENGTH: usize = 8;
-const NAME_ATTEMPTS: usize = 10_000;
-
-/// `random_letters` fills `letters` with letters of [`NAME_LETTERS`] drawn uniformly from the kernel's
-/// random bytes.
-fn random_letters(letters: &mut [u8]) -> io::Result<()> {
-    let mut filled = 0;
-    while filled < letters.len() {
-        let mut byte = 0u8;
-        // SAFETY: `getrandom` writes at most one byte into `byte`, a valid, writable local.
-        let read = unsafe { libc::getrandom((&raw mut byte).cast(), 1, 0) };
-        if read < 0 {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::Interrupted {
-                continue;
-            }
-            return Err(error);
-        }
-        let span = u8::try_from(NAME_LETTERS.len()).expect("the letters fit a byte");
-        if read == 1 && byte < span * (u8::MAX / span) {
-            letters[filled] = NAME_LETTERS[usize::from(byte % span)];
-            filled += 1;
-        }
-    }
-    Ok(())
-}
+use crate::temp_dir::{self, TempDirError};
 
 /// `make_temp_dir` creates `parent/PREFIX` and eight random letters as a directory of mode 0700, drawing
 /// a new name while one is taken.
@@ -49,25 +19,19 @@ fn random_letters(letters: &mut [u8]) -> io::Result<()> {
 /// # Errors
 ///
 /// The random bytes cannot be read, a `mkdir` fails with another error than a taken name, which the
-/// fault states with the attempted path, or [`NAME_ATTEMPTS`] names are all taken.
+/// fault states with the attempted path, or every name drawn is taken.
 pub(super) fn make_temp_dir(prefix: &str, parent: &Path) -> Result<PathBuf, Fault> {
-    for _ in 0..NAME_ATTEMPTS {
-        let mut letters = [0u8; NAME_LENGTH];
-        random_letters(&mut letters).map_err(|error| Fault::os(&error, None))?;
-        let mut name = prefix.as_bytes().to_vec();
-        name.extend_from_slice(&letters);
-        let path = parent.join(OsStr::from_bytes(&name));
-        match DirBuilder::new().mode(0o700).create(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(Fault::os(&error, Some(path.as_os_str()))),
+    temp_dir::make_temp_dir(prefix, parent).map_err(|error| match error {
+        TempDirError::Random(error) => Fault::os(&error, None),
+        TempDirError::Create(error) => Fault::os(error.error(), Some(error.path().as_os_str())),
+        TempDirError::Exhausted => {
+            let exhausted = io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "no usable temporary directory name found",
+            );
+            Fault::os(&exhausted, None)
         }
-    }
-    let exhausted = io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "no usable temporary directory name found",
-    );
-    Err(Fault::os(&exhausted, None))
+    })
 }
 
 /// `utc_stamp` writes the UTC wall clock as [`utc_stamp_at`] does.

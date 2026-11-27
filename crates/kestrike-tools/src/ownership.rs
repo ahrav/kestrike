@@ -300,7 +300,7 @@ pub struct PathError {
 }
 
 impl PathError {
-    fn new(path: &Path, error: io::Error) -> Self {
+    pub(crate) fn new(path: &Path, error: io::Error) -> Self {
         Self {
             path: path.to_path_buf(),
             error,

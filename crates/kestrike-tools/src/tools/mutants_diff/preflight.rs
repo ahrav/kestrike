@@ -18,25 +18,19 @@ use super::options::Options;
 use super::pieces::text;
 use super::process::{INTERRUPT, capture, exit_code};
 use super::stop::{Fault, Stop};
+pub(super) use crate::environ::Environ;
+use crate::environ::{get, set};
+use crate::git::REPOSITORY_VARIABLES;
 use crate::ownership::{foreign_toolchain_paths, status};
 use crate::paths;
 use crate::text::Text;
 
 pub(super) const CONFIG: &str = ".cargo/mutants.toml";
 const WORKFLOW: &str = ".github/workflows/agent-checks.yml";
-const OVERRIDES: [&str; 5] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-];
 const DEFAULT_PATH: &str = "/bin:/usr/bin";
 pub(super) const DEFAULT_TESTS: [&str; 8] = [
     "--lib", "--", "--skip", "bind::", "--skip", "native::", "--skip", "soak",
 ];
-
-pub(super) type Environ = Vec<(OsString, OsString)>;
 
 /// What step 1 fixed: the top level, the report's first fields, the artifacts directory, the
 /// environments of Git and of the tool, and the program that stands for `cargo`.
@@ -74,18 +68,6 @@ fn join(directory: &OsStr, entry: &OsStr) -> OsString {
     }
     joined.extend_from_slice(entry);
     OsString::from_vec(joined)
-}
-
-fn get<'a>(environ: &'a Environ, name: &str) -> Option<&'a OsString> {
-    environ
-        .iter()
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value)
-}
-
-fn set(environ: &mut Environ, name: &str, value: OsString) {
-    environ.retain(|(key, _)| key != name);
-    environ.push((OsString::from(name), value));
 }
 
 /// `is_file` holds for a path whose target is a regular file; [`status`] decides which errors read as no
@@ -303,7 +285,7 @@ fn listed(names: &[Text]) -> Text {
 /// `refuse_inherited` refuses a set Git repository or index variable and an inherited variable that
 /// changes the tool or the build profile.
 fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
-    let set_names: Vec<Text> = OVERRIDES
+    let set_names: Vec<Text> = REPOSITORY_VARIABLES
         .iter()
         .filter(|name| get(environ, name).is_some())
         .map(|&name| Text::from(name))

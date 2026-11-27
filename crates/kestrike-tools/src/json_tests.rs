@@ -2,7 +2,10 @@
 //! the input holds. The reader and [`Integer`] hold an integer of at most 4,300 digits, the length up to which
 //! Python converts an integer to and from text by default; a longer integer token is refused.
 
-use crate::json::{Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, Value, dump, indented, parse};
+use crate::json::{
+    Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, UniqueError, Value, dump, indented, parse,
+    parse_unique, text,
+};
 
 fn round_trip(text: &str) -> String {
     dump(&parse(text).unwrap_or_else(|error| panic!("{text:?} parses: {error}")))
@@ -240,5 +243,46 @@ fn the_digit_limit_counts_digits_and_leaves_floats_alone() {
     assert!(
         matches!(parse(&format!("{digits}9.5")), Ok(Value::Float(value)) if value == f64::INFINITY),
         "{expression}"
+    );
+}
+
+/// `json.loads(text, object_pairs_hook=unique)`, where `unique` raises `ValueError(f"repeated member
+/// {name}")` for the first name it meets twice, judges each object when it closes: a repeat inside a
+/// nested object comes first, a syntax error before the close comes first, and the name is the first of
+/// the object to repeat.
+#[test]
+fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
+    let rows: &[(&str, Result<(), &str>)] = &[
+        (
+            r#"{"a": 1, "b": 2, "b": 3, "a": 4}"#,
+            Err("repeated member b"),
+        ),
+        (
+            r#"{"a": 1, "a": 2, "x": {"b": 1, "b": 2}}"#,
+            Err("repeated member b"),
+        ),
+        (r#"[{"a": 1}, {"c": 1, "c": 2}]"#, Err("repeated member c")),
+        (
+            r#"{"\ud800": 1, "\ud800": 2}"#,
+            Err("repeated member \\ud800"),
+        ),
+        (r#"{"a": 1, "a": 2,"#, Err("expected a key at byte 16")),
+        (r#"{"a": 1, "a": 2} x"#, Err("repeated member a")),
+        (r#"{"a": {"a": 1}, "b": [{"a": 2}]}"#, Ok(())),
+    ];
+    for &(text, expected) in rows {
+        let found = parse_unique(text)
+            .map(drop)
+            .map_err(|error| error.to_string());
+        assert_eq!(found, expected.map_err(str::to_owned), "{text}");
+    }
+    let Err(UniqueError::Repeated(name)) = parse_unique(r#"{"k": 1, "k": 1}"#) else {
+        panic!("the repeat is refused");
+    };
+    assert_eq!(name, Text::from("k"));
+    assert_eq!(
+        parse(r#"{"a": 1, "a": 2}"#).map(|value| text(&value)),
+        Ok(r#"{"a":2}"#.to_owned()),
+        "the present read keeps the last value"
     );
 }
