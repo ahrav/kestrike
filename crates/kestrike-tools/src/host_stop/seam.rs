@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::launch::{Call, Ended, launch};
-use super::record::{Interrupted, Record, SLICE};
+use super::record::{Interrupted, Record, SLICE, left};
 
 /// The call, the two clocks and the sleep a command takes as one value.
 pub trait Seam {
@@ -83,7 +83,7 @@ pub fn sleep(record: &mut Record<'_>, length: Duration) -> Result<(), Interrupte
     let end = Instant::now().checked_add(length);
     loop {
         record.read()?;
-        let left = end.map_or(SLICE, |end| end.saturating_duration_since(Instant::now()));
+        let left = left(end);
         if left.is_zero() {
             return Ok(());
         }

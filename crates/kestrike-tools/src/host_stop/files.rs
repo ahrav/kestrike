@@ -103,7 +103,7 @@ pub struct Disk;
 impl Files for Disk {}
 
 /// `/proc/self/fd/<descriptor>`, which resolves to the file open on that descriptor.
-pub fn proc_path(file: &File) -> PathBuf {
+pub(super) fn proc_path(file: &File) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()))
 }
 

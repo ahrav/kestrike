@@ -16,7 +16,7 @@ mod record;
 mod seam;
 
 pub use evidence::{Lock, LockError, ProbeError, lock, probe, stands};
-pub use files::{Disk, Files, Links, proc_path};
+pub use files::{Disk, Files, Links};
 pub use launch::{AWS, Call, CallFailed, Ended, launch};
 pub use mark::{Step, Unwritten, publish, sync_directory};
 pub use record::{DELIVERED, Delivered, Interrupted, Record, SLICE, Signal, install};

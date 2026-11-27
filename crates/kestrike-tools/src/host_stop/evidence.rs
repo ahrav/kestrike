@@ -8,6 +8,7 @@ use super::files::{Files, Links, proc_path};
 
 /// The exclusive `flock` of a directory, held until the value drops.
 #[derive(Debug)]
+#[must_use = "the lock frees when the value drops"]
 pub struct Lock {
     _held: File,
 }

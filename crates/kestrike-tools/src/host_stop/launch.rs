@@ -21,13 +21,13 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::PathBuf;
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::record::{Interrupted, Record, SLICE};
+use super::record::{Interrupted, Record, SLICE, left};
 use crate::text::strip_str;
 
 /// The program a call starts, found on the given `PATH`.
@@ -52,12 +52,6 @@ pub struct Call<'a> {
 /// error stripped of Python's whitespace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallFailed(String);
-
-impl CallFailed {
-    pub fn message(&self) -> &str {
-        &self.0
-    }
-}
 
 impl fmt::Display for CallFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -86,13 +80,7 @@ type Reader = JoinHandle<io::Result<Vec<u8>>>;
 /// `PATH`, a start, a reader thread, a wait or a read that fails, output other than UTF-8, the cut,
 /// or an exit other than 0.
 pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
-    let what = call
-        .argv
-        .iter()
-        .take(2)
-        .copied()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let what = call.argv[..call.argv.len().min(2)].join(" ");
     let no_answer = |reason: &dyn fmt::Display| {
         Ended::Failed(CallFailed(format!("{what} gave no answer: {reason}")))
     };
@@ -100,6 +88,42 @@ pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended>
     let Some(program) = find(call.env) else {
         return Err(no_answer(&"no directory of PATH holds an executable aws"));
     };
+    let mut child = command(program, call)
+        .spawn()
+        .map_err(|error| no_answer(&error))?;
+    let started = Instant::now();
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let readers = read_all(child.stdout.take(), Arc::clone(&abandoned))
+        .and_then(|out| Ok((out, read_all(child.stderr.take(), Arc::clone(&abandoned))?)));
+    let (out, err) = match readers {
+        Ok(readers) => readers,
+        Err(error) => {
+            stop(&mut child, None, &abandoned);
+            return Err(no_answer(&error));
+        }
+    };
+    let ended = Ending {
+        child: &mut child,
+        abandoned: &abandoned,
+    };
+    let status = wait(record, ended, [&out, &err], started, call.cut).map_err(|end| match end {
+        Waited::Raised(raised) => Ended::Interrupted(raised),
+        Waited::Cut => no_answer(&format_args!("timed out after {:?}", call.cut)),
+        Waited::Failed(error) => no_answer(&error),
+    })?;
+    let stdout = joined(out).map_err(|error| no_answer(&error))?;
+    let stderr = joined(err).map_err(|error| no_answer(&error))?;
+    let code = exit_code(status);
+    if code != 0 {
+        let message = format!("{what} exited {code}: {}", tail(strip_str(&stderr)));
+        return Err(Ended::Failed(CallFailed(message)));
+    }
+    Ok(stdout)
+}
+
+/// The `aws` command of `call`: the program found on the `PATH`, started as `aws`, with the
+/// arguments, the environment and the standard streams the module states.
+fn command(program: PathBuf, call: &Call<'_>) -> Command {
     let cut = whole_seconds(call.cut).to_string();
     let mut command = Command::new(program);
     command
@@ -111,8 +135,9 @@ pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended>
             "json",
             "--cli-read-timeout",
             &cut,
+            "--cli-connect-timeout",
+            &cut,
         ])
-        .args(["--cli-connect-timeout", &cut])
         .env_clear()
         .envs(call.env.iter().map(|(name, value)| (name, value)))
         .env("AWS_PAGER", "")
@@ -127,43 +152,17 @@ pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended>
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn().map_err(|error| no_answer(&error))?;
-    let started = Instant::now();
-    let abandoned = Arc::new(AtomicBool::new(false));
-    let readers = start_readers(&mut child, &abandoned);
-    let (out, err) = match readers {
-        Ok(readers) => readers,
-        Err(error) => {
-            stop(&mut child, None);
-            abandoned.store(true, Ordering::SeqCst);
-            return Err(no_answer(&error));
-        }
-    };
-    let status = match wait(record, &mut child, [&out, &err], started, call.cut) {
-        Ok(status) => status,
-        Err(end) => {
-            abandoned.store(true, Ordering::SeqCst);
-            return Err(match end {
-                Waited::Raised(raised) => Ended::Interrupted(raised),
-                Waited::Cut => no_answer(&format_args!("timed out after {:?}", call.cut)),
-                Waited::Failed(error) => no_answer(&error),
-            });
-        }
-    };
-    let decoded = joined(out).and_then(|stdout| Ok((stdout, joined(err)?)));
-    let (stdout, stderr) = decoded.map_err(|error| no_answer(&error))?;
-    let code = exit_code(status);
-    if code != 0 {
-        let stderr = strip_str(&stderr);
-        let start = stderr
-            .char_indices()
-            .rev()
-            .nth(TAIL - 1)
-            .map_or(0, |(at, _)| at);
-        let message = format!("{what} exited {code}: {}", &stderr[start..]);
-        return Err(Ended::Failed(CallFailed(message)));
-    }
-    Ok(stdout)
+    command
+}
+
+/// The last [`TAIL`] characters of `text`, counted in Unicode scalar values.
+fn tail(text: &str) -> &str {
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(TAIL - 1)
+        .map_or(0, |(at, _)| at);
+    &text[start..]
 }
 
 enum Waited {
@@ -172,13 +171,21 @@ enum Waited {
     Failed(io::Error),
 }
 
+/// The child of a call and the flag its readers watch, which every early end of the wait stops
+/// together.
+struct Ending<'a> {
+    child: &'a mut Child,
+    abandoned: &'a AtomicBool,
+}
+
 fn wait(
     record: &mut Record<'_>,
-    child: &mut Child,
+    ending: Ending<'_>,
     readers: [&Reader; 2],
     started: Instant,
     cut: Duration,
 ) -> Result<ExitStatus, Waited> {
+    let Ending { child, abandoned } = ending;
     let end = started.checked_add(cut);
     let mut status = None;
     loop {
@@ -186,7 +193,7 @@ fn wait(
             match child.try_wait() {
                 Ok(exited) => status = exited,
                 Err(error) => {
-                    stop(child, status);
+                    stop(child, status, abandoned);
                     return Err(Waited::Failed(error));
                 }
             }
@@ -197,33 +204,26 @@ fn wait(
             return Ok(status);
         }
         if let Err(raised) = record.read() {
-            stop(child, status);
+            stop(child, status, abandoned);
             return Err(Waited::Raised(raised));
         }
-        let now = Instant::now();
-        let left = end.map_or(SLICE, |end| end.saturating_duration_since(now));
+        let left = left(end);
         if left.is_zero() {
-            stop(child, status);
+            stop(child, status, abandoned);
             return Err(Waited::Cut);
         }
         thread::sleep(left.min(SLICE));
     }
 }
 
-/// Kills a child that has not been reaped with SIGKILL and reaps it.
-fn stop(child: &mut Child, status: Option<ExitStatus>) {
+/// Kills a child that has not been reaped with SIGKILL and reaps it, then makes the readers drop
+/// what they read from here on.
+fn stop(child: &mut Child, status: Option<ExitStatus>, abandoned: &AtomicBool) {
     if status.is_none() {
         let _ = child.kill();
         let _ = child.wait();
     }
-}
-
-fn start_readers(child: &mut Child, abandoned: &Arc<AtomicBool>) -> io::Result<(Reader, Reader)> {
-    let (stdout, stderr): (Option<ChildStdout>, Option<ChildStderr>) =
-        (child.stdout.take(), child.stderr.take());
-    let out = read_all(stdout, Arc::clone(abandoned))?;
-    let err = read_all(stderr, Arc::clone(abandoned))?;
-    Ok((out, err))
+    abandoned.store(true, Ordering::SeqCst);
 }
 
 /// A thread that reads `stream` to its end; once `abandoned` holds, the thread returns at its next
@@ -253,7 +253,9 @@ fn read_all(
 }
 
 fn joined(reader: Reader) -> io::Result<String> {
-    let bytes = reader.join().expect("a reader thread returns its bytes")?;
+    let bytes = reader
+        .join()
+        .map_err(|_| io::Error::other("a reader of the child's output panicked"))??;
     let text = String::from_utf8(bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))

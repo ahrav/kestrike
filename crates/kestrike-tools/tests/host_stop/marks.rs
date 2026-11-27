@@ -377,6 +377,31 @@ fn short_writes_leave_the_mark_whole() {
     }
 }
 
+/// The mark's directory opens without following a link: a link to a directory fails the open with
+/// `ENOTDIR`, and the directory it names stays empty.
+#[test]
+fn a_link_at_the_directory_fails_the_open() {
+    let scratch = Scratch::new("marks-link");
+    let real = scratch.dir("real");
+    symlink(&real, scratch.0.join("link")).expect("the link is made");
+    for mark in MARKS {
+        let failed = publish(
+            &Disk,
+            &scratch.0.join("link"),
+            OsStr::new(&file_name(mark)),
+            &bytes_of(mark),
+        );
+        match failed {
+            Err(Unwritten::Failed {
+                step: Step::OpenDirectory,
+                error,
+            }) => assert_eq!(error.raw_os_error(), Some(libc::ENOTDIR), "{mark}"),
+            other => panic!("{mark}: {other:?}"),
+        }
+        assert_eq!(listing(&real), Vec::<String>::new());
+    }
+}
+
 /// A name that is no single path component is refused before any step.
 #[test]
 fn a_name_other_than_one_component_takes_no_step() {

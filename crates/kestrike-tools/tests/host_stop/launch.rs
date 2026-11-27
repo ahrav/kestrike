@@ -129,7 +129,7 @@ fn call<'a>(
 
 fn failed(ended: Result<String, Ended>) -> String {
     match ended {
-        Err(Ended::Failed(failed)) => failed.message().to_owned(),
+        Err(Ended::Failed(failed)) => failed.to_string(),
         other => panic!("a failed call: {other:?}"),
     }
 }

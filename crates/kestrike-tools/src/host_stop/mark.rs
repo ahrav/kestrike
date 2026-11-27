@@ -2,7 +2,8 @@
 //!
 //! [`publish`] opens the directory without following a link and makes every later step on that open
 //! directory: it opens a file there that has no name (`O_TMPFILE`, mode 0644), writes every byte, syncs
-//! the file, links it to the name, syncs the file again and syncs the directory. Before the link no
+//! the file, links it to the name, syncs the file again and syncs the directory. The file is synced
+//! again once named, since btrfs logs an inode in full only then. Before the link no
 //! entry has the name, so a failure or a kill there leaves nothing; an entry already at the name fails
 //! the link and keeps its bytes. After the link the mark stands. A failed sync after the link removes
 //! the name and syncs the directory, and the result says whether the removal stands synced, stands
@@ -113,7 +114,10 @@ pub fn publish(
             io::ErrorKind::InvalidInput,
             "a mark's name is one path component",
         );
-        return Err(failed(Step::Name)(error));
+        return Err(Unwritten::Failed {
+            step: Step::Name,
+            error,
+        });
     }
     let held = files
         .open_directory(directory, Links::Refuse)
@@ -132,7 +136,10 @@ pub fn publish(
                 io::ErrorKind::InvalidData,
                 "a write took more bytes than it was given",
             );
-            return Err(failed(Step::Write)(error));
+            return Err(Unwritten::Failed {
+                step: Step::Write,
+                error,
+            });
         };
         rest = after;
     }

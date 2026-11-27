@@ -12,10 +12,16 @@
 
 use std::io;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The longest time a wait or a sleep runs between two reads of the record.
 pub const SLICE: Duration = Duration::from_millis(50);
+
+/// The time left until `end`, or one [`SLICE`] for an end past the range of [`Instant`], which never
+/// comes, so a loop on it reads the record once a slice without end.
+pub(super) fn left(end: Option<Instant>) -> Duration {
+    end.map_or(SLICE, |end| end.saturating_duration_since(Instant::now()))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Signal {
@@ -138,12 +144,14 @@ impl<'a> Record<'a> {
     ///
     /// [`Interrupted`] names the signal taken from the record.
     pub fn read(&mut self) -> Result<(), Interrupted> {
-        if !self.may_raise() {
+        if !self.armed || self.held {
             return Ok(());
         }
-        self.armed = false;
         match self.delivered.take() {
-            Some(signal) => Err(Interrupted(signal)),
+            Some(signal) => {
+                self.armed = false;
+                Err(Interrupted(signal))
+            }
             None => Ok(()),
         }
     }
