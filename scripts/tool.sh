@@ -32,8 +32,11 @@ prepare() {
   [[ -z ${RUSTUP_HOME-} || $RUSTUP_HOME == /* ]] || export RUSTUP_HOME=$PWD/$RUSTUP_HOME
   [[ -z ${CARGO_HOME-} || $CARGO_HOME == /* ]] || export CARGO_HOME=$PWD/$CARGO_HOME
   rustup=
-  ! hash rustup 2>/dev/null || rustup=${BASH_CMDS[rustup]}
-  [[ -z $rustup || $rustup == /* ]] || rustup=$PWD/$rustup
+  unset -f rustup
+  if hash rustup 2>/dev/null; then
+    rustup=${BASH_CMDS[rustup]}
+    [[ $rustup == /* ]] || rustup=$PWD/$rustup
+  fi
   CDPATH='' cd -P -- "${source%/*}/.." || fail "cannot find the top level"
   top=$PWD
 
@@ -44,8 +47,8 @@ prepare() {
   # ends the text puts a field after every quote.
   workflow=$top/.github/workflows/agent-checks.yml
   [[ -f $workflow ]] || fail "$workflow is not a regular file"
-  { mapfile -d '' chunks || true; } 2>/dev/null <"$workflow" || fail "cannot read $workflow"
-  printf -v value '%s\2' ${chunks[@]+"${chunks[@]}"}
+  mapfile -d '' chunks 2>/dev/null <"$workflow" || fail "cannot read $workflow"
+  printf -v value '%s\2' "${chunks[@]}"
   set -f
   IFS='"'
   fields=($value)
@@ -69,6 +72,7 @@ prepare() {
   set +f
   ((pins == 1)) && [[ $pin =~ ^[^[:space:]]+$ ]] || fail "$workflow pins no single STABLE toolchain"
 
+  # A missing `rustup` is refused after the pin, as a `show` that names no host is.
   [[ -n $rustup ]] || fail "rustup names no single host"
   unset RUSTUP_TOOLCHAIN
   export RUSTUP_AUTO_INSTALL=0
@@ -86,23 +90,27 @@ prepare() {
   done <<<"$installed"
   [[ -n $found ]] ||
     fail "the pinned toolchain $pin-$host is not installed; install it with: rustup toolchain install $pin"
-  cargo=$("$rustup" which --toolchain "$pin" cargo 2>/dev/null) || fail "the pinned toolchain $pin-$host has no cargo"
+  cargo=$("$rustup" which --toolchain "$pin" cargo 2>/dev/null) ||
+    fail "the pinned toolchain $pin-$host has no cargo"
   rustc=${cargo%/*}/rustc
   [[ -x $rustc ]] || fail "the pinned toolchain $pin-$host has no rustc"
-  # The build names the pinned toolchain by the full name the list showed, which is the name Cargo reads
-  # under RUSTUP_HOME for its cache of rustc's answers. Both wrappers outrank one that a Cargo
-  # configuration file names. Cargo keeps its cache of rustc's
-  # answers in `target/tools/.rustc_info.json` only for a wrapper that is a file, so the wrapper is
-  # `/usr/bin/env`, which starts rustc with the same arguments and environment. The empty value, which
-  # Cargo reads as no wrapper, stands where that file is no executable or the rustc path holds a `=`,
-  # which `env` would read as an assignment.
+
+  # Cargo keeps its cache of rustc's answers in `target/tools/.rustc_info.json` only for wrappers that are
+  # files it can hash, so both are `/usr/bin/env`, which starts rustc with the same arguments and
+  # environment and outranks a wrapper that a Cargo configuration file names, as the empty value does.
+  # The empty value stands where that file is no executable or the rustc path holds a `=`, which `env`
+  # would read as an assignment.
   wrapper=
-  [[ ! -f /usr/bin/env || ! -x /usr/bin/env || $rustc == *=* ]] || wrapper=/usr/bin/env
+  if [[ -f /usr/bin/env && -x /usr/bin/env && $rustc != *=* ]]; then
+    wrapper=/usr/bin/env
+  fi
 
   for name in "${!CARGO_PROFILE_@}" "${!CARGO_BUILD_@}" "${!CARGO_TARGET_@}"; do
     [[ $name == CARGO_BUILD_JOBS ]] || unset "$name"
   done
   unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTDOC
+  # The full name `<pin>-<host>`, which the list showed, names the toolchain directory that Cargo reads
+  # under a set RUSTUP_HOME to fingerprint rustc for that cache.
   if ! log=$(RUSTUP_TOOLCHAIN=$pin-$host RUSTC=$rustc RUSTC_WRAPPER=$wrapper RUSTC_WORKSPACE_WRAPPER=$wrapper \
     CARGO_BUILD_BUILD_DIR=target/tools "$cargo" build --quiet --package kestrike-tools --bin kestrike-tools \
     --target "$host" --target-dir "$top/target/tools" 2>&1); then
