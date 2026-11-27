@@ -8,6 +8,7 @@ pub mod classes;
 pub mod environ;
 pub mod fixtures;
 pub mod git;
+pub mod hook;
 pub mod json;
 pub mod orderings;
 pub mod ownership;

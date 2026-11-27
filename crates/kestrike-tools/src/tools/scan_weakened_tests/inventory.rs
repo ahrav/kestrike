@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::environ::Environ;
 use crate::git::blob_texts;
 use crate::json::{self, Value};
 use crate::text::{Text, escaped};
@@ -249,12 +250,12 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
 
 /// `inventory_text` returns the inventory's text at `rev`, and an empty text where `rev` holds no entry at its
 /// path. An entry that is no file, and a file that is empty or unreadable, is refused.
-pub fn inventory_text(rev: &str) -> Result<String, Failure> {
-    if files(rev, &[INVENTORY])?.is_empty() {
+pub fn inventory_text(environ: &Environ, rev: &str) -> Result<String, Failure> {
+    if files(environ, rev, &[INVENTORY])?.is_empty() {
         return Ok(String::new());
     }
     let short = short(rev);
-    let text = blob_texts(&[format!("{rev}:{INVENTORY}")])?.remove(0);
+    let text = blob_texts(environ, &[format!("{rev}:{INVENTORY}")])?.remove(0);
     if text.is_empty() {
         return Err(Failure::Refused(format!(
             "{INVENTORY} at {short} is empty or unreadable"

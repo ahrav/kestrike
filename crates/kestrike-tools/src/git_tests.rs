@@ -1,7 +1,11 @@
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
-use crate::git::{GitError, batch_texts, blob_texts, git, label, merge_base};
+use crate::environ::get;
+use crate::git::{
+    GitError, PATHSPEC_MODES, batch_texts, blob_bytes, blob_texts, caller_environ, git, label,
+    merge_base, push_environ, replies, without_pathspec_modes,
+};
 use crate::text::strip_str;
 
 fn specs(names: &[&str]) -> Vec<String> {
@@ -94,7 +98,8 @@ fn a_name_that_git_would_read_as_another_is_refused_as_a_name() {
         ("HEAD:a\0b", "'HEAD:a\\x00b' holds a NUL"),
         ("HEAD:a\r\r", "'HEAD:a\\r\\r' ends in a carriage return"),
     ] {
-        let error = blob_texts(&specs(&["HEAD:a", name])).expect_err("the name is refused");
+        let error = blob_texts(&caller_environ(), &specs(&["HEAD:a", name]))
+            .expect_err("the name is refused");
         assert!(matches!(error, GitError::Name(_)), "{error:?}");
         assert_eq!(
             error.to_string(),
@@ -102,7 +107,7 @@ fn a_name_that_git_would_read_as_another_is_refused_as_a_name() {
         );
     }
     assert!(!matches!(
-        blob_texts(&specs(&["HEAD:a\rb"])),
+        blob_texts(&caller_environ(), &specs(&["HEAD:a\rb"])),
         Err(GitError::Name(_))
     ));
 }
@@ -124,12 +129,15 @@ fn a_label_writes_a_byte_outside_utf8_as_its_surrogate_escape() {
 
 #[test]
 fn a_failed_command_names_itself_and_its_stripped_standard_error() {
-    let error = git(&[
-        "rev-parse",
-        "--verify",
-        "--end-of-options",
-        "no-such-rev-365^{commit}",
-    ])
+    let error = git(
+        &caller_environ(),
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            "no-such-rev-365^{commit}",
+        ],
+    )
     .expect_err("the revision does not exist");
     let GitError::Failed(text) = error else {
         panic!("the command fails: {error:?}");
@@ -145,7 +153,8 @@ fn a_failed_command_names_itself_and_its_stripped_standard_error() {
 
 #[test]
 fn an_unknown_commit_has_no_merge_base_but_fails() {
-    let error = merge_base("HEAD", "f".repeat(40).as_str()).expect_err("the commit does not exist");
+    let error = merge_base(&caller_environ(), "HEAD", "f".repeat(40).as_str())
+        .expect_err("the commit does not exist");
     assert!(matches!(error, GitError::Failed(_)), "{error:?}");
 }
 
@@ -162,5 +171,83 @@ fn the_repository_variables_are_the_five_in_order() {
             "GIT_COMMON_DIR",
             "GIT_OBJECT_DIRECTORY",
         ]
+    );
+}
+
+/// The bytes reader answers a missing name and a tree with `None` and an empty blob with its empty bytes, and
+/// reads the missing reply of a name with a final carriage return under the name Git read.
+#[test]
+fn a_batch_reply_of_bytes_tells_an_absent_name_and_a_tree_from_an_empty_blob() {
+    let reply = b"1111 blob 3\nabc\nHEAD:gone missing\n3333 tree 4\n\x01\x02\x03\x04\n4444 blob 0\n\nHEAD:x missing\n";
+    let names = specs(&["HEAD:a", "HEAD:gone", "HEAD:dir", "HEAD:empty", "HEAD:x\r"]);
+    let read: Vec<Option<Vec<u8>>> = replies(reply, &names, |_, kind, body| {
+        Ok((kind == b"blob").then(|| body.to_vec()))
+    })
+    .expect("the reply reads")
+    .into_iter()
+    .map(Option::flatten)
+    .collect();
+    assert_eq!(
+        read,
+        [Some(b"abc".to_vec()), None, None, Some(Vec::new()), None]
+    );
+}
+
+/// A reply that answers a full object id with another id is refused, and a name that is no object id may be
+/// answered with any id.
+#[test]
+fn a_reply_for_another_object_id_is_refused() {
+    let asked = "a".repeat(40);
+    let reply = format!("{} blob 1\nx\n", "b".repeat(40));
+    let error =
+        replies(reply.as_bytes(), &specs(&[&asked]), |_, _, _| Ok(())).expect_err("the id differs");
+    assert!(matches!(error, GitError::Truncated(_)), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        format!("git cat-file --batch: the answer for {asked} has another form")
+    );
+    assert!(replies(reply.as_bytes(), &specs(&["HEAD:a"]), |_, _, _| Ok(())).is_ok());
+    let same = format!("{asked} blob 1\nx\n");
+    assert!(replies(same.as_bytes(), &specs(&[&asked]), |_, _, _| Ok(())).is_ok());
+}
+
+/// The bytes reader refuses a name Git would split or cut, and sends a name with a final carriage return.
+#[test]
+fn the_bytes_reader_refuses_a_line_feed_or_a_nul_in_a_name() {
+    for (name, said) in [
+        ("HEAD:a\nb", "'HEAD:a\\nb' holds a line feed"),
+        ("HEAD:a\0b", "'HEAD:a\\x00b' holds a NUL"),
+    ] {
+        let error = blob_bytes(&caller_environ(), &specs(&["HEAD:a", name])).expect_err("refused");
+        assert_eq!(
+            error.to_string(),
+            format!("git cat-file --batch: the name {said}")
+        );
+    }
+    assert!(!matches!(
+        blob_bytes(&caller_environ(), &specs(&["HEAD:a\r"])),
+        Err(GitError::Name(_))
+    ));
+}
+
+/// Both environments set replace objects off; the push's drops each pathspec mode variable and keeps every
+/// other variable in order.
+#[test]
+fn the_push_environment_removes_the_pathspec_modes() {
+    assert_eq!(
+        get(&caller_environ(), "GIT_NO_REPLACE_OBJECTS"),
+        Some(&"1".into())
+    );
+    assert_eq!(
+        get(&push_environ(), "GIT_NO_REPLACE_OBJECTS"),
+        Some(&"1".into())
+    );
+    let pair = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
+    let mut given = vec![pair("A", "1")];
+    given.extend(PATHSPEC_MODES.iter().map(|mode| pair(mode, "1")));
+    given.push(pair("B", "2"));
+    assert_eq!(
+        without_pathspec_modes(given),
+        [pair("A", "1"), pair("B", "2")]
     );
 }

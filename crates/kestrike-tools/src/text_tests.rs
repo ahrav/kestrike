@@ -273,3 +273,22 @@ fn join_separates_each_two_items() {
         assert_eq!(Text::join(separator, items).repr(), *expected, "{items:?}");
     }
 }
+
+/// A text is printable when no code point is one that `repr` escapes for being nonprintable: a space and a
+/// letter outside ASCII are, a tab, a no-break space, a zero-width space, DEL and a lone surrogate are not,
+/// and an empty text is.
+#[test]
+fn is_printable_holds_where_repr_escapes_no_code_point() {
+    for (codes, printable) in [
+        (&[0x61, 0x20, 0x62][..], true),
+        (&[0xe9], true),
+        (&[], true),
+        (&[0x9], false),
+        (&[0xa0], false),
+        (&[0x200b], false),
+        (&[0x7f], false),
+        (&[0xdcff], false),
+    ] {
+        assert_eq!(text(codes).is_printable(), printable, "{codes:x?}");
+    }
+}

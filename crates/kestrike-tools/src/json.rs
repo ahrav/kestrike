@@ -3,7 +3,8 @@
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
-//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
+//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead, and
+//! [`parse_members`] keeps every member of an object, a repeated key's included.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
 //! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
@@ -245,11 +246,29 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
     Reader::new(text, true).document()
 }
 
+/// `parse_members` reads what [`parse`] reads and returns each object as an array of its keys and values in
+/// document order, `[key, value, key, value, ...]`, so each member of a repeated key stands in it. An
+/// object and an array of the same items read alike in the result.
+///
+/// # Errors
+///
+/// `parse_members` refuses what [`parse`] refuses.
+pub fn parse_members(text: &str) -> Result<Value, Error> {
+    let mut reader = Reader::new(text, false);
+    reader.members = true;
+    reader.document().map_err(|error| match error {
+        UniqueError::Syntax(error) => error,
+        UniqueError::Repeated(_) => unreachable!("a read that keeps every member refuses none"),
+    })
+}
+
 struct Reader<'a> {
     text: &'a [u8],
     at: usize,
     /// Whether a repeated key ends the read.
     unique: bool,
+    /// Whether an object reads as the array of its keys and values.
+    members: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -258,6 +277,7 @@ impl<'a> Reader<'a> {
             text: text.as_bytes(),
             at: 0,
             unique,
+            members: false,
         }
     }
 
@@ -349,9 +369,10 @@ impl<'a> Reader<'a> {
     fn object(&mut self, depth: usize) -> Result<Value, UniqueError> {
         self.nest(depth)?;
         let mut object = Object::new();
+        let mut members = Vec::new();
         if self.peek() == Some(b'}') {
             self.at += 1;
-            return Ok(Value::Object(object));
+            return Ok(self.closed(object, members));
         }
         let mut repeated = None;
         loop {
@@ -369,14 +390,28 @@ impl<'a> Reader<'a> {
             if self.unique && repeated.is_none() && object.iter().any(|(name, _)| *name == key) {
                 repeated = Some(key.clone());
             }
-            object.insert(key, value);
+            if self.members {
+                members.extend([Value::String(key), value]);
+            } else {
+                object.insert(key, value);
+            }
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
                     return Err(UniqueError::Repeated(name));
                 }
-                return Ok(Value::Object(object));
+                return Ok(self.closed(object, members));
             }
+        }
+    }
+
+    /// `closed` is the value of a read object: the array of its keys and values when the read keeps every
+    /// member, else the object.
+    fn closed(&self, object: Object, members: Vec<Value>) -> Value {
+        if self.members {
+            Value::Array(members)
+        } else {
+            Value::Object(object)
         }
     }
 

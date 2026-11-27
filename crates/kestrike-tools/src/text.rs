@@ -322,6 +322,13 @@ impl Text {
         joined
     }
 
+    /// `is_printable` holds when [`Text::repr`] writes every code point of the text as it is, apart from the
+    /// backslash and the quote it escapes: no code point is one the Unicode 13.0 data marks nonprintable, and
+    /// an empty text is printable.
+    pub fn is_printable(&self) -> bool {
+        self.code_points().all(|code| !is_unprintable(code))
+    }
+
     /// `repr` writes the text between single quotes, or between double quotes when it holds `'` and no `"`;
     /// it writes a backslash, a tab, a line feed and a carriage return as their backslash escapes, and each
     /// code point that the Unicode 13.0 data marks nonprintable as `\xXX`, `\uXXXX` or `\UXXXXXXXX`. An
