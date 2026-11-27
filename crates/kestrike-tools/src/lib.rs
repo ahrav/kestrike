@@ -11,6 +11,7 @@ pub mod fixtures;
 #[cfg(target_os = "linux")]
 pub mod gameday;
 pub mod git;
+pub mod host_stop;
 pub mod json;
 pub mod ownership;
 pub mod paths;
