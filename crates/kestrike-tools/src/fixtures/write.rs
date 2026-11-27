@@ -10,7 +10,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::{AsFd, BorrowedFd, IntoRawFd};
+use std::os::fd::{AsFd, IntoRawFd};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::process::Stdio;
@@ -21,6 +21,7 @@ use super::{case, quint};
 use crate::json::{self, Integer, Object, Value};
 use crate::paths;
 use crate::python;
+use crate::stream::emit;
 
 pub struct Model {
     pub tool: &'static str,
@@ -179,16 +180,6 @@ fn report(text: &str, code: u8) -> u8 {
     match emit(io::stderr().as_fd(), text) {
         Ok(()) => code,
         Err(_) => 120,
-    }
-}
-
-/// `emit` writes `text` to a duplicate of `stream`, so a write error such as `EBADF` on a descriptor opened
-/// read-only reaches the caller. A closed `stream` takes the text without an error.
-fn emit(stream: BorrowedFd<'_>, text: &str) -> io::Result<()> {
-    match stream.try_clone_to_owned() {
-        Ok(owned) => File::from(owned).write_all(text.as_bytes()),
-        Err(error) if error.raw_os_error() == Some(libc::EBADF) => Ok(()),
-        Err(error) => Err(error),
     }
 }
 

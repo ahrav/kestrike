@@ -644,7 +644,8 @@
         "kestrike_tools",
         "fixture_writers",
         "mutants_diff",
-        "ownership"
+        "ownership",
+        "scan_weakened_tests"
       ]
     },
     "source-anchors": {

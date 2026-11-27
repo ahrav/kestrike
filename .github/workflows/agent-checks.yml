@@ -50,16 +50,16 @@ jobs:
           fetch-depth: 0
       - name: Comment markers
         run: bash scripts/forbid-comment-markers.sh
-      - name: Hook regression tests
-        run: python3 scripts/test-agent-hooks.py
-      - name: Review workflow contract tests
-        run: python3 scripts/test-review-workflow.py
       # The measurement-frame checks resolve Rust source anchors with the
       # source-anchors crate, which they build with cargo.
       - name: Pinned toolchain
         run: >-
           exec timeout --kill-after=30s 5m
           rustup toolchain install "$STABLE" --profile minimal
+      - name: Hook regression tests
+        run: python3 scripts/test-agent-hooks.py
+      - name: Review workflow contract tests
+        run: python3 scripts/test-review-workflow.py
       - name: Script self-checks
         env:
           MEASUREMENT_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'origin/main' }}
@@ -81,7 +81,6 @@ jobs:
           python3 scripts/test-judge-quint.py
           python3 scripts/test-scan-barriers.py
           python3 scripts/test-scan-tag-compare.py
-          python3 scripts/test-scan-weakened-tests.py
           python3 scripts/test-guest-binder.py
           python3 scripts/test-qualified-envelope.py
           python3 scripts/test-hit-gate.py
@@ -102,7 +101,7 @@ jobs:
       - name: Weakened-test scan
         env:
           SCAN_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'origin/main' }}
-        run: python3 scripts/scan-weakened-tests.py --base "$SCAN_BASE"
+        run: bash scripts/tool.sh scan-weakened-tests --base "$SCAN_BASE"
 
   lane-script:
     if: >-

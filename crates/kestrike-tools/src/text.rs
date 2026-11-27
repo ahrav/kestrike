@@ -58,6 +58,16 @@ pub fn is_space(code: u32) -> bool {
     char::from_u32(code).is_some_and(|c| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
+/// `strip_str` trims leading and trailing whitespace, including U+001C through U+001F.
+pub fn strip_str(text: &str) -> &str {
+    text.trim_matches(|c: char| is_space(u32::from(c)))
+}
+
+pub fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| is_space(u32::from(c)))
+        .filter(|word| !word.is_empty())
+}
+
 /// Whether `str.splitlines()` ends a line at the code point.
 fn is_line_break(code: u32) -> bool {
     matches!(code, 0xa..=0xd | 0x1c..=0x1e | 0x85 | 0x2028 | 0x2029)
@@ -183,6 +193,20 @@ impl Text {
     /// `to_str` returns `None` when the text holds a surrogate.
     pub fn to_str(&self) -> Option<&str> {
         std::str::from_utf8(&self.0).ok()
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// `rpartition` returns the text before the last `separator` and the text after it, or an empty text and
+    /// the whole text when `separator` is absent.
+    pub fn rpartition(&self, separator: u8) -> (Self, Self) {
+        assert!(separator.is_ascii(), "the separator is one ASCII byte");
+        match self.0.iter().rposition(|&byte| byte == separator) {
+            Some(at) => (self.slice(0, at), self.slice(at + 1, self.0.len())),
+            None => (Self::new(), self.clone()),
+        }
     }
 
     pub fn code_points(&self) -> impl Iterator<Item = u32> + '_ {
