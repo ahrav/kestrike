@@ -642,7 +642,8 @@
       "targets": [
         "doc:kestrike_tools",
         "kestrike_tools",
-        "fixture_writers"
+        "fixture_writers",
+        "ownership"
       ]
     },
     "source-anchors": {

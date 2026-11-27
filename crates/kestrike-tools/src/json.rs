@@ -1,52 +1,25 @@
-//! A JSON reader that preserves document order, and a writer that emits Python's
-//! `json.dumps(data, separators=(",", ":"))` representation followed by one newline.
-//!
-//! The reader takes objects, arrays, strings, integers of any length, `true` and `false`, with the whitespace
-//! JSON allows around them. An object keeps its keys in the order they first appear; a repeated key's last value
-//! takes the first one's place. An integer keeps its digits, except that `-0` reads as `0`. A string holds
-//! Unicode scalar values: an escape may name any of them, a pair of surrogate escapes included. `null`, a
-//! fraction, an exponent, `NaN`, `Infinity`, a lone surrogate escape, a raw control character in a string,
-//! nesting deeper than [`MAX_DEPTH`] and text after the value are errors.
-//!
-//! The writer escapes `"` and `\`, writes `\n`, `\r`, `\t`, `\b` and `\f` by name and every other character
-//! outside the printable ASCII range as `\u` and four lowercase hexadecimal digits, a character past U+FFFF as
-//! its surrogate pair. The writer uses `,` and `:` as separators.
+//! A JSON reader that preserves document order, and the writers [`text`], [`dump`] and [`indented`].
 
 use std::cmp::Ordering;
 use std::fmt;
 
+pub use crate::python::repr_float;
+pub use crate::text::Text;
+
 /// The deepest nesting of arrays and objects the reader takes.
 pub const MAX_DEPTH: usize = 1000;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+pub const MAX_INTEGER_DIGITS: usize = 4300;
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Object(Object),
     Array(Vec<Value>),
     String(Text),
     Integer(Integer),
+    Float(f64),
     Bool(bool),
-}
-
-/// The value of a JSON string: a sequence of Unicode scalar values.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Text(String);
-
-impl Text {
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<&str> for Text {
-    fn from(text: &str) -> Self {
-        Self(text.to_owned())
-    }
-}
-
-impl From<String> for Text {
-    fn from(text: String) -> Self {
-        Self(text)
-    }
+    Null,
 }
 
 /// An integer of any length, held as its sign and its decimal digits without leading zeros.
@@ -133,7 +106,7 @@ impl PartialOrd for Integer {
 }
 
 /// A JSON object: its members in order, each key once.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Object(Vec<(Text, Value)>);
 
 impl Object {
@@ -144,29 +117,29 @@ impl Object {
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.0
             .iter()
-            .find(|(name, _)| name.as_str() == key)
+            .find(|(name, _)| *name == key)
             .map(|(_, value)| value)
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
         self.0
             .iter_mut()
-            .find(|(name, _)| name.as_str() == key)
+            .find(|(name, _)| *name == key)
             .map(|(_, value)| value)
     }
 
     /// Replaces an existing key's value in place or appends a new member.
     pub fn insert(&mut self, key: impl Into<Text>, value: Value) {
         let key = key.into();
-        match self.get_mut(key.as_str()) {
-            Some(slot) => *slot = value,
+        match self.0.iter_mut().find(|(name, _)| *name == key) {
+            Some((_, slot)) => *slot = value,
             None => self.0.push((key, value)),
         }
     }
 
     /// The remaining members keep their relative order.
     pub fn remove(&mut self, key: &str) -> Option<Value> {
-        let at = self.0.iter().position(|(name, _)| name.as_str() == key)?;
+        let at = self.0.iter().position(|(name, _)| *name == key)?;
         Some(self.0.remove(at).1)
     }
 
@@ -207,6 +180,11 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// `parse` accepts one value surrounded by optional JSON whitespace.
+///
+/// # Errors
+///
+/// `parse` returns an error when nesting exceeds [`MAX_DEPTH`] or a non-whitespace byte follows the value.
 pub fn parse(text: &str) -> Result<Value, Error> {
     let mut reader = Reader {
         text: text.as_bytes(),
@@ -253,18 +231,26 @@ impl Reader<'_> {
         found
     }
 
+    fn digits(&mut self) -> usize {
+        let start = self.at;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.at += 1;
+        }
+        self.at - start
+    }
+
     fn value(&mut self, depth: usize) -> Result<Value, Error> {
         match self.peek() {
             Some(b'{') => self.object(depth + 1),
             Some(b'[') => self.array(depth + 1),
             Some(b'"') => Ok(Value::String(self.string()?)),
-            Some(b'-' | b'0'..=b'9') => self.integer(),
+            _ if self.literal(b"null") => Ok(Value::Null),
             _ if self.literal(b"true") => Ok(Value::Bool(true)),
             _ if self.literal(b"false") => Ok(Value::Bool(false)),
-            _ if self.rest_starts_with(b"null") => Err(self.error("null is refused")),
-            _ if self.rest_starts_with(b"NaN") || self.rest_starts_with(b"Infinity") => {
-                Err(self.error("a number beyond the integers is refused"))
-            }
+            _ if self.literal(b"NaN") => Ok(Value::Float(f64::NAN)),
+            _ if self.literal(b"Infinity") => Ok(Value::Float(f64::INFINITY)),
+            _ if self.literal(b"-Infinity") => Ok(Value::Float(f64::NEG_INFINITY)),
+            Some(b'-' | b'0'..=b'9') => self.number(),
             _ => Err(self.error("expected a value")),
         }
     }
@@ -337,37 +323,55 @@ impl Reader<'_> {
         }
     }
 
-    fn integer(&mut self) -> Result<Value, Error> {
+    fn number(&mut self) -> Result<Value, Error> {
         let start = self.at;
         let negative = self.peek() == Some(b'-');
         if negative {
             self.at += 1;
-            if self.rest_starts_with(b"Infinity") {
-                return Err(self.error("a number beyond the integers is refused"));
-            }
         }
         let digits = self.at;
         match self.peek() {
             Some(b'0') => self.at += 1,
             Some(b'1'..=b'9') => {
-                while matches!(self.peek(), Some(b'0'..=b'9')) {
-                    self.at += 1;
-                }
+                self.digits();
             }
             _ => return Err(self.error("expected a digit")),
         }
-        if matches!(self.peek(), Some(b'.' | b'e' | b'E')) {
-            return Err(error_at(start, "a fraction or an exponent is refused"));
+        let integer = self.at;
+        if self.peek() == Some(b'.') && self.text.get(self.at + 1).is_some_and(u8::is_ascii_digit) {
+            self.at += 1;
+            self.digits();
         }
-        let text = std::str::from_utf8(&self.text[digits..self.at]).expect("the digits are ASCII");
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            let mark = self.at;
+            self.at += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.at += 1;
+            }
+            if self.digits() == 0 {
+                self.at = mark;
+            }
+        }
+        let text = std::str::from_utf8(&self.text[start..self.at]).expect("a number is ASCII");
+        if self.at > integer {
+            let value = text.parse().expect("a JSON number parses as an f64");
+            return Ok(Value::Float(value));
+        }
+        if integer - digits > MAX_INTEGER_DIGITS {
+            return Err(error_at(
+                start,
+                "an integer of more digits than the reader takes",
+            ));
+        }
         Ok(Value::Integer(
-            Integer::from_digits(negative, text).expect("the digits are ASCII digits"),
+            Integer::from_digits(negative, &text[digits - start..])
+                .expect("the digits are ASCII digits"),
         ))
     }
 
     fn string(&mut self) -> Result<Text, Error> {
         self.at += 1;
-        let mut text = String::new();
+        let mut text = Text::new();
         loop {
             let start = self.at;
             while self
@@ -383,11 +387,13 @@ impl Reader<'_> {
             match self.peek() {
                 Some(b'"') => {
                     self.at += 1;
-                    return Ok(Text(text));
+                    return Ok(text);
                 }
                 Some(b'\\') => {
                     self.at += 1;
-                    text.push(self.escape()?);
+                    let code = self.escape()?;
+                    text.push_code_point(code)
+                        .expect("an escape names at most U+10FFFF");
                 }
                 Some(_) => return Err(self.error("a control character in a string")),
                 None => return Err(self.error("an unterminated string")),
@@ -396,41 +402,38 @@ impl Reader<'_> {
     }
 
     /// `self.at` must point to the byte after the backslash.
-    fn escape(&mut self) -> Result<char, Error> {
+    fn escape(&mut self) -> Result<u32, Error> {
         let escaped = match self.peek() {
             Some(b'u') => return self.unicode(),
-            Some(b'"') => '"',
-            Some(b'\\') => '\\',
-            Some(b'/') => '/',
-            Some(b'b') => '\u{8}',
-            Some(b'f') => '\u{c}',
-            Some(b'n') => '\n',
-            Some(b'r') => '\r',
-            Some(b't') => '\t',
+            Some(b'"') => b'"',
+            Some(b'\\') => b'\\',
+            Some(b'/') => b'/',
+            Some(b'b') => 0x8,
+            Some(b'f') => 0xc,
+            Some(b'n') => b'\n',
+            Some(b'r') => b'\r',
+            Some(b't') => b'\t',
             Some(_) => return Err(self.error("an invalid escape")),
             None => return Err(self.error("an unterminated string")),
         };
         self.at += 1;
-        Ok(escaped)
+        Ok(u32::from(escaped))
     }
 
-    /// `self.at` must point to the `u` of the first escape. A high surrogate requires an immediately following
-    /// `\u` escape encoding a low surrogate.
-    fn unicode(&mut self) -> Result<char, Error> {
-        let start = self.at - 1;
+    /// `self.at` must point to the `u` of the first escape. A high surrogate joins an immediately following
+    /// `\u` escape encoding a low surrogate; any other code unit stands alone.
+    fn unicode(&mut self) -> Result<u32, Error> {
         let first = self.code_unit()?;
-        let code = match first {
-            0xd800..0xdc00 if self.rest_starts_with(b"\\u") => {
-                self.at += 1;
-                let second = self.code_unit()?;
-                if !(0xdc00..0xe000).contains(&second) {
-                    return Err(error_at(start, "a lone surrogate escape is refused"));
-                }
-                0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00)
+        if (0xd800..0xdc00).contains(&first) && self.rest_starts_with(b"\\u") {
+            let mark = self.at;
+            self.at += 1;
+            let second = self.code_unit()?;
+            if (0xdc00..0xe000).contains(&second) {
+                return Ok(0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00));
             }
-            _ => first,
-        };
-        char::from_u32(code).ok_or(error_at(start, "a lone surrogate escape is refused"))
+            self.at = mark;
+        }
+        Ok(first)
     }
 
     fn code_unit(&mut self) -> Result<u32, Error> {
@@ -462,58 +465,121 @@ pub fn dump(value: &Value) -> String {
 
 pub fn text(value: &Value) -> String {
     let mut out = String::new();
-    write(value, &mut out);
+    write(value, &mut out, None).expect("the compact layout writes every float");
     out
 }
 
-fn write(value: &Value, out: &mut String) {
-    match value {
-        Value::Object(object) => {
-            out.push('{');
-            for (at, (key, member)) in object.iter().enumerate() {
-                if at > 0 {
-                    out.push(',');
-                }
-                write_string(key.as_str(), out);
-                out.push(':');
-                write(member, out);
-            }
-            out.push('}');
-        }
-        Value::Array(items) => {
-            out.push('[');
-            for (at, item) in items.iter().enumerate() {
-                if at > 0 {
-                    out.push(',');
-                }
-                write(item, out);
-            }
-            out.push(']');
-        }
-        Value::String(text) => write_string(text.as_str(), out),
-        Value::Integer(integer) => out.push_str(&integer.to_string()),
-        Value::Bool(true) => out.push_str("true"),
-        Value::Bool(false) => out.push_str("false"),
+/// `indented` uses the layout of Python's `json.dumps(value, indent=2, sort_keys=True)`: object keys sorted
+/// by code point, each member and item on its own line, two spaces per level, `: ` after a key, and `[]` and
+/// `{}` for empty containers.
+///
+/// # Errors
+///
+/// `indented` refuses a non-finite float.
+pub fn indented(value: &Value) -> Result<String, NonFinite> {
+    let mut out = String::new();
+    write(value, &mut out, Some(0))?;
+    Ok(out)
+}
+
+/// A float the indented layout refuses: `NaN`, `Infinity` or `-Infinity`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NonFinite(pub f64);
+
+impl fmt::Display for NonFinite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the float {} has no JSON form", repr_float(self.0))
     }
 }
 
-fn write_string(text: &str, out: &mut String) {
-    out.push('"');
-    for character in text.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            ' '..='~' => out.push(character),
-            _ => {
-                for unit in character.encode_utf16(&mut [0; 2]) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
+impl std::error::Error for NonFinite {}
+
+/// `depth` is `None` in the compact layout and the nesting depth of `value` in the indented layout.
+fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), NonFinite> {
+    match value {
+        Value::Object(object) => {
+            let mut members: Vec<&(Text, Value)> = object.iter().collect();
+            if depth.is_some() {
+                members.sort_by(|left, right| left.0.cmp(&right.0));
             }
+            write_items(
+                &members,
+                ('{', '}'),
+                depth,
+                out,
+                |(key, member), out, inner| {
+                    write_string(key, out);
+                    out.push_str(if inner.is_some() { ": " } else { ":" });
+                    write(member, out, inner)
+                },
+            )?;
+        }
+        Value::Array(items) => {
+            write_items(items, ('[', ']'), depth, out, |item, out, inner| {
+                write(item, out, inner)
+            })?;
+        }
+        Value::String(text) => write_string(text, out),
+        Value::Integer(integer) => out.push_str(&integer.to_string()),
+        Value::Float(value) if value.is_finite() => out.push_str(&repr_float(*value)),
+        Value::Float(value) if depth.is_some() => return Err(NonFinite(*value)),
+        Value::Float(value) if value.is_nan() => out.push_str("NaN"),
+        Value::Float(value) if *value > 0.0 => out.push_str("Infinity"),
+        Value::Float(_) => out.push_str("-Infinity"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        Value::Null => out.push_str("null"),
+    }
+    Ok(())
+}
+
+fn write_items<T>(
+    items: &[T],
+    (open, close): (char, char),
+    depth: Option<usize>,
+    out: &mut String,
+    mut each: impl FnMut(&T, &mut String, Option<usize>) -> Result<(), NonFinite>,
+) -> Result<(), NonFinite> {
+    let line = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.push_str(&"  ".repeat(depth));
+    };
+    out.push(open);
+    let inner = depth.map(|depth| depth + 1);
+    for (at, item) in items.iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        if let Some(inner) = inner {
+            line(out, inner);
+        }
+        each(item, out, inner)?;
+    }
+    if let (Some(depth), false) = (depth, items.is_empty()) {
+        line(out, depth);
+    }
+    out.push(close);
+    Ok(())
+}
+
+fn write_string(text: &Text, out: &mut String) {
+    out.push('"');
+    for code in text.code_points() {
+        match code {
+            0x22 => out.push_str("\\\""),
+            0x5c => out.push_str("\\\\"),
+            0xa => out.push_str("\\n"),
+            0xd => out.push_str("\\r"),
+            0x9 => out.push_str("\\t"),
+            0x8 => out.push_str("\\b"),
+            0xc => out.push_str("\\f"),
+            0x20..=0x7e => out.extend(char::from_u32(code)),
+            0x1_0000.. => {
+                let offset = code - 0x1_0000;
+                let (high, low) = (0xd800 + (offset >> 10), 0xdc00 + (offset & 0x3ff));
+                out.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+            }
+            _ => out.push_str(&format!("\\u{code:04x}")),
         }
     }
     out.push('"');

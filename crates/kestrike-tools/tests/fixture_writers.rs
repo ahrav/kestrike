@@ -185,7 +185,7 @@ fn object<'a>(value: Option<&'a Value>, what: &str) -> &'a Object {
 
 fn text<'a>(value: Option<&'a Value>, what: &str) -> &'a str {
     match value {
-        Some(Value::String(text)) => text.as_str(),
+        Some(Value::String(text)) => text.to_str().expect("a committed trace holds no surrogate"),
         _ => panic!("{what} is a JSON string"),
     }
 }
@@ -561,24 +561,17 @@ fn a_long_trace_exits_1_naming_the_trace() {
 }
 
 #[test]
-fn a_trace_with_null_exits_1_naming_its_file() {
+fn a_trace_with_null_and_a_float_keeps_both() {
     let writer = &WRITERS[1];
     let scratch = Scratch::new();
     let output = scratch.0.join("out");
     let quint = stand_in(&scratch.0, writer, &output, |trace| {
-        reply(trace).replacen("\"vars\"", "\"x\":null,\"vars\"", 1)
+        reply(trace).replacen("\"vars\"", "\"x\":null,\"y\":1.5e-7,\"vars\"", 1)
     });
     let result = write_traces(writer, &quint, &output);
-    assert_eq!(result.status.code(), Some(1));
-    let file = output.join("passes.itf.json");
-    let stderr = stderr(&result);
-    assert!(
-        stderr.starts_with(&format!(
-            "gate_fixtures: {}: null is refused at byte ",
-            file.display()
-        )),
-        "{stderr}"
-    );
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    let written = fs::read_to_string(output.join("passes.itf.json")).expect("the trace is written");
+    assert!(written.contains("\"x\":null,\"y\":1.5e-07,"), "{written}");
 }
 
 #[test]

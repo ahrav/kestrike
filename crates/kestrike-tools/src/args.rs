@@ -1,0 +1,311 @@
+//! [`Reader::parse`] parses command-line arguments against an [`Opt`] table. Missing required options take
+//! precedence over leftover arguments.
+
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
+
+use crate::text::Text;
+
+pub type Check = fn(&Text) -> Result<(), String>;
+
+pub fn any(_: &Text) -> Result<(), String> {
+    Ok(())
+}
+
+/// `parse` returns [`Parsed::Help`] when it accepts an option with `takes_value: false`.
+#[derive(Clone, Copy, Debug)]
+pub struct Opt {
+    pub names: &'static [&'static str],
+    pub takes_value: bool,
+    pub required: bool,
+    pub prefix: bool,
+    pub check: Check,
+}
+
+impl Opt {
+    fn name(&self) -> String {
+        self.names.join("/")
+    }
+}
+
+/// `parse` records the value `--` as `Given::Empty`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Given {
+    Absent,
+    Empty,
+    Value(OsString),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Values(Vec<Given>);
+
+impl Values {
+    pub fn get(&self, index: usize) -> &Given {
+        &self.0[index]
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Parsed {
+    Run(Values),
+    Help(String),
+    Refused { code: u8, text: String },
+}
+
+pub struct Reader<'a> {
+    pub tool: &'a str,
+    pub usage: &'a str,
+    pub help: &'a str,
+    pub options: &'a [Opt],
+}
+
+#[derive(Clone, Copy)]
+struct Match<'a> {
+    option: usize,
+    string: &'a [u8],
+    explicit: Option<&'a [u8]>,
+}
+
+#[derive(Clone, Copy)]
+enum Kind<'a> {
+    Value,
+    Marker,
+    Unknown,
+    Option(Match<'a>),
+}
+
+enum HelpRefusal<'a> {
+    Ignored(&'a [u8]),
+    IndexError,
+}
+
+impl Reader<'_> {
+    fn refuse(&self, message: String) -> Parsed {
+        Parsed::Refused {
+            code: 2,
+            text: format!("{}\n{}: error: {message}\n", self.usage, self.tool),
+        }
+    }
+
+    /// `parse` classifies every argument before it reads any value, so a classification error takes
+    /// precedence over help and value errors. A value-taking option consumes the next argument only when it
+    /// lacks an explicit value and the next argument has kind `Kind::Value`. `parse` records `b"--"` as
+    /// `Given::Empty` and calls `option.check` for every other supplied value; a later occurrence replaces
+    /// an earlier one. `parse` returns `Parsed::Help` immediately upon accepting help. Missing required
+    /// options take precedence over leftover arguments.
+    pub fn parse(&self, args: &[OsString]) -> Parsed {
+        let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
+        let mut kinds = Vec::with_capacity(args.len());
+        let mut ended = false;
+        for arg in &args {
+            kinds.push(if ended {
+                Kind::Value
+            } else if *arg == b"--" {
+                ended = true;
+                Kind::Marker
+            } else {
+                match self.classify(arg) {
+                    Ok(kind) => kind,
+                    Err(message) => return self.refuse(message),
+                }
+            });
+        }
+        let mut values = vec![Given::Absent; self.options.len()];
+        let mut extras = Vec::new();
+        let mut at = 0;
+        while at < args.len() {
+            let Kind::Option(found) = kinds[at] else {
+                extras.push(args[at]);
+                at += 1;
+                continue;
+            };
+            let option = &self.options[found.option];
+            let value = match (option.takes_value, found.explicit) {
+                (false, Some(explicit)) => match help_explicit(found.string, explicit) {
+                    Ok(()) => None,
+                    Err(HelpRefusal::Ignored(rest)) => {
+                        return self.refuse(format!(
+                            "argument {}: ignored explicit argument {}",
+                            option.name(),
+                            Text::from_os(OsStr::from_bytes(rest)).repr()
+                        ));
+                    }
+                    Err(HelpRefusal::IndexError) => {
+                        let text = format!(
+                            "{}: argument {}: string index out of range\n",
+                            self.tool,
+                            option.name()
+                        );
+                        return Parsed::Refused { code: 1, text };
+                    }
+                },
+                (false, None) => None,
+                (true, Some(explicit)) => Some(explicit),
+                (true, None) => match kinds.get(at + 1) {
+                    Some(Kind::Value) => {
+                        at += 1;
+                        Some(args[at])
+                    }
+                    _ => {
+                        return self
+                            .refuse(format!("argument {}: expected one argument", option.name()));
+                    }
+                },
+            };
+            at += 1;
+            let Some(value) = value else {
+                return Parsed::Help(self.help.to_owned());
+            };
+            values[found.option] = if value == b"--" {
+                Given::Empty
+            } else {
+                let value = OsStr::from_bytes(value);
+                if let Err(message) = (option.check)(&Text::from_os(value)) {
+                    return self.refuse(format!("argument {}: {message}", option.name()));
+                }
+                Given::Value(value.to_owned())
+            };
+        }
+        let missing: Vec<String> = self
+            .options
+            .iter()
+            .zip(&values)
+            .filter(|(option, given)| option.required && **given == Given::Absent)
+            .map(|(option, _)| option.name())
+            .collect();
+        if !missing.is_empty() {
+            return self.refuse(format!(
+                "the following arguments are required: {}",
+                missing.join(", ")
+            ));
+        }
+        if !extras.is_empty() {
+            let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
+            return self.refuse(format!("unrecognized arguments: {}", shown.join(" ")));
+        }
+        Parsed::Run(Values(values))
+    }
+
+    fn strings(&self) -> impl Iterator<Item = (usize, &'static [u8])> + '_ {
+        self.options
+            .iter()
+            .enumerate()
+            .flat_map(|(option, row)| row.names.iter().map(move |name| (option, name.as_bytes())))
+    }
+
+    fn exact(&self, string: &[u8]) -> Option<usize> {
+        self.strings()
+            .find(|&(_, name)| name == string)
+            .map(|(option, _)| option)
+    }
+
+    fn classify<'a>(&self, arg: &'a [u8]) -> Result<Kind<'a>, String> {
+        if arg.first() != Some(&b'-') {
+            return Ok(Kind::Value);
+        }
+        if let Some(option) = self.exact(arg) {
+            return Ok(Kind::Option(Match {
+                option,
+                string: arg,
+                explicit: None,
+            }));
+        }
+        if arg.len() == 1 {
+            return Ok(Kind::Value);
+        }
+        if let Some(equals) = arg.iter().position(|&byte| byte == b'=') {
+            let (string, explicit) = (&arg[..equals], &arg[equals + 1..]);
+            if let Some(option) = self.exact(string) {
+                return Ok(Kind::Option(Match {
+                    option,
+                    string,
+                    explicit: Some(explicit),
+                }));
+            }
+        }
+        match self.prefix_matches(arg).as_slice() {
+            [] => {}
+            [found] => return Ok(Kind::Option(*found)),
+            matches => {
+                let names: Vec<String> = matches.iter().map(|found| shown(found.string)).collect();
+                return Err(format!(
+                    "ambiguous option: {} could match {}",
+                    shown(arg),
+                    names.join(", ")
+                ));
+            }
+        }
+        if looks_negative(arg) || arg.contains(&b' ') {
+            return Ok(Kind::Value);
+        }
+        Ok(Kind::Unknown)
+    }
+
+    fn prefix_matches<'a>(&self, arg: &'a [u8]) -> Vec<Match<'a>> {
+        let mut matches = Vec::new();
+        if arg[1] == b'-' {
+            let (prefix, explicit) = match arg.iter().position(|&byte| byte == b'=') {
+                Some(equals) => (&arg[..equals], Some(&arg[equals + 1..])),
+                None => (arg, None),
+            };
+            for (option, string) in self.strings() {
+                if self.options[option].prefix && string.starts_with(prefix) {
+                    matches.push(Match {
+                        option,
+                        string,
+                        explicit,
+                    });
+                }
+            }
+        } else {
+            for (option, string) in self.strings() {
+                if string == &arg[..2] {
+                    matches.push(Match {
+                        option,
+                        string,
+                        explicit: Some(&arg[2..]),
+                    });
+                } else if string.starts_with(arg) {
+                    matches.push(Match {
+                        option,
+                        string,
+                        explicit: None,
+                    });
+                }
+            }
+        }
+        matches
+    }
+}
+
+fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusal<'a>> {
+    let short = string[1] != b'-';
+    if !short {
+        return Err(HelpRefusal::Ignored(explicit));
+    }
+    if explicit.is_empty() {
+        return Err(HelpRefusal::IndexError);
+    }
+    match explicit.iter().position(|&letter| letter != b'h') {
+        Some(rest) => Err(HelpRefusal::Ignored(&explicit[rest..])),
+        None => Ok(()),
+    }
+}
+
+fn looks_negative(arg: &[u8]) -> bool {
+    let arg = arg.strip_suffix(b"\n").unwrap_or(arg);
+    let Some(number) = arg.strip_prefix(b"-") else {
+        return false;
+    };
+    let digits = |part: &[u8]| part.iter().all(u8::is_ascii_digit);
+    match number.iter().position(|&byte| byte == b'.') {
+        None => !number.is_empty() && digits(number),
+        Some(point) => {
+            digits(&number[..point]) && number.len() > point + 1 && digits(&number[point + 1..])
+        }
+    }
+}
+
+fn shown(arg: &[u8]) -> String {
+    Text::from_os(OsStr::from_bytes(arg)).to_string()
+}
