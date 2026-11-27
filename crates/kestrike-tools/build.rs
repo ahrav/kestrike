@@ -5,7 +5,8 @@
 //! call with the tool identifiers in entry-name order. `OUT_DIR/cases.rs` declares one module for each case
 //! under `tests/` and the constant `CASES`, the entry names listed. An entry is `<id>.rs`, a regular file,
 //! or `<id>/`, a directory that holds a regular file `mod.rs`, where `<id>` matches `[a-z][a-z0-9_]*`.
-//! Each declaration's `#[path]` is the entry's absolute path.
+//! Each declaration's `#[path]` is the absolute path of the module's source file: `<id>.rs`, or
+//! `<id>/mod.rs` for a directory entry.
 //!
 //! The script checks directories, links to directories, and entries matching `*.rs` when the first byte
 //! of the entry's name differs from `.`. The script requires each checked entry to match `<id>.rs` or
@@ -113,7 +114,20 @@ fn list(directory: &Path, skip: &str, taken: &[&str]) -> Result<Vec<Module>, Str
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
-        let linked_directory = kind.is_symlink() && fs::metadata(&path).is_ok_and(|to| to.is_dir());
+        let linked_directory = kind.is_symlink()
+            && !bytes.ends_with(b".rs")
+            && match fs::metadata(&path) {
+                Ok(to) => to.is_dir(),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    false
+                }
+                Err(error) => return Err(format!("{}: {error}", path.display())),
+            };
         if !(bytes.ends_with(b".rs") || kind.is_dir() || linked_directory) {
             continue;
         }

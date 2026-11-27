@@ -63,7 +63,8 @@ failures even when standard error is closed or full.
 ## Adding a tool
 
 A port adds files. The package's `build.rs` lists `crates/kestrike-tools/src/tools/` and
-`crates/kestrike-tools/tests/` on every build and declares a module for each entry, so no tool, case or
+`crates/kestrike-tools/tests/` whenever Cargo runs it and declares a module for each tool and case entry,
+and each unit test file is declared by its owner, so no tool, case or
 unit test file has a registration line. A port still adds one sorted `pub mod` line to
 `crates/kestrike-tools/src/lib.rs` for a new library module and a line under `[dependencies]` of
 `crates/kestrike-tools/Cargo.toml` for a dependency it needs.
@@ -81,7 +82,8 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
    included, stand inside its directory: rustc reads a tool root through `#[path]` and resolves a `mod`
    line or a relative `#[path]` inside it beside the root, and every `<id>.rs` directly under
    `src/tools/` is a tool. A tool with unit test files of its own is therefore a directory, whose
-   `mod.rs` declares them with `#[cfg(test)] mod tests;` or `#[path = "<m>_tests.rs"]`. A test module
+   `mod.rs` declares them with `#[cfg(test)] mod tests;` or
+   `#[cfg(test)] #[path = "<m>_tests.rs"] mod tests;`. A test module
    whose items another test file uses is declared `pub(crate) mod tests;`, as
    `crates/kestrike-tools/src/paths.rs` declares the one that holds `Scratch`.
 4. Add an integration case under `crates/kestrike-tools/tests/`: a file `<case>.rs`, or a directory
@@ -99,7 +101,9 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
 In both directories the build script checks each entry whose name starts with a byte other than `.` and
 that is a directory, a link to one, or named `*.rs`; the directory's own root (`src/tools/mod.rs`,
 `tests/tools.rs`) is skipped. It passes over every other entry, so an editor's swap or lock file, a
-backup `x.rs~`, a merge's `x.rs.orig`, `.gitkeep` and `README.md` leave the build as it is. A checked
+backup `x.rs~`, a merge's `x.rs.orig`, `.gitkeep` and `README.md` change no generated list; a newer
+time on one still reruns the build script and rebuilds the binary, so build output and links into it
+stand outside both directories. A checked
 entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular file `mod.rs`, with `<id>`
 matching `[a-z][a-z0-9_]*`. Any other checked entry stops the build with its path: a directory without
 `mod.rs`, a link, a `*.rs` entry of another file type (a fifo, a socket, a device), `<id>.rs` beside
@@ -119,7 +123,8 @@ so an entry is missed when the directory and its entries all carry older times, 
 that holds the directory is unpacked with its times: a missed tool's call exits 2 with the binary's
 refusal, and a missed case fails `every_entry_of_tests_is_a_case` in
 `crates/kestrike-tools/tests/tools.rs`. Removing `target/tools` repairs a missed tool, and removing the
-test run's own target directory repairs a missed case. The generated declarations name each file by its
+test run's own build directory (Cargo's `build.build-dir`, the target directory unless it is set apart)
+repairs a missed case. The generated declarations name each file by its
 absolute path, so a copy of the checkout builds into a target directory of its own, and rustc's
 diagnostics and a panic's location name a tool or case file by its absolute path.
 

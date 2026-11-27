@@ -15,7 +15,23 @@ fn every_entry_of_tests_is_a_case() {
         .filter(|entry| {
             let name = entry.file_name();
             let bytes = name.as_encoded_bytes();
-            !bytes.starts_with(b".") && (bytes.ends_with(b".rs") || entry.path().is_dir())
+            !bytes.starts_with(b".")
+                && (bytes.ends_with(b".rs")
+                    || match std::fs::metadata(entry.path()) {
+                        Ok(to) => to.is_dir(),
+                        Err(error) => {
+                            assert!(
+                                matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::NotFound
+                                        | std::io::ErrorKind::NotADirectory
+                                ),
+                                "{}: {error}",
+                                entry.path().display()
+                            );
+                            false
+                        }
+                    })
         })
         .map(|entry| {
             let name = entry.file_name();
