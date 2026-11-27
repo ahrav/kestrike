@@ -5,9 +5,7 @@
 //!
 //! Offsets are byte offsets. [`read_text`] decodes a file as UTF-8 and reads `\r\n` and a lone `\r` as
 //! `\n`. [`walk`] lists every entry under a directory, hidden entries included, and enters each
-//! directory it meets that is no link. It passes over a directory it may not list, and a link entry
-//! whose target it may not look up stops it from entering that directory's later entries, in the order
-//! the directory lists them.
+//! directory it meets that is no link. It passes over a directory it may not list.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -18,7 +16,8 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::classes::{SPACE, compiled, is_word};
+use crate::classes::{SPACE, WORD, compiled, is_word};
+use crate::ownership::ignored;
 use crate::paths::resolve;
 use crate::rust_text::{Lexeme, lexemes};
 use crate::text::strip_str;
@@ -30,7 +29,10 @@ pub static INCLUDED: LazyLock<Regex> =
 
 static SPACES: LazyLock<Regex> = LazyLock::new(|| compiled(&format!("{SPACE}+")));
 
-static PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| compiled(r" ?([^\p{L}\p{N}_ ]) ?"));
+static PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| {
+    let word = WORD.trim_start_matches('[').trim_end_matches(']');
+    compiled(&format!(" ?([^{word} ]) ?"))
+});
 
 /// The text that stands for a lexeme of `kind` in [`code`].
 pub fn lexeme_text(kind: Lexeme) -> &'static str {
@@ -125,12 +127,9 @@ fn body_after(text: &str, end: usize) -> Option<&str> {
 /// `read_text` returns the error of opening or reading the file, and an error of kind
 /// [`io::ErrorKind::InvalidData`] for bytes that are no UTF-8.
 pub fn read_text(path: &Path) -> io::Result<String> {
-    let text = fs::read_to_string(path)?;
-    Ok(if text.contains('\r') {
-        text.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        text
-    })
+    Ok(fs::read_to_string(path)?
+        .replace("\r\n", "\n")
+        .replace('\r', "\n"))
 }
 
 /// The text of `path`, relative to the checkout's top `top`, as [`read_text`] reads it.
@@ -142,68 +141,38 @@ pub fn read_source(top: &Path, path: &str) -> io::Result<String> {
     read_text(&top.join(path))
 }
 
-/// Whether `error` is one that a lookup of a path reads as no such file: a missing component, a
-/// component that is no directory, a bad descriptor or a link loop.
-fn is_absent(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ENOENT | libc::ENOTDIR | libc::EBADF | libc::ELOOP)
-    )
+/// The metadata of `path` with links followed, or `None` for a lookup that [`ignored`] reads as no
+/// such file.
+fn stat(path: &Path) -> io::Result<Option<fs::Metadata>> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if ignored(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
-/// Whether `path`, with links followed, is a regular file; a lookup that [`is_absent`] reads is no file.
+/// Whether `path`, with links followed, is a regular file; a lookup that [`ignored`] reads is no file.
 ///
 /// # Errors
 ///
 /// `is_file` returns every other error of the lookup.
 pub fn is_file(path: &Path) -> io::Result<bool> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file()),
-        Err(error) if is_absent(&error) => Ok(false),
-        Err(error) => Err(error),
-    }
+    Ok(stat(path)?.is_some_and(|metadata| metadata.is_file()))
 }
 
-fn is_dir(path: &Path) -> io::Result<bool> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(metadata.is_dir()),
-        Err(error) if is_absent(&error) => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-/// The entries of the directory at `path` in the order it lists them, or `None` when the listing is
-/// refused permission.
-fn listing(path: &Path) -> io::Result<Option<Vec<fs::DirEntry>>> {
-    match fs::read_dir(path).and_then(Iterator::collect::<io::Result<Vec<_>>>) {
-        Ok(entries) => Ok(Some(entries)),
-        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Each directory the walk lists under `root`: `root` first, then each subdirectory that is no link,
-/// depth first.
-fn directories(root: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
-    found.push(root.to_path_buf());
-    let Some(entries) = listing(root)? else {
-        return Ok(());
+/// Adds every entry under the directory `directory` to `found`, entering each subdirectory that is no
+/// link. A listing refused permission adds nothing.
+fn entries_under(directory: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
+    let entries = match fs::read_dir(directory).and_then(Iterator::collect::<io::Result<Vec<_>>>) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(error) => return Err(error),
     };
     for entry in entries {
-        let kind = match entry.file_type() {
-            Ok(kind) => kind,
-            Err(error) if is_absent(&error) => continue,
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if kind.is_symlink() {
-            match fs::metadata(entry.path()) {
-                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
-                Err(error) if !is_absent(&error) => return Err(error),
-                _ => {}
-            }
-        } else if kind.is_dir() {
-            directories(&entry.path(), found)?;
+        let path = entry.path();
+        found.push(path.clone());
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            entries_under(&path, found)?;
         }
     }
     Ok(())
@@ -214,26 +183,12 @@ fn directories(root: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// `walk` returns an error of a listing or a lookup other than a refused permission and those
-/// [`is_file`] reads as absent.
+/// `walk` returns an error of a listing other than a refused permission, and of the lookup of `root`
+/// other than those [`ignored`] reads as absent.
 pub fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
-    if !is_dir(root)? {
-        return Ok(Vec::new());
-    }
-    let mut starts = Vec::new();
-    directories(root, &mut starts)?;
-    let mut seen = BTreeSet::new();
     let mut found = Vec::new();
-    for start in starts {
-        let Some(entries) = listing(&start)? else {
-            continue;
-        };
-        for entry in entries {
-            let path = entry.path();
-            if seen.insert(path.clone()) {
-                found.push(path);
-            }
-        }
+    if stat(root)?.is_some_and(|metadata| metadata.is_dir()) {
+        entries_under(root, &mut found)?;
     }
     Ok(found)
 }
@@ -246,7 +201,7 @@ pub fn under_target(path: &Path, root: &Path) -> bool {
 
 /// The suffix of the last component of `path`, as bytes: from its last `.`, unless that `.` leads or
 /// ends the name.
-pub fn suffix(path: &Path) -> &[u8] {
+fn suffix(path: &Path) -> &[u8] {
     let name = path.file_name().map_or(&[][..], |name| name.as_bytes());
     match name.iter().rposition(|&byte| byte == b'.') {
         Some(at) if at > 0 && at < name.len() - 1 => &name[at..],

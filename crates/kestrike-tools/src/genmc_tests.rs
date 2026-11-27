@@ -24,32 +24,6 @@ fn unpin_bodies(source: &str) -> Vec<String> {
     bodies(&normalized(&blanked(source).0), &normalized("fn unpin"))
 }
 
-/// A comment, a nested block comment whole and one that never closes, are one space each, a string
-/// after its prefix is `""`, a char literal is `''`, and a lifetime stays; the normal form keeps one
-/// space only between two word characters.
-#[test]
-fn code_writes_each_literal_as_one_token() {
-    let source = "fn   f ( a :  u8 ) -> u8 { a + 1 } // tail\n/* c /* nested */ */ let s = b\"str\"; \
-                  let r = r#\"raw\"#;\nlet c = 'x'; let l: &'a u8; /* open";
-    assert_eq!(
-        code(source),
-        "fn   f ( a :  u8 ) -> u8 { a + 1 }  \n  let s = b\"\"; let r = \"\";\nlet c = ''; let l: &'a u8;  "
-    );
-    assert_eq!(
-        normalized(source),
-        "fn f(a:u8)->u8{a+1}let s=b\"\";let r=\"\";let c='';let l:&'a u8;"
-    );
-}
-
-/// A header counts where no word character or `.` precedes it and no word character of any script
-/// follows it; a `;` before the brace leaves no body, and a block that never closes gives none.
-#[test]
-fn a_header_counts_only_at_its_word_edges() {
-    let source = "fn f() { a } fn f;\n.fn f { b }\nxfn f { c }\nfn f\u{e9} { d }\nfn f\u{b2} { e }\n\
-                  fn f { { nested } }\nfn f(x: [u8; 2]) { g }\nfn f\n{ unclosed\n";
-    assert_eq!(bodies(source, "fn f"), ["{ a }", "{ { nested } }"]);
-}
-
 /// A body that holds a nested `fn` or `impl` is still the one body its header names.
 #[test]
 fn a_find_moved_into_a_nested_item_is_refused() {
@@ -117,34 +91,66 @@ fn a_text_reads_each_line_ending_as_a_newline() {
     assert_eq!(read_text(&path).expect("the file reads"), "a\nb\nc\n");
 }
 
+/// A comment, a nested block comment whole and one that never closes, are one space each, a string
+/// after its prefix is `""`, a char literal is `''`, and a lifetime stays; the normal form keeps one
+/// space only between two word characters of any script.
+#[test]
+fn code_writes_each_literal_as_one_token() {
+    let source = "fn   f ( a :  u8 ) -> u8 { a + 1 } // tail\n/* c /* nested */ */ let s = b\"str\"; \
+                  let r = r#\"raw\"#;\nlet c = 'x'; let l: &'a u8; /* open";
+    assert_eq!(
+        code(source),
+        "fn   f ( a :  u8 ) -> u8 { a + 1 }  \n  let s = b\"\"; let r = \"\";\nlet c = ''; let l: &'a u8;  "
+    );
+    assert_eq!(
+        normalized(source),
+        "fn f(a:u8)->u8{a+1}let s=b\"\";let r=\"\";let c='';let l:&'a u8;"
+    );
+    assert_eq!(
+        normalized("let \u{e9} = ( a ) ; let \u{b2} b = \u{e9} \u{b2};"),
+        "let \u{e9}=(a);let \u{b2} b=\u{e9} \u{b2};"
+    );
+}
+
+/// A header counts where no word character or `.` precedes it and no word character of any script
+/// follows it; a `;` before the brace leaves no body, a block that never closes gives none, and a
+/// header inside an earlier body gives a body of its own.
+#[test]
+fn a_header_counts_only_at_its_word_edges() {
+    let source = "fn f() { a } fn f;\n.fn f { b }\nxfn f { c }\nfn f\u{e9} { d }\nfn f\u{b2} { e }\n\
+                  fn f { { nested } }\nfn f(x: [u8; 2]) { g }\nfn f\n{ unclosed\n";
+    assert_eq!(bodies(source, "fn f"), ["{ a }", "{ { nested } }"]);
+    assert_eq!(
+        bodies("fn f() { fn f() { x } }", "fn f"),
+        ["{ fn f() { x } }", "{ x }"]
+    );
+}
+
 /// A package's sources are its regular files and links to one, hidden ones included, build state and
-/// a linked directory's contents aside, in component order; then each include they resolve to outside
-/// that list, once.
+/// a linked directory's contents aside, in component order; then each include a `.rs` file resolves to
+/// outside that list, once. An include in a file of another suffix is not read.
 #[test]
 fn the_package_sources_are_its_files_then_their_includes() {
     let scratch = Scratch::new("genmc");
     let package = scratch.0.join("package");
-    for directory in ["src/a", "target", "linked", "out"] {
+    for directory in ["src/a", "target", "linked"] {
         fs::create_dir_all(package.join(directory)).expect("the directory is made");
     }
     fs::create_dir_all(scratch.0.join("out")).expect("the directory is made");
-    fs::write(
-        package.join("src/b.rs"),
-        "#[path = \"../../out/x.rs\"]\nmod x;\n#[path = \"a/c.rs\"]\nmod c;\n",
-    )
-    .expect("the source is written");
-    fs::write(
-        package.join("src/a/c.rs"),
-        "#[path = \"../../../out/x.rs\"]\nmod x;\n",
-    )
-    .expect("the source is written");
-    fs::write(package.join("src/.hidden"), "").expect("the file is written");
-    fs::write(
-        package.join("target/t.rs"),
-        "#[path = \"../../out/y.rs\"]\nmod y;\n",
-    )
-    .expect("the file is written");
-    fs::write(package.join("linked/l.rs"), "").expect("the file is written");
+    let files = [
+        (
+            "src/b.rs",
+            "#[path = \"../../out/x.rs\"]\nmod x;\n#[path = \"a/c.rs\"]\nmod c;\n",
+        ),
+        ("src/a/c.rs", "#[path = \"../../../out/x.rs\"]\nmod x;\n"),
+        ("src/.hidden", ""),
+        ("src/d.inc", "#[path = \"../../out/z.rs\"]\nmod z;\n"),
+        ("target/t.rs", "#[path = \"../../out/y.rs\"]\nmod y;\n"),
+        ("linked/l.rs", ""),
+    ];
+    for (path, text) in files {
+        fs::write(package.join(path), text).expect("the file is written");
+    }
     symlink("../linked", package.join("src/dir")).expect("the link is made");
     symlink("b.rs", package.join("src/link.rs")).expect("the link is made");
     let found: Vec<PathBuf> = package_sources(&package).expect("the package reads");
@@ -154,6 +160,7 @@ fn the_package_sources_are_its_files_then_their_includes() {
         "src/.hidden",
         "src/a/c.rs",
         "src/b.rs",
+        "src/d.inc",
         "src/link.rs",
     ]
     .iter()
@@ -163,7 +170,8 @@ fn the_package_sources_are_its_files_then_their_includes() {
     assert_eq!(found, expected);
 }
 
-/// A directory the walk may not list is passed over.
+/// A directory the walk may not list is passed over. A process that lists it anyway, as root does,
+/// says so and checks nothing.
 #[test]
 fn a_walk_passes_over_a_directory_it_may_not_list() {
     let scratch = Scratch::new("genmc");
@@ -175,6 +183,9 @@ fn a_walk_passes_over_a_directory_it_may_not_list() {
     let found = walk(&scratch.0);
     fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
     if listable {
+        eprintln!(
+            "a_walk_passes_over_a_directory_it_may_not_list: this process lists a mode-000 directory; nothing checked"
+        );
         return;
     }
     let mut found = found.expect("the walk passes over the closed directory");

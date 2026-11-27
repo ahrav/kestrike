@@ -6,12 +6,11 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Refusal, c_literals, diagnostic_sites, diagnostics, include_defects, kernel_texts, loads,
-    loom_site, module_source, references, scope_files,
+    loom_site, module_source, normpath, pure, references, scope_files,
 };
 use crate::genmc::read_source;
 use crate::json::{self, Text, Value};
 use crate::paths::tests::Scratch;
-use crate::rust_text::code;
 
 const STORAGE: &str = "crates/kestrike/src/storage/mod.rs";
 const CREDIT: &str = "crates/kestrike/src/storage/credit.rs";
@@ -19,6 +18,8 @@ const STEPS: &str = "crates/kestrike/src/storage/credit_steps.rs";
 const FILL: &str = "crates/kestrike/src/storage/fill.rs";
 const PACKAGE: &str = "verification/genmc/packages/kernels";
 const FILL_MODEL: &str = "storage::fill_model::two_owners_on_one_key_and_a_servicer";
+const GRACE_MODEL: &str =
+    "storage::grace_model::pinned_readers_never_observe_a_released_anchor_or_a_reused_slot";
 const MACRO_TOKENS: &str =
     "a module declaration inside a macro's tokens, which the scope rule cannot read";
 
@@ -253,62 +254,6 @@ fn a_loom_model_source_follows_inline_and_path_declared_modules() {
     }
 }
 
-/// The grace model's message literals hold `anchor released twice` in two assertions, so no one
-/// assertion names a failure that holds it.
-#[test]
-fn a_loom_failure_two_message_literals_hold_is_refused() {
-    let model = committed("crates/kestrike/src/storage/grace_model.rs");
-    let holding = diagnostics(&model)
-        .iter()
-        .filter(|content| *content == "protection violated: anchor released twice")
-        .count();
-    assert_eq!(holding, 2);
-}
-
-/// A planted assertion whose message extends another's makes two message literals hold the shorter
-/// text.
-#[test]
-fn a_loom_failure_another_message_literal_extends_is_refused() {
-    let anchor = "\"protection violated: anchor released under a pinned reader\"";
-    let extended = planted(
-        "crates/kestrike/src/storage/grace_model.rs",
-        anchor,
-        &format!(
-            "{anchor});\n        assert!(false, \"protection violated: anchor released under a pinned reader twice\""
-        ),
-    );
-    let holding = diagnostics(&extended)
-        .iter()
-        .filter(|content| content.contains("anchor released under a pinned reader"))
-        .count();
-    assert_eq!(holding, 2);
-}
-
-/// A `should_panic` attribute's `expected` text is no message literal: the scan model holds `torn copy
-/// of B` only there, and the fill model's departure message stays a message literal, on one line, with
-/// its attribute replaced by a bare `#[should_panic]`.
-#[test]
-fn a_loom_failure_only_an_attribute_holds_is_refused() {
-    let scan = committed("crates/kestrike/src/index/scan_model.rs");
-    assert!(scan.contains("#[should_panic(expected = \"torn copy of B\")]"));
-    assert!(
-        !diagnostics(&scan)
-            .iter()
-            .any(|content| content.contains("torn copy of B"))
-    );
-    let failure = "a departed record whose owner had not ended";
-    let model = "crates/kestrike/src/storage/fill_model.rs";
-    let attribute = format!("#[should_panic(expected = \"{failure}\")]");
-    let source = committed(model);
-    assert!(source.contains(&attribute));
-    let read = reader(vec![(
-        model,
-        text(source.replace(&attribute, "#[should_panic]")),
-    )]);
-    let found = loom_site(FILL_MODEL, failure, &read).map(|(path, _)| path);
-    assert_eq!(found.as_deref(), Some(model));
-}
-
 /// A `check!` message is a `c"..."` literal that is the call's last argument: the same literal in a
 /// comment, outside a `check!` call or in its condition is none, and a plain string beside it leaves it
 /// one.
@@ -364,19 +309,6 @@ fn a_word_character_outside_ascii_bounds_each_name() {
         diagnostic_sites(asserts),
         [("a".to_owned(), 1), ("d".to_owned(), 6)]
     );
-}
-
-/// The 40 code points before a literal's bracket hold its macro's name: characters outside ASCII in the
-/// window widen it by none, and a message on a later line than its name reports the name's line.
-#[test]
-fn a_window_counts_code_points_of_the_source() {
-    let source = "assert!(\n    cond,\n    \"far from its macro name\" \n);\n\
-                  assert!(c, \"\u{fc}n\u{ef}code \u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\u{eb}\", \"k\");\n";
-    let found: Vec<usize> = diagnostic_sites(source)
-        .into_iter()
-        .map(|(_, line)| line)
-        .collect();
-    assert_eq!(found, [1, 5, 5]);
 }
 
 /// An `include!` call, spelled whole or through a renamed import, is refused by the planted source's line.
@@ -445,124 +377,6 @@ fn a_path_attribute_the_include_scanner_misses_is_refused() {
         [
             "kernels/src/planted.rs:1: the include 'extra.inc' is no Rust source of the package the scan reads"
         ]
-    );
-}
-
-/// A directory named like a source is no kernel text.
-#[test]
-fn a_directory_named_like_a_source_is_skipped() {
-    let scratch = planted_package(&[], Some(""));
-    let package = package_of(&scratch);
-    fs::create_dir(package.join("src/spare.rs")).expect("the directory is made");
-    let names: Vec<String> = kernel_texts(&package)
-        .expect("the package reads")
-        .into_keys()
-        .collect();
-    let mut expected: Vec<String> = kernel_texts(&top().join(PACKAGE))
-        .expect("the committed package reads")
-        .into_keys()
-        .collect();
-    expected.push("src/planted.rs".to_owned());
-    expected.sort();
-    assert_eq!(names, expected);
-}
-
-/// A link that loops and that no include names is passed over like a directory named like a source;
-/// an include that resolves to it is the error of the include's resolution, not a kernel text's.
-#[test]
-fn a_symlink_loop_in_the_kernel_package_is_never_accepted() {
-    let scratch = planted_package(&[], Some("#[path = \"loop.rs\"]\nmod looped;\n"));
-    let package = package_of(&scratch);
-    symlink("loop.rs", package.join("src/loop.rs")).expect("the loop is made");
-    let kernels = kernel_texts(&package).expect("the package reads");
-    assert!(!kernels.contains_key("src/loop.rs"));
-    assert!(include_defects(&package, &kernels).is_err());
-}
-
-/// Each tracked Rust source of the committed kernel package is a kernel text with its file's text,
-/// build state aside, as a run judges its GenMC cases with them.
-#[test]
-fn a_genmc_lane_past_its_deadline_gives_no_verdict_for_every_case() {
-    let package = top().join(PACKAGE);
-    let kernels = kernel_texts(&package).expect("the committed package reads");
-    for (path, source) in &kernels {
-        assert_eq!(source, &committed(&format!("{PACKAGE}/{path}")), "{path}");
-    }
-    assert!(kernels.contains_key("src/join_kernel.rs"));
-    assert!(kernels.contains_key("ops/src/lib.rs"));
-}
-
-/// Each cataloged GenMC failure is the text of a `check!` message of the kernel text of its case's
-/// family, the case name's leading lowercase letters.
-#[test]
-fn each_cataloged_genmc_failure_lies_in_its_case_family_kernel() {
-    let kernels = kernel_texts(&top().join(PACKAGE)).expect("the committed package reads");
-    let catalog = json::parse(&committed("verification/orderings/expected.json"))
-        .expect("the catalog parses");
-    let Value::Object(catalog) = catalog else {
-        panic!("the catalog is an object");
-    };
-    let Some(Value::Array(rows)) = catalog.get("rows") else {
-        panic!("the catalog holds rows");
-    };
-    let mut checked = 0;
-    for row in rows {
-        let Value::Object(row) = row else { continue };
-        let needs = row.get("unrun").and_then(|unrun| match unrun {
-            Value::Object(unrun) => unrun.get("needs"),
-            _ => None,
-        });
-        let Some(Value::Array(needs)) = needs else {
-            continue;
-        };
-        for need in needs {
-            let Value::Object(need) = need else { continue };
-            let (
-                Some(Value::String(lane)),
-                Some(Value::String(failure)),
-                Some(Value::Array(tests)),
-            ) = (need.get("lane"), need.get("failure"), need.get("tests"))
-            else {
-                continue;
-            };
-            if *lane != "genmc" {
-                continue;
-            }
-            for test in tests {
-                let Value::String(case) = test else { continue };
-                let case = case.to_str().expect("a case name is UTF-8");
-                let family: String = case.chars().take_while(char::is_ascii_lowercase).collect();
-                let source = &kernels[&format!("src/{family}_kernel.rs")];
-                let failure = failure.to_str().expect("a failure is UTF-8");
-                assert_eq!(
-                    c_literals(source)
-                        .iter()
-                        .filter(|message| *message == failure)
-                        .count(),
-                    1,
-                    "{case}"
-                );
-                checked += 1;
-            }
-        }
-    }
-    assert!(checked > 0);
-}
-
-/// A declaration in a comment or a string declares nothing: the reading of the planted module file is
-/// the committed file's.
-#[test]
-fn a_commented_declaration_declares_nothing() {
-    let source = planted(
-        STORAGE,
-        "\nmod credit;\n",
-        "\n// mod credit_steps;\n// #[path = \"credit_steps.rs\"]\nconst _DECLARED: &str = \"mod credit_steps;\";\nmod credit;\n",
-    );
-    let committed_source = committed(STORAGE);
-    let child = "crates/kestrike/src/storage";
-    assert_eq!(
-        loads(STORAGE, child, &source, &code(&source)),
-        loads(STORAGE, child, &committed_source, &code(&committed_source))
     );
 }
 
@@ -654,31 +468,16 @@ fn a_module_declaration_inside_a_macro_is_refused() {
     ];
     for (label, file, appended, offset) in rows {
         let source = format!("{file}{appended}");
-        let declared = loads(
-            STORAGE,
-            "crates/kestrike/src/storage",
-            &source,
-            &code(&source),
-        );
+        let declared = loads(STORAGE, "crates/kestrike/src/storage", &source, false);
         let line = file.matches('\n').count() + offset;
         let expected = format!("{STORAGE}:{line}: {MACRO_TOKENS}");
-        assert_eq!(
-            messages(declared.refusals()),
-            [expected.as_str()],
-            "{label}"
-        );
+        assert_eq!(messages(&declared.refusals), [expected.as_str()], "{label}");
     }
     let plain = format!(
         "{base}macro_rules! plain {{\n    () => {{\n        fn helper() {{}}\n    }};\n}}\nplain!();\n"
     );
     assert_eq!(
-        loads(
-            STORAGE,
-            "crates/kestrike/src/storage",
-            &plain,
-            &code(&plain)
-        )
-        .refusals(),
+        loads(STORAGE, "crates/kestrike/src/storage", &plain, false).refusals,
         []
     );
 }
@@ -687,17 +486,17 @@ fn a_module_declaration_inside_a_macro_is_refused() {
 /// and the path attributes it adds.
 fn added(file: &str, appended: &str) -> Added {
     let child = "crates/kestrike/src/storage";
-    let base = loads(STORAGE, child, file, &code(file));
+    let base = loads(STORAGE, child, file, false);
     let source = format!("{file}{appended}");
-    let declared = loads(STORAGE, child, &source, &code(&source));
-    let bare = declared.bare().difference(base.bare()).cloned().collect();
+    let declared = loads(STORAGE, child, &source, false);
+    let bare = declared.bare.difference(&base.bare).cloned().collect();
     let attributed = declared
-        .attributed()
+        .attributed
         .iter()
-        .filter(|entry| !base.attributed().contains(entry))
+        .filter(|entry| !base.attributed.contains(entry))
         .map(|(path, names)| (path.clone(), names.iter().cloned().collect()))
         .collect();
-    let refusals = messages(declared.refusals())
+    let refusals = messages(&declared.refusals)
         .into_iter()
         .map(str::to_owned)
         .collect();
@@ -825,25 +624,8 @@ fn a_module_declared_by_a_raw_identifier_loads_its_file() {
     let raw = planted(STORAGE, "\nmod fill;\n", "\nmod r#fill;\n");
     let child = "crates/kestrike/src/storage";
     assert_eq!(
-        loads(STORAGE, child, &raw, &code(&raw)),
-        loads(STORAGE, child, &base, &code(&base))
-    );
-}
-
-/// A model support file and the credit steps the package includes stand as excluded, since only
-/// test-only items declare them.
-#[test]
-fn a_model_support_file_the_package_includes_is_excluded() {
-    let scratch = planted_package(
-        &["crates/kestrike/src/storage/credit_model.rs", CREDIT],
-        None,
-    );
-    let read = reader(vec![]);
-    let scope =
-        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
-    assert_eq!(
-        scope.excluded(),
-        ["crates/kestrike/src/storage/credit_model.rs", STEPS]
+        loads(STORAGE, child, &raw, false),
+        loads(STORAGE, child, &base, false)
     );
 }
 
@@ -1046,4 +828,552 @@ fn a_record_list_of_another_shape_reads_no_references() {
         references(&declared, &litmus, &records, &top()),
         Err(super::ReferenceError::Shape(_))
     ));
+}
+
+/// A declaration in a comment or a string declares nothing: the credit steps, which only a test-only
+/// declaration loads, stay excluded and nothing is refused.
+#[test]
+fn a_commented_declaration_declares_nothing() {
+    let source = planted(
+        STORAGE,
+        "\nmod credit;\n",
+        "\n// mod credit_steps;\n// #[path = \"credit_steps.rs\"]\nconst _DECLARED: &str = \"mod credit_steps;\";\nmod credit;\n",
+    );
+    let read = reader(vec![(STORAGE, text(source))]);
+    let scope = scope_files(&top().join(PACKAGE), &top(), &read, &top()).expect("the scope reads");
+    assert_eq!(
+        (scope.excluded(), scope.refusals()),
+        (&[STEPS.to_owned()][..], &[][..])
+    );
+}
+
+/// The grace model's message literals hold `anchor released twice` in two assertions, so no one
+/// assertion names a failure that holds it.
+#[test]
+fn a_loom_failure_two_message_literals_hold_is_refused() {
+    let model = committed("crates/kestrike/src/storage/grace_model.rs");
+    let holding = diagnostics(&model)
+        .iter()
+        .filter(|content| *content == "protection violated: anchor released twice")
+        .count();
+    assert_eq!(holding, 2);
+    let read = reader(vec![]);
+    assert_eq!(loom_site(GRACE_MODEL, "anchor released twice", &read), None);
+}
+
+/// A planted assertion whose message extends another's makes two message literals hold the shorter
+/// text, so only the longer names one assertion.
+#[test]
+fn a_loom_failure_another_message_literal_extends_is_refused() {
+    let model = "crates/kestrike/src/storage/grace_model.rs";
+    let anchor = "\"protection violated: anchor released under a pinned reader\"";
+    let extended = planted(
+        model,
+        anchor,
+        &format!(
+            "{anchor});\n        assert!(false, \"protection violated: anchor released under a pinned reader twice\""
+        ),
+    );
+    let holding = diagnostics(&extended)
+        .iter()
+        .filter(|content| content.contains("anchor released under a pinned reader"))
+        .count();
+    assert_eq!(holding, 2);
+    let read = reader(vec![(model, text(extended))]);
+    let site = |failure: &str| loom_site(GRACE_MODEL, failure, &read).is_some();
+    assert_eq!(
+        (
+            site("anchor released under a pinned reader"),
+            site("anchor released under a pinned reader twice")
+        ),
+        (false, true)
+    );
+}
+
+/// A `should_panic` attribute's `expected` text is no message literal, nor is a plain string outside
+/// any message: the scan model holds `torn copy of B` only in an attribute and `"A"` only as a value.
+/// The fill model's departure message stays the message literal of one assertion with its attributes
+/// replaced by a bare `#[should_panic]`, and its site is the line of the assertion's name.
+#[test]
+fn a_loom_failure_only_an_attribute_holds_is_refused() {
+    let scan = committed("crates/kestrike/src/index/scan_model.rs");
+    assert!(scan.contains("#[should_panic(expected = \"torn copy of B\")]"));
+    assert!(
+        !diagnostics(&scan)
+            .iter()
+            .any(|content| content.contains("torn copy of B") || content == "A")
+    );
+    let failure = "a departed record whose owner had not ended";
+    let model = "crates/kestrike/src/storage/fill_model.rs";
+    let attribute = format!("#[should_panic(expected = \"{failure}\")]");
+    let source = committed(model);
+    assert!(source.contains(&attribute));
+    let literal = source
+        .lines()
+        .position(|line| line.contains(&format!("\"protection violated: {failure}\"")))
+        .expect("the model asserts the departure");
+    let named = source
+        .lines()
+        .take(literal + 1)
+        .enumerate()
+        .filter(|(_, line)| line.contains("assert!("))
+        .map(|(at, _)| at + 1)
+        .last();
+    let read = reader(vec![(
+        model,
+        text(source.replace(&attribute, "#[should_panic]")),
+    )]);
+    assert_eq!(
+        loom_site(FILL_MODEL, failure, &read),
+        named.map(|line| (model.to_owned(), line))
+    );
+}
+
+/// The 40 code points before a literal's bracket hold its macro's name: a message on a later line than
+/// its name reports the name's line, a comment of 24 code points and 44 bytes keeps the name inside the
+/// window, and 34 spaces put the name's first letter outside it.
+#[test]
+fn a_window_counts_code_points_of_the_source() {
+    let source = "assert!(\n    cond,\n    \"far from its macro name\" \n);\n\
+                  assert!(c, \"\u{fc}n\u{ef}code\", \"k\");\n";
+    let found: Vec<usize> = diagnostic_sites(source)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    assert_eq!(found, [1, 5, 5]);
+    let rows = [
+        (
+            "a comment of 24 code points",
+            format!("assert!/*{}*/(x, \"m\");\n", "\u{fc}".repeat(20)),
+            1,
+        ),
+        (
+            "33 spaces",
+            format!("assert!{}(x, \"n\");\n", " ".repeat(33)),
+            1,
+        ),
+        (
+            "34 spaces",
+            format!("assert!{}(x, \"o\");\n", " ".repeat(34)),
+            0,
+        ),
+    ];
+    for (label, source, count) in rows {
+        assert_eq!(diagnostic_sites(&source).len(), count, "{label}");
+    }
+}
+
+/// A directory named like a source is no kernel text, and neither is a source under build state.
+#[test]
+fn a_directory_named_like_a_source_is_skipped() {
+    let scratch = planted_package(&[], Some(""));
+    let package = package_of(&scratch);
+    fs::create_dir(package.join("src/spare.rs")).expect("the directory is made");
+    fs::create_dir_all(package.join("target/debug")).expect("the build directory is made");
+    fs::write(package.join("target/debug/built.rs"), "").expect("the build output is written");
+    let names: Vec<String> = kernel_texts(&package)
+        .expect("the package reads")
+        .into_keys()
+        .collect();
+    let mut expected: Vec<String> = kernel_texts(&top().join(PACKAGE))
+        .expect("the committed package reads")
+        .into_keys()
+        .collect();
+    expected.push("src/planted.rs".to_owned());
+    expected.sort();
+    assert_eq!(names, expected);
+}
+
+/// A link that loops and that no include names is passed over like a directory named like a source;
+/// an include that resolves to it is the loop error of the include's resolution.
+#[test]
+fn a_symlink_loop_in_the_kernel_package_is_never_accepted() {
+    let scratch = planted_package(&[], Some("#[path = \"loop.rs\"]\nmod looped;\n"));
+    let package = package_of(&scratch);
+    symlink("loop.rs", package.join("src/loop.rs")).expect("the loop is made");
+    let kernels = kernel_texts(&package).expect("the package reads");
+    assert!(!kernels.contains_key("src/loop.rs"));
+    let error = include_defects(&package, &kernels).expect_err("the include's lookup loops");
+    assert!(
+        error.to_string().starts_with("symlink loop from "),
+        "{error}"
+    );
+}
+
+/// A model support file and the credit steps the package includes stand as excluded, since only
+/// test-only items declare them, and nothing is refused.
+#[test]
+fn a_model_support_file_the_package_includes_is_excluded() {
+    let scratch = planted_package(
+        &["crates/kestrike/src/storage/credit_model.rs", CREDIT],
+        None,
+    );
+    let read = reader(vec![]);
+    let scope =
+        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+    assert_eq!(
+        (scope.excluded(), scope.refusals()),
+        (
+            &[
+                "crates/kestrike/src/storage/credit_model.rs".to_owned(),
+                STEPS.to_owned()
+            ][..],
+            &[][..]
+        )
+    );
+}
+
+/// The kernel texts a run judges its GenMC cases with are the committed package's own `.rs` files a
+/// case build compiles, each with its file's text.
+#[test]
+fn each_kernel_text_is_its_committed_file() {
+    let package = top().join(PACKAGE);
+    let kernels = kernel_texts(&package).expect("the committed package reads");
+    let mut compiled: Vec<String> = crate::genmc::package_sources(&package)
+        .expect("the package's sources list")
+        .iter()
+        .filter_map(|path| path.strip_prefix(&package).ok())
+        .filter_map(Path::to_str)
+        .filter(|path| path.ends_with(".rs"))
+        .map(str::to_owned)
+        .collect();
+    compiled.sort();
+    assert_eq!(kernels.keys().cloned().collect::<Vec<_>>(), compiled);
+    for (path, source) in &kernels {
+        assert_eq!(source, &committed(&format!("{PACKAGE}/{path}")), "{path}");
+    }
+}
+
+/// The GenMC failures of the catalog's `kill` and `unrun` entries with each case's name.
+fn cataloged_genmc_failures() -> Vec<(String, String)> {
+    let catalog = json::parse(&committed("verification/orderings/expected.json"))
+        .expect("the catalog parses");
+    let field = |value: &Value, key: &str| match value {
+        Value::Object(object) => object.get(key).cloned(),
+        _ => None,
+    };
+    let Some(Value::Array(rows)) = field(&catalog, "rows") else {
+        panic!("the catalog holds rows");
+    };
+    let mut found = Vec::new();
+    for row in &rows {
+        let entries = match (
+            field(row, "kill"),
+            field(row, "unrun").and_then(|unrun| field(&unrun, "needs")),
+        ) {
+            (Some(Value::Array(kill)), _) => kill,
+            (_, Some(Value::Array(needs))) => needs,
+            _ => continue,
+        };
+        for entry in &entries {
+            let (
+                Some(Value::String(lane)),
+                Some(Value::String(failure)),
+                Some(Value::Array(tests)),
+            ) = (
+                field(entry, "lane"),
+                field(entry, "failure"),
+                field(entry, "tests"),
+            )
+            else {
+                continue;
+            };
+            if lane != "genmc" {
+                continue;
+            }
+            for test in tests {
+                if let Value::String(case) = test {
+                    found.push((case.to_string(), failure.to_string()));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Each cataloged GenMC failure is the text of one `check!` message of the kernel text of its case's
+/// family, the source whose file stem is the case name's leading lowercase letters and `_kernel`.
+#[test]
+fn each_cataloged_genmc_failure_lies_in_its_case_family_kernel() {
+    let kernels = kernel_texts(&top().join(PACKAGE)).expect("the committed package reads");
+    let failures = cataloged_genmc_failures();
+    assert!(!failures.is_empty());
+    for (case, failure) in failures {
+        let family: String = case.chars().take_while(char::is_ascii_lowercase).collect();
+        let stem = format!("{family}_kernel.rs");
+        let sources: Vec<&String> = kernels
+            .iter()
+            .filter(|(path, _)| {
+                Path::new(path)
+                    .file_name()
+                    .is_some_and(|name| name == stem.as_str())
+            })
+            .map(|(_, source)| source)
+            .collect();
+        assert_eq!(sources.len(), 1, "{case}");
+        let messages = c_literals(sources[0]);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| **message == failure)
+                .count(),
+            1,
+            "{case}"
+        );
+    }
+}
+
+/// Two module files that declare each other by path attributes end the classification: a file whose
+/// standing is being found gives none, so the include stands by its parent's live declaration.
+#[test]
+fn two_files_that_declare_each_other_end_the_classification() {
+    let include = "crates/kestrike/src/storage/cyc_a.rs";
+    let scratch = planted_package(&[include], None);
+    let parent = format!(
+        "{}#[cfg(any())]\n#[path = \"cyc_b.rs\"]\nmod b;\n#[cfg(any())]\n#[path = \"cyc_a.rs\"]\nmod a;\n",
+        committed(STORAGE)
+    );
+    let read = reader(vec![
+        (STORAGE, text(parent)),
+        (include, text("#[path = \"cyc_b.rs\"]\nmod b;\n".to_owned())),
+        (
+            "crates/kestrike/src/storage/cyc_b.rs",
+            text("#[path = \"cyc_a.rs\"]\nmod a;\n".to_owned()),
+        ),
+    ]);
+    let scope =
+        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+    assert_eq!(
+        (
+            scope.included().iter().any(|path| path == include),
+            scope.refusals()
+        ),
+        (true, &[][..])
+    );
+}
+
+/// A refusal of a module file's reading stands once, though its live and its whole reading both give it.
+#[test]
+fn a_refusal_of_a_module_file_stands_once() {
+    let source = format!("{}ignore! {{\n    mod fill;\n}}\n", committed(STORAGE));
+    let line = committed(STORAGE).matches('\n').count() + 1;
+    let found = scope_messages(&top(), vec![(STORAGE, text(source))]);
+    assert_eq!(found, [format!("{STORAGE}:{line}: {MACRO_TOKENS}")]);
+}
+
+/// A file a live declaration and a test-only path attribute both load stands as production.
+#[test]
+fn a_live_declaration_outranks_a_test_only_one() {
+    let include = "crates/kestrike/src/storage/planted/mod.rs";
+    let scratch = planted_package(&[include], None);
+    let declared = planted(
+        STORAGE,
+        "\nmod slot;\n",
+        "\nmod slot;\nmod planted;\n#[cfg(test)]\n#[path = \"planted/mod.rs\"]\nmod planted_tests;\n",
+    );
+    let read = reader(vec![(STORAGE, text(declared))]);
+    let scope =
+        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+    let standing = (
+        scope.included().iter().any(|path| path == include),
+        scope.excluded().iter().any(|path| path == include),
+    );
+    assert_eq!(standing, (true, false));
+}
+
+/// A path attribute whose path holds a backslash, and one that pairs with no `mod name;`, are refused.
+#[test]
+fn a_path_attribute_the_scope_rule_cannot_read_is_refused() {
+    let rows = [
+        (
+            "an escape",
+            "#[path = \"a\\x62.rs\"]\nmod a;\n",
+            "d/m.rs:1: the path attribute holds an escape the scope rule cannot read",
+        ),
+        (
+            "no declaration",
+            "#[path = \"a.rs\"]\n#[cfg(x)]\nmod a {}\n",
+            "d/m.rs holds a path attribute the scope rule cannot read",
+        ),
+    ];
+    for (label, source, expected) in rows {
+        let declared = loads("d/m.rs", "d/m", source, false);
+        assert_eq!(messages(&declared.refusals), [expected], "{label}");
+    }
+    let near = "ignore! { let r#mod = 1; }\n";
+    assert_eq!(loads("d/m.rs", "d/m", near, false).refusals, []);
+}
+
+/// A name that a word character extends is no path attribute: `#[pathx` and a `cfg_attr` whose `path`
+/// a word character precedes are no include the scanner misses.
+#[test]
+fn a_word_character_beside_path_names_no_attribute() {
+    let kernels = BTreeMap::from([(
+        "src/p.rs".to_owned(),
+        "#[pathx = \"a\"]\nmod a;\n#[cfg_attr(k, xpath = \"x\")]\nmod b;\n#[cfg_attr(k, \u{e9}path = \"x\")]\nmod c;\n".to_owned(),
+    )]);
+    let defects = include_defects(&top().join(PACKAGE), &kernels).expect("nothing resolves");
+    assert_eq!(defects, []);
+}
+
+/// The classification's refusals stand in the order of the package's sources, its includes in
+/// component order: the include outside the checkout, whose scratch directory's sibling `aa_outside.rs`
+/// sorts first, then the one no module file declares.
+#[test]
+fn the_classification_refuses_in_the_order_of_the_sources() {
+    let scratch = planted_package(
+        &[
+            "../aa_outside.rs",
+            "crates/kestrike/src/storage/undeclared.rs",
+        ],
+        None,
+    );
+    let found = scope_messages(&scratch.0, vec![]);
+    let outside = scratch
+        .0
+        .parent()
+        .expect("the scratch root has a parent")
+        .join("aa_outside.rs");
+    let heads = [
+        format!("the kernel package includes {}, outside the repository", outside.display()),
+        "the kernel package includes crates/kestrike/src/storage/undeclared.rs and no module file declares it".to_owned(),
+    ];
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .zip(&heads)
+            .all(|(message, head)| message.starts_with(head.as_str())),
+        "{found:?}"
+    );
+}
+
+/// A module's file is `name.rs` when it reads, and `name/mod.rs` when `name.rs` does not exist.
+#[test]
+fn a_module_file_is_its_name_before_its_directory() {
+    let file = "crates/kestrike/src/storage/fill_model.rs";
+    let directory = "crates/kestrike/src/storage/fill_model/mod.rs";
+    let both = reader(vec![
+        (file, text("// file\n".to_owned())),
+        (directory, text("// dir\n".to_owned())),
+    ]);
+    let absent = move |path: &str| {
+        if path == file {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        } else if path == directory {
+            Ok("// dir\n".to_owned())
+        } else {
+            read_source(&top(), path)
+        }
+    };
+    assert_eq!(
+        (
+            module_source("storage::fill_model::t", &both),
+            module_source("storage::fill_model::t", &absent)
+        ),
+        (Some("// file\n".to_owned()), Some("// dir\n".to_owned()))
+    );
+}
+
+/// The references of a planted declaration: a positive and a violation case, a `Sometimes` litmus test,
+/// a loom record's tests less its controls with a number naming no test, and each binding id's last
+/// entry.
+#[test]
+fn the_references_read_each_lane_and_the_last_binding_entry() {
+    let declared = json::parse(&format!(
+        "{{\"package\": \"{PACKAGE}\", \"cases\": {{\"a-pos\": {{\"expect\": \"positive\"}}, \
+         \"b-vio\": {{\"expect\": \"violation\"}}, \"c-x\": {{\"expect\": \"other\"}}}}, \
+         \"bindings\": [{{\"id\": \"x\", \"n\": 1}}, {{\"id\": 1, \"n\": 2}}, {{\"id\": \"y\", \"n\": 3}}, {{\"id\": \"x\", \"n\": 4}}]}}"
+    ))
+    .expect("the declaration parses");
+    let litmus = json::parse(
+        "{\"tests\": {\"sb\": {\"outcome\": \"Sometimes\"}, \"mp\": {\"outcome\": \"Never\"}}}",
+    )
+    .expect("the litmus list parses");
+    let records = json::parse(
+        "{\"records\": [{\"job\": \"loom\", \"tests\": [\"t1\", \"t2\", 7], \"controls\": [{\"test\": \"t2\"}]}, \
+         {\"job\": \"other\", \"tests\": [\"t3\"]}]}",
+    )
+    .expect("the records parse");
+    let found = references(&declared, &litmus, &records, &top()).expect("the references read");
+    let names = |set: Option<&std::collections::BTreeSet<Text>>| -> Vec<String> {
+        set.expect("the lane exists")
+            .iter()
+            .map(Text::to_string)
+            .collect()
+    };
+    let lanes = (
+        names(found.positive("loom")),
+        names(found.positive("genmc")),
+        names(found.twins("loom")),
+        names(found.twins("genmc")),
+        names(found.twins("rc11")),
+    );
+    let expected = (
+        vec!["t1"],
+        vec!["a-pos"],
+        vec!["t2"],
+        vec!["b-vio"],
+        vec!["sb"],
+    );
+    assert_eq!(
+        lanes,
+        (
+            expected.0.iter().map(|s| s.to_string()).collect(),
+            expected.1.iter().map(|s| s.to_string()).collect(),
+            expected.2.iter().map(|s| s.to_string()).collect(),
+            expected.3.iter().map(|s| s.to_string()).collect(),
+            expected.4.iter().map(|s| s.to_string()).collect(),
+        )
+    );
+    let entry = |id: &str| found.binding(&Text::from(id)).map(json::text);
+    assert_eq!(
+        (entry("x"), entry("y"), entry("1")),
+        (
+            Some("{\"id\":\"x\",\"n\":4}".to_owned()),
+            Some("{\"id\":\"y\",\"n\":3}".to_owned()),
+            None
+        )
+    );
+}
+
+/// An include at the checkout's top whose standing depends on a top-level module file stops the
+/// classification with an error: the module's directory, the top, has no name for its sibling.
+#[test]
+fn an_include_at_the_checkouts_top_beside_a_top_level_module_is_an_error() {
+    let scratch = planted_package(&["undeclared.rs"], None);
+    let tree = Scratch::new("sources-tree");
+    fs::create_dir_all(tree.0.join(super::CRATE)).expect("the crate directory is made");
+    let holder = format!("{}/holder.rs", super::CRATE);
+    let attribute = "#[path = \"planted_top.rs\"]\nmod p;\n";
+    fs::write(tree.0.join(&holder), attribute).expect("the holder is written");
+    let read = reader(vec![
+        (holder.as_str(), text(attribute.to_owned())),
+        ("planted_top.rs", text("mod undeclared;\n".to_owned())),
+    ]);
+    let error = scope_files(&package_of(&scratch), &scratch.0, &read, &tree.0)
+        .expect_err("the top has an empty name");
+    assert_eq!(error.to_string(), ". has an empty name");
+}
+
+/// Paths drop empty and `.` components and keep `..`, with a root of exactly two slashes kept; the
+/// lexical normal form drops a component before each `..` and a `..` after the root.
+#[test]
+fn a_path_joins_and_normalizes_by_its_components() {
+    let rows = [
+        ("//a/../b", "//b", "//a/../b"),
+        ("///a", "/a", "/a"),
+        ("../a/..", "..", "../a/.."),
+        ("", ".", "."),
+        ("a//b/./c/", "a/b/c", "a/b/c"),
+        ("/..", "/", "/.."),
+        ("//", "//", "//"),
+    ];
+    for (path, normal, plain) in rows {
+        assert_eq!(
+            (normpath(path), pure(path)),
+            (normal.to_owned(), plain.to_owned()),
+            "{path:?}"
+        );
+    }
 }

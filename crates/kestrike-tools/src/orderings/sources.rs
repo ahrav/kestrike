@@ -20,17 +20,18 @@
 //! directory, and nowhere else. Among a macro's tokens a path attribute or a `mod` keyword loads
 //! nothing and is refused.
 //!
-//! Repository paths are texts relative to the checkout's top, joined and parented as Python's
-//! `PurePosixPath` does, with `..` kept; a path attribute's target is also normalized lexically. Paths
-//! sort component by component, and the include defects by their file's path as text. A refusal is the
-//! catalog check's `scope file` refusal with its sentence, in the order the rules meet it; the
-//! classification gives each distinct sentence once. Offsets are byte offsets of the source, which its
-//! scanned texts share, and each window before a bracket spans 40 code points of the source. Python's
-//! `\b` and the lookarounds of each pattern are checked in code beside a word character of any script.
+//! Repository paths are texts relative to the checkout's top. A path joins with `/`, drops empty and
+//! `.` components and keeps `..`, and a root of exactly two slashes stays; a path attribute's target is
+//! also normalized lexically, each `..` dropping the component before it. Paths sort component by
+//! component, and the include defects by their file's path as text. A refusal is the catalog check's
+//! `scope file` refusal with its sentence, in the order the rules meet it; the classification gives each
+//! distinct sentence once. Offsets are byte offsets of the source, which its scanned texts share, and
+//! each window before a bracket spans 40 code points of the source. A word edge of a pattern stands
+//! where [`is_word`] holds on one side only, a letter, a number or `_` of any script.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -51,7 +52,7 @@ pub const SCOPE_FILE: &str = "scope file";
 
 /// A reader of repository paths: the text at a path relative to the checkout's top, or the error of
 /// reading it, [`io::ErrorKind::NotFound`] for a file that does not exist.
-pub type Read<'r> = &'r dyn Fn(&str) -> io::Result<String>;
+pub type Reader<'r> = &'r dyn Fn(&str) -> io::Result<String>;
 
 /// One refusal of the catalog's check: its name and its sentence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,16 +78,21 @@ impl Refusal {
     }
 }
 
-/// The root of a repository path's text (`//` only when exactly two slashes lead it) and its other
-/// components, with empty and `.` components dropped.
-fn parts(path: &str) -> (&str, Vec<&str>) {
-    let root = if path.starts_with("//") && !path.starts_with("///") {
+/// The root of `path`: `//` when exactly two slashes lead it, `/` for one or three or more, else none.
+fn root(path: &str) -> &'static str {
+    if path.starts_with("//") && !path.starts_with("///") {
         "//"
     } else if path.starts_with('/') {
         "/"
     } else {
         ""
-    };
+    }
+}
+
+/// The root of a repository path's text and its other components, with empty and `.` components
+/// dropped.
+fn parts(path: &str) -> (&str, Vec<&str>) {
+    let root = root(path);
     let names = path
         .split('/')
         .filter(|name| !name.is_empty() && *name != ".")
@@ -153,31 +159,13 @@ fn with_suffix(path: &str, suffix: &str) -> io::Result<String> {
     Ok(joined(&parent(path), &format!("{}{suffix}", stem(path))))
 }
 
-/// `path` and each of its ancestors, nearest first; a relative path's last ancestor is `.`.
-fn lineage(path: &str) -> Vec<String> {
-    let mut found = vec![pure(path)];
-    let mut at = pure(path);
-    loop {
-        let next = parent(&at);
-        if next == at {
-            return found;
-        }
-        found.push(next.clone());
-        at = next;
-    }
-}
-
 /// The lexical normal form of `path`: each `..` drops the component before it, and a `..` that leads
 /// an absolute path is dropped.
 fn normpath(path: &str) -> String {
     if path.is_empty() {
         return ".".to_owned();
     }
-    let slashes = if path.starts_with("//") && !path.starts_with("///") {
-        2
-    } else {
-        usize::from(path.starts_with('/'))
-    };
+    let slashes = root(path).len();
     let mut names: Vec<&str> = Vec::new();
     for component in path.split('/') {
         if component.is_empty() || component == "." {
@@ -195,13 +183,6 @@ fn normpath(path: &str) -> String {
     } else {
         text
     }
-}
-
-/// The order of repository paths component by component, the root first.
-fn component_order(left: &str, right: &str) -> std::cmp::Ordering {
-    let (left_root, left_names) = parts(left);
-    let (right_root, right_names) = parts(right);
-    (left_root, left_names).cmp(&(right_root, right_names))
 }
 
 /// `path` relative to the checkout as text.
@@ -328,44 +309,41 @@ fn mod_keyword(text: &str) -> Option<usize> {
 
 /// What the module declarations of one module file load.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Loads {
+struct Loads {
     bare: BTreeSet<String>,
     attributed: Vec<(String, BTreeSet<String>)>,
     refusals: Vec<Refusal>,
 }
 
 impl Loads {
-    /// The files the bare `mod name;` declarations load: `name.rs` and `name/mod.rs` of each.
-    pub fn bare(&self) -> &BTreeSet<String> {
-        &self.bare
-    }
-
-    /// Each file a path attribute loads, in the order of its first attribute, with the names it is
-    /// declared under, a name inside inline modules prefixed by theirs and `::`.
-    pub fn attributed(&self) -> &[(String, BTreeSet<String>)] {
-        &self.attributed
-    }
-
-    /// Whether a path attribute loads `path`.
-    pub fn attributes(&self, path: &str) -> bool {
-        self.attributed.iter().any(|(target, _)| target == path)
-    }
-
-    /// The declarations the reading refuses: one inside a macro's tokens, a path attribute that holds an
-    /// escape, and a path attribute the reading cannot pair with a declaration.
-    pub fn refusals(&self) -> &[Refusal] {
-        &self.refusals
+    /// Whether a path attribute loads `path`, when `attribute`, or else a bare declaration.
+    fn holds(&self, path: &str, attribute: bool) -> bool {
+        if attribute {
+            self.attributed.iter().any(|(target, _)| target == path)
+        } else {
+            self.bare.contains(path)
+        }
     }
 }
 
 /// What the declarations of the module file `module`, whose text is `text` and whose bare declarations
-/// load from the directory `child`, load; `scanned` is `text` with the parts the reading passes over
-/// blanked, offsets kept: comments and literals, and test-only items for a reading of live code.
+/// load from the directory `child`, load: the live declarations, with test-only items passed over, or
+/// every declaration outside comments and literals. `bare` holds `name.rs` and `name/mod.rs` of each
+/// bare `mod name;`; `attributed` holds each file a path attribute loads, in the order of its first
+/// attribute, with the names it is declared under, a name inside inline modules prefixed by theirs and
+/// `::`; `refusals` holds a declaration among a macro's tokens, a path attribute that holds an escape,
+/// and a path attribute the reading cannot pair with a declaration.
 ///
 /// Among a macro's tokens a path attribute or a `mod` keyword is refused and loads nothing: a
 /// definition's body declares only where it is invoked, and an invocation may drop its tokens or turn
 /// them into a declaration. A macro found among the tokens of an earlier one has no tokens of its own.
-pub fn loads(module: &str, child: &str, text: &str, scanned: &str) -> Loads {
+fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
+    let (text, scanned) = if live {
+        blanked(source)
+    } else {
+        (source.to_owned(), code(source))
+    };
+    let (text, scanned) = (text.as_str(), scanned.as_str());
     let mut found = Loads::default();
     let mut view = scanned.to_owned();
     for head in bounded_iter(&MACRO, scanned) {
@@ -454,27 +432,22 @@ pub fn loads(module: &str, child: &str, text: &str, scanned: &str) -> Loads {
     found
 }
 
-/// The text `read` gives for `path`, or `None` when it gives an error.
-fn read_or_none(read: Read<'_>, path: &str) -> Option<String> {
-    read(path).ok()
-}
-
 /// (the repository path, the text) of the model source of loom test `test`, read down from the crate's
 /// `mod.rs` through `read`: each module the path names is loaded by a declaration [`loads`] reads in its
 /// parent with comments and literals passed over, and the last file reached declares the remaining
 /// module inline. `None` when a declaration or the file it loads is missing, or when a parent declares
 /// one module more than once, inline or by two files, which only a `cfg` this lookup does not evaluate
 /// tells apart.
-pub fn module_file(test: &str, read: Read<'_>) -> Option<(String, String)> {
+pub fn module_file(test: &str, read: Reader<'_>) -> Option<(String, String)> {
     let mut names: Vec<&str> = test.split("::").collect();
     names.pop();
     let mut names = names.as_slice();
     let mut home = CRATE.to_owned();
     let mut path = joined(&home, "mod.rs");
-    let mut text = read_or_none(read, &path);
+    let mut text = read(&path).ok();
     while let (Some(current), Some((&first, rest))) = (&text, names.split_first()) {
         let scanned = code(current);
-        let declared = loads(&path, &home, current, &scanned);
+        let declared = loads(&path, &home, current, false);
         let paths: Vec<&str> = declared
             .attributed
             .iter()
@@ -505,7 +478,7 @@ pub fn module_file(test: &str, read: Read<'_>) -> Option<(String, String)> {
         };
         let chosen = files
             .iter()
-            .find(|file| read_or_none(read, file).is_some())
+            .find(|file| read(file).ok().is_some())
             .unwrap_or(&files[0])
             .clone();
         home = if !paths.is_empty() || name(&chosen) == "mod.rs" {
@@ -513,7 +486,7 @@ pub fn module_file(test: &str, read: Read<'_>) -> Option<(String, String)> {
         } else {
             with_suffix(&chosen, "").expect("a declared module file has a name")
         };
-        text = read_or_none(read, &chosen);
+        text = read(&chosen).ok();
         path = chosen;
         names = rest;
     }
@@ -521,7 +494,7 @@ pub fn module_file(test: &str, read: Read<'_>) -> Option<(String, String)> {
 }
 
 /// The text of the model source [`module_file`] finds for loom test `test`.
-pub fn module_source(test: &str, read: Read<'_>) -> Option<String> {
+pub fn module_source(test: &str, read: Reader<'_>) -> Option<String> {
     module_file(test, read).map(|(_, text)| text)
 }
 
@@ -567,7 +540,7 @@ pub fn diagnostic_sites(text: &str) -> Vec<(String, usize)> {
 /// (path, line) of the one assertion, panic or `expect` in the model source of loom test `test` whose
 /// message literal holds `failure`, or `None` when no model source or other than one such literal
 /// stands there.
-pub fn loom_site(test: &str, failure: &str, read: Read<'_>) -> Option<(String, usize)> {
+pub fn loom_site(test: &str, failure: &str, read: Reader<'_>) -> Option<(String, usize)> {
     let (path, text) = module_file(test, read)?;
     let lines: Vec<usize> = diagnostic_sites(&text)
         .into_iter()
@@ -648,9 +621,11 @@ pub fn include_defects(
     kernels: &BTreeMap<String, String>,
 ) -> io::Result<Vec<Refusal>> {
     let mut defects = Vec::new();
-    let package_name = package
-        .file_name()
-        .map_or(String::new(), |name| name.to_string_lossy().into_owned());
+    let package_name = match package.components().next_back() {
+        Some(Component::Normal(name)) => name.to_string_lossy().into_owned(),
+        Some(Component::ParentDir) => "..".to_owned(),
+        _ => String::new(),
+    };
     for (path, text) in kernels {
         let view = code(text);
         let live: BTreeSet<usize> = path_attributes(&view)
@@ -715,7 +690,7 @@ pub fn include_defects(
 ///
 /// `path_holders` returns an error of [`walk`] or [`is_file`], and an error of kind
 /// [`io::ErrorKind::InvalidData`] for a path that is no UTF-8.
-pub fn path_holders(tree: &Path) -> io::Result<Vec<String>> {
+fn path_holders(tree: &Path) -> io::Result<Vec<String>> {
     let mut sources: Vec<PathBuf> = walk(&tree.join(CRATE))?
         .into_iter()
         .filter(|path| {
@@ -745,9 +720,19 @@ enum Standing {
     Unreadable,
 }
 
-/// The first standing of `states` in rank order, or `None` when it holds none.
-fn best(states: &BTreeSet<Option<Standing>>) -> Option<Standing> {
-    states.iter().flatten().min().copied()
+/// The standings a bare declaration and a path attribute give a file, in that order.
+type Standings = [Option<Standing>; 2];
+
+/// The first of `left` and `right` in rank order, or `None` when both are.
+fn first(left: Option<Standing>, right: Option<Standing>) -> Option<Standing> {
+    left.into_iter().chain(right).min()
+}
+
+/// The file names the path attributes of `text` declare.
+fn declared_names(text: &str) -> impl Iterator<Item = String> + '_ {
+    DECLARED
+        .captures_iter(text)
+        .map(|declared| name(declared.name("path").expect("DECLARED has path").as_str()).to_owned())
 }
 
 /// The text a module file holds for the classification.
@@ -789,11 +774,11 @@ impl Scope {
 
 /// The state of one classification: the texts read, the readings made and the standings found.
 struct Classifier<'r> {
-    read: Read<'r>,
+    read: Reader<'r>,
     roots: [String; 3],
     texts: BTreeMap<String, Source>,
     parsed: BTreeMap<(String, String, bool), Loads>,
-    places: BTreeMap<String, (Option<Standing>, Option<Standing>)>,
+    places: BTreeMap<String, Standings>,
     holders: Vec<String>,
     pathed: BTreeSet<String>,
     scope: Scope,
@@ -832,12 +817,7 @@ impl Classifier<'_> {
             let Some(Source::Text(text)) = self.texts.get(module) else {
                 unreachable!("a module file is parsed after its text is read");
             };
-            let found = if live {
-                let (production, scanned) = blanked(text);
-                loads(module, child, &production, &scanned)
-            } else {
-                loads(module, child, text, &code(text))
-            };
+            let found = loads(module, child, text, live);
             for refusal in found.refusals.clone() {
                 self.once(refusal.message);
             }
@@ -848,16 +828,15 @@ impl Classifier<'_> {
 
     /// The standing a bare declaration gives crate source `file` and the standing a path attribute
     /// gives it. A file whose standing is being found has none.
-    fn place(&mut self, file: &str) -> io::Result<(Option<Standing>, Option<Standing>)> {
+    fn place(&mut self, file: &str) -> io::Result<Standings> {
         if let Some(&found) = self.places.get(file) {
             return Ok(found);
         }
-        self.places.insert(file.to_owned(), (None, None));
+        self.places.insert(file.to_owned(), [None, None]);
         let found = if self.roots.iter().any(|root| root == file) {
-            (Some(Standing::Production), Some(Standing::Production))
+            [Some(Standing::Production); 2]
         } else {
-            let (bare, attributed, _) = self.declared(file)?;
-            (bare, attributed)
+            self.declared(file)?.0
         };
         self.places.insert(file.to_owned(), found);
         Ok(found)
@@ -865,31 +844,27 @@ impl Classifier<'_> {
 
     /// The standings of [`Classifier::place`] for `file`, and the module files whose bare declarations
     /// load from its directory, which a refusal names as searched.
-    fn declared(
-        &mut self,
-        file: &str,
-    ) -> io::Result<(Option<Standing>, Option<Standing>, Vec<String>)> {
+    fn declared(&mut self, file: &str) -> io::Result<(Standings, Vec<String>)> {
         let directory = if name(file) == "mod.rs" {
             parent(&parent(file))
         } else {
             parent(file)
         };
-        let named: Vec<String> = if !lineage(&directory).iter().any(|path| path == CRATE) {
-            Vec::new()
-        } else if directory == CRATE {
-            self.roots.to_vec()
-        } else {
-            vec![
-                joined(&directory, "mod.rs"),
-                with_suffix(&directory, ".rs")?,
-            ]
-        };
+        let named: Vec<String> =
+            if directory != CRATE && !directory.starts_with(&format!("{CRATE}/")) {
+                Vec::new()
+            } else if directory == CRATE {
+                self.roots.to_vec()
+            } else {
+                vec![
+                    joined(&directory, "mod.rs"),
+                    with_suffix(&directory, ".rs")?,
+                ]
+            };
         let mut names = self.pathed.clone();
         for module in &named {
             if let Source::Text(text) = self.source(module) {
-                names.extend(DECLARED.captures_iter(&text).map(|declared| {
-                    name(declared.name("path").expect("DECLARED has path").as_str()).to_owned()
-                }));
+                names.extend(declared_names(&text));
             }
         }
         let mut others: Vec<String> = names
@@ -898,7 +873,7 @@ impl Classifier<'_> {
             .map(|name| joined(&directory, name))
             .filter(|module| module != file && !named.contains(module))
             .collect();
-        others.sort_by(|left, right| component_order(left, right));
+        others.sort_by(|left, right| parts(left).cmp(&parts(right)));
         let modules: Vec<String> = named.into_iter().chain(others).collect();
         let extra: Vec<String> = self
             .roots
@@ -908,7 +883,7 @@ impl Classifier<'_> {
             .cloned()
             .collect();
         let file_name = name(file).to_owned();
-        let mut found = (BTreeSet::new(), BTreeSet::new());
+        let mut found: Standings = [None, None];
         for module in modules.iter().chain(&extra) {
             let home = modules.contains(module);
             let source = self.source(module);
@@ -916,7 +891,7 @@ impl Classifier<'_> {
                 self.once(format!(
                     "{module} cannot be read to classify {file}: {error}"
                 ));
-                found.0.insert(Some(Standing::Unreadable));
+                found[0] = first(found[0], Some(Standing::Unreadable));
             }
             let is_root = self.roots.contains(module);
             let Source::Text(text) = source else {
@@ -932,50 +907,33 @@ impl Classifier<'_> {
             } else {
                 joined(&parent(module), stem(module))
             };
+            let anywhere = self.parse(module, &child, false);
+            let loaded = [anywhere.holds(file, false), anywhere.holds(file, true)];
             for attribute in [false, true] {
-                let anywhere = self.parse(module, &child, false);
-                let loaded = if attribute {
-                    anywhere.attributes(file)
-                } else {
-                    anywhere.bare.contains(file)
-                };
-                if !loaded {
+                if !loaded[usize::from(attribute)] {
                     continue;
                 }
                 let standing = if !home && !is_root {
                     Some(Standing::Elsewhere)
                 } else if attribute || is_root || name(module) == "mod.rs" {
-                    let (bare, attributed) = self.place(module)?;
-                    best(&BTreeSet::from([bare, attributed]))
+                    let [bare, attributed] = self.place(module)?;
+                    first(bare, attributed)
                 } else {
-                    let (bare, attributed) = self.place(module)?;
-                    if *module == with_suffix(&directory, ".rs")? {
-                        bare
-                    } else {
-                        attributed
-                    }
+                    let sibling = *module == with_suffix(&directory, ".rs")?;
+                    self.place(module)?[usize::from(!sibling)]
                 };
-                let tested = standing == Some(Standing::Production) && {
-                    let live = self.parse(module, &child, true);
-                    !if attribute {
-                        live.attributes(file)
-                    } else {
-                        live.bare.contains(file)
-                    }
-                };
+                let tested = standing == Some(Standing::Production)
+                    && !self.parse(module, &child, true).holds(file, attribute);
                 let state = if tested {
                     Some(Standing::Excluded)
                 } else {
                     standing
                 };
-                if attribute {
-                    found.1.insert(state);
-                } else {
-                    found.0.insert(state);
-                }
+                let slot = &mut found[usize::from(attribute)];
+                *slot = first(*slot, state);
             }
         }
-        Ok((best(&found.0), best(&found.1), modules))
+        Ok((found, modules))
     }
 }
 
@@ -994,7 +952,12 @@ impl Classifier<'_> {
 /// source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
 /// UTF-8, and an error for an included file at the top of the checkout whose standing depends on a
 /// sibling named after the top's own empty name.
-pub fn scope_files(package: &Path, root: &Path, read: Read<'_>, tree: &Path) -> io::Result<Scope> {
+pub fn scope_files(
+    package: &Path,
+    root: &Path,
+    read: Reader<'_>,
+    tree: &Path,
+) -> io::Result<Scope> {
     let mut classifier = Classifier {
         read,
         roots: ["mod.rs", "lib.rs", "main.rs"].map(|name| joined(CRATE, name)),
@@ -1007,11 +970,7 @@ pub fn scope_files(package: &Path, root: &Path, read: Read<'_>, tree: &Path) -> 
     };
     for holder in path_holders(tree)? {
         if let Source::Text(text) = classifier.source(&holder) {
-            classifier
-                .pathed
-                .extend(DECLARED.captures_iter(&text).map(|declared| {
-                    name(declared.name("path").expect("DECLARED has path").as_str()).to_owned()
-                }));
+            classifier.pathed.extend(declared_names(&text));
             classifier.holders.push(holder);
         }
     }
@@ -1028,8 +987,8 @@ pub fn scope_files(package: &Path, root: &Path, read: Read<'_>, tree: &Path) -> 
             continue;
         };
         let relative = pure(&text_of(relative)?);
-        let (bare, attributed, searched) = classifier.declared(&relative)?;
-        match best(&BTreeSet::from([bare, attributed])) {
+        let ([bare, attributed], searched) = classifier.declared(&relative)?;
+        match first(bare, attributed) {
             Some(Standing::Production) => classifier.scope.included.push(relative),
             Some(Standing::Elsewhere) => classifier.once(format!(
                 "{relative} is declared only by a path attribute outside its module files and the \
@@ -1104,12 +1063,7 @@ fn members<'v>(value: &'v Value, what: &str) -> Result<Vec<Member<'v>>, Referenc
 
 /// The member `key` of `member`, which must be an object that holds it.
 fn subscript<'v>(member: &Member<'v>, key: &str, what: &str) -> Result<&'v Value, ReferenceError> {
-    match member {
-        Member::Value(Value::Object(object)) => object
-            .get(key)
-            .ok_or_else(|| shape(format!("{what} has no member {key}"))),
-        _ => Err(shape(format!("{what} is no object"))),
-    }
+    lookup(member, key, what)?.ok_or_else(|| shape(format!("{what} has no member {key}")))
 }
 
 /// The member `key` of `member` when it is an object, `None` when the object lacks it.
@@ -1176,16 +1130,11 @@ impl References {
         }
     }
 
-    /// The bindings in the order of each id's first entry, each id with its last entry.
-    pub fn bindings(&self) -> &[(Value, Value)] {
-        &self.bindings
-    }
-
-    /// The last binding entry whose id equals `id`; ids of different JSON types never match.
-    pub fn binding(&self, id: &Value) -> Option<&Value> {
+    /// The last binding entry whose id is the string `id`.
+    pub fn binding(&self, id: &Text) -> Option<&Value> {
         self.bindings
             .iter()
-            .find(|(key, _)| key == id)
+            .find(|(key, _)| matches!(key, Value::String(key) if key == id))
             .map(|(_, entry)| entry)
     }
 
