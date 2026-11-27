@@ -354,3 +354,48 @@ pub fn assert_plan(
         ],
     );
 }
+
+/// A line with no comparison base gives its note before the read of its pushed commits, so the note stands
+/// when that read fails and the line ends with the read's Git error.
+#[test]
+fn an_unreadable_history_without_origin_main_still_notes_the_skipped_scan() {
+    if let Some(row) = child() {
+        let head = row.get("HEAD");
+        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut note = None;
+        let error = plan
+            .line(&line(&head, ZERO), |skipped| {
+                note = Some(skipped.to_string())
+            })
+            .expect_err("the history cannot be read");
+        assert!(
+            matches!(&error, Failure::Git(_)) && error.to_string().starts_with("git rev-list "),
+            "{error}"
+        );
+        assert_eq!(
+            note,
+            Some(format!(
+                "{}: no comparison base; weakened-test scan skipped",
+                &head[..12]
+            ))
+        );
+        return;
+    }
+    let (repository, base) = fixture("unreadable-history");
+    let head = repository.commit(&[("crates/plain.rs", "edited\n")]);
+    repository.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    let tree = repository.git(&["rev-parse", &format!("{base}^{{tree}}")]);
+    let object = repository
+        .top
+        .join(".git/objects")
+        .join(&tree[..2])
+        .join(&tree[2..]);
+    std::fs::remove_file(object).expect("the base's tree is a loose object");
+    repository.in_child(
+        &id(
+            module_path!(),
+            "an_unreadable_history_without_origin_main_still_notes_the_skipped_scan",
+        ),
+        &[("HEAD", &head)],
+    );
+}

@@ -161,16 +161,10 @@ fn an_existing_test_that_gains_an_ignore_writes_the_scan_s_lines_to_the_given_st
     );
     assert!(empty.stdout.is_empty() && empty.stderr.is_empty() && unrelated.stdout.is_empty());
     let written = std::fs::read(&report).expect("the report file reads");
-    assert_eq!(
-        String::from_utf8_lossy(&written),
-        String::from_utf8_lossy(&blocked.stdout)
-    );
+    assert_eq!(written, blocked.stdout);
     let mut refusals = blocked.stderr.clone();
     refusals.extend(&unrelated.stderr);
-    assert_eq!(
-        String::from_utf8_lossy(&entry.stderr),
-        String::from_utf8_lossy(&refusals)
-    );
+    assert_eq!(entry.stderr, refusals);
     assert!(
         String::from_utf8_lossy(&entry.stdout)
             .contains("entry exited 1\nentry exited 0\nentry exited 2\n"),

@@ -256,8 +256,9 @@ fn unbased_checks(
     Ok(checks)
 }
 
-/// `based_checks` are the checks `paths`, changed from `base` to `local`, require. It asks whether the tip
-/// holds a check's file only where a change to that check's inputs makes the answer count.
+/// `based_checks` are the checks `paths`, changed from `base` to `local`, require. It reads whether the tip
+/// holds the replay on every line, and each other check's file only where a change to that check's inputs
+/// makes the answer count.
 fn based_checks(
     environ: &Environ,
     base: &Text,

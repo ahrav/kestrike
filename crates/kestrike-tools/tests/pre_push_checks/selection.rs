@@ -311,7 +311,7 @@ fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
 /// A chaos change at a tip that holds the receipt replay runs it after the contract check; a tip cut
 /// before the replay runs the contract check alone.
 #[test]
-fn a_chaos_change_at_a_tip_that_holds_the_receipt_replay_runs_it_and_its_failure_blocks() {
+fn a_chaos_change_at_a_tip_that_holds_the_receipt_replay_runs_it() {
     if child().is_some() {
         return plan_row();
     }
@@ -328,7 +328,7 @@ fn a_chaos_change_at_a_tip_that_holds_the_receipt_replay_runs_it_and_its_failure
         &repository,
         &id(
             module_path!(),
-            "a_chaos_change_at_a_tip_that_holds_the_receipt_replay_runs_it_and_its_failure_blocks",
+            "a_chaos_change_at_a_tip_that_holds_the_receipt_replay_runs_it",
         ),
         &[(&before, &base), (&head, &held)],
         &[
@@ -361,4 +361,33 @@ fn one_commit_pushed_to_two_refs_runs_the_union_of_their_disjoint_checks() {
     ] {
         assert_plan(&repository, &test, &lines, &[(&head, &union)]);
     }
+}
+
+/// A links registry that is not JSON runs the links check and its self-test at a tip with no comparison
+/// base, and the links check on any change of a line with one.
+#[test]
+fn an_unreadable_links_registry_runs_the_links_check() {
+    if child().is_some() {
+        return plan_row();
+    }
+    let (repository, _) = fixture("unreadable-links");
+    let broken = repository.commit(&[("verification/models/links.json", "not json")]);
+    let head = repository.commit(&[("crates/plain.rs", "edited\n")]);
+    repository.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    let every = [
+        Check::SelectTests,
+        Check::Admit,
+        Check::Reconcile,
+        Check::Links,
+        Check::LinksSelfTest,
+    ];
+    assert_plan(
+        &repository,
+        &id(
+            module_path!(),
+            "an_unreadable_links_registry_runs_the_links_check",
+        ),
+        &[(&head, &broken), (&broken, ZERO)],
+        &[(&head, &[Check::Links]), (&broken, &every)],
+    );
 }
