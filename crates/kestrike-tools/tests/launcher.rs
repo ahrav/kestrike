@@ -537,6 +537,7 @@ fn wrapper() -> &'static str {
 /// removed, the pinned toolchain set, and each of the launcher's own settings, apart from the variables
 /// a shell sets.
 fn built_with(tree: &Tree, caller: &[(&str, &str)], rustc: &str, wrapper: &str) {
+    let pinned = format!("{PIN}-{HOST}");
     let mut expected: BTreeMap<String, String> = caller
         .iter()
         .filter(|(name, _)| !CLEARED.contains(name))
@@ -544,7 +545,7 @@ fn built_with(tree: &Tree, caller: &[(&str, &str)], rustc: &str, wrapper: &str) 
         .collect();
     expected.insert("PATH".to_owned(), tree.default_path());
     for (name, value) in [
-        ("RUSTUP_TOOLCHAIN", PIN),
+        ("RUSTUP_TOOLCHAIN", pinned.as_str()),
         ("RUSTUP_AUTO_INSTALL", "0"),
         ("RUSTC", rustc),
         ("RUSTC_WRAPPER", wrapper),

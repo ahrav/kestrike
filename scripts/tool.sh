@@ -89,7 +89,9 @@ prepare() {
   cargo=$("$rustup" which --toolchain "$pin" cargo 2>/dev/null) || fail "the pinned toolchain $pin-$host has no cargo"
   rustc=${cargo%/*}/rustc
   [[ -x $rustc ]] || fail "the pinned toolchain $pin-$host has no rustc"
-  # Both wrappers outrank one that a Cargo configuration file names. Cargo keeps its cache of rustc's
+  # The build names the pinned toolchain by the full name the list showed, which is the name Cargo reads
+  # under RUSTUP_HOME for its cache of rustc's answers. Both wrappers outrank one that a Cargo
+  # configuration file names. Cargo keeps its cache of rustc's
   # answers in `target/tools/.rustc_info.json` only for a wrapper that is a file, so the wrapper is
   # `/usr/bin/env`, which starts rustc with the same arguments and environment. The empty value, which
   # Cargo reads as no wrapper, stands where that file is no executable or the rustc path holds a `=`,
@@ -101,7 +103,7 @@ prepare() {
     [[ $name == CARGO_BUILD_JOBS ]] || unset "$name"
   done
   unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTDOC
-  if ! log=$(RUSTUP_TOOLCHAIN=$pin RUSTC=$rustc RUSTC_WRAPPER=$wrapper RUSTC_WORKSPACE_WRAPPER=$wrapper \
+  if ! log=$(RUSTUP_TOOLCHAIN=$pin-$host RUSTC=$rustc RUSTC_WRAPPER=$wrapper RUSTC_WORKSPACE_WRAPPER=$wrapper \
     CARGO_BUILD_BUILD_DIR=target/tools "$cargo" build --quiet --package kestrike-tools --bin kestrike-tools \
     --target "$host" --target-dir "$top/target/tools" 2>&1); then
     printf '%s\n' "$log" >&2 || true
