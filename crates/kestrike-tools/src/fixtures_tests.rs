@@ -8,15 +8,18 @@ use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
-use crate::fixtures::quint::{Failure, LIMIT, run};
-use crate::fixtures::{Model, Trace, case, generate, keep};
+use crate::fixtures::quint::{Failure, run};
+use crate::fixtures::{Model, Style, Trace, case, generate, keep};
 use crate::json::{Value, parse};
 use crate::paths_tests::Scratch;
+use crate::tools;
 
 const GATE: Model = Model {
     tool: "gate_fixtures",
     about: "About.",
     name: "gate",
+    style: Style::Format,
+    limit: Duration::from_secs(120),
 };
 
 /// Writes the executable stand-in at `path` through a child process, the one process that holds the file open
@@ -59,6 +62,7 @@ fn the_limit_ends_a_sleeping_child_with_sigkill() {
         OsStr::new("sh"),
         &args,
         &scratch.0,
+        Stdio::null(),
         Duration::from_millis(300),
     );
     let elapsed = start.elapsed();
@@ -78,13 +82,36 @@ fn the_limit_ends_a_sleeping_child_with_sigkill() {
         !scratch.0.join("terminated").exists(),
         "the child's TERM trap never runs"
     );
-    assert_eq!(LIMIT, Duration::from_secs(120));
+}
+
+#[test]
+fn one_quint_run_is_limited_to_120_seconds_for_format_writers_and_60_for_record_writers() {
+    let models = [
+        (tools::escrow_fixtures::MODEL, Style::Format, 120),
+        (tools::gate_fixtures::MODEL, Style::Format, 120),
+        (tools::marklog_fixtures::MODEL, Style::Format, 120),
+        (tools::grace_fixtures::MODEL, Style::Record, 60),
+        (tools::lookup_fixtures::MODEL, Style::Record, 60),
+        (tools::reclaim_fixtures::MODEL, Style::Record, 60),
+        (tools::register_fixtures::MODEL, Style::Record, 60),
+    ];
+    for (model, style, seconds) in models {
+        assert_eq!(model.style, style, "{}", model.tool);
+        assert_eq!(model.limit, Duration::from_secs(seconds), "{}", model.tool);
+    }
 }
 
 #[test]
 fn a_child_exit_status_reaches_the_caller() {
     let args: Vec<OsString> = ["-c", "exit 3"].map(OsString::from).to_vec();
-    let outcome = run(OsStr::new("sh"), &args, &std::env::temp_dir(), LIMIT);
+    let limit = Duration::from_secs(120);
+    let outcome = run(
+        OsStr::new("sh"),
+        &args,
+        &std::env::temp_dir(),
+        Stdio::null(),
+        limit,
+    );
     assert!(
         matches!(outcome, Err(Failure::Exit(status)) if status.code() == Some(3)),
         "{outcome:?}"
@@ -93,34 +120,43 @@ fn a_child_exit_status_reaches_the_caller() {
         OsStr::new("/nonexistent/quint"),
         &[],
         &std::env::temp_dir(),
-        LIMIT,
+        Stdio::null(),
+        limit,
     );
     assert!(matches!(outcome, Err(Failure::Start(_))), "{outcome:?}");
 }
 
 #[test]
 fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() {
-    let scratch = Scratch::new("writer-limit");
-    let quint = scratch.0.join("quint");
-    script(&quint, "#!/bin/sh\nexec sleep 5\n");
-    let traces = [seeded("first", 12), seeded("second", 12)];
-    let output = scratch.0.join("out");
-    let limit = Duration::from_millis(300);
-    let outcome = generate(
-        &GATE,
-        &checkout(),
-        quint.as_os_str(),
-        &output,
-        &traces,
-        keep,
-        limit,
-    );
-    assert_eq!(
-        outcome,
-        Err("first: Quint ran past 0.3 seconds and was sent SIGKILL".to_owned())
-    );
-    assert!(output.join("first/case.qnt").exists());
-    assert!(!output.join("second").exists());
+    for (name, style) in [("gate", Style::Format), ("grace", Style::Record)] {
+        let scratch = Scratch::new("writer-limit");
+        let quint = scratch.0.join("quint");
+        script(&quint, "#!/bin/sh\nexec sleep 5\n");
+        let model = Model {
+            tool: "writer",
+            about: "About.",
+            name,
+            style,
+            limit: Duration::from_millis(300),
+        };
+        let traces = [seeded("first", 12), seeded("second", 12)];
+        let output = scratch.0.join("out");
+        let outcome = generate(
+            &model,
+            &checkout(),
+            quint.as_os_str(),
+            &output,
+            &traces,
+            keep,
+        );
+        assert_eq!(
+            outcome,
+            Err("first: Quint ran past 0.3 seconds and was sent SIGKILL".to_owned()),
+            "{style:?}"
+        );
+        assert!(output.join("first/case.qnt").exists());
+        assert!(!output.join("second").exists());
+    }
 }
 
 /// A step count whose successor `usize` cannot hold fails the state-count check in every build profile,
@@ -142,7 +178,6 @@ fn a_step_count_of_usize_max_fails_the_state_count_check() {
         &output,
         &[seeded("huge", usize::MAX)],
         keep,
-        LIMIT,
     );
     assert_eq!(
         outcome,
@@ -181,7 +216,6 @@ fn the_model_digest_is_read_once_and_each_copy_is_read_anew() {
         &output,
         &[seeded("first", 0), seeded("second", 0)],
         keep,
-        LIMIT,
     );
     assert_eq!(outcome, Ok(()));
     assert_eq!(
@@ -229,7 +263,6 @@ fn a_file_left_at_the_trace_path_is_read_as_the_trace_when_quint_writes_none() {
         &output,
         &[seeded("first", 0)],
         keep,
-        LIMIT,
     );
     assert_eq!(outcome, Ok(()));
     let written = fs::read_to_string(output.join("first.itf.json")).expect("the trace reads");
