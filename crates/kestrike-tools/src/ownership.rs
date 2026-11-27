@@ -211,6 +211,41 @@ pub fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
     }
 }
 
+/// `is_link` holds when `lstat` names a symbolic link; a path absent by [`ignored`] or holding a NUL byte is
+/// no link.
+///
+/// # Errors
+///
+/// `lstat` fails with another error.
+pub fn is_link(path: &Path) -> Result<bool, PathError> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Ok(false);
+    }
+    match fs::symlink_metadata(path) {
+        Ok(found) => Ok(found.file_type().is_symlink()),
+        Err(error) if ignored(&error) => Ok(false),
+        Err(error) => Err(PathError::new(path, error)),
+    }
+}
+
+/// `is_file` holds when [`status`] names a regular file.
+///
+/// # Errors
+///
+/// `stat` fails with an error outside [`ignored`].
+pub fn is_file(path: &Path) -> Result<bool, PathError> {
+    Ok(status(path)?.is_some_and(|found| found.is_file()))
+}
+
+/// `is_dir` holds when [`status`] names a directory.
+///
+/// # Errors
+///
+/// `stat` fails with an error outside [`ignored`].
+pub fn is_dir(path: &Path) -> Result<bool, PathError> {
+    Ok(status(path)?.is_some_and(|found| found.is_dir()))
+}
+
 /// `make_private` creates each member of `path`'s lineage for which `status` returns `Ok(None)`,
 /// outermost first, as a directory of mode 0700 under the umask, then refuses with
 /// [`PrivateError::Shared`] when [`shared_directories`] returns a member. An existing member, a file or
@@ -300,7 +335,7 @@ pub struct PathError {
 }
 
 impl PathError {
-    fn new(path: &Path, error: io::Error) -> Self {
+    pub(crate) fn new(path: &Path, error: io::Error) -> Self {
         Self {
             path: path.to_path_buf(),
             error,

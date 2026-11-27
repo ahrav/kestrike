@@ -116,6 +116,10 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          # The action accepts the GitHub App kestrike-swarm as the actor of the
+          # event that starts this job. The job's prompt, tools and token stay as
+          # the default branch's copy of this file holds them.
+          allowed_bots: kestrike-swarm
           classify_inline_comments: "false"
           prompt: |
             Review pull request ${{ github.repository }}#${{ github.event.pull_request.number }} at head commit ${{ github.event.pull_request.head.sha }}. The checkout is that commit, except that `.claude/`, `.mcp.json`, `CLAUDE.md`, `.gitmodules`, `.ripgreprc` and `.husky/` come from the base branch; the PR's versions of those paths, when it changes them, are under `.claude-pr/`.
