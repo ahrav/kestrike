@@ -1790,6 +1790,13 @@ records with `"outcome": "timeout"`, without a class:
   native AArch64 Linux machine and has no fallback registration. The barrier
   job is disabled with no coverage credit until this runner is provisioned.
 
+The review workflow uses the `pull_request_target` trigger, so each review runs
+the base branch's copy of the workflow, and it runs for pull requests into
+`main` from branches of this repository. Its model token is a secret of the
+`claude-review` environment, which admits `main` and no other ref. A pull
+request stacked on another branch is reviewed when it is retargeted to `main`.
+`.github/CODEOWNERS` names the owner of `.github/`.
+
 Keep the build roles on separate registrations. Each registration takes one
 job at a time; there is no shared job-level lock. Preserve legacy labels while old jobs drain, then
 retire them after verifying that no queued workflow needs them. Cancel no

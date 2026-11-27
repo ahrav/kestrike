@@ -150,7 +150,8 @@ class ReviewWorkflow(unittest.TestCase):
             "github.event.action != 'closed' && "
             "(github.event.action != 'edited' || github.event.changes.base != null) && "
             "github.event.pull_request.draft == false && "
-            "github.event.pull_request.head.repo.full_name == github.repository",
+            "github.event.pull_request.head.repo.full_name == github.repository && "
+            "github.event.pull_request.base.ref == github.event.repository.default_branch",
         )
         self.assertNotIn("allowed_non_write_users:", self.text)
         self.assertNotIn("allowed_bots:", self.text)
@@ -160,6 +161,19 @@ class ReviewWorkflow(unittest.TestCase):
         self.assertNotRegex(job, r"(?m)^    concurrency:")
         self.assertIn("runs-on: ubuntu-24.04\n", job)
         self.assertNotIn("self-hosted", job)
+
+    def test_the_model_token_is_reachable_only_from_the_default_branchs_copy_of_the_workflow(self):
+        """The trigger runs the base branch's copy of this file, the job runs for pull requests into the
+        default branch, and the token is a secret of an environment that admits the default branch."""
+        header = self.text.split("\njobs:\n", 1)[0]
+        self.assertIn("\non:\n  pull_request_target:\n", header)
+        self.assertNotRegex(header, r"(?m)^  pull_request:")
+        self.assertIn("    environment: claude-review\n", self.text)
+        self.assertIn("github.event.pull_request.base.ref == github.event.repository.default_branch", self.text)
+        action = self.step("anthropics/claude-code-action@")
+        self.assertIn("claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}", action)
+        self.assertEqual(self.text.count("secrets.CLAUDE_CODE_OAUTH_TOKEN"), 1)
+        self.assertEqual(set(re.findall(r"secrets\.(\w+)", self.text)), {"GITHUB_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"})
 
     def test_model_and_action_remain_pinned(self):
         self.assertIn("--model claude-opus-5-5", self.text)
@@ -350,7 +364,7 @@ class ReviewWorkflow(unittest.TestCase):
         self.assertNotIn('"', ",".join(self.rules + self.denied))
 
     def test_draft_close_and_retarget_cancel_a_running_review(self):
-        start = next(i for i, line in enumerate(self.lines) if line.strip() == "pull_request:")
+        start = next(i for i, line in enumerate(self.lines) if line.strip() == "pull_request_target:")
         types = self.lines[start + 1].strip()
         self.assertTrue(types.startswith("types:"), types)
         for event in ("converted_to_draft", "closed", "edited"):
