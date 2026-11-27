@@ -5,7 +5,6 @@
 //! `RUN` matches outer attributes, so an inner `#![cfg(test)]` keeps its module's text.
 //! The scanned text is `code(production)`.
 //! The rules search `code(source)`, where [`code`] blanks comments and literal contents.
-//! `scripts/classify-atomics.py` holds the same rules for its own callers.
 //!
 //! Window widths (8 code points before a bracket, 80 before a macro's bracket) count code points of the
 //! source. Blanking writes one space per source byte to keep offsets; the rules read any run of spaces as
