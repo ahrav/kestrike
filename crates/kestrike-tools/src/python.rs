@@ -1,5 +1,5 @@
-//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, and [`say`], which writes one
-//! line with its control characters and surrogates escaped.
+//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, [`hexdigest`] for the SHA-256
+//! hex of bytes, and [`say`], which writes one line with its control characters and surrogates escaped.
 
 use std::io::{self, Write};
 

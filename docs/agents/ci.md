@@ -1671,7 +1671,8 @@ mutants: HEAD against BASE on aarch64: N listed, C caught, M missed, T timeout, 
 HEAD and BASE there are the first 12 characters of the two commit ids;
 `report.json` holds the full ids.
 
-The tool's `--help` states its options, the report fields and the exit codes.
+`bash scripts/tool.sh mutants-diff --help` states the runner's options, the report
+fields and the exit codes.
 The run needs a native aarch64 Linux host whose CPU reports every feature the
 `isa-aarch64` entry of `scripts/test-inventory.json` declares, so the library
 tests run the aarch64 kernels. The host also needs the `STABLE` toolchain of
