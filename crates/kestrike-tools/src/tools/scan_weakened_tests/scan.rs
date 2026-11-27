@@ -11,6 +11,7 @@ use crate::json::Integer;
 use crate::stream::emit;
 use crate::text::{push_repr, strip_str};
 
+use super::cases::{CASES, removed};
 use super::declarations::{conditions, declarations, plain};
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
@@ -136,6 +137,13 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         let old = inventory_text(base)?;
         let new = inventory_text(head)?;
         push(INVENTORY, inventory_changes(&old, &new)?);
+    }
+    let under_cases = |path: &&str| {
+        path.strip_prefix(CASES)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    if paths.iter().any(under_cases) {
+        found.extend(removed(base, head)?);
     }
     Ok(found)
 }

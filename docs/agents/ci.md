@@ -1447,14 +1447,26 @@ acknowledgements into it. The scanner compares the head with the merge base of
 the base and the head, so a change made only on the base side is no finding.
 
 A change that ignores an existing test or changes the condition of its
-conditional ignore (`ignore-existing`), or lowers a declared test budget
-(`budget-lowered`), fails the push and the CI step until a commit in
+conditional ignore (`ignore-existing`), lowers a declared test budget
+(`budget-lowered`), or removes a case of the tools crate (`case-removed`),
+fails the push and the CI step until a commit in
 the scanned range carries this line, with the `CLASS:PATH` key the report
 prints and a nonempty reason:
 
 ```text
 Weakens-Test: CLASS:PATH: REASON
 ```
+
+A case is a top-level entry of `crates/kestrike-tools/tests` that
+[the tools guide](tools.md#adding-a-tool) names, read from the Git trees of the
+merge base and the head: a regular file `<id>.rs`, or a directory `<id>` with
+`mod.rs` (or `main.rs` at a commit without `tests/tools.rs`), where `<id>`
+matches `[a-z][a-z0-9_]*` and is not `tools`. A case of the base blocks when the
+head has neither `<id>.rs` nor `<id>/mod.rs`; a change of shape for the same id
+passes, and a rename to another id is the absence of the old one. Its key names
+the base entry's path, such as
+`case-removed:crates/kestrike-tools/tests/mutants_diff`. Unit test files under
+`src/` are not cases.
 
 One line clears every finding of that class in that file. The scanner's other
 findings print and never block. A pushed ref with no comparison base prints

@@ -2574,3 +2574,115 @@ fn a_replace_ref_leaves_the_heads_own_tree_scanned() {
         &format!("{KEY} second: not ignored -> #[ignore]"),
     );
 }
+
+const CASES: &str = "crates/kestrike-tools/tests";
+
+/// A case of the tools crate that stands at the base and whose id is absent at the head blocks, keyed by the
+/// base entry's path: a deleted case file, a deleted case directory, a case renamed to another id, which is
+/// the absence of its old id, and a directory whose `mod.rs` becomes `main.rs` beside the root `tools.rs`.
+#[test]
+fn a_removed_case_of_the_tools_crate_blocks() {
+    let repo = Repo::new("case-removed");
+    let base = repo.change(&[
+        (&format!("{CASES}/tools.rs"), "mod one;\n"),
+        (&format!("{CASES}/one.rs"), "fn one() {}\n"),
+        (&format!("{CASES}/two/mod.rs"), "mod helper;\n"),
+        (&format!("{CASES}/two/helper.rs"), "fn two() {}\n"),
+        (&format!("{CASES}/three.rs"), "fn three() {}\n"),
+    ]);
+    let block = |path: &str, id: &str| {
+        format!("blocks case-removed:{CASES}/{path} case {id}: present -> absent\n")
+    };
+    let path = |name: &str| format!("{CASES}/{name}");
+    for (files, deleted, expected) in [
+        (vec![], vec![path("one.rs")], block("one.rs", "one")),
+        (
+            vec![],
+            vec![path("two/mod.rs"), path("two/helper.rs")],
+            block("two", "two"),
+        ),
+        (
+            vec![(path("four.rs"), "fn three() {}\n")],
+            vec![path("three.rs")],
+            block("three.rs", "three"),
+        ),
+        (
+            vec![(path("two/main.rs"), "mod helper;\n")],
+            vec![path("two/mod.rs")],
+            block("two", "two"),
+        ),
+    ] {
+        let files: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), *text))
+            .collect();
+        let deleted: Vec<&str> = deleted.iter().map(String::as_str).collect();
+        let head = repo.commit(&files, "change", &deleted);
+        let run = repo.scan(&["--base", &base, "--head", &head]);
+        assert_eq!(
+            run.outcome(),
+            (Some(1), expected.as_str()),
+            "{}",
+            run.stderr
+        );
+        repo.reset(&base);
+    }
+}
+
+/// A case whose id stays at the head under another shape is present: a file that becomes a directory with
+/// `mod.rs`, and a directory whose root `main.rs`, at a base without `tools.rs`, becomes `mod.rs` at a head
+/// with it. A deletion below the top level of the case directory, of a name that starts with a dot, of a test
+/// file of another crate, and of `tools.rs` is no case.
+#[test]
+fn a_case_that_keeps_its_id_or_a_deletion_outside_the_cases_is_no_finding() {
+    let repo = Repo::new("case-kept");
+    let path = |name: &str| format!("{CASES}/{name}");
+    let base = repo.change(&[
+        (&path("one.rs"), "fn one() {}\n"),
+        (&path("two/main.rs"), "fn two() {}\n"),
+        (&path("three/mod.rs"), "mod helper;\n"),
+        (&path("three/helper.rs"), "fn three() {}\n"),
+        (&path(".hidden.rs"), "fn hidden() {}\n"),
+        ("crates/other/tests/four.rs", "fn four() {}\n"),
+    ]);
+    let head = repo.commit(
+        &[
+            (&path("tools.rs"), "mod one;\n"),
+            (&path("one/mod.rs"), "fn one() {}\n"),
+            (&path("two/mod.rs"), "fn two() {}\n"),
+        ],
+        "change",
+        &[
+            &path("one.rs"),
+            &path("two/main.rs"),
+            &path("three/helper.rs"),
+            &path(".hidden.rs"),
+            "crates/other/tests/four.rs",
+        ],
+    );
+    let later = repo.commit(&[], "change", &[&path("tools.rs")]);
+    for (from, to) in [(&base, &head), (&head, &later)] {
+        let run = repo.scan(&["--base", from, "--head", to]);
+        assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    }
+}
+
+/// A commit line `Weakens-Test: case-removed:<base entry path>: <reason>` in the range acknowledges the removal.
+#[test]
+fn an_acknowledged_case_removal_passes() {
+    let repo = Repo::new("case-acknowledged");
+    let path = format!("{CASES}/one.rs");
+    let base = repo.change(&[(&path, "fn one() {}\n")]);
+    let message = format!("Drop the case\n\nWeakens-Test: case-removed:{path}: merged into two\n");
+    let head = repo.commit(&[], &message, &[&path]);
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    let expected = format!(
+        "acknowledged case-removed:{path} case one: present -> absent (Weakens-Test: merged into two)\n"
+    );
+    assert_eq!(
+        run.outcome(),
+        (Some(0), expected.as_str()),
+        "{}",
+        run.stderr
+    );
+}

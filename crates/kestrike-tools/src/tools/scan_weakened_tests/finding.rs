@@ -9,6 +9,7 @@ pub enum Class {
     TimeoutRaised,
     AssertionsRemoved,
     IgnoreNew,
+    CaseRemoved,
 }
 
 impl Class {
@@ -19,11 +20,15 @@ impl Class {
             Self::TimeoutRaised => "timeout-raised",
             Self::AssertionsRemoved => "assertions-removed",
             Self::IgnoreNew => "ignore-new",
+            Self::CaseRemoved => "case-removed",
         }
     }
 
     pub fn blocks(self) -> bool {
-        matches!(self, Self::IgnoreExisting | Self::BudgetLowered)
+        matches!(
+            self,
+            Self::IgnoreExisting | Self::BudgetLowered | Self::CaseRemoved
+        )
     }
 }
 
