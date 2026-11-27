@@ -245,5 +245,5 @@ pub fn package_sources(package: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 #[cfg(test)]
-#[path = "genmc_tests.rs"]
+#[path = "../genmc_tests.rs"]
 mod tests;
