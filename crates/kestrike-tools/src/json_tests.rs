@@ -1,4 +1,4 @@
-use crate::json::{MAX_DEPTH, MAX_INTEGER_DIGITS, NonFinite, Text, Value, dump, indented, parse};
+use crate::json::{MAX_DEPTH, MAX_INTEGER_DIGITS, Text, Value, dump, indented, parse};
 
 fn round_trip(text: &str) -> String {
     dump(&parse(text).unwrap_or_else(|error| panic!("{text:?} parses: {error}")))
@@ -111,7 +111,7 @@ fn each_form_python_refuses_is_refused_with_its_reason() {
         assert_eq!(
             (error.offset(), error.reason()),
             (offset, reason),
-            "json.loads({text:?}) raises JSONDecodeError"
+            "json.loads({text:?}) raises JSONDecodeError; the offset and the reason are the reader's own"
         );
     }
 }
@@ -127,6 +127,8 @@ fn nesting_past_the_limit_is_refused_without_exhausting_the_stack() {
         (error.offset(), error.reason()),
         (MAX_DEPTH, "nesting deeper than the reader takes")
     );
+    let error = parse(&"{\"a\":".repeat(200_000)).expect_err("200,000 open objects");
+    assert_eq!(error.reason(), "nesting deeper than the reader takes");
 }
 
 #[test]
@@ -152,10 +154,8 @@ fn indented_writes_sorted_keys_two_spaces_deep() {
         let value = parse(text).expect("the value parses");
         let refused =
             indented(&value).expect_err("json.dumps(..., allow_nan=False) raises ValueError");
-        assert!(!refused.0.is_finite(), "{text}");
+        assert!(!refused.value().is_finite(), "{text}");
     }
-    assert_eq!(
-        indented(&Value::Float(f64::INFINITY)),
-        Err(NonFinite(f64::INFINITY))
-    );
+    let refused = indented(&Value::Float(f64::INFINITY)).expect_err("infinity has no JSON form");
+    assert_eq!(refused.value(), f64::INFINITY);
 }

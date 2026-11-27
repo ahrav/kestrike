@@ -68,17 +68,8 @@ fn is_surrogate(code: u32) -> bool {
 }
 
 fn is_unprintable(code: u32) -> bool {
-    UNPRINTABLE
-        .binary_search_by(|&(low, high)| {
-            if high < code {
-                std::cmp::Ordering::Less
-            } else if low > code {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .is_ok()
+    let at = UNPRINTABLE.partition_point(|&(_, high)| high < code);
+    UNPRINTABLE.get(at).is_some_and(|&(low, _)| low <= code)
 }
 
 /// Appends `code`, at most U+10FFFF, to `bytes` in the encoding [`Text`] keeps.
@@ -148,12 +139,9 @@ impl Text {
     }
 
     /// If `code` exceeds U+10FFFF, `push_code_point` returns `None` and preserves the text.
+    #[must_use]
     pub fn push_code_point(&mut self, code: u32) -> Option<()> {
         (code <= 0x10_ffff).then(|| encode(code, &mut self.0))
-    }
-
-    pub fn push(&mut self, scalar: char) {
-        encode(u32::from(scalar), &mut self.0);
     }
 
     pub fn push_str(&mut self, text: &str) {
@@ -324,12 +312,6 @@ impl From<&str> for Text {
 impl From<String> for Text {
     fn from(text: String) -> Self {
         Self(text.into_bytes())
-    }
-}
-
-impl PartialEq<str> for Text {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other.as_bytes()
     }
 }
 

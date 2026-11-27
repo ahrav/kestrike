@@ -35,7 +35,7 @@ fn real_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-fn path(bytes: &[u8]) -> PathBuf {
+fn path_of(bytes: &[u8]) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(bytes))
 }
 
@@ -58,16 +58,16 @@ fn lineage(path: &Path) -> Vec<PathBuf> {
             if joined.is_empty() {
                 joined.push(b'.');
             }
-            self::path(&joined)
+            path_of(&joined)
         })
         .collect()
 }
 
-fn join(directory: &Path, name: &str) -> PathBuf {
-    match directory.as_os_str().as_bytes() {
-        b"." => PathBuf::from(name),
-        bytes if bytes.ends_with(b"/") => path(&[bytes, name.as_bytes()].concat()),
-        bytes => path(&[bytes, b"/", name.as_bytes()].concat()),
+fn join(directory: &[u8], name: &[u8]) -> Vec<u8> {
+    match directory {
+        b"." => name.to_vec(),
+        bytes if bytes.ends_with(b"/") => [bytes, name].concat(),
+        bytes => [bytes, b"/", name].concat(),
     }
 }
 
@@ -81,13 +81,13 @@ fn absent(error: &io::Error) -> bool {
 /// # Errors
 ///
 /// A `stat` fails with an error other than `ENOENT` and `ENOTDIR`.
-pub fn shared_directories(path: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn shared_directories(path: &Path) -> Result<Vec<PathBuf>, PathError> {
     let mut found = Vec::new();
     for directory in lineage(path) {
         let status = match fs::metadata(&directory) {
             Ok(status) => status,
             Err(error) if absent(&error) => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(PathError::new(&directory, error)),
         };
         if ![real_uid(), 0].contains(&status.uid()) || status.mode() & SHARED != 0 {
             found.push(directory);
@@ -111,14 +111,15 @@ fn dirname(path: &[u8]) -> Vec<u8> {
     head[..end].to_vec()
 }
 
-/// `traversed` returns each directory in which resolving `path` looks a name up, in order. It walks the
-/// names after the first component of `path` from `/`, takes `..` as the lexical parent, and replaces each
-/// of the first [`MAX_LINKS`] links it meets by its target's names, from `/` for an absolute target.
+/// `traversed` returns each directory in which resolving an absolute `path` looks a name up, from the root
+/// down. It takes `..` as the lexical parent and replaces each of the first [`MAX_LINKS`] links it meets by
+/// its target's names, from `/` for an absolute target. For a path with no root it drops the first name and
+/// walks the rest from `/`.
 ///
 /// # Errors
 ///
 /// Reading a link fails.
-pub fn traversed(path: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn traversed(path: &Path) -> Result<Vec<PathBuf>, PathError> {
     let lineage = lineage(path);
     let full = lineage[0].as_os_str().as_bytes();
     let mut pending: std::collections::VecDeque<Vec<u8>> = full
@@ -135,17 +136,13 @@ pub fn traversed(path: &Path) -> io::Result<Vec<PathBuf>> {
             current = dirname(&current);
             continue;
         }
-        passed.push(self::path(&current));
-        let mut step = current.clone();
-        if !step.ends_with(b"/") {
-            step.push(b'/');
-        }
-        step.extend_from_slice(&part);
-        let is_link =
-            fs::symlink_metadata(self::path(&step)).is_ok_and(|status| status.is_symlink());
+        passed.push(path_of(&current));
+        let step = join(&current, &part);
+        let is_link = fs::symlink_metadata(path_of(&step)).is_ok_and(|status| status.is_symlink());
         if is_link && links < MAX_LINKS {
             links += 1;
-            let target = fs::read_link(self::path(&step))?;
+            let target = fs::read_link(path_of(&step))
+                .map_err(|error| PathError::new(&path_of(&step), error))?;
             let target = target.as_os_str().as_bytes();
             if target.starts_with(b"/") {
                 current = b"/".to_vec();
@@ -165,7 +162,7 @@ pub fn traversed(path: &Path) -> io::Result<Vec<PathBuf>> {
 
 #[derive(Debug)]
 pub enum PrivateError {
-    Io(io::Error),
+    Io(PathError),
     /// The members of the lineage that [`shared_directories`] returns once the directories exist.
     Shared(Vec<PathBuf>),
 }
@@ -187,8 +184,8 @@ impl fmt::Display for PrivateError {
 
 impl std::error::Error for PrivateError {}
 
-impl From<io::Error> for PrivateError {
-    fn from(error: io::Error) -> Self {
+impl From<PathError> for PrivateError {
+    fn from(error: PathError) -> Self {
         Self::Io(error)
     }
 }
@@ -201,23 +198,15 @@ fn ignored(error: &io::Error) -> bool {
     )
 }
 
-fn exists(path: &Path) -> io::Result<bool> {
+fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
     match fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(error) if ignored(&error) => Ok(false),
-        Err(error) => Err(error),
+        Ok(status) => Ok(Some(status)),
+        Err(error) if ignored(&error) => Ok(None),
+        Err(error) => Err(PathError::new(path, error)),
     }
 }
 
-fn is_dir(path: &Path) -> io::Result<bool> {
-    match fs::metadata(path) {
-        Ok(status) => Ok(status.is_dir()),
-        Err(error) if ignored(&error) => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-/// `make_private` creates each member of `path`'s lineage for which `exists` returns `Ok(false)`,
+/// `make_private` creates each member of `path`'s lineage for which `status` returns `Ok(None)`,
 /// outermost first, as a directory of mode 0700 under the umask, then refuses with
 /// [`PrivateError::Shared`] when [`shared_directories`] returns a member. Existing directories retain their
 /// modes and owners.
@@ -225,11 +214,12 @@ fn is_dir(path: &Path) -> io::Result<bool> {
 /// # Errors
 ///
 /// `make_private` returns an error when `stat` reports an error outside `ignored`, when `mkdir` fails
-/// (except for `EEXIST` followed by `is_dir` returning `Ok(true)`), or when a member is shared.
+/// (except for `EEXIST` when `status` returns `Ok(Some(metadata))` and `metadata.is_dir()` is true), or
+/// when a member is shared.
 pub fn make_private(path: &Path) -> Result<(), PrivateError> {
     let mut missing = Vec::new();
     for step in lineage(path) {
-        if !exists(&step)? {
+        if status(&step)?.is_none() {
             missing.push(step);
         }
     }
@@ -237,11 +227,11 @@ pub fn make_private(path: &Path) -> Result<(), PrivateError> {
         match DirBuilder::new().mode(0o700).create(directory) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                if !is_dir(directory)? {
-                    return Err(error.into());
+                if !status(directory)?.is_some_and(|status| status.is_dir()) {
+                    return Err(PathError::new(directory, error).into());
                 }
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(PathError::new(directory, error).into()),
         }
     }
     let shared = shared_directories(path)?;
@@ -261,11 +251,11 @@ pub fn make_private(path: &Path) -> Result<(), PrivateError> {
 /// # Errors
 ///
 /// [`shared_directories`] or [`traversed`] fails.
-pub fn foreign_toolchain_paths(root: &Path) -> io::Result<Vec<PathBuf>> {
+pub fn foreign_toolchain_paths(root: &Path) -> Result<Vec<PathBuf>, PathError> {
     let mut found = shared_directories(root)?;
     for directory in lineage(root) {
         for name in TOOLCHAIN_FILES {
-            let entry = join(&directory, name);
+            let entry = path_of(&join(directory.as_os_str().as_bytes(), name.as_bytes()));
             let Ok(link) = fs::symlink_metadata(&entry) else {
                 continue;
             };
@@ -286,7 +276,7 @@ pub fn foreign_toolchain_paths(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-fn passes_shared(entry: &Path) -> io::Result<bool> {
+fn passes_shared(entry: &Path) -> Result<bool, PathError> {
     for passed in traversed(entry)? {
         let shared = shared_directories(&passed)?;
         if shared.first().map(|first| first.as_os_str()) == Some(passed.as_os_str()) {
@@ -294,4 +284,44 @@ fn passes_shared(entry: &Path) -> io::Result<bool> {
         }
     }
     Ok(false)
+}
+
+#[derive(Debug)]
+pub struct PathError {
+    path: PathBuf,
+    error: io::Error,
+}
+
+impl PathError {
+    fn new(path: &Path, error: io::Error) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            error,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn error(&self) -> &io::Error {
+        &self.error
+    }
+}
+
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: {}",
+            Text::from_os(self.path.as_os_str()),
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for PathError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }

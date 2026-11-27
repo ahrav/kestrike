@@ -39,6 +39,11 @@ impl Layout {
                 ![uid, 0].contains(&status.uid()) || status.mode() & 0o022 != 0
             })
             .collect();
+        assert_eq!(
+            fs::canonicalize(&scratch).ok().as_ref(),
+            Some(&scratch),
+            "the scratch directory's ancestors hold no link"
+        );
         assert!(
             shared.is_empty(),
             "another user owns or can write {shared:?}; run the tests under a private directory"
@@ -66,6 +71,8 @@ impl Layout {
         directory(&at("clean/.cargo"), 0o755);
         file(&at("clean/.cargo/config.toml"), 0o644);
         symlink("loop", at("loop")).expect("the link is made");
+        symlink(at("group"), at("abs")).expect("the link is made");
+        directory(&at("group/sh"), 0o775);
         directory(&at("present"), 0o755);
         directory(&at("present-shared"), 0o775);
         file(&at("file"), 0o644);
@@ -113,6 +120,7 @@ fn shared_directories_names_a_group_writable_ancestor_and_a_link_into_one() {
         ("shared_directories(BASE/link/inner)", "link/inner", &["BASE/link"]),
         ("shared_directories(BASE/absent/x)", "absent/x", &[]),
         ("shared_directories(BASE/file/x)", "file/x", &[]),
+        ("shared_directories(BASE/group/sh)", "group/sh", &["BASE/group/sh", "BASE/group"]),
     ];
     for &(expression, path, python) in rows {
         let found =
@@ -134,6 +142,7 @@ fn traversed_follows_links_and_parents_and_stops_following_after_forty_links() {
         ("traversed(BASE/link/inner)", "link/inner", &["ANCESTORS", "BASE", "BASE", "BASE/group"]),
         ("traversed(BASE/group/../link/inner)", "group/../link/inner", &["ANCESTORS", "BASE", "BASE", "BASE", "BASE/group"]),
         ("traversed(BASE/loop/x)", "loop/x", &looped),
+        ("traversed(BASE/abs/inner)", "abs/inner", &["ANCESTORS", "BASE", "ANCESTORS", "BASE", "BASE/group"]),
     ];
     for &(expression, path, python) in rows {
         let found = traversed(&layout.at(path)).expect("each link reads");
@@ -141,7 +150,11 @@ fn traversed_follows_links_and_parents_and_stops_following_after_forty_links() {
     }
     let expression = "traversed(Path('a/b/c'))";
     let python = [PathBuf::from("/"), PathBuf::from("/b")];
-    assert_eq!(traversed(Path::new("a/b/c")).expect("no link is read"), python, "{expression}");
+    assert_eq!(
+        traversed(Path::new("a/b/c")).expect("no link is read"),
+        python,
+        "{expression}"
+    );
 }
 
 #[test]
@@ -182,6 +195,7 @@ fn make_private_creates_missing_directories_and_refuses_a_shared_one() {
         ("make_private(BASE/link)", "link", Some("link")),
         ("make_private(BASE/file)", "file", None),
         ("make_private(BASE/file-shared)", "file-shared", Some("file-shared")),
+        ("make_private(BASE/new2/../x)", "new2/../x", None),
     ];
     for &(expression, path, python) in rows {
         match (make_private(&layout.at(path)), python) {
@@ -202,6 +216,8 @@ fn make_private_creates_missing_directories_and_refuses_a_shared_one() {
         ("oct(os.stat(BASE/new/a).st_mode & 0o7777)", "new/a", 0o700),
         ("oct(os.stat(BASE/new/a/b).st_mode & 0o7777)", "new/a/b", 0o700),
         ("oct(os.stat(BASE/group/new).st_mode & 0o7777)", "group/new", 0o700),
+        ("oct(os.stat(BASE/new2).st_mode & 0o7777)", "new2", 0o700),
+        ("oct(os.stat(BASE/x).st_mode & 0o7777)", "x", 0o700),
         ("oct(os.stat(BASE/present).st_mode & 0o7777)", "present", 0o755),
         ("oct(os.stat(BASE/present-shared).st_mode & 0o7777)", "present-shared", 0o775),
     ];
@@ -217,7 +233,12 @@ fn make_private_refuses_a_name_a_dangling_link_holds() {
     let expression = "make_private(BASE/dangle/rust-toolchain) raises FileExistsError";
     match make_private(&layout.at("dangle/rust-toolchain")) {
         Err(PrivateError::Io(error)) => {
-            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{expression}")
+            assert_eq!(
+                error.error().kind(),
+                io::ErrorKind::AlreadyExists,
+                "{expression}"
+            );
+            assert_eq!(error.path(), layout.at("dangle/rust-toolchain"));
         }
         found => panic!("{expression}: {found:?}"),
     }
@@ -225,4 +246,29 @@ fn make_private_refuses_a_name_a_dangling_link_holds() {
         fs::symlink_metadata(layout.at("dangle/rust-toolchain"))
             .is_ok_and(|status| status.is_symlink())
     );
+}
+
+#[test]
+fn a_stat_error_other_than_absence_reaches_the_caller_with_its_path() {
+    let layout = Layout::new("loop");
+    let expression = "shared_directories(BASE/loop/x) raises OSError(40)";
+    let error = shared_directories(&layout.at("loop/x")).expect_err(expression);
+    assert_eq!(
+        error.error().raw_os_error(),
+        Some(libc::ELOOP),
+        "{expression}"
+    );
+    assert_eq!(error.path(), layout.at("loop/x"));
+    let expression = "make_private(BASE/group/sh) raises PermissionError";
+    let shown = format!(
+        "another user owns or can write {}, {}",
+        layout.at("group/sh").display(),
+        layout.at("group").display()
+    );
+    match make_private(&layout.at("group/sh")) {
+        Err(error @ PrivateError::Shared(_)) => {
+            assert_eq!(error.to_string(), shown, "{expression}")
+        }
+        found => panic!("{expression}: {found:?}"),
+    }
 }

@@ -15,12 +15,7 @@ pub struct Options {
     pub output: Option<OsString>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Parsed {
-    Run(Options),
-    Help(String),
-    Refused { code: u8, text: String },
-}
+pub type Parsed = crate::args::Parsed<Options>;
 
 const OPTIONS: [Opt; 3] = [
     Opt {
@@ -52,22 +47,13 @@ pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Parsed {
         "{usage}\n\n{about}\n\noptional arguments:\n  -h, --help       show this help message and exit\n  \
          --quint QUINT\n  --output OUTPUT\n"
     );
-    let reader = Reader {
-        tool,
-        usage: &usage,
-        help: &help,
-        options: &OPTIONS,
-    };
+    let reader = Reader::new(tool, &usage, &help, &OPTIONS);
     let value = |given: &Given| match given {
         Given::Value(value) => Some(value.clone()),
         Given::Absent | Given::Empty => None,
     };
-    match reader.parse(args) {
-        crate::args::Parsed::Run(values) => Parsed::Run(Options {
-            quint: value(values.get(1)),
-            output: value(values.get(2)),
-        }),
-        crate::args::Parsed::Help(text) => Parsed::Help(text),
-        crate::args::Parsed::Refused { code, text } => Parsed::Refused { code, text },
-    }
+    reader.parse(args).map(|values| Options {
+        quint: value(values.get("--quint")),
+        output: value(values.get("--output")),
+    })
 }

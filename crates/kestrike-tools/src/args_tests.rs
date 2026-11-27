@@ -51,12 +51,7 @@ const OPTIONS: [Opt; 8] = [
 ];
 
 fn read(args: &[&str]) -> Parsed {
-    let reader = Reader {
-        tool: "tool",
-        usage: "usage: tool [options]",
-        help: "help\n",
-        options: &OPTIONS,
-    };
+    let reader = Reader::new("tool", "usage: tool [options]", "help\n", &OPTIONS);
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     reader.parse(&args)
 }
@@ -81,6 +76,11 @@ fn refused(message: &str) -> Parsed {
         text: format!("usage: tool [options]\ntool: error: {message}\n"),
     }
 }
+
+const PARSER: &str = "p = argparse.ArgumentParser(prog='tool', allow_abbrev=False); \
+    p.add_argument('--base', type=given); p.add_argument('--head', type=given); \
+    p.add_argument('--max-mutants', type=positive); p.add_argument('--shard'); p.add_argument('--tests'); \
+    p.add_argument('--artifacts', type=given); p.add_argument('--cargo', type=given)";
 
 #[test]
 fn long_options_without_prefixes_keep_the_last_value_and_check_each_occurrence() {
@@ -113,19 +113,34 @@ fn long_options_without_prefixes_keep_the_last_value_and_check_each_occurrence()
         let found = read(args);
         match (expected, &found) {
             (Outcome::Run(given), Parsed::Run(values)) => {
-                for (index, given) in given.iter().enumerate() {
+                for (option, given) in OPTIONS.iter().zip(given) {
                     assert_eq!(
-                        values.get(index),
+                        values.get(option.names[0]),
                         given,
-                        "parse_args({args:?}) gives {python}"
+                        "{PARSER}; p.parse_args({args:?}) gives {python}"
                     );
                 }
             }
             (Outcome::Refused(refusal), _) => {
-                assert_eq!(&found, refusal, "parse_args({args:?}) exits 2: {python}")
+                assert_eq!(
+                    &found, refusal,
+                    "{PARSER}; p.parse_args({args:?}) exits 2: {python}"
+                )
             }
             (Outcome::Help, Parsed::Help(text)) => assert_eq!(text, "help\n"),
-            _ => panic!("parse_args({args:?}) gives {python}, not {found:?}"),
+            _ => panic!("{PARSER}; p.parse_args({args:?}) gives {python}, not {found:?}"),
         }
     }
+}
+
+#[test]
+fn a_negative_number_in_other_decimal_digits_reads_as_an_option() {
+    let expression = "p.parse_args(['--base', '-\\u0661'])";
+    let python = "Namespace(base='-\u{661}')";
+    let found = read(&["--base", "-\u{661}"]);
+    assert_eq!(
+        found,
+        refused("argument --base: expected one argument"),
+        "{PARSER}; {expression} gives {python}; the reader takes ASCII digits"
+    );
 }

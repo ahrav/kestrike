@@ -2,8 +2,11 @@
 
 use std::io::{self, Write};
 
-use crate::json::{Integer, Value};
-use crate::text::{Text, push_backslashed, push_repr};
+use crate::json::{Integer, MAX_INTEGER_DIGITS, Value};
+use crate::text::{Text, is_space, push_backslashed, push_repr};
+
+/// The smallest positive `f64` is 2⁻¹⁰⁷⁴, giving `MAX_ROUND_DIGITS` = ⌊1074 × log10(2)⌋.
+pub const MAX_ROUND_DIGITS: usize = 323;
 
 pub fn len(value: &Value) -> Option<usize> {
     match value {
@@ -15,8 +18,8 @@ pub fn len(value: &Value) -> Option<usize> {
 }
 
 /// `int` preserves integer values, maps `false` to 0 and `true` to 1, and truncates a finite float toward
-/// zero. A string takes ASCII digits with an optional leading sign and optional single underscores between
-/// digits, after [`Text::strip`].
+/// zero. A string takes at most [`MAX_INTEGER_DIGITS`] ASCII digits with an optional leading sign and
+/// optional single underscores between digits, after `int` strips `int_space` code points from both ends.
 pub fn int(value: &Value) -> Result<Integer, String> {
     let text = match value {
         Value::Integer(integer) => return Ok(integer.clone()),
@@ -38,8 +41,18 @@ pub fn int(value: &Value) -> Result<Integer, String> {
         }
     };
     let refused = || format!("invalid literal for int() with base 10: {}", text.repr());
-    let stripped = text.strip();
-    let trimmed = stripped.to_str().ok_or_else(refused)?;
+    let codes: Vec<u32> = text.code_points().collect();
+    let start = codes
+        .iter()
+        .position(|&code| !int_space(code))
+        .unwrap_or(codes.len());
+    let end = codes
+        .iter()
+        .rposition(|&code| !int_space(code))
+        .map_or(start, |at| at + 1);
+    let trimmed = Text::from_code_points(codes[start..end].iter().copied())
+        .expect("the code points of a text are at most U+10FFFF");
+    let trimmed = trimmed.to_str().ok_or_else(refused)?;
     let (negative, body) = match trimmed.as_bytes().first() {
         Some(b'-') => (true, &trimmed[1..]),
         Some(b'+') => (false, &trimmed[1..]),
@@ -48,7 +61,20 @@ pub fn int(value: &Value) -> Result<Integer, String> {
     if body.starts_with('_') || body.ends_with('_') || body.contains("__") {
         return Err(refused());
     }
-    Integer::from_digits(negative, &body.replace('_', "")).ok_or_else(refused)
+    let digits = body.replace('_', "");
+    if digits.len() > MAX_INTEGER_DIGITS {
+        return Err(format!(
+            "a string of {} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion",
+            digits.len()
+        ));
+    }
+    Integer::from_digits(negative, &digits).ok_or_else(refused)
+}
+
+/// `int_space` holds for the code points `int()` strips: ASCII space, tab, line feed, vertical tab, form
+/// feed and carriage return, and each non-ASCII code point [`is_space`] takes.
+fn int_space(code: u32) -> bool {
+    matches!(code, 0x9..=0xd | 0x20) || (code >= 0x80 && is_space(code))
 }
 
 /// `repr_float` follows Python's `repr` of a float: the shortest digits that read back to the value, in
@@ -63,12 +89,16 @@ pub fn repr_float(value: f64) -> String {
         return if value > 0.0 { "inf" } else { "-inf" }.to_owned();
     }
     // `{:e}` fixes how many digits the shortest form holds. Rounding the exact value to that many digits, half
-    // to even, picks the even final digit when two shortest forms lie equally close.
+    // to even, picks the even final digit when two shortest forms lie equally close. When `value.abs()` is
+    // an exact power of two, the shorter spacing on its lower side can put the rounded decimal outside its
+    // round-trip interval, and the `{:e}` form stands.
     let shortest = format!("{:e}", value.abs());
     let count = shortest.split_once('e').map_or(1, |(mantissa, _)| {
         mantissa.bytes().filter(u8::is_ascii_digit).count()
     });
-    let scientific = format!("{:.*e}", count - 1, value.abs());
+    let scientific = Some(format!("{:.*e}", count - 1, value.abs()))
+        .filter(|rounded| rounded.parse() == Ok(value.abs()))
+        .unwrap_or(shortest);
     let (mantissa, exponent) = scientific
         .split_once('e')
         .expect("`{:e}` writes an exponent");
@@ -98,12 +128,13 @@ pub fn repr_float(value: f64) -> String {
 }
 
 /// `round` rounds the exact binary value of a finite float to `digits` decimal places, breaking ties to
-/// even, as Python's `round(value, digits)` does.
+/// even, as Python's `round(value, digits)` does. When `digits` exceeds [`MAX_ROUND_DIGITS`], the rounded
+/// decimal converts back to the original `f64`.
 pub fn round(value: &Value, digits: usize) -> Option<Value> {
     match value {
         Value::Integer(integer) => Some(Value::Integer(integer.clone())),
         Value::Bool(flag) => Some(Value::Integer(Integer::from(u64::from(*flag)))),
-        Value::Float(value) if value.is_finite() => {
+        Value::Float(value) if value.is_finite() && digits <= MAX_ROUND_DIGITS => {
             let rounded = format!("{value:.digits$}");
             Some(Value::Float(
                 rounded.parse().expect("a fixed decimal parses as an f64"),

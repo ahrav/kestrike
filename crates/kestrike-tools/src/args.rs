@@ -37,26 +37,45 @@ pub enum Given {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Values(Vec<Given>);
+pub struct Values(Vec<(&'static str, Given)>);
 
 impl Values {
-    pub fn get(&self, index: usize) -> &Given {
-        &self.0[index]
+    pub fn get(&self, name: &str) -> &Given {
+        self.0
+            .iter()
+            .find(|(first, _)| *first == name)
+            .map(|(_, given)| given)
+            .unwrap_or_else(|| panic!("the option table names {name}"))
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Parsed {
-    Run(Values),
+pub enum Parsed<T = Values> {
+    Run(T),
+    /// The caller writes the help to standard output and exits 0.
     Help(String),
-    Refused { code: u8, text: String },
+    /// The caller writes `text` to standard error and exits with `code`.
+    Refused {
+        code: u8,
+        text: String,
+    },
+}
+
+impl<T> Parsed<T> {
+    pub fn map<U>(self, run: impl FnOnce(T) -> U) -> Parsed<U> {
+        match self {
+            Self::Run(values) => Parsed::Run(run(values)),
+            Self::Help(text) => Parsed::Help(text),
+            Self::Refused { code, text } => Parsed::Refused { code, text },
+        }
+    }
 }
 
 pub struct Reader<'a> {
-    pub tool: &'a str,
-    pub usage: &'a str,
-    pub help: &'a str,
-    pub options: &'a [Opt],
+    tool: &'a str,
+    usage: &'a str,
+    help: &'a str,
+    options: &'a [Opt],
 }
 
 #[derive(Clone, Copy)]
@@ -69,7 +88,6 @@ struct Match<'a> {
 #[derive(Clone, Copy)]
 enum Kind<'a> {
     Value,
-    Marker,
     Unknown,
     Option(Match<'a>),
 }
@@ -79,7 +97,52 @@ enum HelpRefusal<'a> {
     IndexError,
 }
 
-impl Reader<'_> {
+impl<'t> Reader<'t> {
+    /// # Panics
+    ///
+    /// `new` panics on any violation of these requirements: each option name starts with `-`, spans at least
+    /// two bytes, and occurs exactly once; the table holds exactly one help row, and it is optional;
+    /// `-h` on the help row is the only permitted short name.
+    pub fn new(tool: &'t str, usage: &'t str, help: &'t str, options: &'t [Opt]) -> Self {
+        let names: Vec<&str> = options
+            .iter()
+            .flat_map(|option| option.names.iter().copied())
+            .collect();
+        for (at, name) in names.iter().enumerate() {
+            assert!(
+                name.starts_with('-') && name.len() >= 2,
+                "the option name {name} starts with a dash"
+            );
+            assert!(
+                !names[..at].contains(name),
+                "the option name {name} appears once"
+            );
+        }
+        let helps: Vec<&Opt> = options
+            .iter()
+            .filter(|option| !option.takes_value)
+            .collect();
+        assert!(
+            matches!(helps.as_slice(), [help] if !help.required),
+            "the table holds one optional help row"
+        );
+        for option in options {
+            for name in option.names {
+                let short = !name.starts_with("--");
+                assert!(
+                    !short || (*name == "-h" && !option.takes_value),
+                    "the help row holds the one short name, -h; {name} breaks it"
+                );
+            }
+        }
+        Self {
+            tool,
+            usage,
+            help,
+            options,
+        }
+    }
+
     fn refuse(&self, message: String) -> Parsed {
         Parsed::Refused {
             code: 2,
@@ -102,7 +165,7 @@ impl Reader<'_> {
                 Kind::Value
             } else if *arg == b"--" {
                 ended = true;
-                Kind::Marker
+                Kind::Unknown
             } else {
                 match self.classify(arg) {
                     Ok(kind) => kind,
@@ -110,7 +173,7 @@ impl Reader<'_> {
                 }
             });
         }
-        let mut values = vec![Given::Absent; self.options.len()];
+        let mut values: Vec<Given> = vec![Given::Absent; self.options.len()];
         let mut extras = Vec::new();
         let mut at = 0;
         while at < args.len() {
@@ -183,7 +246,8 @@ impl Reader<'_> {
             let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
             return self.refuse(format!("unrecognized arguments: {}", shown.join(" ")));
         }
-        Parsed::Run(Values(values))
+        let names = self.options.iter().map(|option| option.names[0]);
+        Parsed::Run(Values(names.zip(values).collect()))
     }
 
     fn strings(&self) -> impl Iterator<Item = (usize, &'static [u8])> + '_ {
@@ -292,6 +356,8 @@ fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusa
     }
 }
 
+/// `looks_negative` matches the `argparse` pattern `^-\d+$|^-\d*\.\d+$` with ASCII digits; `$` also
+/// matches before a final newline.
 fn looks_negative(arg: &[u8]) -> bool {
     let arg = arg.strip_suffix(b"\n").unwrap_or(arg);
     let Some(number) = arg.strip_prefix(b"-") else {

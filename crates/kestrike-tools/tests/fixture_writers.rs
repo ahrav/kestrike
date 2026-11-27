@@ -571,7 +571,12 @@ fn a_trace_with_null_and_a_float_keeps_both() {
     let result = write_traces(writer, &quint, &output);
     assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
     let written = fs::read_to_string(output.join("passes.itf.json")).expect("the trace is written");
-    assert!(written.contains("\"x\":null,\"y\":1.5e-07,"), "{written}");
+    let expression = "json.dumps(json.loads('{\"x\":null,\"y\":1.5e-7}'), separators=(',', ':'))";
+    let python = "{\"x\":null,\"y\":1.5e-07}";
+    assert!(
+        written.contains(&python[1..python.len() - 1]),
+        "{expression}: {written}"
+    );
 }
 
 #[test]

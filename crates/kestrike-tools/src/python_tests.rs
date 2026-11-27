@@ -27,6 +27,7 @@ fn repr_float_writes_the_shortest_digits_in_python_notation() {
         ("repr(12345.678)", f64::from_bits(0x40c81cd6c8b43958), "12345.678"),
         ("repr(16074132311784.812)", f64::from_bits(0x42ad3d19e49dd1a0), "16074132311784.812"),
         ("repr(-638608141482010.2)", f64::from_bits(0xc302267c5b63c0d2), "-638608141482010.2"),
+        ("repr(2.0 ** -1017)", f64::from_bits(0x0060000000000000), "7.120236347223045e-307"),
         ("repr(float('nan'))", f64::NAN, "nan"),
         ("repr(float('inf'))", f64::INFINITY, "inf"),
         ("repr(float('-inf'))", f64::NEG_INFINITY, "-inf"),
@@ -105,4 +106,44 @@ fn int_truncates_a_finite_float_toward_zero() {
         "int(float('nan')) raises ValueError"
     );
     assert!(int(&Value::Null).is_err(), "int(None) raises TypeError");
+}
+
+#[test]
+fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
+    let rows: [(&str, String, Option<&str>); 6] = [
+        (
+            "int('\\x1c12') raises ValueError",
+            "\u{1c}12".to_owned(),
+            None,
+        ),
+        (
+            "int('12\\x1f') raises ValueError",
+            "12\u{1f}".to_owned(),
+            None,
+        ),
+        ("int('\\u300012')", "\u{3000}12".to_owned(), Some("12")),
+        ("int('\\x8512')", "\u{85}12".to_owned(), Some("12")),
+        ("int('0' * 4301) raises ValueError", "0".repeat(4301), None),
+        (
+            "int('1_' * 2150 + '1') has 2151 digits",
+            format!("{}1", "1_".repeat(2150)),
+            Some("1"),
+        ),
+    ];
+    for (expression, given, python) in rows {
+        let found = int(&Value::String(Text::from(given)));
+        match python {
+            Some(digits) => assert!(
+                found.is_ok_and(|value| value.to_string().starts_with(digits)),
+                "{expression}"
+            ),
+            None => assert!(found.is_err(), "{expression}"),
+        }
+    }
+    let expression = "round(1.5, 400)";
+    assert_eq!(
+        round(&Value::Float(1.5), 400),
+        Some(Value::Float(1.5)),
+        "{expression}"
+    );
 }

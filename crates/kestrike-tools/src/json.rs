@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-pub use crate::python::repr_float;
+use crate::python::repr_float;
 pub use crate::text::Text;
 
 /// The deepest nesting of arrays and objects the reader takes.
@@ -484,7 +484,13 @@ pub fn indented(value: &Value) -> Result<String, NonFinite> {
 
 /// A float the indented layout refuses: `NaN`, `Infinity` or `-Infinity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct NonFinite(pub f64);
+pub struct NonFinite(f64);
+
+impl NonFinite {
+    pub fn value(self) -> f64 {
+        self.0
+    }
+}
 
 impl fmt::Display for NonFinite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
