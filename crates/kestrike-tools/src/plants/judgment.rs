@@ -10,7 +10,9 @@
 //! head, beside a catch too.
 //!
 //! The plant's directory holds `root/` (the sweep's root, with `suspects.jsonl` and `manifests/`) and
-//! `confirm.err`, the error output of `campaign confirm`.
+//! `confirm.err`, the error output of `campaign confirm`. The judgment trusts the plant's directory and
+//! the work directory its caller names, which the run made under ancestors only its user or root can
+//! write, and reads their files as they stand.
 
 use std::path::{Path, PathBuf};
 
