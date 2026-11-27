@@ -4303,7 +4303,7 @@ word and the pass cursor to equal the model's state; `observe`, `remove` and
 unchanged across them. A nonzero model era `e` is production era
 `ERA_TERMINAL - 3 + e`, and zero, the inactive record and the unset
 certificate, stays zero, so the model's terminal era is the production
-one. [grace_fixtures.py](grace_fixtures.py) writes the traces
+one. `bash scripts/tool.sh grace_fixtures` writes the traces
 with `quint run --mbt`: seven directed recipes and six traces of sixteen
 steps of the model's own `step` under pinned seeds, which together reach
 `init` and every choice of `step` with each outcome; the test asserts that
@@ -4581,7 +4581,7 @@ entry and the exit; the replay sends one command at a time and waits for
 the reply, so one call runs at a time and the replay covers the order of
 whole calls, with the orderings inside a call left to the loom kernel
 `storage::grace_model` and the GenMC and RC11 lanes.
-[reclaim_fixtures.py](reclaim_fixtures.py) writes the traces with
+`bash scripts/tool.sh reclaim_fixtures` writes the traces with
 `quint run --mbt`: five directed recipes and six traces of eighteen steps
 of the model's own `step` under pinned seeds, which together reach `init`
 and every choice of `step` with each outcome; the test asserts that set.
@@ -5474,7 +5474,7 @@ recorded at publication. One operation runs at a
 time, so the replay covers the order of whole operations; the order of
 the sample, the cutoff read and the sequence loads inside a lookup stays
 with the loom kernel.
-[lookup_fixtures.py](lookup_fixtures.py) writes the traces with
+`bash scripts/tool.sh lookup_fixtures` writes the traces with
 `quint run --mbt`: four directed recipes and six traces of sixteen steps
 of the model's own `step` under pinned seeds, which together reach `init`
 and every choice of `step` with each outcome; the test asserts that set.
@@ -7220,7 +7220,7 @@ call's return to equal the step's event, and both records' reports
 (claimed, pinned era, intervals), the cutoff and the count of outstanding
 registrations to equal the model's state. One call runs at a time, so the
 replay covers the order of whole calls and a close at the two hooks.
-[register_fixtures.py](register_fixtures.py) writes the traces with
+`bash scripts/tool.sh register_fixtures` writes the traces with
 `quint run --mbt`: five directed recipes and six traces of fourteen steps
 of the model's own `step` under pinned seeds; the eleven traces together
 reach `init` and every choice of `step` with each outcome, and the test

@@ -4,7 +4,7 @@
 //! The replay then requires the call's return, and the outcome the replay derives from it, to equal the step's recorded event: a hit must name the object the model names. It also requires the era report, the reserved lease credits, `Storage::outstanding`, and every published object's slot state and count to equal the model's state, and each slot's incarnation to equal the one recorded at publication.
 //! The model numbers objects in publication order; the replay records each object's `AllocationId` when it is published and reads the model's numbers through that record. The model's `bad` flag is history its invariant reads; it stays inside the model, where `quint run --invariant safety` checks it as each trace is generated.
 //!
-//! `python3 quint/lookup_fixtures.py --quint QUINT --output DIR` writes the traces with `quint run --mbt`: four directed recipes and six traces of sixteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
+//! `bash scripts/tool.sh lookup_fixtures --quint QUINT --output DIR` writes the traces with `quint run --mbt`: four directed recipes and six traces of sixteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
 //! The replay is evidence for exactly the schedules these traces record, one operation at a time.
 
 use std::collections::BTreeSet;

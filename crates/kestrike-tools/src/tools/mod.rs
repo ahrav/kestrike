@@ -23,5 +23,9 @@ macro_rules! tools {
 tools! {
     "escrow_fixtures" => escrow_fixtures,
     "gate_fixtures" => gate_fixtures,
+    "grace_fixtures" => grace_fixtures,
+    "lookup_fixtures" => lookup_fixtures,
     "marklog_fixtures" => marklog_fixtures,
+    "reclaim_fixtures" => reclaim_fixtures,
+    "register_fixtures" => register_fixtures,
 }

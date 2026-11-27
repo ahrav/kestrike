@@ -5,7 +5,7 @@
 //!
 //! Model era `e` is production era `BASE + e`, with zero kept as zero, so the model's terminal era 3 is the production [`ERA_TERMINAL`] and `Sequential` runs with its own band. The model's absent pin, `NOPIN`, is the cursor's `u64::MAX`.
 //!
-//! `python3 quint/grace_fixtures.py --quint QUINT --output DIR` writes the traces with `quint run --mbt`: seven directed recipes and six traces of sixteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
+//! `bash scripts/tool.sh grace_fixtures --quint QUINT --output DIR` writes the traces with `quint run --mbt`: seven directed recipes and six traces of sixteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
 //! The replay is evidence for exactly the schedules these traces record.
 
 use std::collections::BTreeSet;

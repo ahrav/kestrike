@@ -5,7 +5,7 @@
 //!
 //! Each reader runs on its own thread, which owns the reader's [`Registration`] and holds its guard between an entry and the exit, since a guard borrows its registration and stays on the thread that pinned. The replay sends one command at a time and waits for its reply, so one call runs at a time in the model's order.
 //!
-//! `python3 quint/reclaim_fixtures.py --quint QUINT --output DIR` writes the traces with `quint run --mbt`: five directed recipes and six traces of eighteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
+//! `bash scripts/tool.sh reclaim_fixtures --quint QUINT --output DIR` writes the traces with `quint run --mbt`: five directed recipes and six traces of eighteen steps of the model's own `step` under pinned seeds. Each trace names the model's sha256, and a trace of another model text fails before any state replays.
 //! The replay is evidence for exactly the schedules these traces record.
 
 use std::collections::BTreeSet;
