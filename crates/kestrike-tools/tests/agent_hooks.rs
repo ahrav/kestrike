@@ -55,6 +55,7 @@ impl Repo {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", self.path.join("global-config"))
             .env("GIT_CEILING_DIRECTORIES", above)
+            .env("XDG_CONFIG_HOME", &self.path)
             .current_dir(&self.path)
             .stdin(Stdio::null());
         command
