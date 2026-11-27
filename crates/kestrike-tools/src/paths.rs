@@ -16,12 +16,6 @@ use std::path::{Path, PathBuf};
 /// The deepest chain of links whose targets `resolve` follows, one link inside the target of the next.
 pub const DEPTH: usize = 993;
 
-/// `ELOOP`, the error of a lookup that meets too many links.
-#[cfg(target_os = "linux")]
-const LOOP: i32 = 40;
-#[cfg(not(target_os = "linux"))]
-const LOOP: i32 = 62;
-
 /// # Errors
 ///
 /// `resolve` returns an error when reading the working directory fails for a relative `path`, when a link
@@ -53,7 +47,7 @@ pub fn resolve(path: &Path) -> io::Result<PathBuf> {
     };
     let resolved = PathBuf::from(OsStr::from_bytes(&normalize(&absolute)));
     match std::fs::metadata(&resolved) {
-        Err(error) if error.raw_os_error() == Some(LOOP) => Err(io::Error::other(format!(
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(format!(
             "symlink loop from {}",
             resolved.display()
         ))),
