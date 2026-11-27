@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use super::options::{Options, Revision, parse};
+use super::options::{Options, parse};
 use crate::args::Parsed;
 
 fn read(args: &[&str]) -> Parsed<Options> {
@@ -65,20 +65,31 @@ fn the_token_after_an_option_is_a_value_unless_it_reads_as_an_option() {
 }
 
 #[test]
-fn the_value_list_of_dash_dash_leaves_defaults_or_empty_values() {
-    let empty = |flag: &str| options(read(&[&format!("{flag}=--")]));
-    assert_eq!(empty("--base").base, None, "base: [] takes the merge base");
-    assert_eq!(empty("--head").head, Revision::EmptyList, "head: []");
-    assert_eq!(empty("--head").head.repr(), "[]", "repr([])");
-    assert_eq!(empty("--tests").tests, Some(Vec::new()), "tests: []");
-    assert_eq!(empty("--max-mutants").max_mutants, None, "max_mutants: []");
-    assert_eq!(empty("--shard").shard, None, "shard: [] passes no shard");
+fn dash_dash_after_an_equals_sign_is_the_value_and_each_check_decides_about_it() {
+    let given = |flag: &str| options(read(&[&format!("{flag}=--")]));
     assert_eq!(
-        empty("--artifacts").artifacts,
-        None,
-        "artifacts: [] takes the default"
+        given("--base").base,
+        Some(OsString::from("--")),
+        "a maintained Python binds base='--'"
     );
-    assert_eq!(empty("--cargo").cargo, None, "cargo: []");
+    assert_eq!(given("--head").head, OsString::from("--"));
+    assert_eq!(
+        given("--tests").tests,
+        Some(vec![OsString::from("--")]),
+        "shlex.split('--') gives ['--']"
+    );
+    assert_eq!(given("--artifacts").artifacts, Some(OsString::from("--")));
+    assert_eq!(given("--cargo").cargo, OsString::from("--"));
+    let limit = refusal(read(&["--max-mutants=--"]));
+    assert_eq!(
+        limit,
+        "mutants-diff: error: argument --max-mutants: a positive integer"
+    );
+    let shard = refusal(read(&["--shard=--"]));
+    assert_eq!(
+        shard,
+        "mutants-diff: error: argument --shard: K/N with 0 <= K < N"
+    );
 }
 
 #[test]
@@ -86,8 +97,8 @@ fn numbers_keep_their_value_and_past_4300_digits_are_invalid() {
     assert_eq!(
         options(read(&["--max-mutants", "0007"]))
             .max_mutants
-            .as_deref(),
-        Some("7"),
+            .to_string(),
+        "7",
         "max_mutants: 7"
     );
     let shard = options(read(&["--shard", "01/02"])).shard.expect("a shard");

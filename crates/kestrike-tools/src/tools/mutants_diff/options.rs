@@ -1,12 +1,9 @@
-//! The command line: seven long options read by [`Reader`] with abbreviation off, and the help.
-//!
-//! A value `--` (`--opt=--`) gives the option an empty value list, which runs no check: `--base`, `--shard`
-//! and `--artifacts` then take their defaults, `--tests` passes no test argument, `--head` names the
-//! revision `[]`, `--max-mutants` holds no limit, and `--cargo` names no program.
+//! The command line: seven long options read by [`Reader`] with whole names alone, and the help. Each
+//! option's check decides about every value it is given, `--` included.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
-use crate::args::{Given, Kind, Opt, Parsed, Reader};
+use crate::args::{Kind, Opt, Parsed, Prefixes, Reader};
 use crate::json::{Integer, MAX_INTEGER_DIGITS};
 use crate::shell;
 use crate::text::Text;
@@ -26,30 +23,6 @@ const OPTIONS_HELP: &str = "options:
 ";
 const DEFAULT_LIMIT: &str = "40";
 
-/// A revision as the command line gave it, or the empty value list of `--head=--`, which Git reads as `[]`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Revision {
-    Given(OsString),
-    EmptyList,
-}
-
-impl Revision {
-    pub(super) fn argument(&self) -> OsString {
-        match self {
-            Self::Given(revision) => revision.clone(),
-            Self::EmptyList => OsString::from("[]"),
-        }
-    }
-
-    /// `repr` quotes a given revision as [`Text::repr`] does and writes the empty list as `[]`.
-    pub(super) fn repr(&self) -> String {
-        match self {
-            Self::Given(revision) => Text::from_os(revision).repr(),
-            Self::EmptyList => "[]".to_owned(),
-        }
-    }
-}
-
 /// A `--shard K/N` value: the text passed to the tool and its two numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Shard {
@@ -58,17 +31,16 @@ pub(super) struct Shard {
     pub(super) n: Integer,
 }
 
-/// The options [`parse`] accepted. `max_mutants` holds the limit's decimal digits without leading zeros,
-/// and `tests` the shell-split words of `--tests`.
+/// The options [`parse`] accepted, `tests` as the shell-split words of `--tests`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub(super) base: Option<OsString>,
-    pub(super) head: Revision,
-    pub(super) max_mutants: Option<String>,
+    pub(super) head: OsString,
+    pub(super) max_mutants: Integer,
     pub(super) shard: Option<Shard>,
     pub(super) tests: Option<Vec<OsString>>,
     pub(super) artifacts: Option<OsString>,
-    pub(super) cargo: Option<OsString>,
+    pub(super) cargo: OsString,
 }
 
 const fn value(names: &'static [&'static str], check: fn(&Text) -> Result<(), String>) -> Opt {
@@ -134,7 +106,7 @@ fn shard_numbers(value: &Text) -> Option<(&str, &str)> {
 }
 
 fn integer(digits: &str) -> Integer {
-    Integer::from_digits(false, digits).expect("a shard number is ASCII digits")
+    Integer::from_digits(false, digits).expect("a checked number is ASCII digits")
 }
 
 fn shard(value: &Text) -> Result<(), String> {
@@ -168,50 +140,36 @@ fn tests(value: &Text) -> Result<(), String> {
     words(value).map(drop)
 }
 
-/// `parse` reads `args` as [`Reader`] does with the option table above and abbreviation off.
+/// `parse` reads `args` as [`Reader`] does with the option table above and whole names alone.
 pub fn parse(args: &[OsString]) -> Parsed<Options> {
     let help = format!("{USAGE}\n\n{}\n{OPTIONS_HELP}", include_str!("help.md"));
-    let reader = Reader::new(TOOL, USAGE, &help, false, &TABLE);
+    let reader = Reader::new(TOOL, USAGE, &help, Prefixes::Refuse, &TABLE);
     reader.parse(args).map(|values| {
-        let explicit = |name| match values.get(name) {
-            Given::Value(value) => Some(value.clone()),
-            Given::Absent | Given::Empty => None,
-        };
-        let or_default = |name, default: &str| match values.get(name) {
-            Given::Absent => Some(OsString::from(default)),
-            Given::Empty => None,
-            Given::Value(value) => Some(value.clone()),
-        };
-        let head = or_default("--head", "HEAD").map_or(Revision::EmptyList, Revision::Given);
-        let max_mutants = or_default("--max-mutants", DEFAULT_LIMIT).map(|digits| {
-            let digits = digits.to_str().expect("a checked limit is ASCII digits");
-            let trimmed = digits.trim_start_matches('0');
-            trimmed.to_owned()
-        });
-        let shard = explicit("--shard").map(|text| {
+        let given = |name| values.get(name).map(OsStr::to_os_string);
+        let or_default =
+            |name, default: &str| given(name).unwrap_or_else(|| OsString::from(default));
+        let limit = or_default("--max-mutants", DEFAULT_LIMIT);
+        let limit = limit.to_str().expect("a checked limit is ASCII digits");
+        let shard = given("--shard").map(|text| {
             let shown = Text::from_os(&text);
             let (k, n) = shard_numbers(&shown).expect("a checked shard is K/N");
             let (k, n) = (integer(k), integer(n));
             Shard { value: text, k, n }
         });
-        let tests = match values.get("--tests") {
-            Given::Absent => None,
-            Given::Empty => Some(Vec::new()),
-            Given::Value(value) => Some(
-                words(&Text::from_os(value))
-                    .expect("checked test arguments split")
-                    .iter()
-                    .map(|word| word.to_os().expect("a word of an argument encodes back"))
-                    .collect(),
-            ),
-        };
+        let tests = given("--tests").map(|value| {
+            let words = words(&Text::from_os(&value)).expect("checked test arguments split");
+            let encoded = words
+                .iter()
+                .map(|word| word.to_os().expect("a word of an argument encodes back"));
+            encoded.collect()
+        });
         Options {
-            base: explicit("--base"),
-            head,
-            max_mutants,
+            base: given("--base"),
+            head: or_default("--head", "HEAD"),
+            max_mutants: integer(limit),
             shard,
             tests,
-            artifacts: explicit("--artifacts"),
+            artifacts: given("--artifacts"),
             cargo: or_default("--cargo", "cargo"),
         }
     })

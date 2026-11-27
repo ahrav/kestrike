@@ -308,13 +308,8 @@ impl Run {
     }
 
     /// `within_limit` holds when the listing is no longer than `--max-mutants`.
-    fn within_limit(&self) -> Result<bool, Stop> {
-        let Some(limit) = &self.options().max_mutants else {
-            let fault = Fault::library("InvalidInput", &"--max-mutants=-- holds no limit");
-            return Err(Stop::failed(&fault));
-        };
-        let listed = self.listed.len().to_string();
-        Ok(listed.len() < limit.len() || (listed.len() == limit.len() && listed <= *limit))
+    fn within_limit(&self) -> bool {
+        Integer::from(self.listed.len()) <= self.options().max_mutants
     }
 
     /// `execute` runs steps 2 to 4 and the outcome reading of step 5 and records their fields.
@@ -339,8 +334,8 @@ impl Run {
             self.list(&diff, &tree)?;
         }
         INTERRUPT.check()?;
-        if !self.within_limit()? {
-            let limit = self.options().max_mutants.clone().unwrap_or_default();
+        if !self.within_limit() {
+            let limit = &self.options().max_mutants;
             let line = format!(
                 "mutants: {} listed, above --max-mutants {limit}",
                 self.listed.len()

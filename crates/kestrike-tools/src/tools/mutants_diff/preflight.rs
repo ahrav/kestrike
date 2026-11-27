@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::config::{self, pins, stables};
-use super::options::{Options, Revision};
+use super::options::Options;
 use super::pieces::text;
 use super::process::{INTERRUPT, capture, exit_code};
 use super::stop::{Fault, Stop};
@@ -155,19 +155,39 @@ fn hex(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_owned()
 }
 
-fn commit(git_env: &Environ, top: &Path, revision: &Revision) -> Result<String, Stop> {
-    let mut spec = revision.argument();
+fn commit(git_env: &Environ, top: &Path, revision: &OsStr) -> Result<String, Stop> {
+    let mut spec = revision.to_os_string();
     spec.push("^{commit}");
     let args = ["rev-parse", "--verify", "--quiet", "--end-of-options"].map(OsStr::new);
     let args: Vec<&OsStr> = args.into_iter().chain([spec.as_os_str()]).collect();
     match git(git_env, top.as_os_str(), &args) {
         Ok(output) => Ok(hex(&output)),
-        Err(GitError::Failed(_)) => Err(Stop::rejected(text!(format!(
-            "unknown revision {}",
-            revision.repr()
-        )))),
+        Err(GitError::Failed(_)) => Err(Stop::rejected(text!(
+            "unknown revision ",
+            Text::from_os(revision).repr()
+        ))),
         Err(error) => Err(error.rejected()),
     }
+}
+
+/// `base_commit` is the given base, or the merge base of `head` with `origin/main`.
+fn base_commit(
+    git_env: &Environ,
+    top: &Path,
+    base: Option<&OsStr>,
+    head: &str,
+) -> Result<String, Stop> {
+    if let Some(base) = base {
+        return commit(git_env, top, base);
+    }
+    let args = [
+        OsStr::new("merge-base"),
+        OsStr::new(head),
+        OsStr::new("origin/main"),
+    ];
+    Ok(hex(
+        &git(git_env, top.as_os_str(), &args).map_err(GitError::rejected)?
+    ))
 }
 
 /// `rejected_fault` is the refusal `<Kind>: <text>` of an unexpected error in the input checks.
@@ -276,16 +296,12 @@ fn listed(names: &[Text]) -> Text {
     joined
 }
 
-/// `preflight` runs step 1 and the checks before it in the process's working directory and environment.
-///
-/// # Errors
-///
-/// A rejected input, or a fatal stop when `--cargo=--` leaves no program to run.
-pub fn preflight(options: Options) -> Result<Prepared, Stop> {
-    let environ: Environ = std::env::vars_os().collect();
+/// `refuse_inherited` refuses a set Git repository or index variable and an inherited variable that
+/// changes the tool or the build profile.
+fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
     let set_names: Vec<Text> = OVERRIDES
         .iter()
-        .filter(|name| get(&environ, name).is_some())
+        .filter(|name| get(environ, name).is_some())
         .map(|&name| Text::from(name))
         .collect();
     if !set_names.is_empty() {
@@ -295,7 +311,7 @@ pub fn preflight(options: Options) -> Result<Prepared, Stop> {
             "; the runner uses the invoking checkout's repository"
         )));
     }
-    let inherited = config::build_overrides(&environ);
+    let inherited = config::build_overrides(environ);
     if !inherited.is_empty() {
         return Err(Stop::rejected(text!(
             "unset ",
@@ -303,51 +319,13 @@ pub fn preflight(options: Options) -> Result<Prepared, Stop> {
             "; the runner sets the tool's options and the build profile"
         )));
     }
-    let mut git_env = environ.clone();
-    set(&mut git_env, "GIT_NO_REPLACE_OBJECTS", OsString::from("1"));
-    git_env.retain(|(name, _)| name != "GIT_DIFF_OPTS");
-    let here = std::env::current_dir()
-        .map_err(|error| rejected_fault(&Fault::os(&error, None)))?
-        .into_os_string();
-    let cargo = options.cargo.as_ref().map(|cargo| {
-        if cargo.as_bytes().contains(&b'/') {
-            join(&here, cargo)
-        } else {
-            cargo.clone()
-        }
-    });
-    let output = git(
-        &git_env,
-        &here,
-        &["rev-parse", "--show-toplevel"].map(OsStr::new),
-    )
-    .map_err(GitError::rejected)?;
-    let top = output.strip_suffix(b"\n").unwrap_or(&output);
-    let top = PathBuf::from(OsStr::from_bytes(top));
-    let head = commit(&git_env, &top, &options.head)?;
-    let base = match &options.base {
-        Some(base) => commit(&git_env, &top, &Revision::Given(base.clone()))?,
-        None => {
-            let args = [
-                OsStr::new("merge-base"),
-                OsStr::new(&head),
-                OsStr::new("origin/main"),
-            ];
-            hex(&git(&git_env, top.as_os_str(), &args).map_err(GitError::rejected)?)
-        }
-    };
-    let config_text = read_pins(&top.join(CONFIG))?;
-    let workflow_text = read_pins(&top.join(WORKFLOW))?;
-    let (pins, stables) = (pins(&config_text), stables(&workflow_text));
-    let ([pin], [stable]) = (pins.as_slice(), stables.as_slice()) else {
-        return Err(Stop::rejected(Text::from(format!(
-            "{CONFIG} must hold one tool pin line and {WORKFLOW} one STABLE pin"
-        ))));
-    };
-    let artifacts = options
-        .artifacts
-        .as_ref()
-        .map_or_else(|| top.join("target/mutants"), PathBuf::from);
+    Ok(())
+}
+
+/// `private_artifacts` resolves the artifacts directory, `target/mutants` under `top` by default, and
+/// refuses it when another user can configure Cargo or rustup through it or an ancestor.
+fn private_artifacts(artifacts: Option<&OsStr>, top: &Path) -> Result<PathBuf, Stop> {
+    let artifacts = artifacts.map_or_else(|| top.join("target/mutants"), PathBuf::from);
     let artifacts =
         paths::resolve(&artifacts).map_err(|error| rejected_fault(&Fault::os(&error, None)))?;
     let foreign = foreign_toolchain_paths(&artifacts).map_err(|error| {
@@ -364,12 +342,48 @@ pub fn preflight(options: Options) -> Result<Prepared, Stop> {
             ", where Cargo would read configuration; pass --artifacts under a directory only you control"
         )));
     }
-    let env = tool_env(&git_env, &here, &artifacts, stable);
-    let Some(cargo) = cargo else {
-        return Err(Stop::fatal(Text::from(
-            "--cargo=-- names no program to run",
-        )));
+    Ok(artifacts)
+}
+
+/// `preflight` runs step 1 and the checks before it in the process's working directory and environment.
+///
+/// # Errors
+///
+/// A rejected input.
+pub fn preflight(options: Options) -> Result<Prepared, Stop> {
+    let environ: Environ = std::env::vars_os().collect();
+    refuse_inherited(&environ)?;
+    let mut git_env = environ.clone();
+    set(&mut git_env, "GIT_NO_REPLACE_OBJECTS", OsString::from("1"));
+    git_env.retain(|(name, _)| name != "GIT_DIFF_OPTS");
+    let here = std::env::current_dir()
+        .map_err(|error| rejected_fault(&Fault::os(&error, None)))?
+        .into_os_string();
+    let cargo = if options.cargo.as_bytes().contains(&b'/') {
+        join(&here, &options.cargo)
+    } else {
+        options.cargo.clone()
     };
+    let output = git(
+        &git_env,
+        &here,
+        &["rev-parse", "--show-toplevel"].map(OsStr::new),
+    )
+    .map_err(GitError::rejected)?;
+    let top = output.strip_suffix(b"\n").unwrap_or(&output);
+    let top = PathBuf::from(OsStr::from_bytes(top));
+    let head = commit(&git_env, &top, &options.head)?;
+    let base = base_commit(&git_env, &top, options.base.as_deref(), &head)?;
+    let config_text = read_pins(&top.join(CONFIG))?;
+    let workflow_text = read_pins(&top.join(WORKFLOW))?;
+    let (pins, stables) = (pins(&config_text), stables(&workflow_text));
+    let ([pin], [stable]) = (pins.as_slice(), stables.as_slice()) else {
+        return Err(Stop::rejected(Text::from(format!(
+            "{CONFIG} must hold one tool pin line and {WORKFLOW} one STABLE pin"
+        ))));
+    };
+    let artifacts = private_artifacts(options.artifacts.as_deref(), &top)?;
+    let env = tool_env(&git_env, &here, &artifacts, stable);
     let version = tool_version(&cargo, &env, pin)?;
     let machine = host_machine(&cargo, &env)?;
     let tests = options
