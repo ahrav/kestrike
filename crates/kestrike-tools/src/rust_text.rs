@@ -1,6 +1,10 @@
 //! `lexemes` locates the comments, string literals and char literals of Rust source as byte spans, and
 //! `code` blanks them with one space for each byte, keeping each newline, so an offset of the view is the
 //! same offset of the source.
+//!
+//! A view's offsets are those of its source, while a blanked character outside ASCII is one space a byte
+//! in the view. [`back`] and [`ahead`] therefore measure a window in code points of the source, so a
+//! character outside ASCII in a comment or a literal widens no window.
 
 use std::sync::LazyLock;
 
@@ -82,6 +86,28 @@ pub fn blank(text: &str) -> String {
     text.bytes()
         .map(|byte| if byte == b'\n' { '\n' } else { ' ' })
         .collect()
+}
+
+/// The offset `count` code points of `source` before `at`, or 0 when fewer stand there. `at` is a code
+/// point boundary of `source`.
+pub fn back(source: &str, at: usize, count: usize) -> usize {
+    match count.checked_sub(1) {
+        None => at,
+        Some(last) => source[..at]
+            .char_indices()
+            .rev()
+            .nth(last)
+            .map_or(0, |(offset, _)| offset),
+    }
+}
+
+/// The offset `count` code points of `source` after `at`, or the end of `source` when fewer stand there.
+/// `at` is a code point boundary of `source`.
+pub fn ahead(source: &str, at: usize, count: usize) -> usize {
+    source[at..]
+        .char_indices()
+        .nth(count)
+        .map_or(source.len(), |(offset, _)| at + offset)
 }
 
 pub fn code(text: &str) -> String {
