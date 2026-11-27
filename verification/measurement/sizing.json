@@ -1,7 +1,7 @@
 {
  "record": "sizing",
  "version": 1,
- "frame": {"version": 3, "sha256": "95e17f2df7733b023e441602fece4ec742521864c53a7d386ca46fd11e19d2b3"},
+ "frame": {"version": 4, "sha256": "6c7adc17e55f0cea33e38a5036662268342cf4339b491599348ee12443042b35"},
  "statistics": {"version": 2, "sha256": "f63dd09e006737a43da7dfe66cb7f011b23dd3df32bcd6e21b90ec135279bf64"},
  "properties": {
   "R14": {"maps": ["#120 P8", "#120 P9"], "falsifier": "a row scored from an advertised limit, an unmeasured envelope or a fleet probability"},
