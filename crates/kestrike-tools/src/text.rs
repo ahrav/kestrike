@@ -17,9 +17,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
-
-use crate::json::Integer;
 
 #[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Text(Vec<u8>);
@@ -427,88 +424,101 @@ impl PartialEq<&str> for Text {
     }
 }
 
-/// A value `text!` writes into a [`Text`]: a string as its code points, a path or an operating-system
-/// string as [`Text::from_os`] decodes it, and a number as its decimal digits.
-pub(crate) trait Piece {
-    fn push_to(&self, text: &mut Text);
-}
+/// The reason builder `text!` and the values it writes, which the Linux tools use.
+#[cfg(target_os = "linux")]
+mod pieces {
+    use std::ffi::{OsStr, OsString};
+    use std::path::{Path, PathBuf};
 
-impl<T: Piece + ?Sized> Piece for &T {
-    fn push_to(&self, text: &mut Text) {
-        (**self).push_to(text);
+    use super::Text;
+    use crate::json::Integer;
+
+    /// A value `text!` writes into a [`Text`]: a string as its code points, a path or an operating-system
+    /// string as [`Text::from_os`] decodes it, and a number as its decimal digits.
+    pub(crate) trait Piece {
+        fn push_to(&self, text: &mut Text);
     }
-}
 
-impl Piece for str {
-    fn push_to(&self, text: &mut Text) {
-        text.push_str(self);
+    impl<T: Piece + ?Sized> Piece for &T {
+        fn push_to(&self, text: &mut Text) {
+            (**self).push_to(text);
+        }
     }
-}
 
-impl Piece for String {
-    fn push_to(&self, text: &mut Text) {
-        text.push_str(self);
+    impl Piece for str {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(self);
+        }
     }
-}
 
-impl Piece for Text {
-    fn push_to(&self, text: &mut Text) {
-        text.push_text(self);
+    impl Piece for String {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(self);
+        }
     }
-}
 
-impl Piece for OsStr {
-    fn push_to(&self, text: &mut Text) {
-        text.push_text(&Text::from_os(self));
+    impl Piece for Text {
+        fn push_to(&self, text: &mut Text) {
+            text.push_text(self);
+        }
     }
-}
 
-impl Piece for OsString {
-    fn push_to(&self, text: &mut Text) {
-        self.as_os_str().push_to(text);
+    impl Piece for OsStr {
+        fn push_to(&self, text: &mut Text) {
+            text.push_text(&Text::from_os(self));
+        }
     }
-}
 
-impl Piece for Path {
-    fn push_to(&self, text: &mut Text) {
-        self.as_os_str().push_to(text);
+    impl Piece for OsString {
+        fn push_to(&self, text: &mut Text) {
+            self.as_os_str().push_to(text);
+        }
     }
-}
 
-impl Piece for PathBuf {
-    fn push_to(&self, text: &mut Text) {
-        self.as_os_str().push_to(text);
+    impl Piece for Path {
+        fn push_to(&self, text: &mut Text) {
+            self.as_os_str().push_to(text);
+        }
     }
-}
 
-impl Piece for Integer {
-    fn push_to(&self, text: &mut Text) {
-        text.push_str(&self.to_string());
+    impl Piece for PathBuf {
+        fn push_to(&self, text: &mut Text) {
+            self.as_os_str().push_to(text);
+        }
     }
-}
 
-impl Piece for i32 {
-    fn push_to(&self, text: &mut Text) {
-        text.push_str(&self.to_string());
+    impl Piece for Integer {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(&self.to_string());
+        }
     }
-}
 
-impl Piece for usize {
-    fn push_to(&self, text: &mut Text) {
-        text.push_str(&self.to_string());
+    impl Piece for i32 {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(&self.to_string());
+        }
     }
+
+    impl Piece for usize {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(&self.to_string());
+        }
+    }
+
+    /// `text!(a, b, ...)` is the [`Text`] of each [`Piece`] in order.
+    macro_rules! text {
+        ($($piece:expr),+ $(,)?) => {{
+            let mut text = $crate::text::Text::new();
+            $( $crate::text::Piece::push_to(&$piece, &mut text); )+
+            text
+        }};
+    }
+
+    pub(crate) use text;
 }
 
-/// `text!(a, b, ...)` is the [`Text`] of each [`Piece`] in order.
-macro_rules! text {
-    ($($piece:expr),+ $(,)?) => {{
-        let mut text = $crate::text::Text::new();
-        $( $crate::text::Piece::push_to(&$piece, &mut text); )+
-        text
-    }};
-}
-
-pub(crate) use text;
+#[cfg(target_os = "linux")]
+pub(crate) use pieces::{Piece, text};
 
 #[cfg(test)]
 #[path = "text_tests.rs"]

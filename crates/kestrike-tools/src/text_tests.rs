@@ -301,6 +301,12 @@ fn texts_match_and_replace_by_code_points() {
     }
     let replaced = surrogate.replace(&text(&[0xdc80]), &Text::from("-"));
     assert_eq!(replaced, Text::from("a-b"));
+}
+
+/// `text!` writes a path outside UTF-8 as `Text::from_os` decodes it, each stray byte a surrogate.
+#[cfg(target_os = "linux")]
+#[test]
+fn text_writes_a_path_as_its_decoded_text() {
     let unencoded = OsStr::from_bytes(b"a\xff");
     assert_eq!(crate::text::text!(unencoded, "/b"), {
         let mut joined = Text::from_os(unencoded);
