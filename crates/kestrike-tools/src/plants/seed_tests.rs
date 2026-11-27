@@ -75,11 +75,7 @@ fn a_manifest_runs_only_the_job_confirm_ran() {
         write(&root.join("manifests/smoke.manifest"), bytes);
         let digest = Value::String(Text::from(digest));
         let read = manifest(&root, &suspect, Some(&digest)).expect("the digest matches");
-        assert_eq!(
-            read.pinned(&pins, suspect.seed()),
-            Text::from(pinned),
-            "{bytes:?}"
-        );
+        assert_eq!(read.pinned(&pins), Text::from(pinned), "{bytes:?}");
         let other = Value::String(Text::from("0".repeat(64)));
         assert_eq!(
             manifest(&root, &suspect, Some(&other)),

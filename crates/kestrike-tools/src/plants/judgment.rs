@@ -1,8 +1,13 @@
 //! The judgment of a live plant after its sweeps, from the last sweep's exit, its `sweep-status`
 //! document and the files of the plant's directory, with the two children it needs asked of its caller.
 //!
-//! The checks run in the order of the results: a catch first, then each of the thirteen causes of no
-//! verdict in turn, the first present one being the reason, then the miss. A catch is a suspect of a catch
+//! The reads come first, and a failed read ends the judgment with no verdict: the expected profiles'
+//! counters, `suspects.jsonl`, `campaign confirm` once a suspect is listed, and the status's account of
+//! each listed profile's replays. Of the results, a catch outranks every cause. With no catch, each
+//! profile of the status, controls and histories included, must give a suspect count; then the first
+//! present one of the thirteen causes of no verdict is the reason, and with none the plant is missed.
+//!
+//! A catch is a suspect of a catch
 //! class in an expected profile that `campaign confirm` turned into a finding of that class, whose replay
 //! the sweep neither lists nor may hide as differing, and whose seed passes on the unpatched head. The seed
 //! of every confirmed suspect that passes both replay tests is checked, in the list's order, once the
@@ -12,16 +17,17 @@
 //! The plant's directory holds `root/` (the sweep's root, with `suspects.jsonl` and `manifests/`) and
 //! `confirm.err`, the error output of `campaign confirm`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::entry::{Entry, Verdict};
+use super::entry::Entry;
 use super::options::Options;
 use super::output::{Confirmed, confirmed};
-use super::seed::{Manifest, SeedCheck, ending, manifest};
+use super::seed::{Manifest, ending, manifest};
 use super::status::{Runs, held_suspects, profile_runs, unlisted_replay};
 use super::suspects::{Suspect, finding_of, listing};
 use super::values::natural;
-use super::verdict::NoVerdict;
+use super::verdict::{NoVerdict, Verdict};
 use crate::json::{Integer, Object, Value};
 use crate::python::{repr, str_of, truthy};
 use crate::text::{Text, text};
@@ -31,7 +37,8 @@ use crate::text::{Text, text};
 const VERDICT_KEYS: [&str; 4] = ["alarm", "no_pass", "unreached", "no_window"];
 
 /// The children the judgment asks of its caller. Each returns the child's exit and its output as a text
-/// read of its output file gives it.
+/// read of its output file gives it. Once the run is interrupted, each later call returns its error with
+/// no child started, and the caller scores no entry of that judgment.
 pub trait Ask {
     /// `confirm` runs `campaign confirm` for the root, with its error output in the plant directory's
     /// `confirm.err`. The judgment asks it once, when `suspects.jsonl` lists a suspect of a catch class in
@@ -53,8 +60,8 @@ pub trait Ask {
 }
 
 /// The plant's sweeps as they ended: the last sweep's exit, 0 or 1, its status, the plant's directory, the
-/// work directory, and the runs each profile must reach (`--runs`) and the most sweeps a plant gets
-/// (`--rounds`).
+/// work directory, and the run index each profile's `next` must reach (`--runs`) and the most sweeps a
+/// plant gets (`--rounds`).
 #[derive(Clone, Copy, Debug)]
 pub struct Sweep<'a> {
     exited_1: bool,
@@ -94,7 +101,7 @@ impl<'a> Sweep<'a> {
 }
 
 /// `judge` sets the result of the swept plant of `entry`: caught, missed or no verdict. The entry's plant
-/// expects a profile; a plant without one is settled by [`Entry::unswept`] once its archive builds.
+/// expects a profile; [`Entry::archived`] settles a plant without one.
 pub fn judge(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) {
     if let Err(ending) = judged(entry, sweep, ask) {
         entry.no_verdict(&ending);
@@ -109,10 +116,10 @@ fn member(status: &Object, name: &str) -> Value {
 /// suspects, with the hold of `confirm` and the count of complete records of `suspects.jsonl`.
 struct Suspects {
     caught: Option<(Text, Object)>,
-    differing: Vec<Text>,
-    failures: Vec<Text>,
-    unchecked: Vec<Text>,
-    unconfirmed: Vec<Text>,
+    differing: Option<Text>,
+    failures: Option<Text>,
+    unchecked: Option<Text>,
+    unconfirmed: Option<Text>,
     hold: Option<Text>,
     complete: usize,
 }
@@ -142,69 +149,67 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
     let root = sweep.root();
     let listing = listing(&root.join("suspects.jsonl"), &profiles, sweep.work)?;
     let confirmed = if listing.listed.is_empty() {
-        Confirmed::none()
+        Confirmed::default()
     } else {
         let (code, out) = ask.confirm()?;
         confirmed(code, &out, &sweep.place.join("confirm.err"), sweep.work)?
     };
-    let mut hidden: Vec<(&Text, Option<Text>)> = Vec::new();
+    let mut hidden: BTreeMap<&Text, Option<Text>> = BTreeMap::new();
     for suspect in &listing.listed {
-        if !hidden
-            .iter()
-            .any(|(profile, _)| *profile == suspect.profile())
-        {
+        if !hidden.contains_key(suspect.profile()) {
             let reason = unlisted_replay(status, suspect.profile(), &listing.shown)?;
-            hidden.push((suspect.profile(), reason));
+            hidden.insert(suspect.profile(), reason);
         }
     }
     let mut found = Suspects {
         caught: None,
-        differing: Vec::new(),
-        failures: Vec::new(),
-        unchecked: Vec::new(),
-        unconfirmed: Vec::new(),
-        hold: confirmed.hold().cloned(),
+        differing: None,
+        failures: None,
+        unchecked: None,
+        unconfirmed: None,
+        hold: confirmed.hold.clone(),
         complete: listing.complete,
     };
     for suspect in &listing.listed {
         let named = suspect.named();
-        let Some(finding) = finding_of(confirmed.findings(), suspect) else {
+        let Some(finding) = finding_of(&confirmed.findings, suspect) else {
             found
                 .unconfirmed
-                .push(text!("`campaign confirm` made no finding of ", named));
+                .get_or_insert_with(|| text!("`campaign confirm` made no finding of ", named));
             continue;
         };
         if listing.replayed.contains(&suspect.identity()) {
-            found.differing.push(text!(
-                "the sweep's replay of ",
-                named,
-                " differs, so its seed does not determine the run"
-            ));
+            found.differing.get_or_insert_with(|| {
+                text!(
+                    "the sweep's replay of ",
+                    named,
+                    " differs, so its seed does not determine the run"
+                )
+            });
             continue;
         }
-        let hides = hidden
-            .iter()
-            .find(|(profile, _)| *profile == suspect.profile());
-        if let Some((_, Some(why))) = hides {
-            found.differing.push(text!(
-                why,
-                ", so a differing replay of ",
-                named,
-                " may be unlisted"
-            ));
+        if let Some(Some(why)) = hidden.get(suspect.profile()) {
+            found.differing.get_or_insert_with(|| {
+                text!(
+                    why,
+                    ", so a differing replay of ",
+                    named,
+                    " may be unlisted"
+                )
+            });
             continue;
         }
         let checked = manifest(&root, suspect, finding.manifest_sha256.as_ref())
             .and_then(|manifest| ask.run_seed(suspect, &manifest))
-            .map(|(code, out)| ending(code, &out));
+            .and_then(|(code, out)| ending(code, &out));
         let (code, ending) = match checked {
-            Err(why) | Ok(SeedCheck::NotRun(why)) => {
-                found
-                    .unchecked
-                    .push(text!("the seed check of ", named, " did not run: ", why));
+            Err(why) => {
+                found.unchecked.get_or_insert_with(|| {
+                    text!("the seed check of ", named, " did not run: ", why)
+                });
                 continue;
             }
-            Ok(SeedCheck::Ran { code, ending }) => (code, ending),
+            Ok(checked) => checked,
         };
         let mut members = suspect.members();
         members.insert("finding", Value::String(finding.id.clone()));
@@ -224,17 +229,21 @@ fn judged(entry: &mut Entry, sweep: &Sweep<'_>, ask: &mut impl Ask) -> Result<()
                 );
                 members.insert("reason", Value::String(reason.clone()));
                 entry.push_head_failure(members);
-                found.failures.push(reason);
+                found.failures.get_or_insert(reason);
             }
-            _ => found.unchecked.push(text!(
-                "the seed check of ",
-                named,
-                " on the unpatched head exited ",
-                code,
-                " (",
-                str_of(&ending),
-                ")"
-            )),
+            _ => {
+                found.unchecked.get_or_insert_with(|| {
+                    text!(
+                        "the seed check of ",
+                        named,
+                        " on the unpatched head exited ",
+                        code,
+                        " (",
+                        str_of(&ending),
+                        ")"
+                    )
+                });
+            }
         }
     }
     if let Some((reason, caught)) = found.caught {
@@ -288,15 +297,15 @@ fn cause(
     let no_counts =
         matches!(status.get("counts"), Some(Value::Object(counts)) if counts.is_empty());
     let causes: [Option<Text>; 13] = [
-        found.differing.first().cloned(),
-        found.failures.first().cloned(),
-        found.unchecked.first().cloned(),
+        found.differing.clone(),
+        found.failures.clone(),
+        found.unchecked.clone(),
         (!keys.is_empty()).then(|| {
             let names: Vec<Text> = keys.iter().map(|(key, _)| key.clone()).collect();
             text!("the root holds ", Text::join(", ", &names))
         }),
         found.hold.clone(),
-        found.unconfirmed.first().cloned(),
+        found.unconfirmed.clone(),
         (!held.is_empty()).then(|| {
             let listed: Vec<Text> = held
                 .iter()

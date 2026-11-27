@@ -7,8 +7,9 @@
 //! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
-//! `Infinity` and `-Infinity`, which strict JSON readers refuse, and so does [`indented_in_order`];
-//! [`indented`] refuses them.
+//! `Infinity` and `-Infinity`, which strict JSON readers refuse.
+//! [`indented_in_order`] writes non-finite floats as `NaN`, `Infinity` and `-Infinity`. [`indented`]
+//! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -73,7 +74,7 @@ impl Integer {
 impl Integer {
     /// `checked_add` is the sum of the two integers, or `None` when it holds more than
     /// [`MAX_INTEGER_DIGITS`] digits.
-    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+    fn checked_add(&self, other: &Self) -> Option<Self> {
         if self.negative == other.negative {
             return Self::from_digits(self.negative, &add_digits(&self.digits, &other.digits));
         }
@@ -653,7 +654,7 @@ fn written(value: &Value, layout: Layout) -> String {
     out
 }
 
-/// A float the indented layout refuses: `NaN`, `Infinity` or `-Infinity`.
+/// A float [`indented`] refuses: `NaN`, `Infinity` or `-Infinity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonFinite(f64);
 

@@ -11,7 +11,7 @@ use std::path::Path;
 
 use super::output::{Pins, last_object};
 use super::suspects::Suspect;
-use crate::json::{Integer, Value};
+use crate::json::Value;
 use crate::ownership::PathError;
 use crate::python::{hexdigest, str_of, truthy};
 use crate::text::{Text, newlines, text};
@@ -19,21 +19,13 @@ use crate::text::{Text, newlines, text};
 /// The class of a run that passes; crates/campaign-supervisor/src/exit.rs names the same class.
 const COUNTS: &str = "counts";
 
-/// What a seed check gave: the exit of the seed's run on the unpatched head with its ending, or why it
-/// ran nothing on the head.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum SeedCheck {
-    /// `campaign sim run` exited `code` with the worker's ending: the class, or the reason with the class
-    /// before it.
-    Ran { code: i32, ending: Value },
-    /// The check ran nothing on the head; the text says why.
-    NotRun(Text),
-}
-
 /// The lines of a profile's manifest, as the sweep wrote it; the judgment makes one once its digest is
 /// the confirmed job's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Manifest(Vec<String>);
+pub struct Manifest {
+    lines: Vec<String>,
+    seed: Text,
+}
 
 /// `rewrite` gives the line with its value replaced when `values` names its key.
 fn rewrite(line: &str, values: &[(&str, &Text)]) -> Text {
@@ -47,19 +39,18 @@ fn rewrite(line: &str, values: &[(&str, &Text)]) -> Text {
 impl Manifest {
     fn rewritten(&self, values: &[(&str, &Text)]) -> Text {
         let mut written = Text::new();
-        for line in &self.0 {
+        for line in &self.lines {
             written.push_text(&rewrite(line, values));
             written.push_str("\n");
         }
         written
     }
 
-    /// `pinned` is the manifest the seed check runs: the root set to `seed` and each of the pins to the
-    /// base archive's.
-    pub fn pinned(&self, pins: &Pins, seed: &Integer) -> Text {
-        let seed = Text::from(seed.to_string());
+    /// `pinned` is the manifest the seed check runs: its `root` lines set to the suspect's seed and its pin
+    /// lines to the base archive's pins. All other lines retain their original contents.
+    pub fn pinned(&self, pins: &Pins) -> Text {
         let mut values: Vec<(&str, &Text)> = pins.named().collect();
-        values.push(("root", &seed));
+        values.push(("root", &self.seed));
         self.rewritten(&values)
     }
 }
@@ -88,9 +79,11 @@ pub(crate) fn manifest(
     if lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
-    let manifest = Manifest(lines);
-    let seed = Text::from(suspect.seed().to_string());
-    let seeded = manifest.rewritten(&[("root", &seed)]);
+    let manifest = Manifest {
+        lines,
+        seed: Text::from(suspect.seed().to_string()),
+    };
+    let seeded = manifest.rewritten(&[("root", &manifest.seed)]);
     let hashed = Text::from(hexdigest(seeded.as_bytes()));
     match digest {
         Some(Value::String(digest)) if *digest == hashed => Ok(manifest),
@@ -101,13 +94,18 @@ pub(crate) fn manifest(
 }
 
 /// `ending` reads what `campaign sim run` of a seed check printed: it exited `code` and printed `out`,
-/// whose last line holds the worker's result. The ending is the result's `reason` when its text begins
-/// with the class and `: `, else `CLASS: REASON`, or the class alone for a false or missing reason; each
-/// is read as Python's `str` writes the value.
-pub(crate) fn ending(code: i32, out: &str) -> SeedCheck {
+/// whose last line holds the worker's result. The ending is the result's `reason` value as printed, an
+/// object or a list included, when its `str` text begins with the class and `: `; else the text
+/// `CLASS: REASON`, or the class alone for a false or missing reason; each is read as Python's `str`
+/// writes the value.
+///
+/// # Errors
+///
+/// A last line without a class, or an exit 0 whose class is other than `counts`.
+pub(crate) fn ending(code: i32, out: &str) -> Result<(i32, Value), Text> {
     let printed = last_object(out, "sim run").ok();
     let Some(class) = printed.as_ref().and_then(|printed| printed.get("class")) else {
-        return SeedCheck::NotRun(text!("exit ", code, " with no result"));
+        return Err(text!("exit ", code, " with no result"));
     };
     let kind = str_of(class);
     let ending = match printed.as_ref().and_then(|printed| printed.get("reason")) {
@@ -121,9 +119,9 @@ pub(crate) fn ending(code: i32, out: &str) -> SeedCheck {
         _ => Value::String(kind.clone()),
     };
     if code == 0 && kind != COUNTS {
-        return SeedCheck::NotRun(text!("exit 0 with the class ", kind));
+        return Err(text!("exit 0 with the class ", kind));
     }
-    SeedCheck::Ran { code, ending }
+    Ok((code, ending))
 }
 
 #[cfg(test)]

@@ -76,7 +76,7 @@ impl Pins {
     }
 
     /// Each of the [`PINS`] with its value, in that order.
-    pub(crate) fn named(&self) -> impl Iterator<Item = (&'static str, &Text)> {
+    pub fn named(&self) -> impl Iterator<Item = (&'static str, &Text)> {
         PINS.into_iter().zip(self.0.iter())
     }
 }
@@ -121,31 +121,12 @@ pub fn archive_pins(code: i32, out: &str, what: &str, err: &Path) -> Result<Pins
     }
 }
 
-/// What a `campaign confirm` printed: its findings, each an object, and the backlog hold that stopped
-/// it, if one did.
-#[derive(Clone, Debug, PartialEq)]
+/// What a `campaign confirm` printed: its findings, each an object, and the reason
+/// `` `campaign confirm` held its queue: REFUSAL `` of the backlog hold that stopped it, if one did.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Confirmed {
-    findings: Vec<Object>,
-    hold: Option<Text>,
-}
-
-impl Confirmed {
-    /// `none` is what a root without a listed suspect gets, where `confirm` does not run.
-    pub(crate) fn none() -> Self {
-        Self {
-            findings: Vec::new(),
-            hold: None,
-        }
-    }
-
-    pub(crate) fn findings(&self) -> &[Object] {
-        &self.findings
-    }
-
-    /// The reason `` `campaign confirm` held its queue: REFUSAL `` of a backlog hold.
-    pub(crate) fn hold(&self) -> Option<&Text> {
-        self.hold.as_ref()
-    }
+    pub(crate) findings: Vec<Object>,
+    pub(crate) hold: Option<Text>,
 }
 
 /// `backlog` holds for a refusal that is the backlog limit's.

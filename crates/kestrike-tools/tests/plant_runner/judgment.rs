@@ -7,15 +7,19 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
+use kestrike_tools::json::MAX_INTEGER_DIGITS;
 use kestrike_tools::json::{self, Value};
 use kestrike_tools::plants::{
-    Ask, Entry, Manifest, NoVerdict, Options, Outcome, Pins, Plant, Suspect, Sweep, archive_pins,
-    first_object, judge,
+    Ask, Entry, Finished, Manifest, NoVerdict, Options, Outcome, Pins, Plant, Suspect, Sweep,
+    archive_pins, first_object, judge,
 };
 use kestrike_tools::text::Text;
 
-use super::judgment_rows::ROWS;
+use super::judgment_rows::{ROWS, WITH_OPTIONS};
 use super::repository::{Repository, chmod, is_root, private_dir, write};
+
+/// The exit of a child that did not run: its output is the reason the caller gives.
+pub const REFUSED: i32 = i32::MIN;
 
 /// The state of a row's `suspects.jsonl`.
 pub enum List {
@@ -65,6 +69,7 @@ struct Children {
     row: &'static Row,
     errors: Errors,
     place: std::path::PathBuf,
+    work: String,
     pins: Pins,
     confirms: usize,
     asked: Vec<(String, String)>,
@@ -74,6 +79,9 @@ impl Ask for Children {
     fn confirm(&mut self) -> Result<(i32, String), NoVerdict> {
         self.confirms += 1;
         let (code, out, err) = self.row.confirm;
+        if code == REFUSED {
+            return Err(NoVerdict::plain(out));
+        }
         let errors = self.place.join("confirm.err");
         match self.errors {
             Errors::Written => write(&errors, err),
@@ -87,38 +95,52 @@ impl Ask for Children {
     }
 
     fn run_seed(&mut self, suspect: &Suspect, manifest: &Manifest) -> Result<(i32, String), Text> {
-        let pinned = manifest.pinned(&self.pins, suspect.seed());
+        let pinned = manifest.pinned(&self.pins);
         let place = format!("{}/{}-{}", suspect.profile(), suspect.run(), suspect.seed());
         self.asked
             .push((place, pinned.to_str().expect("UTF-8").to_owned()));
         let (code, out) = self.row.seeds[self.asked.len() - 1];
-        Ok((code, out.to_owned()))
+        if code == REFUSED {
+            return Err(Text::from(out));
+        }
+        Ok((code, out.replace("{WORK}", &self.work)))
     }
 }
 
-fn base_pins() -> Pins {
-    let printed = r#"{"build": "b0", "executable": "e0", "platform": "p0", "toolchain": "t0"}"#;
-    archive_pins(
-        0,
-        printed,
-        "the unpatched head",
-        Path::new("base/archive.err"),
-    )
-    .expect("pins")
+/// `pins` are the pins an archive whose build digest is `build` prints.
+pub fn pins(build: &str) -> Pins {
+    let printed = format!(
+        r#"{{"build": "{build}", "executable": "e{n}", "platform": "p{n}", "toolchain": "t{n}"}}"#,
+        n = &build[1..]
+    );
+    archive_pins(0, &printed, "an archive", Path::new("archive.err")).expect("pins")
 }
 
 /// `alpha` is the fixture's plant `alpha`, which expects `smoke` and then `crash-loop`, with the run's
 /// default options: a floor of 300 runs and 10 sweeps.
 pub fn alpha(repository: &Repository) -> (Plant, Options) {
-    let Outcome::Run(inputs) = repository.prepare(&repository.call(&["--plant", "alpha"])) else {
+    alpha_with(repository, &[])
+}
+
+/// `alpha_with` is the fixture's plant `alpha` with the options `args` give.
+fn alpha_with(repository: &Repository, args: &[&str]) -> (Plant, Options) {
+    let args: Vec<&str> = ["--plant", "alpha"].iter().chain(args).copied().collect();
+    let Outcome::Run(inputs) = repository.prepare(&repository.call(&args)) else {
         panic!("the fixture's checks pass");
     };
     (inputs.plants()[0].clone(), inputs.options().clone())
 }
 
+/// `row` is the row named `name`.
+pub fn row(name: &str) -> &'static Row {
+    ROWS.iter()
+        .find(|row| row.name == name)
+        .expect("a row of that name")
+}
+
 /// `judged` judges `plant` on `row` in the work directory `work` and returns its finished entry with the
 /// children's record of what they were asked.
-fn judged(row: &'static Row, plant: &(Plant, Options), work: &Path) -> (Entry, Children) {
+fn judged(row: &'static Row, plant: &(Plant, Options), work: &Path) -> (Finished, Children) {
     judged_with(row, plant, work, Errors::Written)
 }
 
@@ -127,7 +149,7 @@ fn judged_with(
     (plant, options): &(Plant, Options),
     work: &Path,
     errors: Errors,
-) -> (Entry, Children) {
+) -> (Finished, Children) {
     let place = work.join(format!("plants/{}", plant.id()));
     let root = place.join("root");
     private_dir(&root.join("manifests"));
@@ -148,49 +170,53 @@ fn judged_with(
         List::Directory => private_dir(&list),
         List::Dangling => symlink(root.join("absent"), &list).expect("linked"),
     }
-    let status = first_object(row.status, "sweep-status").expect("the row's status is an object");
+    let status = row
+        .status
+        .replace("{NINES}", &"9".repeat(MAX_INTEGER_DIGITS));
+    let status = first_object(&status, "sweep-status").expect("the row's status is an object");
     let mut entry = Entry::new(plant);
     entry.set_commit(&Text::from("c0mmit"));
     entry.set_tree(&Text::from("tr33"));
-    entry.set_archive(&Text::from("a1"));
+    assert!(entry.archived(&pins("a1")), "the plant expects a profile");
     let mut children = Children {
         row,
         errors,
         place: place.clone(),
-        pins: base_pins(),
+        work: work.to_str().expect("a UTF-8 work directory").to_owned(),
+        pins: pins("b0"),
         confirms: 0,
         asked: Vec::new(),
     };
     let sweep = Sweep::new(row.code, &status, &place, work, options).expect("an exit of 0 or 1");
     judge(&mut entry, &sweep, &mut children);
-    entry.finish(work);
+    let entry = entry.finish(work).expect("a judged entry holds its result");
     (entry, children)
 }
 
 /// `judged_row` is the finished entry of `plant` on the row named `name`.
-pub fn judged_row(name: &str, plant: &(Plant, Options), work: &Path) -> Entry {
-    let row = ROWS
-        .iter()
-        .find(|row| row.name == name)
-        .expect("a row of that name");
-    let (entry, _) = judged(row, plant, work);
-    entry
+pub fn judged_row(name: &str, plant: &(Plant, Options), work: &Path) -> Finished {
+    judged(row(name), plant, work).0
 }
 
-fn shown(entry: &Entry) -> String {
+/// `shown` is the entry's members as compact JSON.
+pub fn shown(entry: &Finished) -> String {
     json::text(&Value::Object(entry.members().clone()))
 }
 
-/// Every row gives its entry, its count of `confirm` calls and each seed check it asks, with the manifest
-/// that check runs.
-#[test]
-fn each_row_gives_its_entry_and_asks_its_children() {
-    let repository = Repository::new();
-    let plant = alpha(&repository);
-    for (number, row) in ROWS.iter().enumerate() {
+/// `checks` judges each row on `plant` and compares its entry, its count of `confirm` calls and each seed
+/// check it asks, with the manifest that check runs.
+fn checks(
+    repository: &Repository,
+    plant: &(Plant, Options),
+    rows: impl IntoIterator<Item = &'static Row>,
+) {
+    for (number, row) in rows.into_iter().enumerate() {
         let work = repository.scratch.join(format!("work-{number}"));
-        let (entry, children) = judged(row, &plant, &work);
-        assert_eq!(shown(&entry), row.entry, "{}", row.name);
+        let (entry, children) = judged(row, plant, &work);
+        let expected = row
+            .entry
+            .replace("{WORK}", work.to_str().expect("a UTF-8 work directory"));
+        assert_eq!(shown(&entry), expected, "{}", row.name);
         assert_eq!(children.confirms, row.confirms, "{}: confirms", row.name);
         let asked: Vec<(&str, &str)> = children
             .asked
@@ -199,6 +225,27 @@ fn each_row_gives_its_entry_and_asks_its_children() {
             .collect();
         assert_eq!(asked, row.asked, "{}: seed checks", row.name);
         fs::remove_dir_all(&work).expect("removed");
+    }
+}
+
+/// Every row gives its entry, its count of `confirm` calls and each seed check it asks, with the manifest
+/// that check runs.
+#[test]
+fn each_row_gives_its_entry_and_asks_its_children() {
+    let repository = Repository::new();
+    checks(&repository, &alpha(&repository), ROWS);
+}
+
+/// The run's `--runs` and `--rounds` decide the floor each profile's `next` must reach and the sweeps the
+/// reason names.
+#[test]
+fn the_runs_options_set_the_floor_and_the_sweeps_of_a_judgment() {
+    for (args, row) in WITH_OPTIONS {
+        let repository = Repository::new();
+        checks(&repository, &alpha_with(&repository, args), [row]);
+    }
+    if WITH_OPTIONS.is_empty() {
+        panic!("rows under other options");
     }
 }
 
@@ -221,14 +268,8 @@ fn a_sweep_judged_exits_0_or_1() {
 fn an_unreadable_confirm_error_output_fails_the_run_at_an_exit_4_alone() {
     let repository = Repository::new();
     let plant = alpha(&repository);
-    let held = ROWS
-        .iter()
-        .find(|row| row.name == "a_confirm_held_at_its_backlog_keeps_its_findings")
-        .expect("a row");
-    let caught = ROWS
-        .iter()
-        .find(|row| row.name == "a_confirmed_suspect_whose_seed_passes_on_the_head_is_caught")
-        .expect("a row");
+    let held = row("a_confirm_held_at_its_backlog_keeps_its_findings");
+    let caught = row("a_confirmed_suspect_whose_seed_passes_on_the_head_is_caught");
     let mut cases = vec![
         (held, Errors::Missing, Some("No such file or directory")),
         (caught, Errors::Missing, None),
@@ -239,7 +280,7 @@ fn an_unreadable_confirm_error_output_fails_the_run_at_an_exit_4_alone() {
     for (number, (row, errors, failed)) in cases.into_iter().enumerate() {
         let work = repository.scratch.join(format!("errors-{number}"));
         let (entry, _) = judged_with(row, &plant, &work, errors);
-        let reason = entry.reason().expect("a reason").to_string();
+        let reason = entry.reason().to_string();
         match failed {
             Some(error) => assert_eq!(
                 reason,
@@ -253,4 +294,47 @@ fn an_unreadable_confirm_error_output_fails_the_run_at_an_exit_4_alone() {
         }
         fs::remove_dir_all(&work).expect("removed");
     }
+}
+
+/// A `suspects.jsonl` that cannot be opened fails the run, named from the work directory, and asks no
+/// child.
+#[test]
+fn an_unreadable_suspect_list_fails_the_run() {
+    if is_root() {
+        return;
+    }
+    let repository = Repository::new();
+    let plant = alpha(&repository);
+    let work = repository.scratch.join("unreadable-list");
+    let caught = row("a_confirmed_suspect_whose_seed_passes_on_the_head_is_caught");
+    let list = work.join("plants/alpha/root/suspects.jsonl");
+    let place = work.join("plants/alpha");
+    private_dir(&place.join("root/manifests"));
+    let List::File(bytes) = caught.list else {
+        panic!("the row lists its suspects");
+    };
+    write(&list, bytes);
+    chmod(&list, 0o000);
+    let status = first_object(caught.status, "sweep-status").expect("an object");
+    let mut entry = Entry::new(&plant.0);
+    assert!(entry.archived(&pins("a1")));
+    let mut children = Children {
+        row: caught,
+        errors: Errors::Written,
+        place: place.clone(),
+        work: String::new(),
+        pins: pins("b0"),
+        confirms: 0,
+        asked: Vec::new(),
+    };
+    let sweep = Sweep::new(0, &status, &place, &work, &plant.1).expect("an exit of 0");
+    judge(&mut entry, &sweep, &mut children);
+    let entry = entry.finish(&work).expect("a result");
+    assert_eq!(
+        entry.reason().to_string(),
+        "the run failed: Permission denied (plants/alpha/root/suspects.jsonl)"
+    );
+    assert_eq!((children.confirms, children.asked.len()), (0, 0));
+    chmod(&list, 0o600);
+    fs::remove_dir_all(&work).expect("removed");
 }

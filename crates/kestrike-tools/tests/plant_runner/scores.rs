@@ -5,12 +5,15 @@ use std::fs;
 use std::path::Path;
 
 use kestrike_tools::json::{self, Value};
-use kestrike_tools::plants::score::{bytes, exit_code, lines, score};
-use kestrike_tools::plants::{Entry, NoVerdict, Options, Outcome, Plant};
+use kestrike_tools::plants::score::{bytes, exit_code, lines, result_line, score};
+use kestrike_tools::plants::{Entry, Finished, NoVerdict, Options, Outcome, Plant};
 use kestrike_tools::text::Text;
 
-use super::judgment::{alpha, judged_row};
+use super::judgment::{alpha, judged_row, pins, shown};
 use super::repository::{Repository, members, record};
+
+/// The miss cause of the plants of `unprofiled(CAUSE)`.
+const CAUSE: &str = r#"{"cause": "workload", "evidence": "no profile drives it"}"#;
 
 fn plants(repository: &Repository) -> Vec<Plant> {
     let Outcome::Run(inputs) = repository.prepare(&repository.call(&[])) else {
@@ -19,17 +22,16 @@ fn plants(repository: &Repository) -> Vec<Plant> {
     inputs.plants().to_vec()
 }
 
-/// `caused` is a fixture whose plants both name a miss cause, and whose `alpha` expects no profile.
-fn caused() -> Repository {
+/// `unprofiled` is a fixture whose plants expect no profile, each with the miss cause `cause`.
+fn unprofiled(cause: &str) -> Repository {
     let repository = Repository::new();
-    let cause = r#"{"cause": "workload", "evidence": "no profile drives it"}"#;
     for (id, file) in [("alpha", "src/lib.rs"), ("beta", "src/util.rs")] {
         let mut fields = members(id, file);
         for (name, value) in &mut fields {
             if name == "miss_cause" {
                 *value = cause.to_owned();
             }
-            if name == "expected" && id == "alpha" {
+            if name == "expected" {
                 *value = "[]".to_owned();
             }
         }
@@ -40,10 +42,6 @@ fn caused() -> Repository {
     }
     repository.commit();
     repository
-}
-
-fn shown(entry: &Entry) -> String {
-    json::text(&Value::Object(entry.members().clone()))
 }
 
 /// Each result leaves its members in the order the steps first set them: `suspect` for a catch alone,
@@ -77,29 +75,28 @@ fn each_result_leaves_its_members_in_order() {
         ),
         (
             r#"unswept without a cause"#,
-            r#"{"id":"alpha","row":7,"fix":{"pull_request":12,"commit":"0123abc"},"files":["src/lib.rs"],"proof":"tests::the_proof","campaign":"plant-alpha","profiles":["smoke","crash-loop"],"proof_exits":null,"commit":null,"tree":null,"archive":null,"counts":null,"runs":{},"controls":null,"histories":null,"keys":{},"head_failures":[],"result":"missed","reason":"no expected profile; no sweep ran","miss_cause":null}"#,
+            r#"{"id":"alpha","row":7,"fix":{"pull_request":12,"commit":"0123abc"},"files":["src/lib.rs"],"proof":"tests::the_proof","campaign":"plant-alpha","profiles":[],"proof_exits":null,"commit":"c","tree":"t","archive":"a","counts":null,"runs":{},"controls":null,"histories":null,"keys":{},"head_failures":[],"result":"missed","reason":"no expected profile; no sweep ran","miss_cause":null}"#,
         ),
     ];
-    let (plain, caused) = (Repository::new(), caused());
-    let (alpha, with_cause) = (plants(&plain).remove(0), plants(&caused).remove(0));
+    let (plain, caused, uncaused) = (Repository::new(), unprofiled(CAUSE), unprofiled("null"));
+    let alpha = plants(&plain).remove(0);
+    let (with_cause, without_cause) = (plants(&caused).remove(0), plants(&uncaused).remove(0));
     let work = Path::new("/work/of/the/run");
     for (name, expected) in rows {
-        let mut entry = Entry::new(if *name == "unswept" {
-            &with_cause
-        } else {
-            &alpha
+        let mut entry = Entry::new(match *name {
+            "unswept" => &with_cause,
+            "unswept without a cause" => &without_cause,
+            _ => &alpha,
         });
         match *name {
             "does not apply" => {
                 entry.does_not_apply(Text::from("error: patch failed: src/lib.rs:1"))
             }
-            "unswept" => {
+            "unswept" | "unswept without a cause" => {
                 entry.set_commit(&Text::from("c"));
                 entry.set_tree(&Text::from("t"));
-                entry.set_archive(&Text::from("a"));
-                entry.unswept();
+                assert!(!entry.archived(&pins("a")), "{name} has no sweep");
             }
-            "unswept without a cause" => entry.unswept(),
             proved => {
                 let exits: Vec<u8> = proved[6..]
                     .split(' ')
@@ -112,15 +109,30 @@ fn each_result_leaves_its_members_in_order() {
                 }
             }
         }
-        entry.finish(work);
+        let entry = entry.finish(work).expect("a result");
         assert_eq!(shown(&entry), *expected, "{name}");
     }
+}
+
+/// A plant that expects a profile goes on from its archive to its sweeps without a result, and an entry
+/// without a result, a live proof's included, finishes as `None`.
+#[test]
+fn an_entry_finishes_once_a_step_sets_its_result() {
+    let repository = Repository::new();
+    let alpha = plants(&repository).remove(0);
+    let mut entry = Entry::new(&alpha);
+    assert!(entry.archived(&pins("a")));
+    assert_eq!(entry.verdict(), None);
+    assert_eq!(entry.finish(Path::new("/w")), None);
+    let mut proved = Entry::new(&alpha);
+    proved.prove(0, 1);
+    assert_eq!(proved.finish(Path::new("/w")), None);
 }
 
 /// `settled` is a finished entry of `plant` with the result `result`, the way a run's steps set it: a
 /// catch through the judgment, a miss of a plant without a sweep, a proof that exits 1 twice, and any
 /// other result with the reason `the reason of NUMBER`.
-fn settled(result: &str, number: usize, plant: &(Plant, Options), work: &Path) -> Entry {
+fn settled(result: &str, number: usize, plant: &(Plant, Options), work: &Path) -> Finished {
     if result == "caught" {
         let entry = judged_row(
             "a_confirmed_suspect_whose_seed_passes_on_the_head_is_caught",
@@ -134,13 +146,12 @@ fn settled(result: &str, number: usize, plant: &(Plant, Options), work: &Path) -
     let reason = Text::from(format!("the reason of {number}"));
     match result {
         "not live" => entry.prove(1, 1),
-        "missed" => entry.unswept(),
+        "missed" => assert!(!entry.archived(&pins("a"))),
         "does not apply" => entry.does_not_apply(reason),
         "no verdict" => entry.no_verdict(&NoVerdict::plain(reason)),
         other => panic!("no result {other}"),
     }
-    entry.finish(work);
-    entry
+    entry.finish(work).expect("a result")
 }
 
 /// The score tallies results in the order they first occur, counts the caught and the missed plants,
@@ -245,10 +256,22 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
             1,
             None,
         ),
+        (
+            &[(r#"does not apply"#, false)],
+            r#"{"commit":"c0ffee","sentence":"0 of 0 plants at commit c0ffee","results":{"does not apply":1},"not_live":[],"settings":{"workers":28,"runs":300,"seconds":60,"rounds":10,"base_archive":null,"campaign_sha256":"0000000000000000000000000000000000000000000000000000000000000000","plants":["b","a"]},"plants":["alpha"]}"#,
+            &[
+                r#"0 of 0 plants at commit c0ffee"#,
+                r#"alpha: does not apply (the reason of 0)"#,
+            ],
+            3,
+            None,
+        ),
     ];
-    let (repository, with_causes) = (Repository::new(), caused());
+    let repository = Repository::new();
+    let (with_causes, without_causes) = (unprofiled(CAUSE), unprofiled("null"));
     let options = alpha(&repository).1;
-    let (plain, caused) = (plants(&repository), plants(&with_causes));
+    let plain = plants(&repository);
+    let (caused, uncaused) = (plants(&with_causes), plants(&without_causes));
     let json::Value::Object(settings) = json::parse(
         r#"{"workers": 28, "runs": 300, "seconds": 60, "rounds": 10, "base_archive": null,
             "campaign_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -259,20 +282,29 @@ fn a_score_tallies_its_results_and_gives_the_exit_code() {
     };
     let scratch = &repository.scratch;
     for &(results, expected, printed, code, written) in rows {
-        let entries: Vec<Entry> = results
+        let entries: Vec<Finished> = results
             .iter()
             .enumerate()
             .map(|(number, &(result, with_cause))| {
-                let plant = if with_cause {
-                    &caused[number % 2]
-                } else {
-                    &plain[number % 2]
+                let plant = match (result, with_cause) {
+                    ("missed", true) => &caused[number % 2],
+                    ("missed", false) => &uncaused[number % 2],
+                    _ => &plain[number % 2],
                 };
                 let work = scratch.join(format!("work-{number}"));
                 settled(result, number, &(plant.clone(), options.clone()), &work)
             })
             .collect();
         let scored = score("c0ffee", &entries, settings.clone());
+        let members: Vec<Value> = entries
+            .iter()
+            .map(|entry| Value::Object(entry.members().clone()))
+            .collect();
+        assert_eq!(
+            scored.get("plants"),
+            Some(&Value::Array(members)),
+            "{results:?}"
+        );
         let mut ids = scored.clone();
         let listed: Vec<Value> = entries
             .iter()
@@ -318,4 +350,25 @@ fn a_score_writes_every_value_python_writes() {
     let expected = "{\n  \"a\": [\n    NaN,\n    -Infinity,\n    1e+16,\n    0.1\n  ],\n  \"\\u00e9\": \
                     \"\\ud800\\u2028\",\n  \"b\": {}\n}\n";
     assert_eq!(bytes(&read), expected);
+}
+
+/// A reason with a line break stays one value in the score and spans two lines of the result line.
+#[test]
+fn a_reason_with_a_line_break_spans_its_result_line() {
+    let repository = Repository::new();
+    let alpha = plants(&repository).remove(0);
+    let work = Path::new("/work/of/the/run");
+    let mut entry = Entry::new(&alpha);
+    entry.no_verdict(&NoVerdict::plain(
+        "`campaign confirm` exited 2: one\ntwo in /work/of/the/run",
+    ));
+    let entry = entry.finish(work).expect("a result");
+    assert_eq!(
+        entry.reason().to_string(),
+        "`campaign confirm` exited 2: one\ntwo in <work>"
+    );
+    assert_eq!(
+        result_line(&entry).to_string(),
+        "alpha: no verdict (`campaign confirm` exited 2: one\ntwo in <work>)"
+    );
 }

@@ -6,41 +6,13 @@
 //! `keys` and `head_failures`, each `null` or empty until a step sets it. A result adds `result` and
 //! `reason`; a catch adds `suspect`, and a finished miss adds `miss_cause`.
 
-use std::fmt;
 use std::path::Path;
 
+use super::output::Pins;
 use super::record::Plant;
-use super::verdict::NoVerdict;
+use super::verdict::{NoVerdict, Verdict};
 use crate::json::{Integer, Object, Value};
 use crate::text::{Text, text};
-
-/// The five results of a plant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Verdict {
-    Caught,
-    Missed,
-    NoVerdict,
-    DoesNotApply,
-    NotLive,
-}
-
-impl Verdict {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Caught => "caught",
-            Self::Missed => "missed",
-            Self::NoVerdict => "no verdict",
-            Self::DoesNotApply => "does not apply",
-            Self::NotLive => "not live",
-        }
-    }
-}
-
-impl fmt::Display for Verdict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
 
 /// A plant's entry: the score's members for it, its result once a step sets one, and its record's miss
 /// cause.
@@ -100,27 +72,6 @@ impl Entry {
         self.verdict
     }
 
-    pub fn id(&self) -> &Text {
-        self.text("id").expect("an entry holds its id")
-    }
-
-    /// The reason of the result, `None` until a step sets one.
-    pub fn reason(&self) -> Option<&Text> {
-        self.text("reason")
-    }
-
-    /// The entry's members, in the order the steps first set them.
-    pub fn members(&self) -> &Object {
-        &self.members
-    }
-
-    fn text(&self, name: &str) -> Option<&Text> {
-        match self.members.get(name) {
-            Some(Value::String(text)) => Some(text),
-            _ => None,
-        }
-    }
-
     /// The campaign name, `plant-<id>`.
     pub(super) fn campaign(&self) -> &Text {
         &self.campaign
@@ -158,9 +109,18 @@ impl Entry {
         self.set("tree", string(tree));
     }
 
-    /// `set_archive` records the build digest of the planted tree's archive.
-    pub fn set_archive(&mut self, build: &Text) {
-        self.set("archive", string(build));
+    /// `archived` records the planted tree's archive build digest, and settles a plant with no expected
+    /// profile as missed. It returns whether the plant goes on to its sweeps.
+    #[must_use]
+    pub fn archived(&mut self, pins: &Pins) -> bool {
+        self.set("archive", string(pins.build()));
+        if self.profiles.is_empty() {
+            self.settle(
+                Verdict::Missed,
+                Text::from("no expected profile; no sweep ran"),
+            );
+        }
+        !self.profiles.is_empty()
     }
 
     /// `does_not_apply` is the result of a patch Git refuses, with Git's reason.
@@ -188,24 +148,53 @@ impl Entry {
         }
     }
 
-    /// `unswept` is the miss of a plant with no expected profile, once its archive builds.
-    pub fn unswept(&mut self) {
-        self.settle(
-            Verdict::Missed,
-            Text::from("no expected profile; no sweep ran"),
-        );
-    }
-
-    /// `finish` adds the record's miss cause to a miss and writes `<work>` in place of each occurrence of
-    /// the work directory `work` in the reason, since the score is a tracked file. A run finishes each
-    /// entry once, after its last step, and before it scores the entries.
-    pub fn finish(&mut self, work: &Path) {
-        if self.verdict == Some(Verdict::Missed) {
+    /// `finish` returns `None` until a step sets the result. It adds the record's miss cause to a miss and
+    /// replaces each occurrence of `work` in the reason with `<work>`.
+    pub fn finish(mut self, work: &Path) -> Option<Finished> {
+        let verdict = self.verdict?;
+        if verdict == Verdict::Missed {
             self.members.insert("miss_cause", self.miss_cause.clone());
         }
-        if let Some(reason) = self.reason() {
-            let replaced = reason.replace(&text!(work), &Text::from("<work>"));
-            self.members.insert("reason", Value::String(replaced));
-        }
+        let reason = match self.members.get("reason") {
+            Some(Value::String(reason)) => reason.replace(&text!(work), &Text::from("<work>")),
+            _ => panic!("a settled entry holds its reason"),
+        };
+        self.members.insert("reason", Value::String(reason.clone()));
+        let Some(Value::String(id)) = self.members.get("id") else {
+            panic!("an entry holds its id");
+        };
+        Some(Finished {
+            id: id.clone(),
+            reason,
+            verdict,
+            members: self.members,
+        })
+    }
+}
+
+/// [`Entry::finish`] returns `Finished` only after a step sets the plant's verdict.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Finished {
+    id: Text,
+    reason: Text,
+    verdict: Verdict,
+    members: Object,
+}
+
+impl Finished {
+    pub fn id(&self) -> &Text {
+        &self.id
+    }
+
+    pub fn verdict(&self) -> Verdict {
+        self.verdict
+    }
+
+    pub fn reason(&self) -> &Text {
+        &self.reason
+    }
+
+    pub fn members(&self) -> &Object {
+        &self.members
     }
 }

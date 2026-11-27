@@ -36,10 +36,11 @@ pub enum HelperVerdict {
 /// # Errors
 ///
 /// In this order: a tree without the run's lockfile ([`Kind::Relocked`]); exit 3 ([`Kind::Unbuilt`]);
-/// another exit than 0 or 1; the error `ask` returns; and a verdict the helper does not count.
+/// any remaining exit below 0 or above 1; an `Err` from `ask`, whose reason becomes a [`Kind::Plain`]
+/// no verdict; and a verdict the helper leaves uncounted.
 pub fn judge_rerun(
     rerun: &Rerun<'_>,
-    ask: impl FnOnce(i32, &Text) -> Result<HelperVerdict, NoVerdict>,
+    ask: impl FnOnce(i32, &Text) -> Result<HelperVerdict, Text>,
 ) -> Result<u8, NoVerdict> {
     let (proof, code) = (rerun.proof, rerun.code);
     let (log, kept) = (rerun.log, rerun.kept);
@@ -87,7 +88,7 @@ pub fn judge_rerun(
         }
     };
     let lines = Text::from(rerun.out).strip().splitlines();
-    let verdict = ask(code, lines.last().unwrap_or(&Text::new()))?;
+    let verdict = ask(code, lines.last().unwrap_or(&Text::new())).map_err(NoVerdict::plain)?;
     if let HelperVerdict::Uncounted { expected } = verdict {
         return Err(NoVerdict::plain(text!(
             "the rerun of the proof ",

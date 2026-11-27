@@ -281,10 +281,10 @@ fn a_verdict_the_helper_cannot_give_is_the_reruns_ending() {
         code: 1,
         out: "reproduced",
     };
-    let refused = NoVerdict::plain("the head's verdict check failed");
+    let refused = Text::from("the head's verdict check failed");
     assert_eq!(
         judge_rerun(&rerun, |_, _| Err(refused.clone())),
-        Err(refused)
+        Err(NoVerdict::plain(refused))
     );
 }
 
@@ -349,7 +349,8 @@ fn an_archive_prints_its_four_pins_as_text() {
                     other => panic!("{name}: {other:?}"),
                 };
                 let named = ["build", "executable", "platform", "toolchain"].map(pin);
-                assert_eq!(format!("{pins:?}"), format!("Pins([{}])", named.join(", ")));
+                let given: Vec<String> = pins.named().map(|(_, pin)| pin.repr()).collect();
+                assert_eq!(given, named);
                 assert_eq!(
                     Value::String(pins.build().clone()),
                     *printed.get("build").expect("a build")

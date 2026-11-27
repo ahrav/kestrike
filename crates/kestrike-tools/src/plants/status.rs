@@ -23,29 +23,26 @@ pub(crate) const OTHER: &str = "other";
 /// A profile's counters, each an integer of at least zero with `pass` ≤ `runs` ≤ `next`, its run range
 /// and the evidence members `replays` and `uncredited`, as its record holds them.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Runs(Object);
+pub struct Runs {
+    next: Integer,
+    runs: Integer,
+    members: Object,
+}
 
 impl Runs {
-    fn counter(&self, name: &str) -> &Integer {
-        match self.0.get(name) {
-            Some(Value::Integer(number)) => number,
-            _ => panic!("a profile's checked counters hold {name}"),
-        }
-    }
-
     /// The first run a next sweep runs.
     pub fn next(&self) -> &Integer {
-        self.counter("next")
+        &self.next
     }
 
     /// The runs counted.
     pub fn runs(&self) -> &Integer {
-        self.counter("runs")
+        &self.runs
     }
 
     /// The members `next`, `runs`, `pass`, `suspects`, `range`, `replays` and `uncredited`, in that order.
     pub(crate) fn members(&self) -> &Object {
-        &self.0
+        &self.members
     }
 }
 
@@ -70,27 +67,20 @@ pub fn profile_runs(status: &Object, profile: &Text) -> Result<Runs, NoVerdict> 
             return Err(NoVerdict::plain(text!(named, "names no profile ", profile)));
         }
     };
-    let mut values = Object::new();
-    let mut numbers = Vec::with_capacity(COUNTERS.len());
-    for name in COUNTERS {
-        match totals.get(name).and_then(natural_integer) {
-            Some(number) => {
-                numbers.push(number);
-                values.insert(name, Value::Integer(number.clone()));
-            }
-            _ => {
-                return Err(NoVerdict::plain(text!(
-                    named,
-                    "gives ",
-                    profile,
-                    " no count of ",
-                    COUNTERS.join(", ")
-                )));
-            }
-        }
-    }
-    let [following, ran, passed, _] = numbers[..] else {
-        unreachable!("each counter was read");
+    let counter = |name: &str| totals.get(name).and_then(natural_integer);
+    let (Some(following), Some(ran), Some(passed), Some(suspects)) = (
+        counter("next"),
+        counter("runs"),
+        counter("pass"),
+        counter("suspects"),
+    ) else {
+        return Err(NoVerdict::plain(text!(
+            named,
+            "gives ",
+            profile,
+            " no count of ",
+            COUNTERS.join(", ")
+        )));
     };
     if !(passed <= ran && ran <= following) {
         return Err(NoVerdict::plain(text!(
@@ -116,11 +106,20 @@ pub fn profile_runs(status: &Object, profile: &Text) -> Result<Runs, NoVerdict> 
             Value::Integer(last),
         ])
     };
-    values.insert("range", range);
+    let mut members = Object::new();
+    members.insert("next", Value::Integer(following.clone()));
+    members.insert("runs", Value::Integer(ran.clone()));
+    members.insert("pass", Value::Integer(passed.clone()));
+    members.insert("suspects", Value::Integer(suspects.clone()));
+    members.insert("range", range);
     for name in ["replays", "uncredited"] {
-        values.insert(name, totals.get(name).cloned().unwrap_or(Value::Null));
+        members.insert(name, totals.get(name).cloned().unwrap_or(Value::Null));
     }
-    Ok(Runs(values))
+    Ok(Runs {
+        next: following.clone(),
+        runs: ran.clone(),
+        members,
+    })
 }
 
 /// `held_suspects` is each profile of `status` with its suspect count, in the status's order, controls

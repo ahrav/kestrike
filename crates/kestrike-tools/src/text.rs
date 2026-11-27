@@ -7,8 +7,8 @@
 //! outside a UTF-8 sequence becomes the surrogate U+DC80 to U+DCFF, as Python's `surrogateescape` decodes
 //! it, and [`Text::to_os`] turns that surrogate back into the byte.
 //!
-//! A code point's encoding begins with a byte that begins no other code point's, so a match of one text's
-//! bytes inside another's starts and ends at code points.
+//! A code point's encoding begins with a leading byte, which never occurs as a continuation byte, so a
+//! match of one text's bytes inside another's starts and ends at code points.
 //!
 //! The whitespace rules are Python's: [`is_space`] holds for the characters `str.isspace()` takes, and
 //! [`Text::strip`], [`Text::split`] and [`Text::splitlines`] apply them as `str.strip()`, `str.split()` and

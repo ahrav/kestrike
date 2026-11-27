@@ -47,7 +47,7 @@ pub(crate) mod values;
 mod verdict;
 mod work;
 
-pub use entry::{Entry, Verdict};
+pub use entry::{Entry, Finished};
 pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
@@ -58,7 +58,7 @@ pub use seed::Manifest;
 pub use status::{Runs, profile_runs};
 pub use store::{SCORE, STORE};
 pub use suspects::Suspect;
-pub use verdict::{Kind, NoVerdict};
+pub use verdict::{Kind, NoVerdict, Verdict};
 
 #[cfg(test)]
 #[path = "../plants_tests.rs"]

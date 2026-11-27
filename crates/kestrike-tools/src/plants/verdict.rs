@@ -7,12 +7,34 @@ use std::path::Path;
 use super::files::strerror;
 use crate::text::{Text, text};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Caught,
+    Missed,
+    NoVerdict,
+    DoesNotApply,
+    NotLive,
+}
+
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Caught => "caught",
+            Self::Missed => "missed",
+            Self::NoVerdict => "no verdict",
+            Self::DoesNotApply => "does not apply",
+            Self::NotLive => "not live",
+        }
+    }
+}
+
 /// What a no verdict means for the plants after it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// The plant's own.
     Plain,
-    /// A proof rerun exited 3: the head's library tests do not build, so no test id reruns.
+    /// A proof rerun exits 3 when the tree's library tests fail to build. The failure applies to every test
+    /// id in that tree.
     Unbuilt,
     /// A proof rerun left the proof's worktree without the run's `Cargo.lock`.
     Relocked,
