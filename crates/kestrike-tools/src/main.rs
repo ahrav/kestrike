@@ -1,0 +1,22 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+use kestrike_tools::tools;
+
+fn main() -> ExitCode {
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    let [top, tool, rest @ ..] = args.as_slice() else {
+        eprintln!("kestrike-tools: usage: kestrike-tools TOP TOOL [ARGUMENT ...]");
+        return ExitCode::from(2);
+    };
+    let Some(entry) = tool.to_str().and_then(tools::entry) else {
+        eprintln!(
+            "kestrike-tools: no tool is named {}; the tools are {}",
+            tool.to_string_lossy(),
+            tools::NAMES.join(", ")
+        );
+        return ExitCode::from(2);
+    };
+    ExitCode::from(entry(&PathBuf::from(top), rest))
+}

@@ -155,6 +155,9 @@ watch host or the fuzz host, or change `crates/sim-host`, read
 Before you deploy, configure or run the zone reconciler service, or change
 `crates/kestrike-reconciler`, read `docs/agents/reconciler.md`.
 
+Before you start, add or change a tool under `crates/kestrike-tools`, change
+`scripts/tool.sh`, or port a script to a tool, read `docs/agents/tools.md`.
+
 Before you read, change or validate a file under `chaos/`, or report what a
 chaos campaign on the simulated Kestrike shows, read `docs/agents/chaos.md`.
 

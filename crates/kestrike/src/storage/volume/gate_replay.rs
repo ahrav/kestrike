@@ -61,7 +61,7 @@ use crate::storage::recovery::MetadataOutcome;
 const MODEL: &[u8] = include_bytes!("../../../../../quint/gate.qnt");
 /// The key of the model's state record in each trace state.
 const STATE: &str = "gateCase::gate::st";
-/// The traces `quint/gate_fixtures.py` writes: eighteen directed recipes, then eight seeded runs of twelve steps
+/// The traces `bash scripts/tool.sh gate_fixtures` writes: eighteen directed recipes, then eight seeded runs of twelve steps
 /// of the model's `step`, each named `step_` and its seed in hexadecimal.
 const FIXTURES: [(&str, &str); 26] = [
     (
