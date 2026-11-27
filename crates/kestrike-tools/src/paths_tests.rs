@@ -84,6 +84,23 @@ fn a_link_loop_stays_unresolved_unless_the_final_path_loops() {
         base.join("link/x"),
         "the components after a loop are normalized as written"
     );
+    assert_eq!(
+        resolve(&at("/loop//../y")).expect("resolves"),
+        base.join("y")
+    );
+    for (looping, named) in [
+        ("/loop", "/loop"),
+        ("/loop/x", "/loop/x"),
+        ("/loop//x", "/loop/x"),
+        ("//loop/./x", "/loop/x"),
+    ] {
+        let error = resolve(&at(looping)).expect_err("a looping final path is refused");
+        assert_eq!(
+            error.to_string(),
+            format!("symlink loop from {}", at(named).display()),
+            "{looping}"
+        );
+    }
     for looping in ["/loop", "/loop/x"] {
         let error = resolve(&at(looping)).expect_err("a looping final path is refused");
         assert_eq!(
