@@ -424,24 +424,25 @@ echo "stand-in: writing $name"
 cat "$replies/$name.reply" > "$out"
 "#;
 
-/// `write_script` writes an executable script from a child `sh`, so this process never holds a descriptor open
-/// for writing on the file. A child that another test thread forks inherits every descriptor of this
-/// process until its exec, and an exec of a file such a descriptor holds open fails with `ETXTBSY`.
+/// Writes the executable script at `path` through a child process, the one process that holds the file open
+/// for writing. `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and a child
+/// that another test thread forks inherits every descriptor of this process until its own `execve`. No
+/// descriptor of the script is open here, so the script starts whatever the other threads fork.
 fn write_script(path: &Path, text: &str) {
-    let mut child = Command::new("sh")
-        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
         .arg(path)
         .stdin(Stdio::piped())
         .spawn()
-        .expect("sh starts");
-    child
+        .expect("the script's writer starts");
+    writer
         .stdin
         .take()
-        .expect("the child's standard input is piped")
+        .expect("the writer's standard input is a pipe")
         .write_all(text.as_bytes())
-        .expect("the script reaches the child");
-    let status = child.wait().expect("sh is reaped");
-    assert!(status.success(), "{}: {status}", path.display());
+        .expect("the script's text reaches the writer");
+    let status = writer.wait().expect("the script's writer is reaped");
+    assert!(status.success(), "the script is written: {status}");
 }
 
 fn stand_in(
@@ -1381,7 +1382,7 @@ fn a_read_only_standard_stream_exits_120() {
         .arg(top())
         .args(["gate_fixtures", "-h"])
         .stdout(read_only())
-        .stderr(std::process::Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .expect("the binary starts");
     assert_eq!(help.code(), Some(120));

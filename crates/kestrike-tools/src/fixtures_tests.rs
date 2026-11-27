@@ -23,24 +23,25 @@ const GATE: Model = Model {
     limit: Duration::from_secs(120),
 };
 
-/// `script` writes an executable script from a child `sh`, so this process never holds a descriptor open
-/// for writing on the file. A child that another test thread forks inherits every descriptor of this
-/// process until its exec, and an exec of a file such a descriptor holds open fails with `ETXTBSY`.
+/// Writes the executable stand-in at `path` through a child process, the one process that holds the file open
+/// for writing. `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and a child
+/// that another test thread forks inherits every descriptor of this process until its own `execve`. No
+/// descriptor of the stand-in is open here, so the stand-in starts whatever the other threads fork.
 fn script(path: &Path, text: &str) {
-    let mut child = Command::new("sh")
-        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
         .arg(path)
         .stdin(Stdio::piped())
         .spawn()
-        .expect("sh starts");
-    child
+        .expect("the stand-in's writer starts");
+    writer
         .stdin
         .take()
-        .expect("the child's standard input is piped")
+        .expect("the writer's standard input is a pipe")
         .write_all(text.as_bytes())
-        .expect("the script reaches the child");
-    let status = child.wait().expect("sh is reaped");
-    assert!(status.success(), "{}: {status}", path.display());
+        .expect("the stand-in's text reaches the writer");
+    let status = writer.wait().expect("the stand-in's writer is reaped");
+    assert!(status.success(), "the stand-in is written: {status}");
 }
 
 fn checkout() -> PathBuf {
