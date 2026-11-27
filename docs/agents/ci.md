@@ -1447,14 +1447,34 @@ acknowledgements into it. The scanner compares the head with the merge base of
 the base and the head, so a change made only on the base side is no finding.
 
 A change that ignores an existing test or changes the condition of its
-conditional ignore (`ignore-existing`), or lowers a declared test budget
-(`budget-lowered`), fails the push and the CI step until a commit in
+conditional ignore (`ignore-existing`), lowers a declared test budget
+(`budget-lowered`), or removes a case of the tools crate (`case-removed`),
+fails the push and the CI step until a commit in
 the scanned range carries this line, with the `CLASS:PATH` key the report
 prints and a nonempty reason:
 
 ```text
 Weakens-Test: CLASS:PATH: REASON
 ```
+
+The report and the hint write each control character of a key as `\r` or
+`\x7f`; the acknowledging line carries the character itself, as Git stores
+the path.
+
+The scanner reads its rule for a case from the Git trees of the merge base and
+the head, apart from the build's check of the directory that
+[the tools guide](tools.md#adding-a-tool) describes. A case is a top-level
+entry of `crates/kestrike-tools/tests`: a regular file `<id>.rs`, or a
+directory `<id>` with a regular `mod.rs`, where `<id>` matches
+`[a-z][a-z0-9_]*` and is not `tools`; the rule counts `std` and the Rust
+keywords, which the build refuses.
+A tree without a regular `tools.rs`, the root of the one test executable, also
+recognizes `<id>/main.rs`, at the base and at the head alike. A case of the base
+blocks when the head holds no case of the same id; a change of shape for the
+same id passes, and a rename to another id is the absence of the old one. Its
+key names the base entry's path, such as
+`case-removed:crates/kestrike-tools/tests/mutants_diff`. Unit test files under
+`src/` are not cases.
 
 One line clears every finding of that class in that file. The scanner's other
 findings print and never block. A pushed ref with no comparison base prints
@@ -1794,7 +1814,10 @@ records with `"outcome": "timeout"`, without a class:
 
 The review workflow uses the `pull_request_target` trigger, so each review runs
 the base branch's copy of the workflow, and it runs for pull requests into
-`main` from branches of this repository. Its model token is a secret of the
+`main` from branches of this repository. The pinned action runs the review for
+an event of a person with write access to the repository or of the GitHub App
+`kestrike-swarm`, the one name its `allowed_bots` input holds, and fails the
+job for an event of any other App or bot. Its model token is a secret of the
 `claude-review` environment, which admits `main` and no other ref. A pull
 request stacked on another branch is reviewed when it is retargeted to `main`.
 `.github/CODEOWNERS` names the owner of `.github/`, and a ruleset on `main`
