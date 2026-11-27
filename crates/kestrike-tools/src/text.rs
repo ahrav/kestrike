@@ -10,6 +10,9 @@
 //! A code point's encoding begins with a leading byte, which never occurs as a continuation byte, so a
 //! match of one text's bytes inside another's starts and ends at code points.
 //!
+//! On Linux, [`text!`] builds a reason from literal words, texts, paths and counts, and each value's
+//! type writes itself through [`Piece`]; [`crate::json::Integer`] writes its digits.
+//!
 //! The whitespace rules are Python's: [`is_space`] holds for the characters `str.isspace()` takes, and
 //! [`Text::strip`], [`Text::split`] and [`Text::splitlines`] apply them as `str.strip()`, `str.split()` and
 //! `str.splitlines()` do with no argument.
@@ -427,11 +430,10 @@ impl PartialEq<&str> for Text {
 /// The reason builder `text!` and the values it writes, which the Linux tools use.
 #[cfg(target_os = "linux")]
 mod pieces {
-    use std::ffi::{OsStr, OsString};
+    use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
 
     use super::Text;
-    use crate::json::Integer;
 
     /// A value `text!` writes into a [`Text`]: a string as its code points, a path or an operating-system
     /// string as [`Text::from_os`] decodes it, and a number as its decimal digits.
@@ -469,12 +471,6 @@ mod pieces {
         }
     }
 
-    impl Piece for OsString {
-        fn push_to(&self, text: &mut Text) {
-            self.as_os_str().push_to(text);
-        }
-    }
-
     impl Piece for Path {
         fn push_to(&self, text: &mut Text) {
             self.as_os_str().push_to(text);
@@ -484,12 +480,6 @@ mod pieces {
     impl Piece for PathBuf {
         fn push_to(&self, text: &mut Text) {
             self.as_os_str().push_to(text);
-        }
-    }
-
-    impl Piece for Integer {
-        fn push_to(&self, text: &mut Text) {
-            text.push_str(&self.to_string());
         }
     }
 

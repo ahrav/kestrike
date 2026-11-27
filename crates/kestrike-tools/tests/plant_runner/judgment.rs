@@ -55,6 +55,9 @@ pub fn manifest_of(profile: &str) -> String {
     )
 }
 
+/// The rows whose `campaign confirm` writes no error output, so a read of it fails.
+const UNWRITTEN: &[&str] = &["a_confirm_exit_4_is_read_before_its_error_output"];
+
 /// What `campaign confirm` leaves of its error output.
 #[derive(Clone, Copy)]
 enum Errors {
@@ -141,7 +144,12 @@ pub fn row(name: &str) -> &'static Row {
 /// `judged` judges `plant` on `row` in the work directory `work` and returns its finished entry with the
 /// children's record of what they were asked.
 fn judged(row: &'static Row, plant: &(Plant, Options), work: &Path) -> (Finished, Children) {
-    judged_with(row, plant, work, Errors::Written)
+    let errors = if UNWRITTEN.contains(&row.name) {
+        Errors::Missing
+    } else {
+        Errors::Written
+    };
+    judged_with(row, plant, work, errors)
 }
 
 fn judged_with(

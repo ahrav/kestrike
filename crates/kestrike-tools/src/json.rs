@@ -1,5 +1,6 @@
-//! A JSON reader that preserves document order, and the writers [`text`], [`dump`], [`indented`] and
-//! [`indented_in_order`].
+//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`] and
+//! [`indented_in_order`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits, which adds, steps
+//! down by one and sums without passing that bound.
 //!
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
@@ -146,6 +147,13 @@ fn subtract_digits(left: &str, right: &str) -> String {
     }
     difference.reverse();
     String::from_utf8(difference).expect("digits are ASCII")
+}
+
+#[cfg(target_os = "linux")]
+impl crate::text::Piece for Integer {
+    fn push_to(&self, text: &mut Text) {
+        text.push_str(&self.to_string());
+    }
 }
 
 impl From<u64> for Integer {

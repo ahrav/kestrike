@@ -1,5 +1,6 @@
-//! The value tests of a plant record, each a predicate on one JSON value: Python's `str.strip` decides
-//! blank text and Python's `str.isspace` set is the whitespace.
+//! The value tests of a plant record, each a predicate on one JSON value, and [`natural_integer`], which
+//! reads the integer such a test admits: Python's `str.strip` decides blank text and Python's
+//! `str.isspace` set is the whitespace.
 
 use crate::json::{Integer, Value};
 use crate::text::Text;

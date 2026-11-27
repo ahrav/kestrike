@@ -1,6 +1,7 @@
 //! The record's value tests: `natural` holds for a JSON integer of at least its bound, and a boolean or a
 //! float is none; `count` holds for a positive integer; `text` holds for a string with a code point outside
-//! the whitespace `str.isspace` takes.
+//! the whitespace `str.isspace` takes. The status readers `unlisted_replay` and `held_suspects` on the
+//! statuses the judgment cannot reach.
 
 use crate::json::{Value, parse};
 use crate::plants::values::{count, natural, text};
@@ -131,6 +132,20 @@ fn a_status_may_hide_a_differing_replay_for_each_of_its_reasons() {
             Ok(None),
         ),
         (
+            r#"{"profiles": {"smoke": {"suspects": 1, "suspect_keys": {"b": 1}}}}"#,
+            &[("smoke", "a", 1)],
+            Ok(Some(
+                "`suspects.jsonl` lists 1 suspects of smoke under `a` and `campaign sweep-status` counts 0",
+            )),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 3, "suspect_keys": {"a": 1, "other": 2}}}}"#,
+            &[("smoke", "a", 2)],
+            Ok(Some(
+                "`suspects.jsonl` lists 2 suspects of smoke under `a` and `campaign sweep-status` counts 1",
+            )),
+        ),
+        (
             r#"{"profiles": [1]}"#,
             &[],
             Err("the run failed: `campaign sweep-status` profiles is no object"),
@@ -167,5 +182,24 @@ fn a_status_may_hide_a_differing_replay_for_each_of_its_reasons() {
             .map(|reason| reason.map(str::to_owned))
             .map_err(str::to_owned);
         assert_eq!(got, expected, "{status:?} {shown:?}");
+    }
+}
+
+/// A status with no object of profiles names none, whatever stands in its place.
+#[test]
+fn a_status_without_profiles_names_none() {
+    use crate::plants::status::held_suspects;
+    use crate::plants::verdict::Kind;
+
+    for status in [r#"{}"#, r#"{"profiles": null}"#, r#"{"profiles": []}"#] {
+        let Value::Object(status) = value(status) else {
+            panic!("an object");
+        };
+        let refused = held_suspects(&status).expect_err("no profiles");
+        assert_eq!(refused.kind(), Kind::Plain);
+        assert_eq!(
+            refused.reason().to_string(),
+            "`campaign sweep-status` names no profiles"
+        );
     }
 }

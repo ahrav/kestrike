@@ -8,7 +8,7 @@ use kestrike_tools::json::{self, Value};
 use kestrike_tools::plants::{
     HelperVerdict, Kind, NoVerdict, Rerun, archive_pins, first_object, judge_rerun, last_object,
 };
-use kestrike_tools::text::Text;
+use kestrike_tools::text::{Text, strip_str};
 
 enum Line {
     First,
@@ -79,6 +79,8 @@ fn a_command_line_reads_as_one_json_object() {
         ("\n{\"a\": 1}", Line::Last, Read::Object(r#"{"a":1}"#)),
         ("{\"a\": 1}\r\n", Line::First, Read::Object(r#"{"a":1}"#)),
         ("{\"a\": 1}\r\n", Line::Last, Read::Object(r#"{"a":1}"#)),
+        ("{\"a\": 1}\u{1f}", Line::Last, Read::Object(r#"{"a":1}"#)),
+        ("{\"a\": 1}\u{1c}\n", Line::Last, Read::Object(r#"{"a":1}"#)),
     ];
     for (text, line, read) in rows {
         let (got, what, given) = match line {
@@ -90,7 +92,7 @@ fn a_command_line_reads_as_one_json_object() {
             Line::Last => (
                 last_object(text, "sim run"),
                 "sim run",
-                text.trim().rsplit('\n').next(),
+                strip_str(text).rsplit('\n').next(),
             ),
         };
         let got = got
@@ -115,6 +117,39 @@ fn a_proof_rerun_is_judged_in_the_order_of_its_checks() {
     type Ending = Result<u8, (Kind, &'static str)>;
     type Asked = &'static [(i32, &'static str)];
     let rows: &[(bool, i32, &str, bool, Asked, Ending)] = &[
+        (
+            false,
+            2,
+            r#""#,
+            true,
+            &[],
+            Err((
+                Kind::Relocked,
+                r#"the rerun of the proof net::the_test left the proof's worktree without the run's Cargo.lock; its output is in proof/head-0.out"#,
+            )),
+        ),
+        (
+            false,
+            4,
+            r#""#,
+            true,
+            &[],
+            Err((
+                Kind::Relocked,
+                r#"the rerun of the proof net::the_test left the proof's worktree without the run's Cargo.lock; its output is in proof/head-0.out"#,
+            )),
+        ),
+        (
+            false,
+            -9,
+            r#""#,
+            true,
+            &[],
+            Err((
+                Kind::Relocked,
+                r#"the rerun of the proof net::the_test left the proof's worktree without the run's Cargo.lock; its output is in proof/head-0.out"#,
+            )),
+        ),
         (
             false,
             0,
