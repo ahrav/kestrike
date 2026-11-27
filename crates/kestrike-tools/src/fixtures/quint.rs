@@ -1,4 +1,4 @@
-//! [`run`] starts its monotonic timer after `spawn` returns successfully.
+//! [`run`] starts one `quint run` with the standard library's `Command` and waits for it under a time limit.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -17,7 +17,8 @@ pub enum Failure {
     Start(io::Error),
     Wait(io::Error),
     Exit(ExitStatus),
-    /// `status` records the child's actual exit status, including a natural exit between `try_wait` and `kill`.
+    /// The limit passed and the child was sent SIGKILL. `status` records the status the reap returned,
+    /// including a natural exit between the last poll and the signal.
     Limit {
         limit: Duration,
         status: Option<ExitStatus>,
@@ -32,7 +33,7 @@ impl fmt::Display for Failure {
             Self::Exit(status) => write!(f, "Quint ended with {status}"),
             Self::Limit { limit, .. } => write!(
                 f,
-                "Quint ran past {} seconds and was killed",
+                "Quint ran past {} seconds and was sent SIGKILL",
                 limit.as_secs_f64()
             ),
         }
@@ -40,7 +41,8 @@ impl fmt::Display for Failure {
 }
 
 /// `run` discards the child's standard output; the child inherits standard input, standard error and the
-/// environment.
+/// environment. The timer starts once `spawn` returns. A failed status read returns at once and sends the
+/// child no signal, since the child may already be reaped.
 pub fn run(
     program: &OsStr,
     args: &[OsString],
@@ -60,11 +62,7 @@ pub fn run(
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => return Err(Failure::Exit(status)),
             Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(Failure::Wait(error));
-            }
+            Err(error) => return Err(Failure::Wait(error)),
         }
         let elapsed = start.elapsed();
         if elapsed >= limit {

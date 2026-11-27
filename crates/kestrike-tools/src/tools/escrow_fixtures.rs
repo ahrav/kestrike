@@ -1,3 +1,10 @@
+//! Traces of the builder-escrow model, `quint/escrow.qnt`, for the replay against `Storage`.
+//!
+//! A directed trace follows one recipe at its volume; a seeded trace takes [`STEPS`] steps of the model's
+//! own `step` under the seed its name carries, at the volume beside the seed. Every trace records under
+//! `#meta.escrow` the model's digest, its seed, its number of steps, its volume and a directed trace's
+//! recipe, and the replay refuses a trace whose digest differs from the model's.
+
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -18,6 +25,8 @@ pub const SEEDS: [(u64, u64); 8] = [
     (0xe57, 315),
 ];
 
+/// The first four recipes equal `RUNS` of `quint/escrow_check.py`, which `quint/check.py` runs as checked
+/// runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str], u64); 6] = [
     ("an_exact_promise_succeeds_and_a_short_one_refuses", &[
@@ -33,10 +42,14 @@ pub const RECIPES: [(&str, &[&str], u64); 6] = [
     ("the_reserve_refuses_a_promise_of_exactly_the_allocatable_units", &[
         "claim", "claim", "promise(1, 3)", "unclaim", "promise(1, 3)",
     ], 315),
+    // Each exit of each placement cut: an unplaced cancel and drop, a partial cancel, a complete cancel and
+    // drop, and service returning a parked sequence one extent per call, then idle.
     ("every_exit_at_every_cut", &[
         "promise(1, 2)", "cancel(1)", "promise(2, 3)", "release(2)", "service", "promise(1, 3)", "place(1)",
         "cancel(1)", "promise(2, 2)", "place(2)", "place(2)", "release(2)", "service", "service", "service",
     ], 316),
+    // A claim refused beside two promises, a cancel of an unplaced builder beside a complete one, a promise
+    // refused beside two claims, the complete builder's cancel and an exact promise, then both claims return.
     ("refusals_beside_promises_and_claims", &[
         "promise(1, 3)", "promise(2, 2)", "claim", "place(1)", "place(1)", "place(1)", "cancel(2)", "claim", "claim",
         "promise(2, 2)", "cancel(1)", "promise(2, 3)", "unclaim", "unclaim",

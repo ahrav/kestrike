@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::args::{Given, Kind, Opt, Parsed, Reader, any};
+use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::git::{blob_texts, git, git_text, merge_base};
 use crate::json::Integer;
 use crate::text::strip_str;
@@ -317,7 +317,7 @@ fn fail(text: &str, code: u8) -> u8 {
 }
 
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
-    let reader = Reader::new(TOOL, USAGE, HELP, true, &OPTIONS);
+    let reader = Reader::new(TOOL, USAGE, HELP, Prefixes::Select, &OPTIONS);
     let values = match reader.parse(args) {
         Parsed::Run(values) => values,
         Parsed::Help(text) => {
@@ -332,11 +332,7 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
         }
         Parsed::Refused { code, text } => return fail(&text, code),
     };
-    let rev = |name: &str, absent: &str| match values.get(name) {
-        Given::Absent => OsString::from(absent),
-        Given::Empty => OsString::from("--"),
-        Given::Value(value) => value.clone(),
-    };
+    let rev = |name: &str, absent: &str| values.get(name).unwrap_or(OsStr::new(absent)).to_owned();
     let scanned = match scan(&rev("--base", ""), &rev("--head", "HEAD")) {
         Ok(Some(scanned)) => scanned,
         Ok(None) => return 0,

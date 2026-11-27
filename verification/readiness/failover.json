@@ -13,10 +13,10 @@
   }
  },
  "pins": {
-  "acceptance_sha256": "5601b3c51236eef374865c0f7644d5e0a30c8f59f70a7967c250367d64b84dc8",
-  "hardware_profiles_sha256": "6d5e24091344bdd9e3a81bdb561dafe9b8d1a439721185b4ac3cc8516085cb28",
+  "acceptance_sha256": "c1fe5479d372950e801600d1a9a0639a5b56755914d6f46bed553ef52fd9e81d",
+  "hardware_profiles_sha256": "59c6fa29977e65a781ee3f9190e77f544563dc5175c35a59d716cd226e2c4f12",
   "fis_profiles_sha256": "2c6a56d58a6a87f9721fe355ed74e0ed34162dafc7164ba3668e9d14243eb08d",
-  "gamedays_sha256": "99b8497219bc2a2981dfd0a43cbf796b308173accd94ebadd58e70e213d78c41",
+  "gamedays_sha256": "69a8ffb3d41037b0347933ca24f726e18f761d7d1d6c1a364e6db5fef1bf6b07",
   "runbooks_sha256": "035583ca90b9bf6991bfa24f122ea233a1c37c8480c1cc4646379dbff6a2d10a",
   "alarms_sha256": null
  },

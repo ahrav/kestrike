@@ -545,11 +545,16 @@ class PrePushChecks(unittest.TestCase):
                   and [getattr(target, "id", None) for target in node.targets] == ["OWNING"]]
         self.assertEqual(len(owning), 1)
         self.assertGreaterEqual(len(owning[0]), 9)
+        self.assertEqual({f"scripts/{name}" for name in owning[0]} & set(hook.GAMEDAY_OWN),
+                         {"scripts/gameday-judge.py"})
         for name in owning[0]:
             with self.subTest(readiness_hashes=name):
                 self.assertIn(hook.GAMEDAY_TEST[0], hook.checks_for([f"scripts/{name}"], set(), set()))
-                self.assertNotIn(hook.GAMEDAY_TEST[0],
-                                 hook.checks_for([f"scripts/{name}"], set(), set(), gameday_held=False))
+                unheld = hook.checks_for([f"scripts/{name}"], set(), set(), gameday_held=False)
+                if f"scripts/{name}" in hook.GAMEDAY_OWN:
+                    self.assertIn(hook.GAMEDAY_TEST[0], unheld)
+                else:
+                    self.assertNotIn(hook.GAMEDAY_TEST[0], unheld)
 
     def test_a_game_day_input_push_runs_the_isolated_self_test_and_its_failure_blocks(self):
         gameday = "test-gameday-judge.py"
@@ -1184,6 +1189,18 @@ class ChaosReceiptReplay(unittest.TestCase):
             source = ROOT / "chaos" / name
             (shutil.copytree if source.is_dir() else shutil.copy)(source, tree / "chaos" / name)
         shutil.copytree(ROOT / "chaos/tests/runs/fixture-upload-live", tree / "chaos/runs/fixture-upload-live")
+        # The validity judge holds a run only while its `scenario_row` is the digest of the scenario's row in the
+        # tree's ledger. The recorded run names `recorded` for `ks-upload-no-fault` and `chaos/ledger.json` gives
+        # `current`, so the copy names `current` and the judge writes the outcome `held`, which the held-receipt
+        # case requires. If the ledger row's digest differs from `current`, the judge writes `invalid` and that
+        # case fails.
+        recorded = "55b2c9cdf9b08a7be0ee2dcecac61ecb817747764a235bc4bfc22fe448d436d5"
+        current = "6733940892ad59f1e0cbf5747a891123187c1998b4412c59fe023675d7c61a31"
+        run = tree / "chaos/runs/fixture-upload-live/run.json"
+        record = json.loads(run.read_text())
+        if record["scenario_row"] == recorded:
+            record["scenario_row"] = current
+            run.write_text(json.dumps(record))
         (tree / "chaos/receipts/fixture-upload-live").mkdir(parents=True)
         receipt = tree / "chaos/receipts/fixture-upload-live/ks-upload-no-fault.json"
         subprocess.run([sys.executable, "-I", "-B", "chaos/judges/core/validity.py", "ks-upload-no-fault", "--evidence",
