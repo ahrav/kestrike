@@ -1807,7 +1807,7 @@ class LaneCancellation(unittest.TestCase):
         self.assertIn("### Workspace suite: selection credited", summary)
         self.assertIn(
             "- 1696 executed; ignored per crate: 0 campaign-monitor, 0 campaign-supervisor, "
-            "0 sim-host, 15 kestrike, 0 kestrike-aws, 0 kestrike-reconciler, 0 source-anchors, 0 spdk-sys",
+            "0 sim-host, 15 kestrike, 0 kestrike-aws, 0 kestrike-reconciler, 0 kestrike-tools, 0 source-anchors, 0 spdk-sys",
             summary,
         )
         revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True).stdout.strip()

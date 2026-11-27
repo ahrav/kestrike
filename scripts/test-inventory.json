@@ -638,6 +638,13 @@
         }
       }
     },
+    "kestrike-tools": {
+      "targets": [
+        "doc:kestrike_tools",
+        "kestrike_tools",
+        "fixture_writers"
+      ]
+    },
     "source-anchors": {
       "targets": [
         "source_anchors"

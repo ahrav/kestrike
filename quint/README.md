@@ -5579,7 +5579,8 @@ cancel that refunds twice (`RefundOnce`); and a placement that completes
 one extent early (`CompleteAtLast`). These are finite checks at the stated
 bounds. The replay against the Rust code is
 `storage::builder_tests::escrow_replay`, which replays committed traces
-that [escrow_fixtures.py](escrow_fixtures.py) regenerates.
+that `bash scripts/tool.sh escrow_fixtures --quint QUINT --output DIR`
+regenerates.
 
 ## Allowance model
 
@@ -7303,7 +7304,7 @@ stated bound; no refinement mapping to the implementation is claimed.
 
 ### Replay of the marklog model
 
-`python3 quint/marklog_fixtures.py --quint QUINT --output DIR` writes twelve
+`bash scripts/tool.sh marklog_fixtures --quint QUINT --output DIR` writes twelve
 traces with `quint run --mbt`, with `BOUND` set to each trace's length: six
 directed recipes and six traces of fourteen steps of the model's own `step`
 under pinned seeds. Each state after the first names the action taken and
