@@ -1,5 +1,6 @@
 pub mod args;
 pub mod fixtures;
+pub mod git;
 pub mod json;
 pub mod ownership;
 pub mod paths;
@@ -12,6 +13,8 @@ pub mod tools;
 mod args_tests;
 #[cfg(test)]
 mod fixtures_tests;
+#[cfg(test)]
+mod git_tests;
 #[cfg(test)]
 mod json_tests;
 #[cfg(test)]
