@@ -1,4 +1,11 @@
 //! A JSON reader that preserves document order, and the writers [`text`], [`dump`] and [`indented`].
+//!
+//! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
+//! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
+//! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
+//! last value, and `-0` reads as the integer zero. The reader refuses nesting past [`MAX_DEPTH`] and an integer
+//! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
+//! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -9,6 +16,7 @@ pub use crate::text::Text;
 /// The deepest nesting of arrays and objects the reader takes.
 pub const MAX_DEPTH: usize = 1000;
 
+/// The most decimal digits an integer token of [`parse`] and an [`Integer`] hold.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -22,7 +30,8 @@ pub enum Value {
     Null,
 }
 
-/// An integer of any length, held as its sign and its decimal digits without leading zeros.
+/// An integer of at most [`MAX_INTEGER_DIGITS`] decimal digits, held as its sign and its digits without
+/// leading zeros, so each writer emits only integers that [`parse`] reads back.
 ///
 /// Zero has `negative == false` and `digits == "0"`, so each integer has one representation and [`Ord`]
 /// compares integers numerically.
@@ -34,13 +43,16 @@ pub struct Integer {
 
 impl Integer {
     /// The integer that `negative` and the ASCII decimal `digits` spell, or `None` when `digits` is empty or
-    /// holds a byte other than a digit. `from_digits` strips leading zeros and maps all-zero digits to zero
-    /// whatever `negative` says.
+    /// holds a byte other than a digit, or when more than [`MAX_INTEGER_DIGITS`] digits remain after
+    /// `from_digits` strips leading zeros. All-zero digits give zero whatever `negative` says.
     pub fn from_digits(negative: bool, digits: &str) -> Option<Self> {
         if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
         }
         let digits = digits.trim_start_matches('0');
+        if digits.len() > MAX_INTEGER_DIGITS {
+            return None;
+        }
         Some(if digits.is_empty() {
             Self {
                 negative: false,
@@ -184,7 +196,9 @@ impl std::error::Error for Error {}
 ///
 /// # Errors
 ///
-/// `parse` returns an error when nesting exceeds [`MAX_DEPTH`] or a non-whitespace byte follows the value.
+/// `parse` returns an error for text that is no JSON value of the forms the module states, for nesting past
+/// [`MAX_DEPTH`], for an integer token of more than [`MAX_INTEGER_DIGITS`] digits, and when a
+/// non-whitespace byte follows the value. A successful parse can hold a non-finite float.
 pub fn parse(text: &str) -> Result<Value, Error> {
     let mut reader = Reader {
         text: text.as_bytes(),
@@ -457,12 +471,16 @@ fn error_at(offset: usize, reason: &'static str) -> Error {
     Error { offset, reason }
 }
 
+/// `dump` writes what [`text`] writes, then a newline.
 pub fn dump(value: &Value) -> String {
     let mut out = text(value);
     out.push('\n');
     out
 }
 
+/// `text` uses the layout of Python's `json.dumps(value, separators=(",", ":"))`: members in document order,
+/// `,` between items, `:` after a key, non-ASCII code points as `\uXXXX` escapes, and non-finite floats as
+/// `NaN`, `Infinity` and `-Infinity`.
 pub fn text(value: &Value) -> String {
     let mut out = String::new();
     write(value, &mut out, None).expect("the compact layout writes every float");
@@ -503,23 +521,14 @@ impl std::error::Error for NonFinite {}
 /// `depth` is `None` in the compact layout and the nesting depth of `value` in the indented layout.
 fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), NonFinite> {
     match value {
-        Value::Object(object) => {
+        Value::Object(object) if depth.is_some() => {
             let mut members: Vec<&(Text, Value)> = object.iter().collect();
-            if depth.is_some() {
-                members.sort_by(|left, right| left.0.cmp(&right.0));
-            }
-            write_items(
-                &members,
-                ('{', '}'),
-                depth,
-                out,
-                |(key, member), out, inner| {
-                    write_string(key, out);
-                    out.push_str(if inner.is_some() { ": " } else { ":" });
-                    write(member, out, inner)
-                },
-            )?;
+            members.sort_by(|left, right| left.0.cmp(&right.0));
+            write_items(&members, ('{', '}'), depth, out, |member, out, inner| {
+                write_member(member, out, inner)
+            })?;
         }
+        Value::Object(object) => write_items(&object.0, ('{', '}'), depth, out, write_member)?,
         Value::Array(items) => {
             write_items(items, ('[', ']'), depth, out, |item, out, inner| {
                 write(item, out, inner)
@@ -537,6 +546,16 @@ fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), No
         Value::Null => out.push_str("null"),
     }
     Ok(())
+}
+
+fn write_member(
+    (key, member): &(Text, Value),
+    out: &mut String,
+    inner: Option<usize>,
+) -> Result<(), NonFinite> {
+    write_string(key, out);
+    out.push_str(if inner.is_some() { ": " } else { ":" });
+    write(member, out, inner)
 }
 
 fn write_items<T>(

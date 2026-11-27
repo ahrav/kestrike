@@ -100,7 +100,7 @@ fn decode(bytes: &[u8]) -> (u32, usize) {
     }
 }
 
-/// `push_repr` appends `code` as Python's `repr` writes it inside the quotes. The caller escapes the quote
+/// `push_repr` appends `code` as [`Text::repr`] writes it inside the quotes. The caller escapes the quote
 /// character.
 pub(crate) fn push_repr(code: u32, out: &mut String) {
     match code {
@@ -268,7 +268,10 @@ impl Text {
         lines
     }
 
-    /// `repr` follows Python's `repr()` contract for `str`.
+    /// `repr` writes the text between single quotes, or between double quotes when it holds `'` and no `"`;
+    /// it writes a backslash, a tab, a line feed and a carriage return as their backslash escapes, and each
+    /// code point that the Unicode 13.0 data marks nonprintable as `\xXX`, `\uXXXX` or `\UXXXXXXXX`. An
+    /// unassigned code point, such as U+0378, is written as it is.
     pub fn repr(&self) -> String {
         let quote = if self.0.contains(&b'\'') && !self.0.contains(&b'"') {
             '"'

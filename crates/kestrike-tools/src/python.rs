@@ -1,4 +1,5 @@
-//! Python-style `len` and `int` for JSON values and `repr` for floats.
+//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, and [`say`], which writes one
+//! line with its control characters and surrogates escaped.
 
 use std::io::{self, Write};
 
@@ -10,6 +11,8 @@ use crate::text::{Text, is_space, push_backslashed, push_repr};
 /// The smallest positive `f64` is 2⁻¹⁰⁷⁴, giving `MAX_ROUND_DIGITS` = ⌊1074 × log10(2)⌋.
 pub const MAX_ROUND_DIGITS: usize = 323;
 
+/// `len` counts a string's Unicode scalar values, an array's items and an object's members, and returns
+/// `None` for an integer, a float, a boolean or `null`.
 pub fn len(value: &Value) -> Option<usize> {
     match value {
         Value::String(text) => Some(text.len()),
@@ -43,18 +46,10 @@ pub fn int(value: &Value) -> Result<Integer, String> {
         }
     };
     let refused = || format!("invalid literal for int() with base 10: {}", text.repr());
-    let codes: Vec<u32> = text.code_points().collect();
-    let start = codes
-        .iter()
-        .position(|&code| !int_space(code))
-        .unwrap_or(codes.len());
-    let end = codes
-        .iter()
-        .rposition(|&code| !int_space(code))
-        .map_or(start, |at| at + 1);
-    let trimmed = Text::from_code_points(codes[start..end].iter().copied())
-        .expect("the code points of a text are at most U+10FFFF");
-    let trimmed = trimmed.to_str().ok_or_else(refused)?;
+    let trimmed = text
+        .to_str()
+        .ok_or_else(refused)?
+        .trim_matches(|code: char| int_space(u32::from(code)));
     let (negative, body) = match trimmed.as_bytes().first() {
         Some(b'-') => (true, &trimmed[1..]),
         Some(b'+') => (false, &trimmed[1..]),
@@ -146,7 +141,8 @@ pub fn repr_float(value: f64) -> String {
 
 /// `round` rounds the exact binary value of a finite float to `digits` decimal places, breaking ties to
 /// even, as Python's `round(value, digits)` does. When `digits` exceeds [`MAX_ROUND_DIGITS`], the rounded
-/// decimal converts back to the original `f64`.
+/// decimal converts back to the original `f64`. An integer stays as it is, a boolean becomes the integer 0
+/// or 1, a non-finite float stays as it is, and a string, an array, an object or `null` gives `None`.
 pub fn round(value: &Value, digits: usize) -> Option<Value> {
     match value {
         Value::Integer(integer) => Some(Value::Integer(integer.clone())),

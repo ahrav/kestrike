@@ -1,3 +1,6 @@
+//! The binary takes the checkout's top level and a tool name, runs the tool with the remaining arguments
+//! and exits with the tool's code. A missing or unknown tool name exits 2.
+
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::PathBuf;

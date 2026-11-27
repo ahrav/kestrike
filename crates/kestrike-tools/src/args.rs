@@ -6,12 +6,15 @@ use std::os::unix::ffi::OsStrExt;
 
 use crate::text::Text;
 
+/// A check judges one value an option takes; its `Err` text follows `argument <names>: ` in the refusal.
 pub type Check = fn(&Text) -> Result<(), String>;
 
 pub fn any(_: &Text) -> Result<(), String> {
     Ok(())
 }
 
+/// One row of an option table: the names that select it, long names of the form `--name` and, on the help
+/// row alone, `-h`, and what it takes. [`Values::get`] looks a row up by any of its names.
 #[derive(Clone, Copy, Debug)]
 pub struct Opt {
     pub names: &'static [&'static str],
@@ -22,7 +25,13 @@ pub struct Opt {
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Help,
-    Value { required: bool, check: Check },
+    /// An option that takes one value. `required` asks only that the option appear: an explicit `--`
+    /// satisfies it without a call of `check`, and every other value, the empty string included, is checked
+    /// at each occurrence `parse` reaches.
+    Value {
+        required: bool,
+        check: Check,
+    },
 }
 
 impl Opt {
@@ -40,15 +49,20 @@ pub enum Given {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Values(Vec<(&'static str, Given)>);
+pub struct Values(Vec<(&'static [&'static str], Given)>);
 
 impl Values {
+    /// Returns what the command line gave for the row that lists `name`; any of a row's names selects it.
+    ///
+    /// # Panics
+    ///
+    /// `get` panics when no row of the option table lists `name`.
+    #[track_caller]
     pub fn get(&self, name: &str) -> &Given {
-        self.0
-            .iter()
-            .find(|(first, _)| *first == name)
-            .map(|(_, given)| given)
-            .unwrap_or_else(|| panic!("the option table names {name}"))
+        match self.0.iter().find(|(names, _)| names.contains(&name)) {
+            Some((_, given)) => given,
+            None => panic!("the option table names {name}"),
+        }
     }
 }
 
@@ -102,11 +116,17 @@ enum HelpRefusal<'a> {
 }
 
 impl<'t> Reader<'t> {
+    /// `tool` and `usage` open each refusal of code 2, which writes `usage`, a newline, then
+    /// `<tool>: error: <message>`; `help` is returned unchanged in [`Parsed::Help`]. When `abbrev` holds, a
+    /// unique prefix of a long name selects its row; an exact long name and the `-h` cluster rules apply
+    /// whatever `abbrev` says.
+    ///
     /// # Panics
     ///
-    /// `new` panics on any violation of these requirements: each option name starts with `-`, spans at least
-    /// two bytes, and occurs exactly once; the table holds exactly one `Kind::Help` row;
-    /// `-h` on the help row is the only permitted short name.
+    /// `new` panics on any violation of these requirements: each row lists at least one name; each option
+    /// name starts with `-`, spans at least two bytes, differs from `--`, and occurs exactly once in the
+    /// table; the table holds exactly one `Kind::Help` row; `-h`, permitted on the help row alone, is the
+    /// only short name.
     pub fn new(
         tool: &'t str,
         usage: &'t str,
@@ -195,49 +215,46 @@ impl<'t> Reader<'t> {
                 continue;
             };
             let option = &self.options[found.option];
-            let value = match (option.kind, found.explicit) {
-                (Kind::Help, Some(explicit)) => match help_explicit(found.string, explicit) {
-                    Ok(()) => None,
-                    Err(HelpRefusal::Ignored(rest)) => {
-                        return self.refuse(format!(
+            let check = match option.kind {
+                Kind::Help => {
+                    let Some(explicit) = found.explicit else {
+                        return Parsed::Help(self.help.to_owned());
+                    };
+                    return match help_explicit(found.string, explicit) {
+                        Ok(()) => Parsed::Help(self.help.to_owned()),
+                        Err(HelpRefusal::Ignored(rest)) => self.refuse(format!(
                             "argument {}: ignored explicit argument {}",
                             option.name(),
                             Text::from_os(OsStr::from_bytes(rest)).repr()
-                        ));
-                    }
-                    Err(HelpRefusal::IndexError) => {
-                        let text = format!(
-                            "{}: argument {}: string index out of range\n",
-                            self.tool,
-                            option.name()
-                        );
-                        return Parsed::Refused { code: 1, text };
-                    }
-                },
-                (Kind::Help, None) => None,
-                (Kind::Value { .. }, Some(explicit)) => Some(explicit),
-                (Kind::Value { .. }, None) => match kinds.get(at + 1) {
-                    Some(Arg::Value) => {
-                        at += 1;
-                        Some(args[at])
-                    }
-                    _ => {
-                        return self
-                            .refuse(format!("argument {}: expected one argument", option.name()));
-                    }
-                },
+                        )),
+                        Err(HelpRefusal::IndexError) => Parsed::Refused {
+                            code: 1,
+                            text: format!(
+                                "{}: argument {}: string index out of range\n",
+                                self.tool,
+                                option.name()
+                            ),
+                        },
+                    };
+                }
+                Kind::Value { check, .. } => check,
+            };
+            let value = match (found.explicit, kinds.get(at + 1)) {
+                (Some(explicit), _) => explicit,
+                (None, Some(Arg::Value)) => {
+                    at += 1;
+                    args[at]
+                }
+                (None, _) => {
+                    return self
+                        .refuse(format!("argument {}: expected one argument", option.name()));
+                }
             };
             at += 1;
-            let Some(value) = value else {
-                return Parsed::Help(self.help.to_owned());
-            };
             values[found.option] = if value == b"--" {
                 Given::Empty
             } else {
                 let value = OsStr::from_bytes(value);
-                let Kind::Value { check, .. } = option.kind else {
-                    unreachable!("a help option returns before it reaches a value");
-                };
                 if let Err(message) = check(&Text::from_os(value)) {
                     return self.refuse(format!("argument {}: {message}", option.name()));
                 }
@@ -264,7 +281,7 @@ impl<'t> Reader<'t> {
             let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
             return self.refuse(format!("unrecognized arguments: {}", shown.join(" ")));
         }
-        let names = self.options.iter().map(|option| option.names[0]);
+        let names = self.options.iter().map(|option| option.names);
         Parsed::Run(Values(names.zip(values).collect()))
     }
 
@@ -347,12 +364,6 @@ impl<'t> Reader<'t> {
                         string,
                         explicit: Some(&arg[2..]),
                     });
-                } else if string.starts_with(arg) {
-                    matches.push(Match {
-                        option,
-                        string,
-                        explicit: None,
-                    });
                 }
             }
         }
@@ -360,6 +371,9 @@ impl<'t> Reader<'t> {
     }
 }
 
+/// `help_explicit` judges the text attached to a help name: any text after `--help=` is ignored and
+/// refused, an empty attachment to `-h` (as in `-h=`) is the code-1 refusal, and an attachment of `h`s alone
+/// (as in `-hh`) is help.
 fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusal<'a>> {
     let short = string[1] != b'-';
     if !short {

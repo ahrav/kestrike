@@ -78,6 +78,12 @@ fn absent(error: &io::Error) -> bool {
 /// `shared_directories` returns, in lineage order, each existing member that a user other than this user
 /// and root owns or that has a [`SHARED`] bit. `stat` judges a link by its target.
 ///
+/// The lineage is `path` and its lexical parents, spelled as given, with `..` and links left unresolved: it
+/// ends at `/` (or `//`) for an absolute path and at `.` for a relative one, and a link member is judged by
+/// its target alone, not by the target's parents. The result covers the directories the kernel traverses
+/// for `path` only when `path` is absolute with its links resolved; [`make_private`] and
+/// [`foreign_toolchain_paths`] judge the same lineage.
+///
 /// # Errors
 ///
 /// A `stat` fails with an error other than `ENOENT` and `ENOTDIR`.
@@ -96,21 +102,6 @@ pub fn shared_directories(path: &Path) -> Result<Vec<PathBuf>, PathError> {
     Ok(found)
 }
 
-fn dirname(path: &[u8]) -> Vec<u8> {
-    let head = &path[..path
-        .iter()
-        .rposition(|&byte| byte == b'/')
-        .map_or(0, |at| at + 1)];
-    if head.iter().all(|&byte| byte == b'/') {
-        return head.to_vec();
-    }
-    let end = head
-        .iter()
-        .rposition(|&byte| byte != b'/')
-        .map_or(0, |at| at + 1);
-    head[..end].to_vec()
-}
-
 /// `traversed` returns each directory in which resolving an absolute `path` looks a name up, from the root
 /// down. It takes `..` as the lexical parent and replaces each of the first [`MAX_LINKS`] links it meets by
 /// its target's names, from `/` for an absolute target. For a path with no root it drops the first name and
@@ -120,20 +111,22 @@ fn dirname(path: &[u8]) -> Vec<u8> {
 ///
 /// Reading a link fails.
 pub fn traversed(path: &Path) -> Result<Vec<PathBuf>, PathError> {
-    let lineage = lineage(path);
-    let full = lineage[0].as_os_str().as_bytes();
-    let mut pending: std::collections::VecDeque<Vec<u8>> = full
+    let bytes = path.as_os_str().as_bytes();
+    let mut pending: std::collections::VecDeque<Vec<u8>> = bytes
         .split(|&byte| byte == b'/')
-        .filter(|name| !name.is_empty())
+        .filter(|name| !name.is_empty() && *name != b".")
         .map(<[u8]>::to_vec)
-        .skip(usize::from(!full.starts_with(b"/")))
+        .skip(usize::from(!bytes.starts_with(b"/")))
         .collect();
     let mut current = b"/".to_vec();
     let mut passed = Vec::new();
     let mut links = 0;
     while let Some(part) = pending.pop_front() {
         if part == b".." {
-            current = dirname(&current);
+            // `current` is absolute with single slashes and no trailing slash past the root, so its parent
+            // ends before its last slash, and the parent of `/` and of `/name` is `/`.
+            let last = current.iter().rposition(|&byte| byte == b'/').unwrap_or(0);
+            current.truncate(last.max(1));
             continue;
         }
         passed.push(path_of(&current));
@@ -182,14 +175,9 @@ impl fmt::Display for PrivateError {
     }
 }
 
-impl std::error::Error for PrivateError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(error) => Some(error),
-            Self::Shared(_) => None,
-        }
-    }
-}
+/// The `Display` text of `Io` is its [`PathError`]'s, which holds the I/O error's text, so the error reports
+/// no `source`.
+impl std::error::Error for PrivateError {}
 
 impl From<PathError> for PrivateError {
     fn from(error: PathError) -> Self {
@@ -205,13 +193,17 @@ fn ignored(error: &io::Error) -> bool {
     )
 }
 
-/// `status` returns the `stat` of `path`, or `None` for the errors that make Python's `Path.exists` and
-/// `Path.is_file` false: `ENOENT`, `ENOTDIR`, `EBADF` and `ELOOP`.
+/// `status` returns the `stat` of `path`, or `None` for a path absent by [`ignored`], the errors that make
+/// Python's `Path.exists` and `Path.is_file` false, and for a path that holds a NUL byte, which names no
+/// file.
 ///
 /// # Errors
 ///
 /// `stat` fails with another error.
 pub fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Ok(None);
+    }
     match fs::metadata(path) {
         Ok(status) => Ok(Some(status)),
         Err(error) if ignored(&error) => Ok(None),
@@ -221,8 +213,9 @@ pub fn status(path: &Path) -> Result<Option<fs::Metadata>, PathError> {
 
 /// `make_private` creates each member of `path`'s lineage for which `status` returns `Ok(None)`,
 /// outermost first, as a directory of mode 0700 under the umask, then refuses with
-/// [`PrivateError::Shared`] when [`shared_directories`] returns a member. Existing directories retain their
-/// modes and owners.
+/// [`PrivateError::Shared`] when [`shared_directories`] returns a member. An existing member, a file or
+/// another non-directory included, keeps its type, mode and owner, so `Ok(())` shows that no member is
+/// shared and does not show that `path` is a directory.
 ///
 /// # Errors
 ///
@@ -255,10 +248,11 @@ pub fn make_private(path: &Path) -> Result<(), PrivateError> {
     }
 }
 
-/// `foreign_toolchain_paths` returns flagged Cargo and rustup configuration paths under `root`: first what
-/// [`shared_directories`] returns for `root`, then, for each member of the lineage and each name of
-/// [`TOOLCHAIN_FILES`], the entry when its `lstat` succeeds and its `stat` fails, or when the entry or its
-/// target has an owner other than this user, root included, the target has a [`SHARED`] bit, or a
+/// `foreign_toolchain_paths` returns the flagged Cargo and rustup configuration entries of `root` and of
+/// each of its lexical parents: first what [`shared_directories`] returns for `root`, then, for each member
+/// of the lineage from `root` outward and each name of [`TOOLCHAIN_FILES`] in order, the entry when its
+/// `lstat` succeeds and its `stat` fails, or when the entry or its target has an owner other than the
+/// process's real uid (a root-owned entry or target is flagged), the target has a [`SHARED`] bit, or a
 /// directory [`traversed`] returns for the entry is itself shared.
 ///
 /// # Errors
@@ -333,8 +327,6 @@ impl fmt::Display for PathError {
     }
 }
 
-impl std::error::Error for PathError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
-    }
-}
+/// The `Display` text holds the path and the I/O error's text, so the error reports no `source`;
+/// [`PathError::error`] gives the I/O error itself.
+impl std::error::Error for PathError {}

@@ -1,5 +1,5 @@
-use crate::json::{Integer, Text, Value};
-use crate::python::{int, repr_float, round};
+use crate::json::{Integer, Text, Value, parse};
+use crate::python::{self, int, repr_float, round};
 
 #[test]
 fn repr_float_writes_the_shortest_digits_in_python_notation() {
@@ -110,7 +110,7 @@ fn int_truncates_a_finite_float_toward_zero() {
 
 #[test]
 fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
-    let rows: [(&str, String, Option<&str>); 10] = [
+    let rows: [(&str, String, Option<String>); 12] = [
         (
             "int('\\x1c12') raises ValueError",
             "\u{1c}12".to_owned(),
@@ -121,13 +121,27 @@ fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
             "12\u{1f}".to_owned(),
             None,
         ),
-        ("int('\\u300012')", "\u{3000}12".to_owned(), Some("12")),
-        ("int('\\x8512')", "\u{85}12".to_owned(), Some("12")),
+        (
+            "int('\\u300012')",
+            "\u{3000}12".to_owned(),
+            Some("12".to_owned()),
+        ),
+        (
+            "int('\\x8512')",
+            "\u{85}12".to_owned(),
+            Some("12".to_owned()),
+        ),
+        (
+            "int(' -1_2 \\u3000')",
+            " -1_2 \u{3000}".to_owned(),
+            Some("-12".to_owned()),
+        ),
+        ("int('-007')", "-007".to_owned(), Some("-7".to_owned())),
         ("int('0' * 4301) raises ValueError", "0".repeat(4301), None),
         (
             "int('1_' * 2150 + '1') has 2151 digits",
             format!("{}1", "1_".repeat(2150)),
-            Some("1"),
+            Some("1".repeat(2151)),
         ),
         (
             "int('ab' * 3000) raises ValueError",
@@ -147,25 +161,30 @@ fn int_strips_python_int_whitespace_and_refuses_past_the_digit_limit() {
         (
             "int(' ' + '1' * 4300 + ' ')",
             format!(" {} ", "1".repeat(4300)),
-            Some("1"),
+            Some("1".repeat(4300)),
         ),
     ];
     for (expression, given, python) in rows {
         let found = int(&Value::String(Text::from(given)));
         match python {
-            Some(digits) => assert!(
-                found.is_ok_and(|value| value.to_string().starts_with(digits)),
+            Some(digits) => assert_eq!(
+                found.map(|value| value.to_string()),
+                Ok(digits),
                 "{expression}"
             ),
             None => assert!(found.is_err(), "{expression}"),
         }
     }
-    let expression = "round(1.5, 400)";
-    assert_eq!(
-        round(&Value::Float(1.5), 400),
-        Some(Value::Float(1.5)),
-        "{expression}"
-    );
+    for (expression, digits) in [
+        ("round(1.5, 400)", 400),
+        ("round(1.5, 2**64 - 1)", usize::MAX),
+    ] {
+        assert_eq!(
+            round(&Value::Float(1.5), digits),
+            Some(Value::Float(1.5)),
+            "{expression} == 1.5"
+        );
+    }
 }
 
 #[test]
@@ -181,5 +200,71 @@ fn int_reports_the_digit_limit_only_for_a_run_of_digits_past_it() {
     for (expression, given, limit) in rows {
         let message = int(&Value::String(Text::from(given))).expect_err(expression);
         assert_eq!(message.contains("limit"), limit, "{expression}: {message}");
+    }
+}
+
+#[test]
+fn python_int_reads_the_forms_python_reads() {
+    let int = |text: &str| python::int(&parse(text).expect("the value parses"));
+    let integer = |negative, digits: &str| Integer::from_digits(negative, digits).expect("digits");
+    assert_eq!(int(r#""1_0""#), Ok(integer(false, "10")));
+    assert_eq!(int(r#"" +7 ""#), Ok(integer(false, "7")));
+    assert_eq!(int(r#""\u00a0-0\u3000""#), Ok(integer(false, "0")));
+    assert_eq!(
+        int(r#""\t\n\u000b\f\r\u0085 -12\u2028""#),
+        Ok(integer(true, "12"))
+    );
+    assert_eq!(int(r#""007""#), Ok(integer(false, "7")));
+    assert_eq!(int("true"), Ok(integer(false, "1")));
+    assert_eq!(int("12"), Ok(integer(false, "12")));
+    assert_eq!(int("-12"), Ok(integer(true, "12")));
+    for refused in [
+        r#""1__0""#,
+        r#""_1""#,
+        r#""1_""#,
+        r#""""#,
+        r#""0x1""#,
+        "[]",
+        "{}",
+        r#""- 1""#,
+    ] {
+        assert!(int(refused).is_err(), "{refused}");
+    }
+    // U+001C to U+001F are white space to `str.isspace()` but stay in the string `int()` reads, so a
+    // digit string that carries one at either end is refused.
+    for separator in ["\\u001c", "\\u001d", "\\u001e", "\\u001f"] {
+        for refused in [format!("\"{separator}5\""), format!("\"5{separator}\"")] {
+            assert!(int(&refused).is_err(), "{refused}");
+        }
+    }
+}
+
+#[test]
+fn python_len_counts_characters_items_and_members() {
+    let len = |text: &str| python::len(&parse(text).expect("the value parses"));
+    assert_eq!(len(r#""\u00e9a""#), Some(2));
+    assert_eq!(len("[1,[2,3]]"), Some(2));
+    assert_eq!(len(r#"{"a":1}"#), Some(1));
+    assert_eq!(len("7"), None);
+    assert_eq!(python::len(&Value::Bool(true)), None);
+}
+
+#[test]
+fn int_refuses_a_surrogate_at_an_edge_and_a_string_of_spaces_naming_the_whole_text() {
+    #[rustfmt::skip]
+    let rows: [(&str, &[u32], &str); 4] = [
+        ("int('\\ud800 1') raises ValueError", &[0xd800, 0x20, 0x31], "invalid literal for int() with base 10: '\\ud800 1'"),
+        ("int(' 1\\udc80') raises ValueError", &[0x20, 0x31, 0xdc80], "invalid literal for int() with base 10: ' 1\\udc80'"),
+        ("int('   ') raises ValueError", &[0x20, 0x20, 0x20], "invalid literal for int() with base 10: '   '"),
+        ("int('') raises ValueError", &[], "invalid literal for int() with base 10: ''"),
+    ];
+    for (expression, codes, python) in rows {
+        let text =
+            Text::from_code_points(codes.iter().copied()).expect("each code is at most U+10FFFF");
+        assert_eq!(
+            int(&Value::String(text)),
+            Err(python.to_owned()),
+            "{expression}"
+        );
     }
 }

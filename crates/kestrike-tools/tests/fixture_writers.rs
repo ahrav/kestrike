@@ -3,8 +3,9 @@
 //! arguments belong to another trace.
 
 use std::ffi::OsStr;
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, DirBuilder};
+use std::io;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,7 +24,6 @@ struct Writer {
     recipes: &'static [&'static str],
 }
 
-/// The `case.qnt` texts match `inputs` in `quint/<model>_check.py`.
 const WRITERS: [Writer; 3] = [
     Writer {
         tool: "escrow_fixtures",
@@ -123,18 +123,26 @@ fn top() -> PathBuf {
         .expect("the checkout's top level resolves")
 }
 
-/// `Scratch` owns the temporary directory and removes it on drop.
+/// `Scratch` is a directory the test process created itself, with mode 0700, and removes on drop. A name
+/// that already exists is left as it is and the next name is tried. The path is the resolved temporary
+/// directory and the new name, as the writers resolve `--output`.
 struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let at = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("kestrike-tools-test-{}-{at}", std::process::id()));
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).expect("the scratch directory is created");
-        Self(path)
+        loop {
+            let at = NEXT.fetch_add(1, Ordering::Relaxed);
+            let parent = std::env::temp_dir()
+                .canonicalize()
+                .expect("the temporary directory resolves");
+            let path = parent.join(format!("kestrike-tools-test-{}-{at}", std::process::id()));
+            match DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", path.display()),
+            }
+        }
     }
 }
 
@@ -156,6 +164,12 @@ fn committed(writer: &Writer) -> Vec<Committed> {
         .expect("the fixture directory reads")
         .map(|entry| entry.expect("the fixture directory lists").path())
         .map(|path| {
+            let kind = fs::symlink_metadata(&path).expect("a fixture's type reads");
+            assert!(
+                kind.is_file() && path.to_string_lossy().ends_with(".itf.json"),
+                "{} is a regular .itf.json file",
+                path.display()
+            );
             let bytes = fs::read(&path).expect("a committed trace reads");
             let text = std::str::from_utf8(&bytes).expect("a committed trace is UTF-8");
             let Value::Object(data) = json::parse(text).expect("a committed trace parses") else {
@@ -224,9 +238,10 @@ fn reply(trace: &Committed) -> String {
             }
         }
     }
-    json::dump(&Value::Object(data))
+    json::text(&Value::Object(data))
 }
 
+/// `expected_call` returns the arguments the writer passes to Quint for `trace`, each ended by a NUL byte.
 fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
     let record = object(
         object(trace.data.get("#meta"), "#meta").get(writer.model),
@@ -265,7 +280,7 @@ fn expected_call(writer: &Writer, trace: &Committed, output: &Path) -> String {
             .expect("the path is UTF-8")
             .to_owned(),
     );
-    call.join("\n")
+    call.iter().map(|arg| format!("{arg}\0")).collect()
 }
 
 const STAND_IN: &str = r#"#!/bin/sh
@@ -278,11 +293,12 @@ done
 name=${out##*/}
 name=${name%.itf.json}
 [ -f "$replies/$name.call" ] || { echo "stand-in: no trace $name" >&2; exit 3; }
-[ "$(printf '%s\n' "$@")" = "$(cat "$replies/$name.call")" ] || { echo "stand-in: a call of another trace" >&2; exit 3; }
+printf '%s\0' "$@" | cmp -s - "$replies/$name.call" || { echo "stand-in: a call of another trace" >&2; exit 3; }
 here=$(pwd -P)
 [ "${here##*/}" = "$name" ] || { echo "stand-in: $name runs outside its own directory" >&2; exit 3; }
 [ -f case.qnt ] || { echo "stand-in: no case.qnt in the working directory" >&2; exit 3; }
 echo "$name" >> "$replies/calls"
+echo "stand-in: writing $name"
 cat "$replies/$name.reply" > "$out"
 "#;
 
@@ -388,7 +404,24 @@ fn each_committed_trace_is_written_byte_for_byte() {
                 fs::read_to_string(output.join(name).join("case.qnt")).expect("case.qnt reads");
             assert_eq!(case, expected, "{}: case.qnt of {name}", writer.tool);
         }
-        let entries = fs::read_dir(&output).expect("the output lists").count();
+        let mut entries = 0;
+        for entry in fs::read_dir(&output).expect("the output lists") {
+            let path = entry.expect("the output lists").path();
+            let kind = fs::symlink_metadata(&path).expect("an entry's type reads");
+            let name = path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .expect("a UTF-8 name");
+            let trace = name.strip_suffix(".itf.json").unwrap_or(name);
+            assert!(
+                traces.iter().any(|committed| committed.name == trace)
+                    && (kind.is_file() == name.ends_with(".itf.json"))
+                    && (kind.is_dir() != name.ends_with(".itf.json")),
+                "{}: {name} is a trace file or a trace directory",
+                writer.tool
+            );
+            entries += 1;
+        }
         assert_eq!(
             entries,
             2 * traces.len(),
@@ -456,10 +489,16 @@ fn help_prints_the_usage_on_standard_output_and_exits_0() {
 fn an_unknown_tool_exits_2() {
     let result = run("check", &[]);
     assert_eq!(result.status.code(), Some(2));
-    assert_eq!(
-        stderr(&result),
-        "kestrike-tools: no tool is named check; the tools are escrow_fixtures, gate_fixtures, marklog_fixtures, mutants-diff\n"
-    );
+    let line = stderr(&result);
+    let tools = line
+        .strip_prefix("kestrike-tools: no tool is named check; the tools are ")
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .unwrap_or_else(|| panic!("{line}"));
+    let tools: Vec<&str> = tools.split(", ").collect();
+    assert!(tools.is_sorted(), "{line}");
+    for writer in &WRITERS {
+        assert!(tools.contains(&writer.tool), "{line}");
+    }
 }
 
 #[test]
@@ -499,13 +538,20 @@ fn an_existing_trace_directory_exits_1_at_that_trace_and_keeps_the_earlier_ones(
 fn a_quint_that_exits_1_ends_the_run_with_exit_1() {
     let scratch = Scratch::new();
     let quint = scratch.0.join("quint");
-    write_script(&quint, "#!/bin/sh\nexit 1\n");
+    write_script(
+        &quint,
+        "#!/bin/sh\necho 'quint: on standard output'\necho 'quint: on standard error' >&2\nexit 1\n",
+    );
     let output = scratch.0.join("out");
     let result = write_traces(&WRITERS[1], &quint, &output);
     assert_eq!(result.status.code(), Some(1));
+    assert!(
+        result.stdout.is_empty(),
+        "Quint's standard output is discarded"
+    );
     assert_eq!(
         stderr(&result),
-        "gate_fixtures: passes: Quint ended with exit status: 1\n"
+        "quint: on standard error\ngate_fixtures: passes: Quint ended with exit status: 1\n"
     );
     assert!(!output.join("passes.itf.json").exists());
     assert!(!output.join("busy_then_foreign_registrant").exists());
@@ -517,11 +563,13 @@ fn a_short_trace_exits_1_naming_the_trace_and_keeps_quints_bytes() {
     let scratch = Scratch::new();
     let output = scratch.0.join("out");
     let short = |trace: &Committed| {
-        let mut data = trace.data.clone();
+        let Ok(Value::Object(mut data)) = json::parse(&reply(trace)) else {
+            panic!("a reply parses as an object");
+        };
         if let Some(Value::Array(states)) = data.get_mut("states") {
             states.pop();
         }
-        json::dump(&Value::Object(data))
+        json::text(&Value::Object(data))
     };
     let quint = stand_in(&scratch.0, writer, &output, short);
     let result = write_traces(writer, &quint, &output);
@@ -573,10 +621,15 @@ fn a_trace_with_null_and_a_float_keeps_both() {
     let written = fs::read_to_string(output.join("passes.itf.json")).expect("the trace is written");
     let expression = "json.dumps(json.loads('{\"x\":null,\"y\":1.5e-7}'), separators=(',', ':'))";
     let python = "{\"x\":null,\"y\":1.5e-07}";
-    assert!(
-        written.contains(&python[1..python.len() - 1]),
-        "{expression}: {written}"
-    );
+    let passes = committed_trace(writer, "passes");
+    let expected = std::str::from_utf8(&passes.bytes)
+        .expect("a committed trace is UTF-8")
+        .replacen(
+            "\"vars\"",
+            &format!("{},\"vars\"", &python[1..python.len() - 1]),
+            1,
+        );
+    assert_eq!(written, expected, "{expression}");
 }
 
 #[test]
@@ -600,6 +653,8 @@ fn a_relative_output_resolves_against_the_working_directory() {
     assert!(output.join("step_6b0d.itf.json").exists());
 }
 
+/// With `--quint=--`, the fixture writer creates the first trace directory, writes the model copy and `case.qnt`
+/// there, then exits with status 1.
 #[test]
 fn an_empty_quint_value_exits_1_after_the_first_trace_directory_is_written() {
     let scratch = Scratch::new();
@@ -648,4 +703,361 @@ fn a_refusal_on_a_full_standard_error_exits_120() {
         .output()
         .expect("the binary starts");
     assert_eq!(result.status.code(), Some(120));
+}
+
+fn committed_trace(writer: &Writer, name: &str) -> Committed {
+    committed(writer)
+        .into_iter()
+        .find(|trace| trace.name == name)
+        .unwrap_or_else(|| panic!("{name} is committed"))
+}
+
+fn parsed(text: &str) -> Object {
+    match json::parse(text) {
+        Ok(Value::Object(data)) => data,
+        other => panic!("a reply parses as an object: {other:?}"),
+    }
+}
+
+#[test]
+fn an_empty_output_value_exits_1_before_quint_starts_and_writes_nothing() {
+    let scratch = Scratch::new();
+    let here = scratch.0.join("here");
+    fs::create_dir(&here).expect("the working directory is made");
+    let marker = scratch.0.join("called");
+    let quint = scratch.0.join("quint");
+    write_script(
+        &quint,
+        &format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    );
+    let result = Command::new(BINARY)
+        .arg(top())
+        .args([
+            "gate_fixtures".as_ref(),
+            "--quint".as_ref(),
+            quint.as_os_str(),
+        ])
+        .arg("--output=--")
+        .current_dir(&here)
+        .output()
+        .expect("the binary starts");
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        stderr(&result),
+        "gate_fixtures: argument --output: the value `--` leaves no path\n"
+    );
+    assert_eq!(fs::read_dir(&here).expect("the directory lists").count(), 0);
+    assert!(!marker.exists(), "Quint never starts");
+}
+
+#[test]
+fn the_format_is_copied_from_quints_meta_and_a_missing_one_exits_1() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        let mut data = parsed(&reply(trace));
+        let Some(Value::Object(meta)) = data.get_mut("#meta") else {
+            panic!("a reply has #meta");
+        };
+        match trace.name.as_str() {
+            "passes" => meta.insert("format", Value::String("ITF-x".into())),
+            _ => {
+                meta.remove("format");
+            }
+        }
+        json::text(&Value::Object(data))
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    let first = fs::read_to_string(output.join("passes.itf.json")).expect("the first trace reads");
+    let expected = String::from_utf8(committed_trace(writer, "passes").bytes)
+        .expect("a committed trace is UTF-8")
+        .replacen(r#""format":"ITF""#, r#""format":"ITF-x""#, 1);
+    assert_eq!(first, expected);
+    let file = output.join("busy_then_foreign_registrant.itf.json");
+    assert_eq!(
+        stderr(&result),
+        format!(
+            "gate_fixtures: {}: the trace has no '#meta' record with a 'format'\n",
+            file.display()
+        )
+    );
+    assert_eq!(
+        fs::read(&file).expect("Quint's trace stays"),
+        fs::read(scratch.0.join("replies/busy_then_foreign_registrant.reply"))
+            .expect("the reply reads")
+    );
+    assert!(!output.join("acquire_conflict").exists());
+}
+
+#[test]
+fn a_trace_the_reader_refuses_exits_1_naming_its_file_and_the_byte() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        let mut text = reply(trace);
+        text.insert(text.len() - 1, ',');
+        text
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    let shown = stderr(&result);
+    let prefix = format!(
+        "gate_fixtures: {}: ",
+        output.join("passes.itf.json").display()
+    );
+    assert!(
+        shown.starts_with(&prefix) && shown.contains(" at byte ") && shown.ends_with('\n'),
+        "json.loads of a trace ending in ',}}' raises JSONDecodeError: {shown}"
+    );
+    assert_eq!(shown.lines().count(), 1, "{shown}");
+}
+
+#[test]
+fn a_trace_without_states_exits_1_naming_its_file() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        let mut data = parsed(&reply(trace));
+        data.remove("states");
+        json::text(&Value::Object(data))
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        stderr(&result),
+        format!(
+            "gate_fixtures: {}: the trace has no key 'states'\n",
+            output.join("passes.itf.json").display()
+        )
+    );
+}
+
+#[test]
+fn a_seeded_marklog_step_without_picks_exits_1_naming_its_file() {
+    let writer = &WRITERS[2];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        let mut data = parsed(&reply(trace));
+        if trace.name == "step_6b01"
+            && let Some(Value::Array(states)) = data.get_mut("states")
+            && let Some(Value::Object(state)) = states.get_mut(1)
+        {
+            state.remove("mbt::nondetPicks");
+        }
+        json::text(&Value::Object(data))
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        stderr(&result),
+        format!(
+            "marklog_fixtures: {}: no key 'mbt::nondetPicks'\n",
+            output.join("step_6b01.itf.json").display()
+        )
+    );
+    assert!(!output.join("step_6b02").exists());
+}
+
+#[test]
+fn a_quint_that_cannot_start_exits_1_naming_the_trace() {
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let result = write_traces(&WRITERS[1], Path::new("/nonexistent/quint"), &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        stderr(&result).starts_with("gate_fixtures: passes: Quint did not start: "),
+        "{}",
+        stderr(&result)
+    );
+    assert!(!output.join("busy_then_foreign_registrant").exists());
+}
+
+/// Quint runs in the trace's directory, so a relative `--quint` with a `/` names a file there: from
+/// `<scratch>/out/<name>/`, `../../quint` is the stand-in, while from the test's working directory, the
+/// crate's directory, it names the checkout's `quint/` directory.
+#[test]
+fn a_relative_quint_with_a_slash_names_a_file_in_the_trace_directory() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    stand_in(&scratch.0, writer, &output, reply);
+    let result = write_traces(writer, Path::new("../../quint"), &output);
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    assert!(output.join("step_1228.itf.json").exists());
+}
+
+/// The stand-in compares the whole argument vector, argument boundaries included, so a recorded call that
+/// joins two arguments into one is refused and the writer exits 1 after the stand-in's own line.
+#[test]
+fn the_stand_in_refuses_a_call_that_differs_from_the_recorded_one() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, reply);
+    let call = scratch.0.join("replies/passes.call");
+    let recorded = fs::read_to_string(&call).expect("the call reads");
+    let joined = recorded.replacen("--invariant\0safety\0", "--invariant safety\0", 1);
+    assert_ne!(joined, recorded);
+    fs::write(&call, joined).expect("the call is rewritten");
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        stderr(&result),
+        "stand-in: a call of another trace\ngate_fixtures: passes: Quint ended with exit status: 3\n"
+    );
+}
+
+/// The state count compares the length of the `states` value, so a string or an object of `steps + 1`
+/// characters or members passes the check and is written under the writer's record.
+#[test]
+fn a_states_value_of_the_right_length_passes_the_count_whatever_its_type() {
+    for (writer, name) in [
+        (
+            &WRITERS[0],
+            "an_exact_promise_succeeds_and_a_short_one_refuses",
+        ),
+        (&WRITERS[1], "passes"),
+    ] {
+        let scratch = Scratch::new();
+        let output = scratch.0.join("out");
+        let replace = |data: &mut Object| {
+            let Some(Value::Array(states)) = data.get("states") else {
+                panic!("a committed trace holds states");
+            };
+            let count = states.len();
+            let value = if writer.model == "escrow" {
+                Value::String("s".repeat(count).as_str().into())
+            } else {
+                let mut members = Object::new();
+                for at in 0..count {
+                    members.insert(format!("m{at}"), Value::Bool(true));
+                }
+                Value::Object(members)
+            };
+            data.insert("states", value);
+        };
+        let quint = stand_in(&scratch.0, writer, &output, |trace| {
+            let mut data = parsed(&reply(trace));
+            if trace.name == name {
+                replace(&mut data);
+            }
+            json::text(&Value::Object(data))
+        });
+        let result = write_traces(writer, &quint, &output);
+        assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+        let mut expected = committed_trace(writer, name).data;
+        replace(&mut expected);
+        assert_eq!(
+            fs::read_to_string(output.join(format!("{name}.itf.json"))).expect("the trace reads"),
+            json::dump(&Value::Object(expected)),
+            "{}",
+            writer.tool
+        );
+    }
+}
+
+#[test]
+fn a_read_only_standard_stream_exits_120() {
+    let read_only = || fs::File::open("/dev/null").expect("/dev/null opens");
+    let help = Command::new(BINARY)
+        .arg(top())
+        .args(["gate_fixtures", "-h"])
+        .stdout(read_only())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the binary starts");
+    assert_eq!(help.code(), Some(120));
+    let refusal = Command::new(BINARY)
+        .arg(top())
+        .args(["gate_fixtures", "--bogus"])
+        .stderr(read_only())
+        .status()
+        .expect("the binary starts");
+    assert_eq!(refusal.code(), Some(120));
+}
+
+/// `reverse_sets` reverses every `#set` array inside `value`.
+fn reverse_sets(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(reverse_sets),
+        Value::Object(object) => {
+            if let Some(Value::Array(items)) = object.get_mut("#set") {
+                items.reverse();
+            }
+            let keys: Vec<String> = object
+                .iter()
+                .map(|(key, _)| {
+                    key.to_str()
+                        .expect("a trace key holds no surrogate")
+                        .to_owned()
+                })
+                .collect();
+            for key in keys {
+                if let Some(member) = object.get_mut(&key) {
+                    reverse_sets(member);
+                }
+            }
+        }
+        Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::Bool(_) | Value::Null => {}
+    }
+}
+
+/// A seeded marklog `call` lists a set's pages in ascending order whatever order Quint's `#set` holds.
+#[test]
+fn a_seeded_marklog_call_sorts_the_pages_of_each_set() {
+    let writer = &WRITERS[2];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let mut reversed = 0;
+    for trace in committed(writer) {
+        let mut data = parsed(&reply(&trace));
+        let before = json::text(&Value::Object(data.clone()));
+        if let Some(states) = data.get_mut("states") {
+            reverse_sets(states);
+        }
+        if json::text(&Value::Object(data)) != before && trace.name.starts_with("step_") {
+            reversed += 1;
+        }
+    }
+    assert!(
+        reversed > 0,
+        "some seeded trace holds a set of two or more pages"
+    );
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        let mut data = parsed(&reply(trace));
+        if let Some(states) = data.get_mut("states") {
+            reverse_sets(states);
+        }
+        json::text(&Value::Object(data))
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    for trace in committed(writer)
+        .iter()
+        .filter(|trace| trace.name.starts_with("step_"))
+    {
+        let Value::Object(written) = json::parse(
+            &fs::read_to_string(output.join(format!("{}.itf.json", trace.name)))
+                .expect("the trace reads"),
+        )
+        .expect("the trace parses") else {
+            panic!("the trace is an object");
+        };
+        let calls = |data: &Object| match data.get("states") {
+            Some(Value::Array(states)) => states
+                .iter()
+                .map(|state| match state {
+                    Value::Object(state) => state.get("call").map(json::text),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!("a trace holds states"),
+        };
+        assert_eq!(calls(&written), calls(&trace.data), "{}", trace.name);
+    }
 }

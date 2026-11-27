@@ -166,6 +166,18 @@ fn an_undecodable_byte_reads_as_a_surrogate_and_writes_back_as_the_byte() {
         None,
         "os.fsencode('\\ud800') raises UnicodeEncodeError"
     );
+    for code in [0xdc00, 0xdc7f, 0xdd00, 0xdfff] {
+        assert_eq!(
+            text(&[code]).to_os(),
+            None,
+            "os.fsencode(chr({code:#x})) raises UnicodeEncodeError"
+        );
+    }
+    assert_eq!(
+        text(&[0xdc80, 0xdcff]).to_os(),
+        Some(OsString::from_vec(b"\x80\xff".to_vec())),
+        "os.fsencode('\\udc80\\udcff') == b'\\x80\\xff'"
+    );
     assert_eq!(Text::from("\u{e9}").to_str(), Some("\u{e9}"));
     assert_eq!(text(&[0x61, 0xdcff]).len(), 2);
 }
@@ -186,7 +198,10 @@ fn texts_order_by_code_point() {
 
 #[test]
 fn repr_escapes_each_unprintable_range_up_to_its_bounds() {
-    let expression = "[(c, chr(c).isprintable()) for c in sorted({c for low, high in UNPRINTABLE for c in (low - 1, low, high, high + 1)}) if unicodedata.category(chr(c)) != 'Cn']";
+    let expression = "bad = [c for c in range(0x110000) if unicodedata.category(chr(c)) != 'Cn' and not chr(c).isprintable()]; \
+        ranges = [(bad[0], bad[0])]; \
+        [ranges.__setitem__(-1, (ranges[-1][0], c)) if c == ranges[-1][1] + 1 else ranges.append((c, c)) for c in bad[1:]]; \
+        [(c, chr(c).isprintable()) for c in sorted({c for low, high in ranges for c in (low - 1, low, high, high + 1) if 0 <= c <= 0x10ffff}) if unicodedata.category(chr(c)) != 'Cn']";
     #[rustfmt::skip]
     let python: &[(u32, bool)] = &[(0x0, false), (0x1f, false), (0x20, true), (0x7e, true), (0x7f, false), (0xa0, false), (0xa1, true), (0xac, true), (0xad, false), (0xae, true), (0x600, false), (0x605, false), (0x606, true), (0x61b, true), (0x61c, false), (0x6dc, true), (0x6dd, false), (0x6de, true), (0x70f, false), (0x710, true), (0x8e1, true), (0x8e2, false), (0x8e3, true), (0x167f, true), (0x1680, false), (0x1681, true), (0x180d, true), (0x180e, false), (0x2000, false), (0x200f, false), (0x2010, true), (0x2027, true), (0x2028, false), (0x202f, false), (0x2030, true), (0x205e, true), (0x205f, false), (0x2064, false), (0x2066, false), (0x206f, false), (0x2070, true), (0x3000, false), (0x3001, true), (0xd800, false), (0xf8ff, false), (0xf900, true), (0xfeff, false), (0xfff9, false), (0xfffb, false), (0xfffc, true), (0x110bc, true), (0x110bd, false), (0x110be, true), (0x110cd, false), (0x13430, false), (0x13438, false), (0x1bc9f, true), (0x1bca0, false), (0x1bca3, false), (0x1d172, true), (0x1d173, false), (0x1d17a, false), (0x1d17b, true), (0xe0001, false), (0xe0020, false), (0xe007f, false), (0xf0000, false), (0xffffd, false), (0x100000, false), (0x10fffd, false)];
     for &(code, printable) in python {
