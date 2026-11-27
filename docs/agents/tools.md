@@ -81,25 +81,35 @@ unit test file has a registration line. A port still adds one sorted `pub mod` l
    included, stand inside its directory: rustc reads a tool root through `#[path]` and resolves a `mod`
    line or a relative `#[path]` inside it beside the root, and every `<id>.rs` directly under
    `src/tools/` is a tool. A tool with unit test files of its own is therefore a directory, whose
-   `mod.rs` declares them with `#[cfg(test)] mod tests;` or `#[path = "<m>_tests.rs"]`.
+   `mod.rs` declares them with `#[cfg(test)] mod tests;` or `#[path = "<m>_tests.rs"]`. A test module
+   whose items another test file uses is declared `pub(crate) mod tests;`, as `src/paths.rs` declares
+   the one that holds `Scratch`.
 4. Add an integration case under `crates/kestrike-tools/tests/`: a file `<case>.rs`, or a directory
-   `<case>/` with `mod.rs` and its helpers beside it. A file case holds no `mod` line, since its
-   `mod h;` would read `tests/h.rs`, itself a case. A helper that several cases share is a case
+   `<case>/` with `mod.rs` and its helpers beside it. A file case declares no module file, since its
+   `mod h;` would read `tests/h.rs`, itself a case; an inline `mod h { ... }` is fine. A helper that several cases share is a case
    directory of its own, which the others reach as `crate::<helper>`. Every case is a module of the one
    test executable `tools`, built from `crates/kestrike-tools/tests/tools.rs`, so a test `<rest>` of a
-   case has the id `<case>::<rest>`, and one process runs every case. `scripts/test-inventory.json` lists
+   case has the id `<case>::<rest>`, and one process runs every case: the tests of all cases run as
+   threads of one libtest process, so a setting that applies to the whole process (the umask, the
+   working directory, the environment, a signal disposition, a resource limit) is made in a child
+   process the case starts, or it holds for every case. `scripts/test-inventory.json` lists
    the package's targets, `doc:kestrike_tools`, `kestrike_tools` and `tools`, and a case adds no line
    there.
 
-In both directories an entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular file
-`mod.rs`, with `<id>` matching `[a-z][a-z0-9_]*`; the directory's own root (`src/tools/mod.rs`,
-`tests/tools.rs`) is skipped. Any other entry stops the build with its path: a directory without
-`mod.rs`, a file of another type or name, a link, `<id>.rs` beside `<id>/`, a name outside the
-pattern, a Rust keyword, or a name the including file already uses (`core`, `std` and `tests` under
-`src/tools/`; `core`, `kestrike_tools` and `std` under `tests/`). The build script reads listings, so an
-untracked file counts, an editor's swap or lock file among them: while one stands in either directory,
-every build of the package stops. A tool root without `NAME` or `run` is rustc's unresolved-name error,
-and two tools of one name are rustc's `unreachable pattern` error.
+In both directories the build script checks each entry whose name starts with a byte other than `.` and
+that is a directory, a link to one, or named `*.rs`; the directory's own root (`src/tools/mod.rs`,
+`tests/tools.rs`) is skipped. It passes over every other entry, so an editor's swap or lock file, a
+backup `x.rs~`, a merge's `x.rs.orig`, `.gitkeep` and `README.md` leave the build as it is. A checked
+entry is a regular file `<id>.rs` or a directory `<id>/` that holds a regular file `mod.rs`, with `<id>`
+matching `[a-z][a-z0-9_]*`. Any other checked entry stops the build with its path: a directory without
+`mod.rs`, a link, `<id>.rs` beside `<id>/`, a name outside the pattern, a Rust keyword, or a name the
+including file reserves (`std` and `tests` under `src/tools/`; `std` and `tools` under `tests/`). The build script reads listings, so an untracked file counts. A tool root without
+`NAME` or `run` is rustc's unresolved-name error, and two tools of one name are rustc's
+`unreachable pattern` error.
+
+`cargo fmt --all -- --check` reaches neither the tool roots nor the case files, since they are declared
+through `include!`. The `rust-format` job and the rustfmt over every tracked Rust file that `AGENTS.md`
+names format them.
 
 A change under either directory reruns the build script, so the next call of `scripts/tool.sh`
 rebuilds the binary. Cargo compares the times of the directories and their entries with its last run,
@@ -108,7 +118,8 @@ that holds the directory is unpacked with its times: a missed tool's call exits 
 refusal, and a missed case fails `every_entry_of_tests_is_a_case` in
 `crates/kestrike-tools/tests/tools.rs`. Removing `target/tools` repairs a missed tool, and removing the
 test run's own target directory repairs a missed case. The generated declarations name each file by its
-absolute path, so a copy of the checkout builds into a target directory of its own.
+absolute path, so a copy of the checkout builds into a target directory of its own, and rustc's
+diagnostics and a panic's location name a tool or case file by its absolute path.
 
 The change that makes a tool startable deletes its script and the script's self-test with `git rm`, and
 edits each caller's command text.
