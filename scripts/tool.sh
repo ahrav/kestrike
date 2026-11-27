@@ -14,7 +14,8 @@ fail() {
 
 prepare() {
   local +x source directory top workflow line value at pin='' pins=0 rustup entry rest shown host='' hosts=0
-  local +x installed toolchain found cargo rustc wrapper name log extra
+  local +x installed toolchain found cargo rustc wrapper name log extra cache built
+  local +x -n ref
   local +x chunks=() fields=() lines=()
   source=${BASH_SOURCE[0]}
   [[ $source == */* ]] || source=./$source
@@ -26,6 +27,17 @@ prepare() {
     [[ $source == /* ]] || source=$directory/$source
   done
   [[ $source == */* ]] || source=./$source
+
+  # Each variable the preparation clears or sets must be writable. Bash preserves the caller's value when
+  # `unset`, `export` or a prefix assignment of a readonly variable fails, so that value can reach the
+  # build. A name reference reads the attributes of a declared variable that holds no value too.
+  set +u
+  for ref in RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
+    RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTDOC RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
+    CARGO_BUILD_BUILD_DIR "${!CARGO_PROFILE_@}" "${!CARGO_BUILD_@}" "${!CARGO_TARGET_@}"; do
+    [[ ${!ref} == CARGO_BUILD_JOBS || ${ref@a} != *r* ]] || fail "the variable ${!ref} is readonly"
+  done
+  set -u
 
   # rustup and Cargo run in the top level. Before changing to it, the preparation resolves a relative
   # RUSTUP_HOME and CARGO_HOME, and finds `rustup` on PATH, in the caller's physical directory. The
@@ -103,7 +115,7 @@ prepare() {
   done <<<"$installed"
   [[ -n $found ]] ||
     fail "the pinned toolchain $pin-$host is not installed; install it with: rustup toolchain install $pin"
-  cargo=$("$rustup" which --toolchain "$pin" cargo 2>/dev/null) ||
+  cargo=$("$rustup" which --toolchain "$pin" cargo 2>/dev/null) && [[ $cargo == /* ]] ||
     fail "the pinned toolchain $pin-$host has no cargo"
   rustc=${cargo%/*}/rustc
   [[ -x $rustc ]] || fail "the pinned toolchain $pin-$host has no rustc"
@@ -124,10 +136,24 @@ prepare() {
   unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTDOC
   # The full name `<pin>-<host>`, which the list showed, names the toolchain directory that Cargo reads
   # under a set RUSTUP_HOME to fingerprint rustc for that cache.
-  if ! log=$(RUSTUP_TOOLCHAIN=$pin-$host RUSTC=$rustc RUSTC_WRAPPER=$wrapper RUSTC_WORKSPACE_WRAPPER=$wrapper \
-    CARGO_BUILD_BUILD_DIR=target/tools "$cargo" build --quiet --package kestrike-tools --bin kestrike-tools \
-    --target "$host" --target-dir "$top/target/tools" 2>&1); then
+  export RUSTUP_TOOLCHAIN=$pin-$host RUSTC=$rustc RUSTC_WRAPPER=$wrapper RUSTC_WORKSPACE_WRAPPER=$wrapper \
+    CARGO_BUILD_BUILD_DIR=target/tools
+
+  # Cargo can reuse cached `rustc -vV` output for an unchanged rustc executable. The preparation starts
+  # the pinned rustc itself, in the build's environment, so a rustc that cannot start fails the call.
+  cache=$top/target/tools/.rustc_info.json
+  built=
+  if log=$("$rustc" -vV 2>&1); then
+    [[ ! -L $cache && (-f $cache || ! -e $cache) ]] || fail "$cache is not a regular file"
+    log=$("$cargo" build --quiet --package kestrike-tools --bin kestrike-tools --target "$host" \
+      --target-dir "$top/target/tools" 2>&1) && built=yes
+  fi
+  if [[ -z $built ]]; then
     printf '%s\n' "$log" >&2 || true
+    # Removing the cache file makes the next call's Cargo run its rustc probes again.
+    if [[ -f $cache && ! -L $cache ]]; then
+      command rm -f -- "$cache" || true
+    fi
     fail "the build of kestrike-tools failed"
   fi
   printf '%s' "$top/target/tools/$host/debug/kestrike-tools"

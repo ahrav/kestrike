@@ -4,9 +4,10 @@
 //! `rustup`, and a `git` and a `cargo` that each log a decoy line. The `rustup` stand-in prints its
 //! `show`, `toolchain list` and `which` answers from files under `answers/`, writes a line to standard
 //! error, and logs each call with its working directory, its rustup and Cargo homes and its rustup
-//! variables. The `cargo` that `which` names stands beside an executable `rustc`; it writes a line to
-//! each stream, logs its arguments and directory, records its environment, and writes a binary that logs
-//! and prints its build's number, then prints its arguments. The stand-ins log each argument in brackets,
+//! variables. The `cargo` that `which` names stands beside a `rustc`, and each of the two writes a line
+//! to each stream, logs its arguments and directory and records its environment; `rustc` fails where
+//! its answer file says so, and `cargo` writes a binary that logs and prints its build's number, then
+//! prints its arguments. The stand-ins log each argument in brackets,
 //! so a merged, split or extra argument changes the logged line, and the scratch tree's path holds a space.
 //! Each case checks the complete call log. A decoy's line, a missing resolution, a skipped build or an
 //! earlier build's binary causes a log mismatch. A successful call's standard error must equal the
@@ -96,6 +97,20 @@ echo 'the binary on standard error' >&2
 exit 7
 EOF
 chmod 755 "$binary.new" && mv -f "$binary.new" "$binary"
+"#;
+
+const RUSTC: &str = r#"#!/bin/sh
+root='@ROOT@'
+args=
+for arg; do args="$args[$arg]"; done
+printf 'rustc %s|%s\n' "$args" "$(pwd -P)" >> "$root/log"
+env > "$root/rustc.env"
+echo 'rustc 1.99.0 (stand-in)'
+echo 'warning: the stand-in rustc on standard error' >&2
+if [ -e "$root/answers/rustc-fails" ]; then
+  echo 'error: the stand-in rustc fails' >&2
+  exit 1
+fi
 "#;
 
 const DECOY: &str = r#"#!/bin/sh
@@ -282,7 +297,7 @@ impl Tree {
             script(&tree.at(decoy), &tree.fill(DECOY));
         }
         script(&tree.at("toolchain/bin/cargo"), &tree.fill(CARGO));
-        script(&tree.at("toolchain/bin/rustc"), "#!/bin/sh\nexit 0\n");
+        script(&tree.at("toolchain/bin/rustc"), &tree.fill(RUSTC));
         tree
     }
 
@@ -305,6 +320,11 @@ impl Tree {
 
     fn workflow(&self) -> PathBuf {
         self.at("top/.github/workflows/agent-checks.yml")
+    }
+
+    /// Cargo's cache of rustc's answers under the build directory.
+    fn cache(&self) -> PathBuf {
+        self.at("top/target/tools/.rustc_info.json")
     }
 
     fn binary(&self) -> PathBuf {
@@ -404,6 +424,7 @@ impl Tree {
             rustup("[show]"),
             rustup("[toolchain][list]"),
             rustup(&format!("[which][--toolchain][{pin}][cargo]")),
+            format!("rustc [-vV]|{top}"),
             format!(
                 "cargo [build][--quiet][--package][kestrike-tools][--bin][kestrike-tools][--target]\
                  [{HOST}][--target-dir][{top}/target/tools]|{top}"
@@ -491,6 +512,7 @@ fn built_with(tree: &Tree, caller: &[(&str, &str)], rustc: &str, wrapper: &str) 
         expected.insert(name.to_owned(), value.to_owned());
     }
     assert_eq!(tree.environment("cargo.env"), expected);
+    assert_eq!(tree.environment("rustc.env"), expected);
 }
 
 enum Pin {
@@ -869,10 +891,11 @@ fn relative_homes_and_path_resolve_against_the_callers_directory() {
     homes("binary.env", Some("rustup-home"), Some("cargo-home"));
 }
 
-/// Each call resolves the toolchain, runs one build and starts the binary that build left: cold, warm
-/// twice, with the binary dated a day ahead, with a source dated in the year 2000, and with the lock
-/// file changed and then absent. Each build gets the pinned toolchain's full name, the rustc beside its
-/// cargo, the `/usr/bin/env` wrappers and the cleared variables.
+/// Each call resolves the toolchain, starts the pinned `rustc -vV` once, runs one build and starts the
+/// binary that build left: cold, warm twice, with the binary dated a day ahead, with a source dated in the
+/// year 2000, and with the lock file changed and then absent. Each build and its `rustc -vV` get the
+/// pinned toolchain's full name, the rustc beside its cargo, the `/usr/bin/env` wrappers and the cleared
+/// variables. A successful call leaves Cargo's cache file as it stands.
 #[test]
 fn cargo_is_asked_on_every_call() {
     let tree = Tree::new(workflow_text("\n").as_bytes());
@@ -939,11 +962,14 @@ fn cargo_is_asked_on_every_call() {
         built_with(&tree, &caller, &rustc, WRAPPER);
     }
 
+    fs::write(tree.cache(), "{}").expect("the cache is written");
     tree.answer("build-noop", Some(""));
     let output = start();
     ran("a build that compiles nothing", &output, 7);
     assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 7));
     built_with(&tree, &caller, &rustc, WRAPPER);
+    let cache = fs::read_to_string(tree.cache()).expect("a successful call keeps the cache");
+    assert_eq!(cache, "{}");
 }
 
 /// Where the pinned rustc's path holds a `=`, which `/usr/bin/env` would read as an assignment, both
@@ -973,16 +999,20 @@ fn a_rustc_path_with_an_equals_sign_gets_the_empty_wrappers() {
 
 /// With a working binary of an earlier call in place, each state the launcher refuses exits 127 with its
 /// line and starts no binary: rustup absent from `PATH`, a `show` that names no host, two, or an empty
-/// one before the host, a host with a `/`, a failing `toolchain list`, a list without the pin, a failing `which`, a `rustc`
-/// missing or not executable beside `cargo`, and a failed build, which also prints Cargo's output. The rustup calls a refusal needs
-/// come first in the log, and nothing after them. The call after a failed build builds again. A launcher
-/// whose directory is gone, read through a descriptor of its deleted file, cannot find the top level.
+/// one before the host, a host with a `/`, a failing `toolchain list`, a list without the pin, a failing
+/// `which` or one whose reply is no absolute path, a `rustc` missing or not executable beside `cargo`, a
+/// `rustc -vV` that fails or cannot start, a cache path that is a link, a dangling link or a directory,
+/// a variable the launcher clears or sets made readonly through `BASH_ENV`, and a failed build, which
+/// also prints Cargo's output. The calls a refusal needs come first in the log, and nothing after them. A
+/// failed probe or build removes the cache file, and the call after it builds again; a refused link
+/// leaves its target unchanged. A launcher whose directory is gone, read through a descriptor of its
+/// deleted file, cannot find the top level.
 #[test]
 fn each_refused_state_exits_127_and_starts_no_binary() {
     let pinned = format!("{PIN}-{HOST}");
     let no_host = "rustup names no single host".to_owned();
     type Make = fn(&Tree);
-    let rows: [(&str, Make, usize, String); 9] = [
+    let rows: [(&str, Make, usize, String); 10] = [
         (
             "no host",
             |tree| tree.answer("show", Some("rustup home: x\n")),
@@ -1037,6 +1067,12 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
             format!("the pinned toolchain {pinned} has no cargo"),
         ),
         (
+            "a which reply that is no absolute path",
+            |tree| tree.answer("cargo", Some("true\n")),
+            3,
+            format!("the pinned toolchain {pinned} has no cargo"),
+        ),
+        (
             "no rustc",
             |tree| fs::remove_file(tree.at("toolchain/bin/rustc")).expect("removed"),
             3,
@@ -1084,6 +1120,7 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     refused_early(&tree, "a literal ~ entry", &output, "no rustup on PATH");
 
     let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    fs::write(tree.cache(), "{}").expect("the cache is written");
     tree.answer("build-fails", Some(""));
     let output = tree.call(&["scan-weakened-tests"]);
     refused(
@@ -1092,11 +1129,112 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
         "stand-in cargo: compiling\nwarning: the stand-in cargo on standard error\n\
          error: the stand-in build fails\ntool.sh: the build of kestrike-tools failed\n",
     );
-    assert_eq!(tree.take_log(), tree.resolved_until(4));
+    assert_eq!(tree.take_log(), tree.resolved_until(5));
+    assert!(!tree.cache().exists(), "a failed build removes the cache");
     tree.answer("build-fails", None);
     let output = tree.call(&["scan-weakened-tests"]);
     ran("the build after a failed one", &output, 3);
     assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 3));
+
+    let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    fs::write(tree.cache(), "{}").expect("the cache is written");
+    tree.answer("rustc-fails", Some(""));
+    let output = tree.call(&["scan-weakened-tests"]);
+    refused(
+        "a rustc that fails its probe",
+        &output,
+        "rustc 1.99.0 (stand-in)\nwarning: the stand-in rustc on standard error\n\
+         error: the stand-in rustc fails\ntool.sh: the build of kestrike-tools failed\n",
+    );
+    assert_eq!(tree.take_log(), tree.resolved_until(4));
+    assert!(!tree.cache().exists(), "a failed probe removes the cache");
+    tree.answer("rustc-fails", None);
+    let output = tree.call(&["scan-weakened-tests"]);
+    ran("the call after a failed probe", &output, 2);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 2));
+
+    let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    script(
+        &tree.at("toolchain/bin/rustc"),
+        "#!/nonexistent/interpreter\n",
+    );
+    let output = tree.call(&["scan-weakened-tests"]);
+    assert_eq!(output.status.code(), Some(127), "{output:?}");
+    let rustc = tree.at("toolchain/bin/rustc").display().to_string();
+    let lines: Vec<&str> = text(&output.stderr).lines().collect();
+    assert!(
+        lines.len() == 2
+            && lines[0].contains(&format!("{rustc}: "))
+            && lines[1] == "tool.sh: the build of kestrike-tools failed",
+        "bash's line for the rustc that cannot start, then the launcher's: {output:?}"
+    );
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert_eq!(
+        tree.take_log(),
+        tree.resolved_until(3),
+        "a rustc that cannot start"
+    );
+
+    type Place = fn(&Tree);
+    let places: [(&str, Place); 3] = [
+        ("a link to a file", |tree| {
+            symlink(tree.at("outside.json"), tree.cache()).expect("the link is made")
+        }),
+        ("a dangling link", |tree| {
+            symlink(tree.at("absent.json"), tree.cache()).expect("the link is made")
+        }),
+        ("a directory", |tree| {
+            fs::create_dir(tree.cache()).expect("the directory is made")
+        }),
+    ];
+    for (row, place) in places {
+        let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+        fs::write(tree.at("outside.json"), "the link's target\n").expect("the target is written");
+        place(&tree);
+        let output = tree.call(&["scan-weakened-tests"]);
+        let line = format!(
+            "tool.sh: {} is not a regular file\n",
+            tree.cache().display()
+        );
+        refused(row, &output, &line);
+        assert_eq!(tree.take_log(), tree.resolved_until(4), "{row}");
+        let target = fs::read_to_string(tree.at("outside.json")).expect("the target reads");
+        assert_eq!(target, "the link's target\n", "{row}");
+        assert!(!tree.at("absent.json").exists(), "{row}");
+        assert!(
+            fs::symlink_metadata(tree.cache()).is_ok(),
+            "{row}: the path stays"
+        );
+    }
+
+    let readonly = [
+        ("an exported RUSTFLAGS", "readonly RUSTFLAGS\n", "RUSTFLAGS"),
+        ("an unset RUSTC", "declare -r RUSTC\n", "RUSTC"),
+        (
+            "a CARGO_PROFILE_ name",
+            "readonly CARGO_PROFILE_DEV_OPT_LEVEL\n",
+            "CARGO_PROFILE_DEV_OPT_LEVEL",
+        ),
+    ];
+    for (row, startup, name) in readonly {
+        let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+        fs::write(tree.at("readonly.sh"), startup).expect("the startup file is written");
+        let file = tree.at("readonly.sh").display().to_string();
+        let env = [
+            ("BASH_ENV", file.as_str()),
+            ("RUSTFLAGS", "caller's value"),
+            ("CARGO_PROFILE_DEV_OPT_LEVEL", "3"),
+        ];
+        let output = tree.start(
+            &tree.launcher(),
+            &tree.at("caller"),
+            &tree.default_path(),
+            &env,
+            &["scan-weakened-tests"],
+        );
+        let line = format!("the variable {name} is readonly");
+        refused_early(&tree, row, &output, &line);
+    }
 
     let tree = Tree::new(workflow_text("\n").as_bytes());
     let mut command = Command::new("sh");

@@ -27,8 +27,11 @@ finds `rustup` on the caller's `PATH` from the caller's directory: it takes each
 first executable regular file named `rustup`, passing over a shell function of that name. An unexported
 `PATH` reads as `/bin:/usr/bin`, the C library's default. An empty `CARGO_HOME` stays empty, and an empty
 `RUSTUP_HOME` is unset for the launcher's own rustup and Cargo calls; rustup and Cargo read both forms as
-unset, and Cargo's rustc cache stays on. The launcher needs bash 4.4 or later, for `mapfile -d`. On every
-call it:
+unset, and Cargo's rustc cache stays on. Before all of this, the launcher refuses where a variable it
+clears or sets below, or `RUSTUP_HOME` or `CARGO_HOME`, is readonly in its own shell, as a `BASH_ENV`
+file can make one: bash keeps a readonly variable's value when `unset`, `export` or an assignment of it
+fails. It reads each variable's attributes in bash, set or unset. The launcher needs bash 4.4 or later,
+for `mapfile -d`. On every call it:
 
 1. Reads the stable toolchain that `.github/workflows/agent-checks.yml` pins as `STABLE`, and checks
    that `rustup toolchain list` names `<pin>-<host>` as the first word of a line. The launcher installs
@@ -39,10 +42,10 @@ call it:
    must hold no whitespace. A NUL byte reads as the byte 0x02, an ordinary character. A read error after
    the file opened is refused as a file that cannot be opened is: after `mapfile` returns, the launcher
    reads one more byte and takes only the end of the file as a complete read.
-2. Runs the pinned toolchain's own `cargo`, which `rustup which --toolchain <pin> cargo` names, with `RUSTC`
-   set to the `rustc` beside it, so neither a `cargo` earlier on `PATH` nor a `build.rustc` in a Cargo
-   configuration file replaces the pin. It builds the `kestrike-tools` binary for the host
-   (`--target <host>`, which also takes the place of a configured `build.target`) into
+2. Runs the pinned toolchain's own `cargo`, which `rustup which --toolchain <pin> cargo` names by an
+   absolute path, with `RUSTC` set to the `rustc` beside it, so neither a `cargo` earlier on `PATH` nor a
+   `build.rustc` in a Cargo configuration file replaces the pin. It builds the `kestrike-tools` binary for
+   the host (`--target <host>`, which also takes the place of a configured `build.target`) into
    `target/tools/<host>/debug`, with the top level as the build's working directory, `RUSTUP_TOOLCHAIN` set
    to the pinned toolchain's full name `<pin>-<host>`, as the list named it, and `RUSTUP_AUTO_INSTALL=0`.
    For this build it clears `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`,
@@ -60,7 +63,15 @@ call it:
    off. The launcher also sets `CARGO_BUILD_BUILD_DIR=target/tools`, which outranks a configured
    `build.build-dir`, so the build's fingerprints and lock stay under `target/tools`. With `--target`, the
    repository's `target.<cfg>.rustflags` apply to the binary and its dependencies and not to build scripts.
-   A tool is then the same program whatever lane starts it.
+   A tool is then the same program whatever lane starts it. Ahead of Cargo, the launcher starts the pinned
+   `rustc -vV` itself in the build's environment, and a rustc that exits nonzero or cannot start fails the
+   call as a failed build does: with Cargo's cache, a call that compiles nothing starts no rustc of
+   Cargo's, so this check is the one rustc start of a warm call. A toolchain whose `rustc -vV` succeeds
+   while a later probe of Cargo's would fail is refused at the next call that compiles. Cargo writes the
+   cache through a link at its path, so the launcher refuses, just before Cargo runs, where
+   `target/tools/.rustc_info.json` exists and is not a regular file. Cargo stores a probe that ran and
+   failed in that file and replays it while rustc's file stands unchanged, so a failed call removes the
+   file where it is a regular file, and the next call probes rustc again.
 3. Replaces itself with the binary, started as `kestrike-tools <top> <tool> <arguments>` in the caller's
    directory, with `<top>` the top level's canonical path. The binary gets the caller's environment as
    bash passes it on: bash, which runs the launcher, may set `PWD`, `OLDPWD`, `SHLVL` and `_`, and leaves
@@ -70,9 +81,11 @@ The build prints nothing unless it fails. Cargo's fingerprint decides whether it
 Cargo's lock on `target/tools` makes a second caller wait for the first; that wait has no limit of its
 own, so the caller's deadline counts it. The launcher keeps no record of its own of a current binary and
 compares no file time: each call resolves the pinned toolchain, runs the one `cargo build` and starts the
-binary that build left, and a failed build starts none. The fingerprint compares file times: a source
-changed under an older time keeps the old binary until `target/tools` is removed. A first build in a clone
-writes the untracked `Cargo.lock`.
+binary that build left, and a failed build starts none. Cargo's lock covers the build alone: where two
+calls at once in one checkout build different binaries for the same host, either can start the binary
+the other's build left. The fingerprint compares file times: a source changed under an older time keeps
+the old binary until `target/tools` is removed. A first build in a clone writes the untracked
+`Cargo.lock`.
 
 The build reads Cargo configuration from the checkout, from each directory above it and from `CARGO_HOME`,
 as a script was read from the checkout, so a checkout that another user can write, or one below a
@@ -83,15 +96,17 @@ its own for that; a tool's own ownership checks run after the build.
 
 | Exit | Cause | Output |
 | --- | --- | --- |
-| 127 | The top level cannot be found | `tool.sh: cannot find the top level` on standard error |
+| 127 | A variable the launcher clears or sets is readonly in its shell | `tool.sh: the variable <name> is readonly` on standard error |
+| 127 | The top level cannot be found | `tool.sh: cannot find the top level` |
 | 127 | The workflow path is absent, a directory, a FIFO, a device or another file that is not a regular file once links are followed | `tool.sh: <path> is not a regular file` |
 | 127 | The workflow is a regular file that cannot be opened, or a read of it fails | `tool.sh: cannot read <path>` |
 | 127 | The workflow holds no pin line, two or more, or a pin whose value holds whitespace | `tool.sh: <path> pins no single STABLE toolchain` |
 | 127 | No executable regular file named `rustup` stands on `PATH` | `tool.sh: no rustup on PATH` |
 | 127 | `rustup show` names no single `Default host` | `tool.sh: rustup names no single host` |
 | 127 | `rustup toolchain list` fails | `tool.sh: rustup lists no toolchains` |
-| 127 | The list names no `<pin>-<host>`, or the pinned toolchain has no `cargo` or no executable `rustc` beside it | `tool.sh: the pinned toolchain <pin>-<host> is not installed; install it with: rustup toolchain install <pin>`, `... has no cargo` or `... has no rustc` |
-| 127 | The build fails, a first dependency resolution without network included | Cargo's output, then `tool.sh: the build of kestrike-tools failed`; the next call builds again |
+| 127 | The list names no `<pin>-<host>`, `rustup which` fails or names no absolute path, or no executable `rustc` stands beside that `cargo` | `tool.sh: the pinned toolchain <pin>-<host> is not installed; install it with: rustup toolchain install <pin>`, `... has no cargo` or `... has no rustc` |
+| 127 | `target/tools/.rustc_info.json` exists and is not a regular file: a link, a dangling link, a FIFO or a directory | `tool.sh: <path> is not a regular file` |
+| 127 | The pinned `rustc -vV` exits nonzero or cannot start, or the build fails, a first dependency resolution without network included. A toolchain whose `rustc -vV` succeeds while a later probe of Cargo's fails is refused at the next call that compiles | rustc's or Cargo's output, then `tool.sh: the build of kestrike-tools failed`; the launcher removes a regular `target/tools/.rustc_info.json`, and the next call probes rustc and builds again |
 | 127 | An entry of `src/tools/` or `tests/` is outside the rules of [Adding a tool](#adding-a-tool), a tool root lacks `NAME` or `run`, or two tools share a name | the build script's `kestrike-tools build script: <path>: <reason>` line or rustc's error, then the line above |
 | 2 | The tool name is missing or names no tool | the binary's `kestrike-tools:` line on standard error |
 
