@@ -28,4 +28,5 @@ tools! {
     "marklog_fixtures" => marklog_fixtures,
     "reclaim_fixtures" => reclaim_fixtures,
     "register_fixtures" => register_fixtures,
+    "scan-weakened-tests" => scan_weakened_tests,
 }
