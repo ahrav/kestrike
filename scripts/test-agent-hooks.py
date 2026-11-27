@@ -15,7 +15,6 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
-MARKER = "commentlin" + "t: allow(JUDGE)"
 ZERO = "0" * 40
 DELETION = f"(delete) {ZERO} refs/heads/gone {'1' * 40}\n"
 
@@ -61,91 +60,6 @@ class AgentHooks(unittest.TestCase):
             args, cwd=self.repo, env=self.env, text=True,
             input=input, capture_output=True, check=check,
         )
-
-    def stage(self, name, content):
-        (self.repo / name).write_text(content)
-        self.run_command("git", "add", "--", name, check=True)
-
-    def scan(self, *args):
-        return self.run_command("bash", str(ROOT / "scripts/forbid-comment-markers.sh"), *args)
-
-    def test_clean_staged_file_passes(self):
-        self.stage("a.rs", "let value = 1;\n")
-        self.assertEqual(self.scan("--staged").returncode, 0)
-
-    def test_marker_reports_file_and_line(self):
-        self.stage("clean.rs", "let a = 1;\nlet b = 2;\n")
-        self.stage("file with spaces.rs", f"let value = 1;\n// {MARKER.upper()}\n")
-        result = self.scan("--staged")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("file with spaces.rs:2:", result.stderr)
-        self.assertNotIn("clean.rs:", result.stderr)
-
-    def test_leading_plus_does_not_hide_marker(self):
-        self.stage("a.rs", f"let value = 1;\n+value; // {MARKER}\n")
-        self.assertEqual(self.scan("--staged").returncode, 1)
-
-    def test_unstaged_cleanup_does_not_hide_staged_marker(self):
-        self.stage("a.rs", f"// {MARKER}\n")
-        (self.repo / "a.rs").write_text("// A plain comment.\n")
-        self.assertEqual(self.scan("--staged").returncode, 1)
-        self.assertEqual(self.scan().returncode, 0)
-
-    def test_full_scan_rejects_marker(self):
-        self.stage("a.rs", f"// {MARKER}\n")
-        self.assertEqual(self.scan().returncode, 1)
-
-    def test_binary_attributes_do_not_hide_markers(self):
-        for attribute in ("binary", "-diff"):
-            self.stage(".gitattributes", f"*.rs {attribute}\n")
-            self.stage("a.rs", f"// {MARKER}\n")
-            for args in ((), ("--staged",)):
-                with self.subTest(attribute=attribute, args=args):
-                    self.assertEqual(self.scan(*args).returncode, 1)
-
-    def test_retired_local_artifacts_remain_ignored(self):
-        (self.repo / ".gitignore").write_text((ROOT / ".gitignore").read_text())
-        for name in (".bv/cache.json", ".perles/config.yaml"):
-            with self.subTest(path=name):
-                path = self.repo / name
-                path.parent.mkdir(exist_ok=True)
-                path.write_text("local configuration\n")
-                result = self.run_command("git", "check-ignore", "--quiet", "--", name)
-                self.assertEqual(result.returncode, 0)
-
-    def test_full_scan_includes_parent_directories(self):
-        self.stage("a.rs", f"// {MARKER}\n")
-        nested = self.repo / "nested"
-        nested.mkdir()
-        result = subprocess.run(
-            ["bash", str(ROOT / "scripts/forbid-comment-markers.sh")],
-            cwd=nested, env=self.env, text=True, capture_output=True,
-        )
-        self.assertEqual(result.returncode, 1)
-
-    def test_staged_scan_ignores_textconv(self):
-        self.stage(".gitattributes", "*.rs diff=hidden\n")
-        self.stage("a.rs", f"// {MARKER}\n")
-        self.run_command("git", "config", "diff.hidden.textconv", "true", check=True)
-        self.assertEqual(self.scan("--staged").returncode, 1)
-
-    def test_staged_scan_ignores_external_diff(self):
-        self.stage("a.rs", f"// {MARKER}\n")
-        self.env["GIT_EXTERNAL_DIFF"] = "true"
-        self.assertEqual(self.scan("--staged").returncode, 1)
-
-    def test_git_failure_does_not_pass(self):
-        self.env["GIT_DIR"] = str(self.repo / "missing")
-        self.assertNotEqual(self.scan("--staged").returncode, 0)
-        self.assertEqual(self.scan().returncode, 2)
-
-    def test_pre_commit_runs_repository_check(self):
-        scripts = self.repo / "scripts"
-        scripts.mkdir()
-        (scripts / "forbid-comment-markers.sh").symlink_to(ROOT / "scripts/forbid-comment-markers.sh")
-        self.stage("a.rs", f"// {MARKER}\n")
-        result = self.run_command("bash", str(ROOT / ".githooks/pre-commit"))
-        self.assertEqual(result.returncode, 1)
 
     def test_pre_push_preserves_global_guard_arguments_input_and_failure(self):
         hooks = self.repo / "shared hooks"

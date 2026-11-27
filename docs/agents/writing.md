@@ -33,6 +33,8 @@ anchor, and backticked repository path in `REVIEW.md`, `AGENTS.md`, and
 ```sh
 bash scripts/forbid-comment-markers.sh
 python3 scripts/test-agent-hooks.py
+python3 scripts/test-chaos-receipt-replay.py
+cargo test -p kestrike-tools --test tools agent_hooks::
 python3 scripts/test-review-workflow.py
 ```
 
