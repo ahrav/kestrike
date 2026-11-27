@@ -25,6 +25,8 @@ pub const SEEDS: [(u64, u64); 8] = [
     (0xe57, 315),
 ];
 
+/// The first four recipes equal `RUNS` of `quint/escrow_check.py`, which `quint/check.py` runs as checked
+/// runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str], u64); 6] = [
     ("an_exact_promise_succeeds_and_a_short_one_refuses", &[

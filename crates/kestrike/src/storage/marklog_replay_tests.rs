@@ -2,8 +2,8 @@
 //! file log.
 //!
 //! The traces are written by `bash scripts/tool.sh marklog_fixtures --quint QUINT --output DIR`: directed
-//! recipes and seeded runs of the model's `step`, each naming the model's sha256 and its `steps`, and each state after the first names the action taken and its
-//! arguments. A trace with a mismatched model sha256 or a state count unequal to `steps + 1` fails before any
+//! recipes and seeded runs of the model's `step`, each naming the model's sha256 and its `steps`, and each
+//! state after the first names the action taken and its arguments. A trace with a mismatched model sha256 or a state count unequal to `steps + 1` fails before any
 //! state replays. The simulated store holds a shard with three coverage pages, the model's pages 1 to 3 at
 //! version 1.
 //! The host records the empty watermark in a log file of its own directory, and each client process opens a

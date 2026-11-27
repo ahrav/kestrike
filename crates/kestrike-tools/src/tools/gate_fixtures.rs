@@ -32,6 +32,8 @@ macro_rules! reported {
 
 pub const REPORTED: &[&str] = reported!();
 
+/// The first four recipes equal `RUNS` of `quint/gate_check.py`, and [`SUBMIT`] and [`REPORTED`] equal its
+/// `SUBMIT` and `REPORTED`; `quint/check.py` runs those recipes as checked runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 18] = [
     ("passes", reported!["report(\"sole\")", SUBMIT]),
