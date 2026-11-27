@@ -556,6 +556,26 @@ fn the_pin_is_read_by_the_line_rule() {
             lf.replace(&quoted, "\"1.99\0.0\""),
             Pin::NotInstalled("1.99\u{2}.0"),
         ),
+        (
+            "value with a tab",
+            lf.replace(&quoted, "\"1.99\t.0\""),
+            Pin::NoneSingle,
+        ),
+        (
+            "an empty value on the line before",
+            lf.replace("env:\n", "env:\n  STABLE: \"\"\n"),
+            Pin::Read,
+        ),
+        (
+            "an unclosed value before a lone carriage return",
+            lf.replace("env:\n", "env:\n  STABLE: \"x\r"),
+            Pin::Read,
+        ),
+        (
+            "a glob value",
+            lf.replace(&quoted, "\"*\""),
+            Pin::NotInstalled("*"),
+        ),
     ];
     for (row, workflow, pin) in rows {
         let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
@@ -587,6 +607,16 @@ fn the_pin_is_read_by_the_line_rule() {
             }
         }
     }
+
+    let tree = Tree::new(lf.as_bytes()).with_old_binary();
+    fs::write(tree.workflow(), lf.replace("STABLE", "UNSTABLE")).expect("the workflow is written");
+    fs::remove_file(tree.at("bin/rustup")).expect("the stand-in is removed");
+    let output = tree.call(&["scan-weakened-tests"]);
+    let line = format!(
+        "{} pins no single STABLE toolchain",
+        tree.workflow().display()
+    );
+    refused_early(&tree, "no pin and no rustup", &output, &line);
 }
 
 /// A workflow path that is no regular file once links are followed is refused before it is opened, so a
@@ -643,7 +673,9 @@ fn the_workflow_file_must_be_a_regular_file() {
 /// A relative `RUSTUP_HOME` and `CARGO_HOME`, and a relative `PATH` entry that holds `rustup`, resolve
 /// against the caller's directory for rustup and Cargo, which run in the top level; the binary gets the
 /// caller's own values and runs in the caller's directory. The decoy `rustup` later on `PATH` is what a
-/// lookup from the top level finds. An empty `RUSTUP_HOME` and `CARGO_HOME` stay empty.
+/// lookup from the top level finds. An absolute `RUSTUP_HOME` and `CARGO_HOME` reach rustup unchanged, a
+/// relative `CARGO_HOME` is resolved when `RUSTUP_HOME` is unset, and an empty `RUSTUP_HOME` and
+/// `CARGO_HOME` stay empty.
 #[test]
 fn relative_homes_and_path_resolve_against_the_callers_directory() {
     let tree = Tree::new(workflow_text("\n").as_bytes());
@@ -690,6 +722,38 @@ fn relative_homes_and_path_resolve_against_the_callers_directory() {
         fs::read_to_string(tree.at("binary.dir")).expect("the binary's directory reads");
     assert_eq!(directory, format!("{}\n", caller.display()));
 
+    let env = [
+        ("RUSTUP_HOME", "/x/rustup-home"),
+        ("CARGO_HOME", "/x/cargo-home"),
+    ];
+    let output = tree.start(
+        &tree.launcher(),
+        &caller,
+        &tree.default_path(),
+        &env,
+        &["x"],
+    );
+    ran("absolute", &output, 2);
+    assert_eq!(
+        tree.take_log(),
+        tree.resolved(PIN, ("/x/rustup-home", "/x/cargo-home"), 2)
+    );
+
+    let env = [("CARGO_HOME", "cargo-home")];
+    let output = tree.start(
+        &tree.launcher(),
+        &caller,
+        &tree.default_path(),
+        &env,
+        &["x"],
+    );
+    ran("cargo home alone", &output, 3);
+    let cargo_home = format!("{}/cargo-home", caller.display());
+    assert_eq!(
+        tree.take_log(),
+        tree.resolved(PIN, ("unset", &cargo_home), 3)
+    );
+
     let env = [("RUSTUP_HOME", ""), ("CARGO_HOME", "")];
     let output = tree.start(
         &tree.launcher(),
@@ -698,8 +762,8 @@ fn relative_homes_and_path_resolve_against_the_callers_directory() {
         &env,
         &["x"],
     );
-    ran("empty", &output, 2);
-    assert_eq!(tree.take_log(), tree.resolved(PIN, ("", ""), 2));
+    ran("empty", &output, 4);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("", ""), 4));
     let cargo = tree.environment("cargo.env");
     assert_eq!(cargo.get("RUSTUP_HOME").map(String::as_str), Some(""));
     assert_eq!(cargo.get("CARGO_HOME").map(String::as_str), Some(""));
@@ -788,9 +852,9 @@ fn a_rustc_path_with_an_equals_sign_gets_the_empty_wrappers() {
 }
 
 /// With a working binary of an earlier call in place, each state the launcher refuses exits 127 with its
-/// line and starts no binary: rustup absent from `PATH`, a `show` that names no host or two, a failing
-/// `toolchain list`, a list without the pin, a failing `which`, a `rustc` missing or not executable
-/// beside `cargo`, and a failed build, which also prints Cargo's output. The rustup calls a refusal needs
+/// line and starts no binary: rustup absent from `PATH`, a `show` that names no host, two, or an empty
+/// one before the host, a host with a `/`, a failing `toolchain list`, a list without the pin, a failing `which`, a `rustc`
+/// missing or not executable beside `cargo`, and a failed build, which also prints Cargo's output. The rustup calls a refusal needs
 /// come first in the log, and nothing after them. The call after a failed build builds again. A launcher
 /// whose directory is gone, read through a descriptor of its deleted file, cannot find the top level.
 #[test]
@@ -798,7 +862,7 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     let pinned = format!("{PIN}-{HOST}");
     let no_host = "rustup names no single host".to_owned();
     type Make = fn(&Tree);
-    let rows: [(&str, Make, usize, String); 8] = [
+    let rows: [(&str, Make, usize, String); 10] = [
         (
             "no rustup",
             |tree| fs::remove_file(tree.at("bin/rustup")).expect("removed"),
@@ -816,6 +880,23 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
             |tree| {
                 let two = format!("Default host: {HOST}\nDefault host: other\n");
                 tree.answer("show", Some(&two))
+            },
+            1,
+            no_host.clone(),
+        ),
+        (
+            "a host with a slash",
+            |tree| tree.answer("show", Some("Default host: a/b\n")),
+            1,
+            no_host.clone(),
+        ),
+        (
+            "an empty host before the host",
+            |tree| {
+                tree.answer(
+                    "show",
+                    Some(&format!("Default host: \nDefault host: {HOST}\n")),
+                )
             },
             1,
             no_host,
@@ -909,8 +990,9 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
 /// top level's canonical path and the caller's arguments, and sees the caller's environment unchanged
 /// apart from the variables bash sets. The rustup calls see neither the caller's `RUSTUP_TOOLCHAIN` nor
 /// its `RUSTUP_AUTO_INSTALL`, and the build sees the cleared variables removed. A launcher started
-/// through a link to its file or to the top level passes the same canonical path. A shell function
-/// named `rustup` in the caller's environment is passed over for the `rustup` on `PATH`.
+/// through a link to its file, a chain of links with a relative target, a link to the top level, or a
+/// relative path with `CDPATH` set passes the same canonical path. A shell function named `rustup` in the
+/// caller's environment is passed over for the `rustup` on `PATH`.
 #[test]
 fn a_successful_call_passes_the_caller_through() {
     let tree = Tree::new(workflow_text("\n").as_bytes());
@@ -955,7 +1037,13 @@ fn a_successful_call_passes_the_caller_through() {
 
     symlink(tree.at("top"), tree.at("top-link")).expect("the link is made");
     symlink(tree.launcher(), tree.at("tool-link.sh")).expect("the link is made");
-    let links = [tree.at("top-link/scripts/tool.sh"), tree.at("tool-link.sh")];
+    symlink("top/scripts/tool.sh", tree.at("relative-link.sh")).expect("the link is made");
+    symlink("relative-link.sh", tree.at("chain-link.sh")).expect("the link is made");
+    let links = [
+        tree.at("top-link/scripts/tool.sh"),
+        tree.at("tool-link.sh"),
+        tree.at("chain-link.sh"),
+    ];
     for (build, launcher) in (2..).zip(links) {
         let output = tree.start(&launcher, &caller_dir, &tree.default_path(), &[], &["x"]);
         ran("a link", &output, build);
@@ -977,6 +1065,24 @@ fn a_successful_call_passes_the_caller_through() {
         &function,
         &["x"],
     );
-    ran("a rustup function", &output, 4);
-    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 4));
+    ran("a rustup function", &output, 5);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 5));
+
+    fs::create_dir_all(tree.at("elsewhere/scripts")).expect("the directory is made");
+    let cdpath = tree.at("elsewhere").display().to_string();
+    let env = [("CDPATH", cdpath.as_str())];
+    let relative = Path::new("scripts/tool.sh");
+    let output = tree.start(
+        relative,
+        &tree.at("top"),
+        &tree.default_path(),
+        &env,
+        &["x"],
+    );
+    ran("a relative path with CDPATH set", &output, 6);
+    assert_eq!(
+        text(&output.stdout),
+        format!("marker 6\n{}\nx\n", tree.top())
+    );
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 6));
 }

@@ -13,8 +13,8 @@ fail() {
 }
 
 prepare() {
-  local source directory top workflow line value at pin='' pins=0 rustup shown host='' installed toolchain found
-  local cargo rustc wrapper name log
+  local source directory top workflow line value at pin='' pins=0 rustup shown host='' hosts=0
+  local installed toolchain found cargo rustc wrapper name log
   local chunks=() fields=() lines=()
   source=${BASH_SOURCE[0]}
   [[ $source == */* ]] || source=./$source
@@ -80,9 +80,9 @@ prepare() {
   shown=$("$rustup" show 2>/dev/null) || true
   mapfile -t lines <<<"$shown"
   for line in "${lines[@]}"; do
-    [[ $line != 'Default host: '* ]] || host+=${host:+$'\n'}${line#'Default host: '}
+    [[ $line != 'Default host: '* ]] || { host=${line#'Default host: '} && hosts=$((hosts + 1)); }
   done
-  [[ $host =~ ^[^[:space:]/]+$ ]] || fail "rustup names no single host"
+  ((hosts == 1)) && [[ $host =~ ^[^[:space:]/]+$ ]] || fail "rustup names no single host"
   installed=$("$rustup" toolchain list 2>/dev/null) || fail "rustup lists no toolchains"
   found=
   while read -r toolchain _; do

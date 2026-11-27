@@ -23,7 +23,8 @@ environment it gives rustup and Cargo stay out of the final step. It runs each r
 top level. Before the first, it makes a relative `RUSTUP_HOME` or `CARGO_HOME` absolute against the caller's
 directory, since rustup and Cargo read a relative value against their own working directory, and finds
 `rustup` on the caller's `PATH` from the caller's directory, passing over a shell function of that name. An
-empty value stays empty, as rustup and Cargo read it as unset. On every call it:
+empty value stays empty, as rustup and Cargo read it as unset. The launcher needs bash 4.4 or later, for
+`mapfile -d`. On every call it:
 
 1. Reads the stable toolchain that `.github/workflows/agent-checks.yml` pins as `STABLE`, and checks
    that `rustup toolchain list` names `<pin>-<host>` as the first word of a line. The launcher installs
@@ -37,25 +38,24 @@ empty value stays empty, as rustup and Cargo read it as unset. On every call it:
    set to the `rustc` beside it, so neither a `cargo` earlier on `PATH` nor a `build.rustc` in a Cargo
    configuration file replaces the pin. It builds the `kestrike-tools` binary for the host
    (`--target <host>`, which also takes the place of a configured `build.target`) into
-   `target/tools/<host>/debug`,
-   with the top level as the build's working directory, `RUSTUP_TOOLCHAIN` set to the pinned toolchain's
-   full name `<pin>-<host>`, as the list named it, and `RUSTUP_AUTO_INSTALL=0`. For this build it clears
-   `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`, `CARGO_ENCODED_RUSTDOCFLAGS`, every
-   `CARGO_PROFILE_*`, every `CARGO_BUILD_*` except `CARGO_BUILD_JOBS`, every `CARGO_TARGET_*`
-   (`CARGO_TARGET_DIR` included), `RUSTDOC`, `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER`, and keeps the
-   rest. It then sets `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER` to `/usr/bin/env`, which outranks a
-   wrapper a Cargo configuration file names and starts rustc with the same arguments and environment. Cargo
-   keeps its cache of rustc's answers in `target/tools/.rustc_info.json` only when each wrapper is a file it
-   can hash, and the empty value, which Cargo also reads as no wrapper, turns the cache off, so every call
-   would run rustc's probes again. Where `/usr/bin/env` is no executable file, or the `rustc` path holds a
-   `=`, which `env` would read as an assignment, both wrappers take the empty value instead. While
-   `RUSTUP_HOME` is set, Cargo fingerprints rustc for that cache as
-   `RUSTUP_HOME/toolchains/<RUSTUP_TOOLCHAIN>/bin/rustc`: the full name gives the path of rustup's own
-   directory for the toolchain, and a bare pin gives no file, which turns the cache off. The launcher also
-   sets `CARGO_BUILD_BUILD_DIR=target/tools`, which outranks a configured `build.build-dir`, so the build's
-   fingerprints and lock stay under `target/tools`. With `--target`, the repository's
-   `target.<cfg>.rustflags` apply to the binary and its dependencies and not to build scripts. A tool is
-   then the same program whatever lane starts it.
+   `target/tools/<host>/debug`, with the top level as the build's working directory, `RUSTUP_TOOLCHAIN` set
+   to the pinned toolchain's full name `<pin>-<host>`, as the list named it, and `RUSTUP_AUTO_INSTALL=0`.
+   For this build it clears `RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`, `RUSTDOCFLAGS`,
+   `CARGO_ENCODED_RUSTDOCFLAGS`, every `CARGO_PROFILE_*`, every `CARGO_BUILD_*` except `CARGO_BUILD_JOBS`,
+   every `CARGO_TARGET_*` (`CARGO_TARGET_DIR` included), `RUSTDOC`, `RUSTC_WRAPPER` and
+   `RUSTC_WORKSPACE_WRAPPER`, and keeps the rest. It then sets `RUSTC_WRAPPER` and `RUSTC_WORKSPACE_WRAPPER`
+   to `/usr/bin/env`, which outranks a wrapper a Cargo configuration file names and starts rustc with the
+   same arguments and environment. Cargo keeps its cache of rustc's answers in
+   `target/tools/.rustc_info.json` only when each wrapper is a file it can hash, and the empty value, which
+   Cargo also reads as no wrapper, turns the cache off, so every call would run rustc's probes again. Where
+   `/usr/bin/env` is no executable file, or the `rustc` path holds a `=`, which `env` would read as an
+   assignment, both wrappers take the empty value instead. While `RUSTUP_HOME` is set, Cargo fingerprints
+   rustc for that cache as `RUSTUP_HOME/toolchains/<RUSTUP_TOOLCHAIN>/bin/rustc`: the full name gives the
+   path of rustup's own directory for the toolchain, and a bare pin gives no file, which turns the cache
+   off. The launcher also sets `CARGO_BUILD_BUILD_DIR=target/tools`, which outranks a configured
+   `build.build-dir`, so the build's fingerprints and lock stay under `target/tools`. With `--target`, the
+   repository's `target.<cfg>.rustflags` apply to the binary and its dependencies and not to build scripts.
+   A tool is then the same program whatever lane starts it.
 3. Replaces itself with the binary, started as `kestrike-tools <top> <tool> <arguments>` in the caller's
    directory, with `<top>` the top level's canonical path. The binary gets the caller's environment as
    bash passes it on: bash, which runs the launcher, may set `PWD`, `OLDPWD`, `SHLVL` and `_`, and leaves
