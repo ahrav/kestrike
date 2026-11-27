@@ -14,6 +14,7 @@ const PRODUCTION_ROWS: &[(&str, &str, &str)] = &[
     ("test with a mark outside ASCII after it", "#[cfg(all(test\u{301}))]\nfn probe() {}\n", "                   \n             \n"),
     ("an item keyword with a word outside ASCII after it", "fn f(n: u8) -> u8 {\n    match n {\n        #[cfg(test)]\n        type\u{b2} => 1, _ => 2,\n    }\n}\n", "fn f(n: u8) -> u8 {\n    match n {\n                    \n                     _ => 2,\n    }\n}\n"),
     ("an item keyword with a mark outside ASCII after it", "fn f(n: u8) -> u8 {\n    match n {\n        #[cfg(test)]\n        type\u{301} => 1, _ => 2,\n    }\n}\n", "fn f(n: u8) -> u8 {\n    match n {\n                    \n                            \n    }\n}\n"),
+    ("a test-only element without an end", "fn f() {}\n#[cfg(test)]\nconst A: u8 = 1\n", "fn f() {}\n#[cfg(test)]\nconst A: u8 = 1\n"),
 ];
 
 #[rustfmt::skip]
@@ -38,6 +39,7 @@ const CUT_ROWS: &[(&str, &str, &[usize])] = &[
     ("a union named i32", "m!(#[cfg(test)] union i32 { a: u8 });\n", &[]),
     ("a union named ifx", "m!(#[cfg(test)] union ifx { a: u8 });\n", &[]),
     ("a union named ab", "m!(#[cfg(test)] union ab { a: u8 });\n", &[]),
+    ("a test-only element without an end", "fn f() {}\n#[cfg(test)]\nconst A: u8 = 1\n", &[]),
 ];
 
 #[test]

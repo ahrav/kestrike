@@ -14,8 +14,9 @@
 //! `fetch_update`'s set and fetch orderings are an `rmw` and a `load`, each read by argument position
 //! while no earlier argument holds `<` or `>` outside brackets. The op of a strength constant, a
 //! `const NAME: Ordering` item, comes from each `S::NAME` mention in the file's scanned text: the mentions
-//! must all sit in atomic calls of one op. A constant with no such mention takes its op from [`EXTERNAL`],
-//! keyed by the file and the constant's name, and any other constant with no mention is unread.
+//! must all sit in atomic calls of one op. A constant with no such mention takes its op from the pin the
+//! caller gives for the file and the constant's name, and is unread without one; [`EXTERNAL`] holds the
+//! catalog's pins.
 //!
 //! The production text spells each ordering variant as part of an `Ordering::` path and names each fence
 //! path only in a path call whose callee the reading delimits whole, a macro fragment, or a forwarder
@@ -636,7 +637,7 @@ pub fn sites(scanned: &str) -> Vec<Site> {
 
 /// The reading of the scoped file at `path`, the path relative to the checkout's top, whose text is
 /// `text`. A strength constant with no `S::NAME` mention takes its op from the pin in `pins` for `path`
-/// and its name; the catalog's check passes [`EXTERNAL`].
+/// and its name.
 pub fn read(path: &str, text: &str, pins: &[Pin]) -> Reading {
     let analysis = analyzed(text);
     let view = View {

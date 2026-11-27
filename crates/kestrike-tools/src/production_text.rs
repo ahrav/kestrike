@@ -146,9 +146,8 @@ pub fn closing(text: &str, start: usize) -> Option<usize> {
 /// The end of the item or statement starting at `start`: its block, or its `;` outside brackets, or for a
 /// field, variant, argument or arm, its `,` outside brackets. An item keyword after the attributes and
 /// visibility, such as `fn` or `impl`, runs past each comma outside brackets, those of its generics
-/// included, to its block or `;`. A closing
-/// bracket or brace that the item never opened belongs to the enclosing list or block, so a last element
-/// without a trailing comma ends before it. Under [`Closer::Angle`] or [`Closer::Pipe`] the element ends at
+/// included, to its block or `;`. A closing bracket or brace that the item never opened belongs to the
+/// enclosing list or block, so a last element without a trailing comma ends before it. Under [`Closer::Angle`] or [`Closer::Pipe`] the element ends at
 /// its `,` or before the list's `>` or `|`; under [`Closer::Comma`] it ends at its `,` whatever word starts
 /// it. `start` is a code point boundary.
 fn item_end(text: &str, start: usize, closer: Closer) -> Option<usize> {

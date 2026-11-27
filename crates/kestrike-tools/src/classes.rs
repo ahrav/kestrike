@@ -111,10 +111,10 @@ fn next_code_point(text: &str, at: usize) -> usize {
     at + text[at..].chars().next().map_or(1, char::len_utf8)
 }
 
-/// Each match of `regex` in `text` in order, as Python's `finditer` yields them for the pattern with its
-/// `\b` at the word edges, under the condition of [`captures_bounded`] and for a pattern that matches no
-/// empty text: [`captures_bounded`] from the end of the previous match, or from one code point after an
-/// empty match.
+/// Each match of `regex` in `text` in order: [`captures_bounded`] from the end of the previous match, or
+/// from one code point after an empty match. For a pattern under the condition of [`captures_bounded`]
+/// that matches no empty text, these are the matches Python's `finditer` yields for the pattern with its
+/// `\b` at the word edges.
 pub fn bounded_iter<'r, 'h>(
     regex: &'r Regex,
     text: &'h str,
