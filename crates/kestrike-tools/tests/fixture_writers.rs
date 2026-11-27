@@ -23,7 +23,6 @@ struct Writer {
     recipes: &'static [&'static str],
 }
 
-/// The `case.qnt` texts match `inputs` in `quint/<model>_check.py`.
 const WRITERS: [Writer; 3] = [
     Writer {
         tool: "escrow_fixtures",
@@ -603,7 +602,7 @@ fn a_relative_output_resolves_against_the_working_directory() {
 }
 
 /// With `--quint=--`, the fixture writer creates the first trace directory, writes the model copy and `case.qnt`
-/// there, then exits with status 1, the behavior kept from the script; issue #363 holds its fix.
+/// there, then exits with status 1.
 #[test]
 fn an_empty_quint_value_exits_1_after_the_first_trace_directory_is_written() {
     let scratch = Scratch::new();

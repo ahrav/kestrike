@@ -1,5 +1,4 @@
-//! Python 3.9.25's `pathlib.Path.resolve()` defaults to `strict=False`: it permits missing components and
-//! raises `RuntimeError` on a symlink loop.
+//! `resolve` keeps a missing component as written and refuses a symlink loop.
 
 use std::fs;
 use std::os::unix::fs::symlink;

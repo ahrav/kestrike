@@ -1,6 +1,5 @@
-//! For texts with integers of at most 4,300 digits, each expected text is what Python 3.9.25 prints for
-//! `json.dumps(json.loads(text), separators=(",", ":"))`. Python 3.9.25 refuses a longer integer under its
-//! default conversion limit; the reader takes it.
+//! Each expected text is the text of `json.dumps(value, separators=(",", ":"))` for the value the input holds.
+//! The reader takes an integer of any length.
 
 use crate::json::{MAX_DEPTH, Value, dump, parse};
 
@@ -37,8 +36,8 @@ fn integers_keep_their_digits_and_minus_zero_reads_as_zero() {
     assert_eq!(round_trip(&digits), format!("{digits}\n"));
 }
 
-/// Each row: the text, whether Python 3.9.25's `json.loads` takes it, and the reader's offset and reason. The forms Python
-/// takes and the reader refuses are the JSON a Quint trace lacks.
+/// Each row: the text, whether it is a form the reader leaves out rather than malformed text, and the reader's
+/// offset and reason.
 #[test]
 fn each_form_outside_the_reader_is_refused_with_its_reason() {
     #[rustfmt::skip]
@@ -67,13 +66,13 @@ fn each_form_outside_the_reader_is_refused_with_its_reason() {
         ("\u{feff}1", false, 0, "expected a value"),
         ("1 2", false, 2, "text after the value"),
     ];
-    for (text, python_takes_it, offset, reason) in refused {
+    for (text, left_out, offset, reason) in refused {
         let error = parse(text).expect_err(text);
         let found = (error.offset(), error.reason());
         assert_eq!(
             found,
             (offset, reason),
-            "{text:?}, which Python takes: {python_takes_it}"
+            "{text:?}, a form left out: {left_out}"
         );
     }
     let error = parse("01").expect_err("01");

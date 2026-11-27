@@ -165,8 +165,8 @@ enum HelpRefusal<'a> {
     IndexError,
 }
 
-/// `argparse` reads each letter after `-h` as one more short option and refuses the rest from the first
-/// letter other than `h`. For `-h=`, `parse` returns `Parsed::Refused` with code 1 and the message
+/// Each letter after `-h` reads as one more `-h`, and the rest from the first letter other than `h` is an
+/// ignored explicit argument. For `-h=`, `parse` returns `Parsed::Refused` with code 1 and the message
 /// `string index out of range`. The long form `--help=` refuses any explicit value.
 fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusal<'a>> {
     let short = string[1] != b'-';
@@ -300,7 +300,7 @@ fn pieces(arg: &[u8]) -> Vec<Piece> {
     pieces
 }
 
-/// Python's standard error writes a byte outside a UTF-8 sequence as `\udc` and two hexadecimal digits.
+/// `shown` writes a byte outside a UTF-8 sequence as `\udc` and two hexadecimal digits.
 fn shown(arg: &[u8]) -> String {
     let mut out = String::new();
     for piece in pieces(arg) {
