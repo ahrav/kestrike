@@ -1,4 +1,4 @@
-use super::{EXTERNAL, Kind, Op, Site, line_of, read, sites};
+use super::{EXTERNAL, Kind, Op, Site, View, fence_calls, line_of, ordered_sites, read};
 
 const FILL: &str = "crates/kestrike/src/storage/fill.rs";
 const GRACE: &str = "crates/kestrike/src/storage/grace.rs";
@@ -22,6 +22,15 @@ type DefectRow = (
     &'static str,
     &'static [&'static str],
 );
+
+/// `sites` uses `scanned` as both the scan input and the source for site windows.
+fn sites(scanned: &str) -> Vec<Site> {
+    let view = View {
+        source: scanned,
+        scanned,
+    };
+    ordered_sites(view, &fence_calls(view).found, "", &[])
+}
 
 fn ordering_ops(scanned: &str) -> Vec<(&'static str, Op)> {
     sites(scanned)
@@ -104,8 +113,6 @@ fn an_earlier_operand_with_angle_brackets_leaves_a_compare_exchange_ordering_unr
     }
 }
 
-/// Each row's planted source reads the sites listed beside it, which the script's reading gave for the
-/// same source.
 #[test]
 fn each_planted_source_reads_its_recorded_sites() {
     for &(case, path, source, expected) in SITE_ROWS {
@@ -124,8 +131,6 @@ fn each_planted_source_reads_its_recorded_sites() {
     }
 }
 
-/// Each row's planted source reads the defect sentences listed beside it, which the script's reading gave
-/// for the same source.
 #[test]
 fn each_planted_source_reads_its_recorded_defects() {
     for &(case, path, source, expected) in DEFECT_ROWS {
@@ -182,6 +187,57 @@ fn a_strength_constant_takes_its_op_from_the_pin_it_is_given() {
     assert_eq!(ops(CREDIT, &[]), ["unread"]);
     assert_eq!(ops(FILL, &[(FILL, "RELOAD", Op::Store)]), ["store"]);
     assert_eq!(ops(FILL, &[(FILL, "OTHER", Op::Store)]), ["unread"]);
+}
+
+#[test]
+fn a_reading_returns_its_production_and_scanned_texts() {
+    let text = "fn live(a: &AtomicU64) -> u64 { a.load(Ordering::Acquire) } // \"note\"\nconst S: &str = \"x\";\n#[cfg(test)]\nfn probe() {}\n";
+    let reading = read(FILL, text, EXTERNAL);
+    assert_eq!(
+        reading.production(),
+        "fn live(a: &AtomicU64) -> u64 { a.load(Ordering::Acquire) } // \"note\"\nconst S: &str = \"x\";\n            \n             \n"
+    );
+    assert_eq!(
+        reading.scanned(),
+        "fn live(a: &AtomicU64) -> u64 { a.load(Ordering::Acquire) }          \nconst S: &str =    ;\n            \n             \n"
+    );
+}
+
+#[test]
+fn each_repeated_ordering_token_takes_the_span_of_its_own_occurrence() {
+    let spans: Vec<(usize, usize, Op)> =
+        sites("s.fetch_update(Ordering::SeqCst, Ordering::SeqCst, f)")
+            .iter()
+            .map(|site| match site.kind() {
+                Kind::Ordering { op, .. } => (site.start(), site.end(), op),
+                Kind::Fence { .. } => (site.start(), site.end(), Op::Unread),
+            })
+            .collect();
+    assert_eq!(spans, [(15, 31, Op::Rmw), (33, 49, Op::Load)]);
+}
+
+#[test]
+fn a_name_longer_than_any_compiled_pattern_reads_as_a_shorter_one_does() {
+    let name = "A".repeat(1 << 20);
+    let constant = format!(
+        "impl Strength for Sequential {{\n    const {name}: Ordering = Ordering::SeqCst;\n}}\n"
+    );
+    let ops: Vec<&str> = read(FILL, &constant, EXTERNAL)
+        .sites()
+        .iter()
+        .map(Site::op_name)
+        .collect();
+    assert_eq!(ops, ["unread"]);
+    let forwarder = format!(
+        "macro_rules! {name} {{\n    ($s:ty, $fence:path) => {{\n        $fence(Ordering::SeqCst)\n    }};\n}}\n"
+    );
+    assert_eq!(
+        read(FILL, &forwarder, EXTERNAL).defects(),
+        [format!(
+            "crates/kestrike/src/storage/fill.rs: {name}! holds a $fence call, and 0 of its 0 production \
+             invocations pass std::sync::atomic::fence"
+        )]
+    );
 }
 
 const NBSP: &str = "\u{a0}";
@@ -314,10 +370,10 @@ const SITE_ROWS: &[SiteRow] = &[
     ("FENCE: a mark outside ASCII after the name", FILL, "fn extra() {\n    std::sync::atomic::fence\u{301}(Ordering::SeqCst);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "unread")]),
     ("FENCE: a mark outside ASCII before the name", FILL, "fn extra() {\n    std::sync::atomic::\u{301}fence(Ordering::SeqCst);\n}\n", &[(2, "fence(Ordering::SeqCst);", "fence", "fence")]),
     ("a definition's `fn`: a mark outside ASCII before the name", FILL, "fn \u{301}fence() {}\nfn extra() {\n    fence();\n}\n", &[(1, "fence()", "fence", "fence"), (3, "fence();", "fence", "fence")]),
-    ("a definition's `fn`: a word character outside ASCII after it", FILL, "fn\u{b2} fence() {}\n", &[(1, "fence()", "fence", "fence")]),
+    ("a definition's `fn`: a character other than white space after it", FILL, "fn\u{b2} fence() {}\n", &[(1, "fence()", "fence", "fence")]),
     ("a hook's `S::`: a mark outside ASCII before it", GRACE, "trait Strength {\n    fn fence_pin() {}\n}\nfn pin<S: Strength>() {\n    \u{301}S::fence_pin();\n}\n", &[]),
     ("a hook's `S::`: a word character outside ASCII before it", GRACE, "trait Strength {\n    fn fence_pin() {}\n}\nfn pin<S: Strength>() {\n    \u{b2}S::fence_pin();\n}\n", &[(5, "\u{b2}S::fence_pin();", "fence", "fence")]),
-    ("a hook's definition: a mark outside ASCII after `fn`", GRACE, "trait Strength {\n    fn\u{301} fence_pin() {}\n}\nfn pin<S: Strength>() {\n    S::fence_pin();\n}\n", &[(2, "fence_pin()", "fence", "fence"), (5, "S::fence_pin();", "fence", "fence")]),
+    ("a hook's definition: a character other than white space after `fn`", GRACE, "trait Strength {\n    fn\u{301} fence_pin() {}\n}\nfn pin<S: Strength>() {\n    S::fence_pin();\n}\n", &[(2, "fence_pin()", "fence", "fence"), (5, "S::fence_pin();", "fence", "fence")]),
     ("a hook's definition: a word character outside ASCII after the name", GRACE, "trait Strength {\n    fn fence_pin\u{b2}() {}\n}\nfn pin<S: Strength>() {\n    S::fence_pin();\n}\n", &[(5, "S::fence_pin();", "fence", "fence")]),
     ("a hook's definition: a mark outside ASCII after the name", GRACE, "trait Strength {\n    fn fence_pin\u{301}() {}\n}\nfn pin<S: Strength>() {\n    S::fence_pin();\n}\n", &[]),
     ("CONSTANT: a word character outside ASCII before it", GRACE, "impl Strength for Sequential {\n    \u{b2}const VISIT: Ordering = Ordering::SeqCst;\n}\nfn v<S: Strength>(r: &W) -> u64 {\n    r.load(S::VISIT)\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "unread")]),
@@ -337,6 +393,31 @@ const SITE_ROWS: &[SiteRow] = &[
     ("an inner cfg(test) attribute", FILL, "#![cfg(test)]\nfn peek(state: &AtomicU64) -> u64 {\n    state.load(Ordering::Acquire)\n}\n", &[(3, "Ordering::Acquire", "Acquire", "load")]),
     ("a_strength_constant_takes_its_op_from_the_code", CREDIT, "impl Strength for Sequential {\n    const OTHER: Ordering = Ordering::SeqCst;\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "unread")]),
     ("a fence path measured in code points of the source", FILL, "fn extra() {\n    std::/*\u{e9}*/sync::atomic::fence(Ordering::SeqCst);\n}\n", &[(2, "std::/*\u{e9}*/sync::atomic::fence(Ordering::SeqCst);", "fence", "fence")]),
+    ("a raw final segment of a fence path", FILL, "fn extra() {\n    std::sync::atomic::r#fence(Ordering::SeqCst);\n}\n", &[(2, "fence(Ordering::SeqCst);", "fence", "fence")]),
+    ("a raw intermediate segment of a fence path", FILL, "fn extra() {\n    std::r#sync::atomic::fence(Ordering::SeqCst);\n}\n", &[(2, "sync::atomic::fence(Ordering::SeqCst);", "fence", "fence")]),
+    ("a raw fence definition", FILL, "fn r#fence() {}\n", &[(1, "fence()", "fence", "fence")]),
+    ("a raw fence method call", FILL, "fn extra(x: &W) {\n    x.r#fence();\n}\n", &[(2, "fence();", "fence", "fence")]),
+    ("a `$fence` call behind a path segment", FILL, "macro_rules! fwd {\n    ($s:ty, $fence:path) => {\n        x::$fence(Ordering::SeqCst)\n    };\n}\nfwd!(u8, settle);\n", &[(3, "x::$fence(Ordering::SeqCst)", "fence", "fence")]),
+    ("a word and a space before a rooted fence path", FILL, "fn extra() -> u8 {\n    return ::std::sync::atomic::fence(Ordering::SeqCst);\n}\n", &[(2, "return ::std::sync::atomic::fence(Ordering::SeqCst);", "fence", "fence")]),
+    ("a fence path at the window's edge: the path's first character 200 code points back", FILL, "fn extra() {\n    std::sync::atomic::                                                                                                                                                                                     fence(Ordering::SeqCst);\n}\n", &[(2, "std::sync::atomic::                                                                                                                                                                                     fence(Ordering::SeqCst);", "fence", "fence")]),
+    ("a fence path at the window's edge: the path's first character 201 code points back", FILL, "fn extra() {\n    std::sync::atomic::                                                                                                                                                                                      fence(Ordering::SeqCst);\n}\n", &[(2, "td::sync::atomic::                                                                                                                                                                                      fence(Ordering::SeqCst);", "fence", "fence")]),
+    ("a test-only item among a macro's tokens", FILL, "m!(#[cfg(test)] fn probe(state: &AtomicU64) -> u64 { state.load(Ordering::Acquire) });\n", &[]),
+    ("call_op: an earlier operand with `,` and `<` inside brackets", FILL, "pub(crate) fn peek(state: &AtomicU64) -> u64 {\n    s.compare_exchange(f(1, x < y), 2, Ordering::AcqRel, Ordering::Acquire)\n}\n", &[(2, "Ordering::AcqRel", "AcqRel", "rmw"), (2, "Ordering::Acquire", "Acquire", "load")]),
+    ("call_op: a store whose value holds `<<`", FILL, "pub(crate) fn peek(state: &AtomicU64) -> u64 {\n    state.store(1 << 2, Ordering::Release)\n}\n", &[(2, "Ordering::Release", "Release", "store")]),
+    ("call_op: a fetch_add whose operand holds `<<`", FILL, "pub(crate) fn peek(state: &AtomicU64) -> u64 {\n    state.fetch_add(1 << 2, Ordering::AcqRel)\n}\n", &[(2, "Ordering::AcqRel", "AcqRel", "rmw")]),
+    ("call_op: a direct fetch_sub", FILL, "pub(crate) fn peek(state: &AtomicU64) -> u64 {\n    state.fetch_sub(1, Ordering::Release)\n}\n", &[(2, "Ordering::Release", "Release", "rmw")]),
+    ("a_strength_constant_takes_its_op_from_the_code", GRACE, "impl Strength for Sequential {\n    const VISIT: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.load(S::VISIT);\n    record.load(S::VISIT);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "load")]),
+    ("a_strength_constant_takes_its_op_from_the_code", GRACE, "impl Strength for Sequential {\n    const VISIT: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.fetch_add(1, S::VISIT);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "rmw")]),
+    ("a_strength_constant_takes_its_op_from_the_code", GRACE, "impl Strength for Sequential {\n    const VISIT: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.fetch_and(1, S::VISIT);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "rmw")]),
+    ("a_strength_constant_takes_its_op_from_the_code", CREDIT, "impl Strength for Sequential {\n    const RELOAD: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.store(0, S::RELOAD);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "store")]),
+    ("a_strength_constant_passed_to_two_ops_is_unread", CREDIT, "impl Strength for Sequential {\n    const RELOAD: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.store(0, S::RELOAD);\n    record.load(S::RELOAD);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "unread")]),
+    ("a_strength_constant_passed_to_two_ops_is_unread", CREDIT, "impl Strength for Sequential {\n    const RELOAD: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.store(0, S::RELOAD);\n    apply(S::RELOAD);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "unread")]),
+    ("a constant's `S::NAME`: an accepted mention inside a candidate rejected at its start", GRACE, "impl Strength for Sequential {\n    const VISIT: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.load(XS::S::VISIT);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "load")]),
+    ("a constant's `S::NAME`: an accepted mention inside a candidate whose name differs", GRACE, "impl Strength for Sequential {\n    const VISIT: Ordering = Ordering::SeqCst;\n}\nfn visit<W: EraWord, S: Strength>(record: &W) {\n    record.load(S::S::VISIT);\n}\n", &[(2, "Ordering::SeqCst", "SeqCst", "load")]),
+    ("a strength constant whose initializer starts on the next line", CREDIT, "impl Strength for Sequential {\n    const RELOAD: Ordering =\n        Ordering::SeqCst;\n}\n", &[(3, "Ordering::SeqCst", "SeqCst", "unread")]),
+    ("a hook's definition: a word character outside ASCII before `fn`", GRACE, "trait Strength {\n    \u{b2}fn fence_pin() {}\n}\nfn pin<S: Strength>() {\n    S::fence_pin();\n}\n", &[(2, "fence_pin()", "fence", "fence"), (5, "S::fence_pin();", "fence", "fence")]),
+    ("a_hook_with_a_body_is_a_fence_site", GRACE, "trait Strength {\n    fn fence_park() {}\n    fn fence_clear() {}\n    fn fence_retire() {}\n    fn fence_certify() {}\n    fn fence_other() {}\n}\nfn pin<S: Strength>() {\n    S::fence_park();\n    S::fence_clear();\n    S::fence_retire();\n    S::fence_certify();\n    S::fence_other();\n}\n", &[(13, "S::fence_other();", "fence", "fence")]),
+    ("sites in the order of their starts", FILL, "fn extra(state: &AtomicU64) {\n    state.load(Ordering::Acquire);\n    std::sync::atomic::fence(Ordering::SeqCst);\n}\n", &[(2, "Ordering::Acquire", "Acquire", "load"), (3, "std::sync::atomic::fence(Ordering::SeqCst);", "fence", "fence")]),
 ];
 
 #[rustfmt::skip]
@@ -420,4 +501,19 @@ const DEFECT_ROWS: &[DefectRow] = &[
     ("a_forwarder_that_is_not_one_arm_its_invocations_directly_follow_is_refused", SEQUENCE, "macro_rules! forward_seq_word {\n    () => {};\n    ($atomic:ty, $fence:path) => {\n        impl FillWord for $atomic {\n            fn acquire_fence() {\n                $fence(Ordering::Acquire);\n            }\n        }\n    };\n}\n\nforward_seq_word!(std::sync::atomic::AtomicU64, std::sync::atomic::fence);\n", &["crates/kestrike/src/index/sequence.rs: forward_seq_word! is not one arm ($name:ty, $fence:path) => {..} that its production invocations directly follow"]),
     ("a word directly before `$fence`", FILL, "macro_rules! fwd {\n    ($s:ty, $fence:path) => {\n        return$fence(Ordering::SeqCst)\n    };\n}\n", &[]),
     ("a word and a space before `$fence`", FILL, "macro_rules! fwd {\n    ($s:ty, $fence:path) => {\n        return $fence(Ordering::SeqCst)\n    };\n}\n", &["crates/kestrike/src/storage/fill.rs: fwd! holds a $fence call, and 0 of its 0 production invocations pass std::sync::atomic::fence"]),
+    ("a raw final segment of a fence path", FILL, "fn extra() {\n    std::sync::atomic::r#fence(Ordering::SeqCst);\n}\n", &[]),
+    ("a raw intermediate segment of a fence path", FILL, "fn extra() {\n    std::r#sync::atomic::fence(Ordering::SeqCst);\n}\n", &[]),
+    ("a raw fence definition", FILL, "fn r#fence() {}\n", &[]),
+    ("a raw fence method call", FILL, "fn extra(x: &W) {\n    x.r#fence();\n}\n", &[]),
+    ("a `$fence` call behind a path segment", FILL, "macro_rules! fwd {\n    ($s:ty, $fence:path) => {\n        x::$fence(Ordering::SeqCst)\n    };\n}\nfwd!(u8, settle);\n", &[]),
+    ("a bare `$fence` call", FILL, "macro_rules! fwd {\n    ($s:ty, $fence:path) => {\n        $fence(Ordering::SeqCst)\n    };\n}\nfwd!(u8, settle);\n", &["crates/kestrike/src/storage/fill.rs: fwd! holds a $fence call, and 0 of its 1 production invocations pass std::sync::atomic::fence"]),
+    ("a word and a space before a rooted fence path", FILL, "fn extra() -> u8 {\n    return ::std::sync::atomic::fence(Ordering::SeqCst);\n}\n", &[]),
+    ("a fence path at the window's edge: the path's first character 200 code points back", FILL, "fn extra() {\n    std::sync::atomic::                                                                                                                                                                                     fence(Ordering::SeqCst);\n}\n", &[]),
+    ("a fence path at the window's edge: the path's first character 201 code points back", FILL, "fn extra() {\n    std::sync::atomic::                                                                                                                                                                                      fence(Ordering::SeqCst);\n}\n", &[]),
+    ("a test-only item among a macro's tokens", FILL, "m!(#[cfg(test)] fn probe(state: &AtomicU64) -> u64 { state.load(Ordering::Acquire) });\n", &[]),
+    ("defects in the order of their kinds", FILL, "fn a(w: &W) { w.acquire_fence(); }\nfn extra<A, #[cfg(test)] B>(a: A) -> A { a }\nfn peek() { Acquire }\nuse std::sync::atomic::Ordering::*;\n", &["crates/kestrike/src/storage/fill.rs:4: Ordering::* hides the sites it names from the matcher", "crates/kestrike/src/storage/fill.rs:3: Acquire outside an Ordering:: path hides its site from the matcher", "crates/kestrike/src/storage/fill.rs:2: a test-only element whose end the matcher reads more than one way; parenthesize its `<`, `>` or `|`, or move it into a test-only block or module", "crates/kestrike/src/storage/fill.rs:1: a fence called as a method hides the sites it names from the matcher"]),
+    ("the callee's last character: a qualified path at column 0 after a line that ends in a word character", FILL, "fn extra<W: FillWord>() {\n    x\n<W>::acquire_fence();\n}\n", &["crates/kestrike/src/storage/fill.rs:3: a fence callee the matcher cannot delimit hides the sites it names from the matcher"]),
+    ("a_forwarder_that_passes_another_fence_is_refused", FILL, "macro_rules! forward_fill_word {\n    ($atomic:ty, $fence:path) => {\n        impl FillWord for $atomic {\n            fn acquire_fence() {\n                $fence(Ordering::Acquire);\n            }\n        }\n    };\n}\n\nforward_fill_word!(std::sync::atomic::AtomicU64, std::sync::atomic::compiler_fence);\n", &["crates/kestrike/src/storage/fill.rs:11: a fence path named outside a call hides the sites it names from the matcher", "crates/kestrike/src/storage/fill.rs: forward_fill_word! holds a $fence call, and 0 of its 1 production invocations pass std::sync::atomic::fence"]),
+    ("a fence name without `$` before `:`", FILL, "struct S {\n    acquire_fence: u8,\n}\n", &["crates/kestrike/src/storage/fill.rs:2: a fence path named outside a call hides the sites it names from the matcher"]),
+    ("a_forwarder_that_is_not_one_arm_its_invocations_directly_follow_is_refused", FILL, "macro_rules! forward_fill_word {\n    ($atomic:ty, $fence:path) => {\n        impl FillWord for $atomic {\n            fn acquire_fence() {\n                $fence(Ordering::Acquire);\n            }\n        }\n    };\n}\n\nforward_fill_word!(std::sync::atomic::AtomicU64, std::sync::atomic::fence);\n#[cfg(all(test, loom))]\nforward_fill_word!(loom::sync::atomic::AtomicU64, loom::sync::atomic::fence);\n", &[]),
 ];

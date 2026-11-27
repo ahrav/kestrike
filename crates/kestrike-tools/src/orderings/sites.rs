@@ -9,6 +9,8 @@
 //! every such body is empty. An ordering passed directly to a fence call belongs to the fence; an ordering
 //! nested deeper in the fence's arguments is a site of its own.
 //!
+//! [`read`] counts the sites in the part of a test-only element after its first brace block.
+//!
 //! The op of an ordering comes from the atomic method, called as `receiver.method(...)`, whose argument it
 //! is. A compare-exchange's success ordering is an `rmw` and its failure ordering a `load`, and
 //! `fetch_update`'s set and fetch orderings are an `rmw` and a `load`, each read by argument position
@@ -16,25 +18,31 @@
 //! `const NAME: Ordering` item, comes from each `S::NAME` mention in the file's scanned text: the mentions
 //! must all sit in atomic calls of one op. A constant with no such mention takes its op from the pin the
 //! caller gives for the file and the constant's name, and is unread without one; [`EXTERNAL`] holds the
-//! catalog's pins.
+//! catalog's pins. A constant counts as one only where `const NAME: Ordering =` and its initializer's
+//! `Ordering::` path start on one line; otherwise [`read`] counts that path as an ordinary ordering site.
 //!
 //! The production text spells each ordering variant as part of an `Ordering::` path and names each fence
 //! path only in a path call whose callee the reading delimits whole, a macro fragment, or a forwarder
-//! invocation `name!(<type>, std::sync::atomic::fence);`. Each `$fence` call sits in the body of a
-//! `macro_rules!` that is one arm `($name:ty, $fence:path) => {..}`, whose production invocations, at
-//! least one, all pass `std::sync::atomic::fence`, lie among no other macro's tokens and follow the
-//! definition with only blank text between. Each departure from these rules is a defect, as is each
-//! test-only element whose end the production text's rules read more than one way.
+//! invocation `name!(<type>, std::sync::atomic::fence);`. Each fence site that starts with `$` sits in
+//! the sole arm of a `macro_rules!` definition: `($name:ty, $fence:path) => {..}`. That macro has at least
+//! one production invocation. Each invocation passes `std::sync::atomic::fence` at macro nesting depth
+//! zero, and the invocations follow the definition with only blank text between. Each invoked forwarder
+//! holds a fence site that starts with `$`. A word or a path segment directly before `$fence` joins the
+//! site's path. Only sites that start with `$` trigger the forwarder requirements. The production-text
+//! rules must identify a unique end for each test-only element. Each departure from these rules is a
+//! defect.
 //!
 //! Offsets are byte offsets of the source, which the production and scanned texts share. Each window
 //! spans a count of code points of the source: 200 before and after a fence name, 200 before a method.
 //! Each pattern compiles with Python's classes; [`captures_bounded`] checks Python's `\b` at a match's word
 //! edges, and `fence_path` also matches the fence path before a final newline, as Python's `$` does.
+//! The word class uses the `regex` crate's Unicode tables, which can assign letters and numbers that the
+//! Python interpreter's Unicode tables leave unassigned.
 
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-use regex::Regex;
+use regex::{Match, Regex};
 
 use crate::classes::{SPACE, WORD, bounded_iter, captures_bounded, compiled, is_word};
 use crate::production_text::{analyzed, closing};
@@ -199,7 +207,7 @@ static FENCE_PATH: LazyLock<Regex> = LazyLock::new(|| {
 
 static FORWARDER: LazyLock<Regex> = LazyLock::new(|| {
     compiled(&format!(
-        r"({WORD}+){SPACE}*!{SPACE}*\({SPACE}*[\p{{L}}\p{{N}}_:<>]+{SPACE}*,{SPACE}*std{SPACE}*::{SPACE}*sync{SPACE}*::{SPACE}*atomic{SPACE}*::{SPACE}*\z"
+        r"({WORD}+){SPACE}*!{SPACE}*\({SPACE}*[{WORD}:<>]+{SPACE}*,{SPACE}*std{SPACE}*::{SPACE}*sync{SPACE}*::{SPACE}*atomic{SPACE}*::{SPACE}*\z"
     ))
 });
 
@@ -223,6 +231,12 @@ static CONSTANT: LazyLock<Regex> = LazyLock::new(|| {
 
 static MACRO_RULES: LazyLock<Regex> =
     LazyLock::new(|| compiled(&format!(r"macro_rules!{SPACE}*(?:r#)?({WORD}+){SPACE}*\{{")));
+
+static MENTION: LazyLock<Regex> =
+    LazyLock::new(|| compiled(&format!(r"S{SPACE}*::{SPACE}*({WORD}+)")));
+
+static INVOCATION: LazyLock<Regex> =
+    LazyLock::new(|| compiled(&format!(r"({WORD}+){SPACE}*!{SPACE}*[(\[{{]")));
 
 static METHOD: LazyLock<Regex> = LazyLock::new(|| {
     compiled(&format!(
@@ -378,8 +392,9 @@ fn empty_hooks(scanned: &str) -> Vec<&'static str> {
 
 /// The span of the fence path at the end of `before`, as Python's `search` finds it with a `$` that
 /// matches at the end and before a final newline: the leftmost start, and at one start the match that
-/// runs to the end. A path's white space runs over line breaks, so a word that ends the line above a
-/// rooted path `::std::...` starts the path. A path that ends before a final newline is counted back from
+/// runs to the end. The site starts at the preceding word when white space alone, a line break included,
+/// separates the word from a rooted path such as `::std::...`: `return ::std::sync::atomic::fence(..)`
+/// gives a site that starts at `return`. A path that ends before a final newline is counted back from
 /// the fence name by its length: a callee `<W>::x` on the line above `fence(` gives a site that starts at
 /// `W>` and a prefix that ends with `<`.
 fn fence_path(before: &str) -> (usize, usize) {
@@ -527,12 +542,9 @@ fn forwarder_defects(scanned: &str, fences: &Fences) -> Vec<String> {
         })
         .collect();
     for (name, low, high) in &owners {
-        let invocation = compiled(&format!(r"{}{SPACE}*!{SPACE}*[(\[{{]", regex::escape(name)));
-        let invoked: Vec<(usize, usize)> = bounded_iter(&invocation, scanned)
-            .map(|found| {
-                let whole = found.get_match();
-                (whole.start(), whole.end() - 1)
-            })
+        let invoked: Vec<(usize, usize)> = named(&INVOCATION, scanned, name, |group| group.end())
+            .into_iter()
+            .map(|whole| (whole.start(), whole.end() - 1))
             .collect();
         if invoked.iter().any(|&(offset, _)| {
             groups
@@ -578,6 +590,28 @@ fn forwarder_defects(scanned: &str, fences: &Fences) -> Vec<String> {
     defects
 }
 
+fn named<'h>(
+    regex: &Regex,
+    text: &'h str,
+    name: &str,
+    resume: fn(Match<'h>) -> usize,
+) -> Vec<Match<'h>> {
+    let (mut found, mut at) = (Vec::new(), 0);
+    while let Some(candidate) = captures_bounded(regex, text, at) {
+        let (whole, group) = (
+            candidate.get_match(),
+            candidate.get(1).expect("the pattern has group 1"),
+        );
+        if group.as_str() == name {
+            found.push(whole);
+            at = whole.end();
+        } else {
+            at = resume(group);
+        }
+    }
+    found
+}
+
 /// Each site of the view in order of start, given its fence calls and the pins of the file at `path`.
 fn ordered_sites(view: View<'_>, fences: &[Site], path: &str, pins: &[Pin]) -> Vec<Site> {
     let scanned = view.scanned;
@@ -599,9 +633,9 @@ fn ordered_sites(view: View<'_>, fences: &[Site], path: &str, pins: &[Pin]) -> V
         let op = match captures_bounded(&CONSTANT, &scanned[line..start], 0) {
             Some(constant) => {
                 let name = constant.get(1).expect("CONSTANT has group 1").as_str();
-                let mention = compiled(&format!(r"S{SPACE}*::{SPACE}*{}", regex::escape(name)));
-                let ops: BTreeSet<Op> = bounded_iter(&mention, scanned)
-                    .map(|found| call_op(view, found.get_match().start()))
+                let ops: BTreeSet<Op> = named(&MENTION, scanned, name, |group| group.start())
+                    .into_iter()
+                    .map(|mention| call_op(view, mention.start()))
                     .collect();
                 match ops.len() {
                     0 => pins
@@ -623,16 +657,6 @@ fn ordered_sites(view: View<'_>, fences: &[Site], path: &str, pins: &[Pin]) -> V
     }
     found.sort_by_key(|site| site.start);
     found
-}
-
-/// The sites of `scanned` read alone: its own fence calls, and no strength constant whose consumer lies
-/// outside it. Its windows count code points of `scanned`.
-pub fn sites(scanned: &str) -> Vec<Site> {
-    let view = View {
-        source: scanned,
-        scanned,
-    };
-    ordered_sites(view, &fence_calls(view).found, "", &[])
 }
 
 /// The reading of the scoped file at `path`, the path relative to the checkout's top, whose text is

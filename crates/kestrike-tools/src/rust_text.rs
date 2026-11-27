@@ -1,10 +1,6 @@
 //! `lexemes` locates the comments, string literals and char literals of Rust source as byte spans, and
 //! `code` blanks them with one space for each byte, keeping each newline, so an offset of the view is the
 //! same offset of the source.
-//!
-//! A view's offsets are those of its source, while a blanked character outside ASCII is one space a byte
-//! in the view. [`back`] and [`ahead`] therefore measure a window in code points of the source, so a
-//! character outside ASCII in a comment or a literal widens no window.
 
 use std::sync::LazyLock;
 

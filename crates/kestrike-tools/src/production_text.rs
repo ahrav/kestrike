@@ -1,7 +1,10 @@
-//! Production text preserves source offsets and blanks each element under a test-only `cfg` attribute,
-//! from the first outer attribute of its run. The scanned text is the production text with comments and
-//! literal contents also blanked, as [`code`] gives them. The rules find attributes and element ends in
-//! the scanned text, so each attribute and each end they find stands in code.
+//! Production text preserves source offsets and blanks each test-only element: a run of outer attributes
+//! that ends in `#[cfg(test)]` or `#[cfg(all(test ...))]`, together with the element that follows.
+//! Blanking stops at the end `item_end` finds; text after that end stays production text.
+//! An element whose end the rules cannot find stays production text whole.
+//! `RUN` matches outer attributes, so an inner `#![cfg(test)]` keeps its module's text.
+//! The scanned text is `code(production)`.
+//! The rules search `code(source)`, where [`code`] blanks comments and literal contents.
 //! `scripts/classify-atomics.py` holds the same rules for its own callers.
 //!
 //! Window widths (8 code points before a bracket, 80 before a macro's bracket) count code points of the
@@ -24,7 +27,9 @@ use crate::rust_text::{back, blank, code};
 use crate::text::is_space;
 
 /// Python's `\b` after a word character, consuming the next character or matching the end.
-const AFTER_WORD: &str = r"(?:[^\p{L}\p{N}_]|\z)";
+fn after_word() -> String {
+    format!(r"(?:[^{WORD}]|\z)")
+}
 
 fn qualifiers() -> String {
     format!(
@@ -47,21 +52,23 @@ fn static_item() -> String {
 /// `\b` there.
 static RUN: LazyLock<Regex> = LazyLock::new(|| {
     compiled(&format!(
-        r"(?:#{SPACE}*\[(?:[^\[\]]|\[[^\[\]]*\])*\]{SPACE}*)*#\[cfg\((?:test|all\(test(?:[^\]\p{{L}}\p{{N}}_][^\]]*)?)\)\]"
+        r"(?:#{SPACE}*\[(?:[^\[\]]|\[[^\[\]]*\])*\]{SPACE}*)*#\[cfg\((?:test|all\(test(?:[^\]{WORD}][^\]]*)?)\)\]"
     ))
 });
 
 static ITEM: LazyLock<Regex> = LazyLock::new(|| {
+    let after_word = after_word();
     compiled(&format!(
-        r"\A{SPACE}*(?:#\[[^\]]*\]{SPACE}*)*{}(?:(?:fn|impl|struct|enum|trait|type|mod|const|static|use){AFTER_WORD}|{})",
+        r"\A{SPACE}*(?:#\[[^\]]*\]{SPACE}*)*{}(?:(?:fn|impl|struct|enum|trait|type|mod|const|static|use){after_word}|{})",
         qualifiers(),
         union()
     ))
 });
 
 static PROVEN: LazyLock<Regex> = LazyLock::new(|| {
+    let after_word = after_word();
     compiled(&format!(
-        r"\A{SPACE}*(?:#\[[^\[\]]*\]{SPACE}*)*(?:{}(?:fn{SPACE}+{WORD}|{}|{}|(?:impl|struct|enum|trait|type|mod|use){AFTER_WORD})|(?:let|if|match|while|for|loop|return){AFTER_WORD})",
+        r"\A{SPACE}*(?:#\[[^\[\]]*\]{SPACE}*)*(?:{}(?:fn{SPACE}+{WORD}|{}|{}|(?:impl|struct|enum|trait|type|mod|use){after_word})|(?:let|if|match|while|for|loop|return){after_word})",
         qualifiers(),
         union(),
         static_item()
