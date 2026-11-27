@@ -170,3 +170,7 @@ pub fn say(out: &mut impl Write, line: &Text) -> io::Result<()> {
     said.push('\n');
     out.write_all(said.as_bytes())
 }
+
+#[cfg(test)]
+#[path = "python_tests.rs"]
+mod tests;

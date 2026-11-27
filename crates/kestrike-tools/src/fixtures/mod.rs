@@ -13,6 +13,9 @@ pub mod quint;
 
 #[cfg(test)]
 mod args_tests;
+#[cfg(test)]
+#[path = "../fixtures_tests.rs"]
+mod tests;
 
 mod write;
 

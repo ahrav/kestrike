@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use crate::fixtures::{self, Model, Style};
 
+pub const NAME: &str = "reclaim_fixtures";
+
 pub(crate) const MODEL: Model = Model {
-    tool: "reclaim_fixtures",
+    tool: NAME,
     about: "Reclaim model traces for the replay against `Storage`: the directed recipes and seeded runs of `step`.",
     name: "reclaim",
     style: Style::Record,

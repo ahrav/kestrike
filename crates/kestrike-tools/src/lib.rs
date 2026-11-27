@@ -12,20 +12,3 @@ pub mod python;
 pub mod shell;
 pub mod text;
 pub mod tools;
-
-#[cfg(test)]
-mod args_tests;
-#[cfg(test)]
-mod fixtures_tests;
-#[cfg(test)]
-mod json_tests;
-#[cfg(test)]
-mod paths_tests;
-#[cfg(test)]
-mod python_tests;
-#[cfg(test)]
-mod shell_tests;
-#[cfg(test)]
-mod text_tests;
-#[cfg(test)]
-mod tools_tests;

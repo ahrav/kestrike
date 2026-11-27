@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use crate::fixtures::{self, Model, Style, Trace, case};
 
+pub const NAME: &str = "gate_fixtures";
+
 pub(crate) const MODEL: Model = Model {
-    tool: "gate_fixtures",
+    tool: NAME,
     about: "Attach-gate model traces for the replay against `Volume`: the directed recipes and seeded runs of `step`.",
     name: "gate",
     style: Style::Format,

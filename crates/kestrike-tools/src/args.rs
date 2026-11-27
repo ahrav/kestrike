@@ -387,3 +387,7 @@ fn looks_negative(arg: &[u8]) -> bool {
 fn shown(arg: &[u8]) -> String {
     Text::from_os(OsStr::from_bytes(arg)).to_string()
 }
+
+#[cfg(test)]
+#[path = "args_tests.rs"]
+mod tests;

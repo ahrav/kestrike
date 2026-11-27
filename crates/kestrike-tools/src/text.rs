@@ -323,3 +323,7 @@ impl PartialEq<&str> for Text {
         self.0 == other.as_bytes()
     }
 }
+
+#[cfg(test)]
+#[path = "text_tests.rs"]
+mod tests;

@@ -15,8 +15,10 @@ use crate::fixtures::{self, Model, Style, Trace, case};
 use crate::json::{Integer, Object, Value};
 use crate::python;
 
+pub const NAME: &str = "marklog_fixtures";
+
 pub(crate) const MODEL: Model = Model {
-    tool: "marklog_fixtures",
+    tool: NAME,
     about: "Watermark-log model traces for the replay against the file log: the directed recipes and seeded runs of `step`.",
     name: "marklog",
     style: Style::Format,

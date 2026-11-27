@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::fixtures::quint::{Failure, run};
 use crate::fixtures::{Model, Style, Trace, case, generate, keep};
 use crate::json::{Value, parse};
-use crate::paths_tests::Scratch;
+use crate::paths::tests::Scratch;
 use crate::tools;
 
 const GATE: Model = Model {

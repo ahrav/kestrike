@@ -11,8 +11,10 @@ use std::time::Duration;
 
 use crate::fixtures::{self, Model, Style};
 
+pub const NAME: &str = "lookup_fixtures";
+
 pub(crate) const MODEL: Model = Model {
-    tool: "lookup_fixtures",
+    tool: NAME,
     about: "Lookup model traces for the replay against `Storage`: the directed recipes and seeded runs of `step`.",
     name: "lookup",
     style: Style::Record,
