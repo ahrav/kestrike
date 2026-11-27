@@ -128,7 +128,8 @@ fn a_header_counts_only_at_its_word_edges() {
 
 /// A package's sources are its regular files and links to one, hidden ones included, build state and
 /// a linked directory's contents aside, in component order; then each include a `.rs` file resolves to
-/// outside that list, once. An include in a file of another suffix is not read.
+/// outside that list, once. An include in a file of another suffix is not read, nor in `.rs`, whose
+/// leading `.` makes no suffix. `src/a/c.rs` sorts before `src/a.rs`, its component `a` before `a.rs`.
 #[test]
 fn the_package_sources_are_its_files_then_their_includes() {
     let scratch = Scratch::new("genmc");
@@ -147,6 +148,8 @@ fn the_package_sources_are_its_files_then_their_includes() {
         ("src/d.inc", "#[path = \"../../out/z.rs\"]\nmod z;\n"),
         ("target/t.rs", "#[path = \"../../out/y.rs\"]\nmod y;\n"),
         ("linked/l.rs", ""),
+        ("src/a.rs", ""),
+        ("src/.rs", "#[path = \"../../out/w.rs\"]\nmod w;\n"),
     ];
     for (path, text) in files {
         fs::write(package.join(path), text).expect("the file is written");
@@ -158,7 +161,9 @@ fn the_package_sources_are_its_files_then_their_includes() {
     let expected: Vec<PathBuf> = [
         "linked/l.rs",
         "src/.hidden",
+        "src/.rs",
         "src/a/c.rs",
+        "src/a.rs",
         "src/b.rs",
         "src/d.inc",
         "src/link.rs",
@@ -191,4 +196,25 @@ fn a_walk_passes_over_a_directory_it_may_not_list() {
     let mut found = found.expect("the walk passes over the closed directory");
     found.sort();
     assert_eq!(found, [closed, scratch.0.join("open.rs")]);
+}
+
+/// A lookup refused permission is an error, not an absent file.
+#[test]
+fn a_lookup_refused_permission_is_an_error() {
+    let scratch = Scratch::new("genmc");
+    let closed = scratch.0.join("closed");
+    fs::create_dir_all(&closed).expect("the directory is made");
+    fs::write(closed.join("f.rs"), "").expect("the file is written");
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).expect("the mode is set");
+    let found = super::is_file(&closed.join("f.rs"));
+    let searchable = fs::metadata(closed.join("f.rs")).is_ok();
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
+    if searchable {
+        eprintln!(
+            "a_lookup_refused_permission_is_an_error: this process searches a mode-000 directory; nothing checked"
+        );
+        return;
+    }
+    let error = found.expect_err("the lookup is refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }

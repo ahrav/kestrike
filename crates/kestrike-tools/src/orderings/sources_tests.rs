@@ -13,6 +13,7 @@ use crate::json::{self, Text, Value};
 use crate::paths::tests::Scratch;
 
 const STORAGE: &str = "crates/kestrike/src/storage/mod.rs";
+const TREE: &str = "crates/kestrike/src/mod.rs";
 const CREDIT: &str = "crates/kestrike/src/storage/credit.rs";
 const STEPS: &str = "crates/kestrike/src/storage/credit_steps.rs";
 const FILL: &str = "crates/kestrike/src/storage/fill.rs";
@@ -84,11 +85,11 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// A copy of the kernel package under a scratch root with one more source, `src/planted.rs`: `text`,
+/// A copy of the kernel package under a planted checkout root with one more source, `src/planted.rs`: `text`,
 /// with `{up}` the path from the source to the root, or one that includes each of `extra` by `#[path]`.
 fn planted_package(extra: &[&str], text: Option<&str>) -> Scratch {
     let scratch = Scratch::new("sources");
-    let package = scratch.0.join(PACKAGE);
+    let package = root_of(&scratch).join(PACKAGE);
     copy_tree(&top().join(PACKAGE), &package);
     let up = "../".repeat(Path::new(PACKAGE).join("src").iter().count());
     let source = text.map_or_else(
@@ -106,8 +107,14 @@ fn planted_package(extra: &[&str], text: Option<&str>) -> Scratch {
     scratch
 }
 
+/// The checkout root of a planted package: a directory of its own inside the scratch directory, so the
+/// root's parent, where an include outside the checkout resolves, holds nothing else.
+fn root_of(scratch: &Scratch) -> PathBuf {
+    scratch.0.join("top")
+}
+
 fn package_of(scratch: &Scratch) -> PathBuf {
-    scratch.0.join(PACKAGE)
+    root_of(scratch).join(PACKAGE)
 }
 
 fn messages(refusals: &[Refusal]) -> Vec<&str> {
@@ -295,7 +302,7 @@ fn a_genmc_failure_spelled_c_only_in_a_comment_is_refused() {
     }
 }
 
-/// Python's `\b` holds beside a word character of any script: a name a word character extends is no
+/// A word edge stands beside a word character of any script: a name a word character extends is no
 /// `check!` and no assertion, and a `c` prefix a word character precedes is no C string. Each row is a
 /// text and the messages and the (content, line) sites it gives.
 #[test]
@@ -652,8 +659,8 @@ fn a_directory_module_is_classified_by_its_parent() {
             STORAGE,
             text(planted(STORAGE, "\nmod slot;\n", declaration)),
         )]);
-        let scope =
-            scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+        let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+            .expect("the scope reads");
         let standing = (
             scope.included().iter().any(|path| path == include),
             scope.excluded().iter().any(|path| path == include),
@@ -693,7 +700,7 @@ fn a_file_declared_only_from_another_directory_is_refused() {
 fn an_include_no_module_file_declares_is_refused() {
     let include = "crates/kestrike/src/storage/undeclared.rs";
     let scratch = planted_package(&[include], None);
-    let found = scope_messages(&scratch.0, vec![]);
+    let found = scope_messages(&root_of(&scratch), vec![]);
     let head = format!(
         "the kernel package includes {include} and no module file declares it through declarations \
          that reach the crate root; searched ['{STORAGE}', 'crates/kestrike/src/storage.rs', "
@@ -704,7 +711,7 @@ fn an_include_no_module_file_declares_is_refused() {
         .collect();
     assert_eq!(undeclared.len(), 1, "{found:?}");
     assert!(undeclared[0].ends_with("] and the crate's path attributes"));
-    let refused = scope_messages(&scratch.0, vec![(STORAGE, Plant::Refused)]);
+    let refused = scope_messages(&root_of(&scratch), vec![(STORAGE, Plant::Refused)]);
     let expected = format!(
         "{STORAGE} cannot be read to classify {include}: {}",
         io::Error::from(io::ErrorKind::PermissionDenied)
@@ -716,7 +723,7 @@ fn an_include_no_module_file_declares_is_refused() {
         "{}\n#[cfg(test)]\n#[path = \"tests/extra.rs\"]\nmod extra;\n",
         committed(STORAGE)
     );
-    let found = scope_messages(&scratch.0, vec![(STORAGE, text(elsewhere))]);
+    let found = scope_messages(&root_of(&scratch), vec![(STORAGE, text(elsewhere))]);
     let head = format!("the kernel package includes {extra} and no module file declares it");
     assert_eq!(
         found
@@ -727,7 +734,7 @@ fn an_include_no_module_file_declares_is_refused() {
         "{found:?}"
     );
     let scratch = planted_package(&["undeclared.rs"], None);
-    let found = scope_messages(&scratch.0, vec![]);
+    let found = scope_messages(&root_of(&scratch), vec![]);
     let head = "the kernel package includes undeclared.rs and no module file declares it";
     assert_eq!(
         found
@@ -743,17 +750,24 @@ fn an_include_no_module_file_declares_is_refused() {
 #[test]
 fn an_include_outside_the_repository_is_refused() {
     let scratch = planted_package(&["../outside.rs"], None);
-    let found = scope_messages(&scratch.0, vec![]);
-    let outside = scratch
-        .0
-        .parent()
-        .expect("the scratch root has a parent")
-        .join("outside.rs");
+    let found = scope_messages(&root_of(&scratch), vec![]);
+    let outside = scratch.0.join("outside.rs");
     let expected = format!(
         "the kernel package includes {}, outside the repository",
         outside.display()
     );
     assert_eq!(found, [expected]);
+    let read = reader(vec![]);
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
+    assert_eq!(
+        scope
+            .refusals()
+            .iter()
+            .map(Refusal::name)
+            .collect::<Vec<_>>(),
+        ["scope file"]
+    );
 }
 
 /// The committed obligation records, with one loom control also listed under its record's tests.
@@ -1009,8 +1023,8 @@ fn a_model_support_file_the_package_includes_is_excluded() {
         None,
     );
     let read = reader(vec![]);
-    let scope =
-        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
     assert_eq!(
         (scope.excluded(), scope.refusals()),
         (
@@ -1141,8 +1155,8 @@ fn two_files_that_declare_each_other_end_the_classification() {
             text("#[path = \"cyc_a.rs\"]\nmod a;\n".to_owned()),
         ),
     ]);
-    let scope =
-        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
     assert_eq!(
         (
             scope.included().iter().any(|path| path == include),
@@ -1172,8 +1186,8 @@ fn a_live_declaration_outranks_a_test_only_one() {
         "\nmod slot;\nmod planted;\n#[cfg(test)]\n#[path = \"planted/mod.rs\"]\nmod planted_tests;\n",
     );
     let read = reader(vec![(STORAGE, text(declared))]);
-    let scope =
-        scope_files(&package_of(&scratch), &scratch.0, &read, &top()).expect("the scope reads");
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
     let standing = (
         scope.included().iter().any(|path| path == include),
         scope.excluded().iter().any(|path| path == include),
@@ -1217,7 +1231,7 @@ fn a_word_character_beside_path_names_no_attribute() {
 }
 
 /// The classification's refusals stand in the order of the package's sources, its includes in
-/// component order: the include outside the checkout, whose scratch directory's sibling `aa_outside.rs`
+/// component order: the include outside the checkout, whose `aa_outside.rs` beside the checkout root
 /// sorts first, then the one no module file declares.
 #[test]
 fn the_classification_refuses_in_the_order_of_the_sources() {
@@ -1228,12 +1242,8 @@ fn the_classification_refuses_in_the_order_of_the_sources() {
         ],
         None,
     );
-    let found = scope_messages(&scratch.0, vec![]);
-    let outside = scratch
-        .0
-        .parent()
-        .expect("the scratch root has a parent")
-        .join("aa_outside.rs");
+    let found = scope_messages(&root_of(&scratch), vec![]);
+    let outside = scratch.0.join("aa_outside.rs");
     let heads = [
         format!("the kernel package includes {}, outside the repository", outside.display()),
         "the kernel package includes crates/kestrike/src/storage/undeclared.rs and no module file declares it".to_owned(),
@@ -1302,30 +1312,11 @@ fn the_references_read_each_lane_and_the_last_binding_entry() {
             .map(Text::to_string)
             .collect()
     };
-    let lanes = (
-        names(found.positive("loom")),
-        names(found.positive("genmc")),
-        names(found.twins("loom")),
-        names(found.twins("genmc")),
-        names(found.twins("rc11")),
-    );
-    let expected = (
-        vec!["t1"],
-        vec!["a-pos"],
-        vec!["t2"],
-        vec!["b-vio"],
-        vec!["sb"],
-    );
-    assert_eq!(
-        lanes,
-        (
-            expected.0.iter().map(|s| s.to_string()).collect(),
-            expected.1.iter().map(|s| s.to_string()).collect(),
-            expected.2.iter().map(|s| s.to_string()).collect(),
-            expected.3.iter().map(|s| s.to_string()).collect(),
-            expected.4.iter().map(|s| s.to_string()).collect(),
-        )
-    );
+    assert_eq!(names(found.positive("loom")), ["t1"]);
+    assert_eq!(names(found.positive("genmc")), ["a-pos"]);
+    assert_eq!(names(found.twins("loom")), ["t2"]);
+    assert_eq!(names(found.twins("genmc")), ["b-vio"]);
+    assert_eq!(names(found.twins("rc11")), ["sb"]);
     let entry = |id: &str| found.binding(&Text::from(id)).map(json::text);
     assert_eq!(
         (entry("x"), entry("y"), entry("1")),
@@ -1351,7 +1342,7 @@ fn an_include_at_the_checkouts_top_beside_a_top_level_module_is_an_error() {
         (holder.as_str(), text(attribute.to_owned())),
         ("planted_top.rs", text("mod undeclared;\n".to_owned())),
     ]);
-    let error = scope_files(&package_of(&scratch), &scratch.0, &read, &tree.0)
+    let error = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &tree.0)
         .expect_err("the top has an empty name");
     assert_eq!(error.to_string(), ". has an empty name");
 }
@@ -1376,4 +1367,290 @@ fn a_path_joins_and_normalizes_by_its_components() {
             "{path:?}"
         );
     }
+}
+
+/// A crate source the walk cannot read as text holds no path attribute, so the file its attribute
+/// names leaves the classification's search, and the source's failed read goes unreported.
+#[test]
+fn a_crate_source_that_cannot_be_read_holds_no_path_attribute() {
+    let tree = Scratch::new("sources-holders");
+    let crate_dir = tree.0.join(super::CRATE);
+    fs::create_dir_all(&crate_dir).expect("the crate directory is made");
+    fs::write(crate_dir.join("a.rs"), "#[path = \"x.rs\"]\nmod x;\n")
+        .expect("the source is written");
+    fs::write(
+        crate_dir.join("b.rs"),
+        b"#[path = \"y.rs\"]\nmod y; // \xff\n",
+    )
+    .expect("the source is written");
+    assert_eq!(
+        super::path_holders(&tree.0).expect("the crate lists"),
+        [format!("{}/a.rs", super::CRATE)]
+    );
+}
+
+/// A module's `name.rs` that exists and cannot be read is passed over for `name/mod.rs`, which becomes
+/// the model source, and the failed read of `name.rs` goes unreported.
+#[test]
+fn a_module_file_that_cannot_be_read_is_passed_over_for_its_directory() {
+    let file = "crates/kestrike/src/storage/fill_model.rs";
+    let read = reader(vec![
+        (file, Plant::Refused),
+        (
+            "crates/kestrike/src/storage/fill_model/mod.rs",
+            text("// dir\n".to_owned()),
+        ),
+    ]);
+    assert_eq!(
+        module_source("storage::fill_model::t", &read),
+        Some("// dir\n".to_owned())
+    );
+}
+
+const SOURCES: [&str; 6] = [
+    "credit.rs",
+    "credit_steps.rs",
+    "fill.rs",
+    "grace.rs",
+    "row.rs",
+    "word.rs",
+];
+
+fn storage_files() -> Vec<String> {
+    SOURCES
+        .iter()
+        .map(|name| format!("crates/kestrike/src/storage/{name}"))
+        .collect()
+}
+
+/// A test-only declaration two hops up the chain excludes each file the storage module loads, and
+/// a dropped one leaves each declared by no module file.
+#[test]
+fn a_chain_of_declarations_classifies_through_each_hop() {
+    let package = top().join(PACKAGE);
+    let tested = planted(TREE, "pub mod storage;", "#[cfg(test)]\npub mod storage;");
+    let read = reader(vec![(TREE, text(tested))]);
+    let scope = scope_files(&package, &top(), &read, &top()).expect("the scope reads");
+    assert_eq!(
+        (scope.included(), scope.excluded(), scope.refusals()),
+        (
+            &["crates/kestrike/src/index/sequence.rs".to_owned()][..],
+            &storage_files()[..],
+            &[][..]
+        )
+    );
+    let dropped = planted(TREE, "pub mod storage;", "");
+    let found = scope_messages(&top(), vec![(TREE, text(dropped))]);
+    let heads: Vec<String> = storage_files()
+        .iter()
+        .map(|path| {
+            format!("the kernel package includes {path} and no module file declares it through")
+        })
+        .collect();
+    assert_eq!(found.len(), heads.len(), "{found:?}");
+    assert!(
+        found
+            .iter()
+            .zip(&heads)
+            .all(|(message, head)| message.starts_with(head.as_str())),
+        "{found:?}"
+    );
+}
+
+/// A file a test-only declaration of its home and a path attribute of another directory both load is
+/// refused as declared elsewhere, and a file its home excludes stays excluded beside a sibling module
+/// file that cannot be read.
+#[test]
+fn the_standings_rank_elsewhere_before_excluded_before_unreadable() {
+    let extra = "crates/kestrike/src/storage/extra.rs";
+    let scratch = planted_package(&[extra], None);
+    let holder = "crates/kestrike/src/failover/reconcile_tests.rs";
+    let read = reader(vec![
+        (
+            STORAGE,
+            text(format!("{}#[cfg(test)]\nmod extra;\n", committed(STORAGE))),
+        ),
+        (
+            holder,
+            text(format!(
+                "{}\n#[path = \"../storage/extra.rs\"]\nmod decoy;\n",
+                committed(holder)
+            )),
+        ),
+    ]);
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
+    let elsewhere = format!(
+        "{extra} is declared only by a path attribute outside its module files and the crate root, in a \
+         file whose place in the crate the scope rule does not read"
+    );
+    assert_eq!(
+        (scope.excluded(), messages(scope.refusals())),
+        (&[STEPS.to_owned()][..], vec![elsewhere.as_str()])
+    );
+    let helper = "crates/kestrike/src/storage/helpers/extra.rs";
+    let scratch = planted_package(&[helper], None);
+    let read = reader(vec![
+        (
+            STORAGE,
+            text(format!("{}mod helpers;\n", committed(STORAGE))),
+        ),
+        (
+            "crates/kestrike/src/storage/helpers/mod.rs",
+            text("#[cfg(test)]\nmod extra;\n".to_owned()),
+        ),
+        ("crates/kestrike/src/storage/helpers.rs", Plant::Refused),
+    ]);
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
+    let unreadable = format!(
+        "crates/kestrike/src/storage/helpers.rs cannot be read to classify {helper}: {}",
+        io::Error::from(io::ErrorKind::PermissionDenied)
+    );
+    assert_eq!(
+        (scope.excluded(), messages(scope.refusals())),
+        (
+            &[STEPS.to_owned(), helper.to_owned()][..],
+            vec![unreadable.as_str()]
+        )
+    );
+}
+
+/// A module file a parent loads by a path attribute declares from its own directory: a root's
+/// `#[path = "storage.rs"]` sibling that loads only `fill`, and a `via.rs` beside the storage module that
+/// loads the credit steps, make those files production.
+#[test]
+fn a_module_file_a_path_attribute_loads_declares_from_its_directory() {
+    let by_path = planted(
+        TREE,
+        "pub mod storage;",
+        "#[path = \"storage.rs\"]\npub mod storage;",
+    );
+    let read = reader(vec![
+        (TREE, text(by_path)),
+        (
+            "crates/kestrike/src/storage.rs",
+            text("#[path = \"storage/fill.rs\"]\nmod fill;\n".to_owned()),
+        ),
+    ]);
+    let scope = scope_files(&top().join(PACKAGE), &top(), &read, &top()).expect("the scope reads");
+    assert_eq!(
+        scope.included(),
+        ["crates/kestrike/src/index/sequence.rs", FILL]
+    );
+    let via = format!("{}#[path = \"via.rs\"]\nmod via;\n", committed(STORAGE));
+    let read = reader(vec![
+        (STORAGE, text(via)),
+        (
+            "crates/kestrike/src/storage/via.rs",
+            text("mod credit_steps;\n".to_owned()),
+        ),
+    ]);
+    let scope = scope_files(&top().join(PACKAGE), &top(), &read, &top()).expect("the scope reads");
+    assert!(scope.included().iter().any(|path| path == STEPS) && scope.excluded().is_empty());
+}
+
+/// An include that resolves to a kernel source of the package is no defect.
+#[test]
+fn an_include_of_a_kernel_source_is_no_defect() {
+    let scratch = planted_package(&[], Some("#[path = \"join.rs\"]\nmod j;\n"));
+    let package = package_of(&scratch);
+    let kernels = kernel_texts(&package).expect("the package reads");
+    assert_eq!(
+        include_defects(&package, &kernels).expect("the includes resolve"),
+        []
+    );
+}
+
+/// A word character beside `include` or `mod` makes no name: `include_str!`, `xinclude!` and
+/// `\u{e9}include!` are no include, `xmod a;` and `\u{e9}mod d;` declare nothing, and `xmacro_rules!` opens no
+/// macro, so the declaration inside its braces loads its file.
+#[test]
+fn a_word_character_beside_a_keyword_makes_no_name() {
+    let kernels = BTreeMap::from([(
+        "src/p.rs".to_owned(),
+        "include_str!(\"a\");\nxinclude!(\"b\");\n\u{e9}include!(\"c\");\ninclude!(\"d\");\n"
+            .to_owned(),
+    )]);
+    let defects = include_defects(&top().join(PACKAGE), &kernels).expect("nothing resolves");
+    assert_eq!(
+        messages(&defects),
+        ["kernels/src/p.rs:4: an include! macro, whose source the scope rule does not read"]
+    );
+    let rows = [
+        (
+            "xmod a;\nxmod b { mod c; }\n\u{e9}mod d;\n",
+            vec!["d/m/c.rs", "d/m/c/mod.rs"],
+        ),
+        (
+            "xmacro_rules! a { mod z; }\n",
+            vec!["d/m/z.rs", "d/m/z/mod.rs"],
+        ),
+    ];
+    for (source, expected) in rows {
+        let declared = loads("d/m.rs", "d/m", source, false);
+        assert_eq!(
+            (
+                declared.bare.iter().map(String::as_str).collect::<Vec<_>>(),
+                declared.refusals
+            ),
+            (expected, vec![]),
+            "{source}"
+        );
+    }
+}
+
+/// A string literal that opens the text is no `check!` message.
+#[test]
+fn a_text_that_opens_with_a_literal_holds_no_message() {
+    assert_eq!(c_literals("\"x\""), Vec::<String>::new());
+}
+
+/// A module that a path attribute loads declares its children from its own file's directory.
+#[test]
+fn a_child_of_a_path_declared_module_loads_beside_its_file() {
+    let route = "crates/kestrike/src/net/client/route_model.rs";
+    let read = reader(vec![
+        (route, text(format!("{}\nmod child;\n", committed(route)))),
+        (
+            "crates/kestrike/src/net/client/child.rs",
+            text("// child\n".to_owned()),
+        ),
+        (
+            "crates/kestrike/src/net/client/route_model/child.rs",
+            text("// nested\n".to_owned()),
+        ),
+    ]);
+    assert_eq!(
+        module_source("net::client::route::route_model::child::t", &read),
+        Some("// child\n".to_owned())
+    );
+}
+
+/// A loom record's tests that are a string or an object name each code point or key.
+#[test]
+fn a_record_of_tests_names_each_member_it_iterates() {
+    let declared = json::parse(&committed("verification/genmc/expected.json"))
+        .expect("the declaration parses");
+    let litmus =
+        json::parse(&committed("verification/rc11/expected.json")).expect("the litmus list parses");
+    let records = json::parse(
+        "{\"records\": [{\"job\": \"loom\", \"tests\": \"ab\", \"controls\": []}, {\"job\": \"loom\", \"tests\": {\"k1\": 1}}]}",
+    )
+    .expect("the records parse");
+    let found = references(&declared, &litmus, &records, &top()).expect("the references read");
+    let names: Vec<String> = found
+        .positive("loom")
+        .expect("loom has tests")
+        .iter()
+        .map(Text::to_string)
+        .collect();
+    assert_eq!(names, ["a", "b", "k1"]);
+    assert_eq!(
+        found.kernels().keys().collect::<Vec<_>>(),
+        kernel_texts(&top().join(PACKAGE))
+            .expect("the package reads")
+            .keys()
+            .collect::<Vec<_>>()
+    );
 }

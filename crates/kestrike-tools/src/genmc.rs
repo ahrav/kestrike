@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use crate::classes::{SPACE, WORD, compiled, is_word};
-use crate::ownership::ignored;
+use crate::ownership::status;
 use crate::paths::resolve;
 use crate::rust_text::{Lexeme, lexemes};
 use crate::text::strip_str;
@@ -141,17 +141,13 @@ pub fn read_source(top: &Path, path: &str) -> io::Result<String> {
     read_text(&top.join(path))
 }
 
-/// The metadata of `path` with links followed, or `None` for a lookup that [`ignored`] reads as no
-/// such file.
+/// The metadata of `path` with links followed, or `None` for a path that names no file.
 fn stat(path: &Path) -> io::Result<Option<fs::Metadata>> {
-    match fs::metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if ignored(&error) => Ok(None),
-        Err(error) => Err(error),
-    }
+    status(path).map_err(|error| io::Error::new(error.error().kind(), error))
 }
 
-/// Whether `path`, with links followed, is a regular file; a lookup that [`ignored`] reads is no file.
+/// Whether `path`, with links followed, is a regular file; a path that names no file is none: a missing
+/// component, a component that is no directory, a link loop or a NUL byte.
 ///
 /// # Errors
 ///
@@ -184,7 +180,7 @@ fn entries_under(directory: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
 /// # Errors
 ///
 /// `walk` returns an error of a listing other than a refused permission, and of the lookup of `root`
-/// other than those [`ignored`] reads as absent.
+/// other than one that names no file.
 pub fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     if stat(root)?.is_some_and(|metadata| metadata.is_dir()) {

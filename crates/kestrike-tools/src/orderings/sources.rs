@@ -5,7 +5,7 @@
 //!
 //! A loom test is named by its whole module path. Its model source is the one module file that path
 //! reaches from `crates/kestrike/src/mod.rs`: each module the path names is loaded by a declaration
-//! [`loads`] reads in its parent, a `#[path]` one or a bare `mod name;`, and the last file reached
+//! the declaration reading reads in its parent, a `#[path]` one or a bare `mod name;`, and the last file reached
 //! declares the remaining module inline. A module that its parent declares more than once, inline or
 //! by two files, has none.
 //!
@@ -45,34 +45,32 @@ use crate::production_text::blanked;
 use crate::rust_text::{Lexeme, back, blank, code, lexemes};
 
 /// The crate whose module tree holds the model sources and the included production files.
-pub const CRATE: &str = "crates/kestrike/src";
+const CRATE: &str = "crates/kestrike/src";
 
 /// The name of every refusal this module gives.
-pub const SCOPE_FILE: &str = "scope file";
+const SCOPE_FILE: &str = "scope file";
 
 /// A reader of repository paths: the text at a path relative to the checkout's top, or the error of
 /// reading it, [`io::ErrorKind::NotFound`] for a file that does not exist.
 pub type Reader<'r> = &'r dyn Fn(&str) -> io::Result<String>;
 
-/// One refusal of the catalog's check: its name and its sentence.
+/// One refusal of the catalog's check, a `scope file` refusal with its sentence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
-    name: &'static str,
     message: String,
 }
 
 impl Refusal {
     fn scope(message: String) -> Self {
-        Self {
-            name: SCOPE_FILE,
-            message,
-        }
+        Self { message }
     }
 
+    /// The refusal's name in the check's report.
     pub fn name(&self) -> &'static str {
-        self.name
+        SCOPE_FILE
     }
 
+    /// The refusal's sentence.
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -185,7 +183,13 @@ fn normpath(path: &str) -> String {
     }
 }
 
-/// `path` relative to the checkout as text.
+/// Whether the name of `path` ends in `.rs`.
+fn named_rs(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.as_encoded_bytes().ends_with(b".rs"))
+}
+
+/// The text of `path`.
 ///
 /// # Errors
 ///
@@ -357,8 +361,8 @@ fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
                 line_of(&view, whole.start())
             )));
         }
-        let blanked = blank(tokens);
-        view.replace_range(whole.end()..end, &blanked);
+        let hidden = blank(tokens);
+        view.replace_range(whole.end()..end, &hidden);
     }
     let inline: Vec<(String, usize, usize)> = bounded_iter(&INLINE, &view)
         .map(|block| {
@@ -433,7 +437,7 @@ fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
 }
 
 /// (the repository path, the text) of the model source of loom test `test`, read down from the crate's
-/// `mod.rs` through `read`: each module the path names is loaded by a declaration [`loads`] reads in its
+/// `mod.rs` through `read`: each module the path names is loaded by a declaration the declaration reading reads in its
 /// parent with comments and literals passed over, and the last file reached declares the remaining
 /// module inline. `None` when a declaration or the file it loads is missing, or when a parent declares
 /// one module more than once, inline or by two files, which only a `cfg` this lookup does not evaluate
@@ -454,11 +458,16 @@ pub fn module_file(test: &str, read: Reader<'_>) -> Option<(String, String)> {
             .filter(|(_, names)| names.contains(first))
             .map(|(target, _)| target.as_str())
             .collect();
-        let pattern = compiled(&format!(
-            r"mod{SPACE}+(?:r#)?{}{SPACE}*\{{",
-            regex::escape(first)
-        ));
-        let inline = captures_bounded(&pattern, &scanned, 0).is_some();
+        let inline = if !first.is_empty() && first.chars().all(is_word) {
+            bounded_iter(&INLINE, &scanned)
+                .any(|block| block.get(1).is_some_and(|name| name.as_str() == first))
+        } else {
+            Regex::new(&format!(
+                r"mod{SPACE}+(?:r#)?{}{SPACE}*\{{",
+                regex::escape(first)
+            ))
+            .is_ok_and(|pattern| captures_bounded(&pattern, &scanned, 0).is_some())
+        };
         let bare = declared
             .bare
             .contains(&joined(&home, &format!("{first}.rs")));
@@ -594,10 +603,7 @@ pub fn c_literals(text: &str) -> Vec<String> {
 pub fn kernel_texts(package: &Path) -> io::Result<BTreeMap<String, String>> {
     let mut texts = BTreeMap::new();
     for path in walk(package)? {
-        let named = path
-            .file_name()
-            .is_some_and(|name| name.as_encoded_bytes().ends_with(b".rs"));
-        if !named || !is_file(&path)? || under_target(&path, package) {
+        if !named_rs(&path) || !is_file(&path)? || under_target(&path, package) {
             continue;
         }
         let relative = path.strip_prefix(package).unwrap_or(&path);
@@ -693,10 +699,7 @@ pub fn include_defects(
 fn path_holders(tree: &Path) -> io::Result<Vec<String>> {
     let mut sources: Vec<PathBuf> = walk(&tree.join(CRATE))?
         .into_iter()
-        .filter(|path| {
-            path.file_name()
-                .is_some_and(|name| name.as_encoded_bytes().ends_with(b".rs"))
-        })
+        .filter(|path| named_rs(path))
         .collect();
     sources.sort();
     let mut holders = Vec::new();
@@ -766,7 +769,7 @@ impl Scope {
 
     /// The refusals: an include outside the repository, a file declared only by a path attribute
     /// elsewhere, one no module file declares, a module file that cannot be read, and the declaration
-    /// refusals of [`loads`], each distinct sentence once.
+    /// refusals of the declaration reading, each distinct sentence once.
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
     }
@@ -809,7 +812,7 @@ impl Classifier<'_> {
         self.texts[module].clone()
     }
 
-    /// [`loads`] of `module`, its bare declarations loading from `child`: of its live declarations, or
+    /// `loads` of `module`, its bare declarations loading from `child`: of its live declarations, or
     /// of all of them with comments and literals passed over. The module's text has been read.
     fn parse(&mut self, module: &str, child: &str, live: bool) -> &Loads {
         let key = (module.to_owned(), child.to_owned(), live);
@@ -948,7 +951,7 @@ impl Classifier<'_> {
 ///
 /// # Errors
 ///
-/// `scope_files` returns an error of [`package_sources`], of [`path_holders`], of [`resolve`] for a
+/// `scope_files` returns an error of [`package_sources`], of the walk of the crate's sources, of [`resolve`] for a
 /// source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
 /// UTF-8, and an error for an included file at the top of the checkout whose standing depends on a
 /// sibling named after the top's own empty name.
@@ -1104,7 +1107,7 @@ fn items<'v>(value: &'v Value, what: &str) -> Result<Vec<(&'v Text, &'v Value)>,
 pub struct References {
     positive: [BTreeSet<Text>; 2],
     twins: [BTreeSet<Text>; 3],
-    bindings: Vec<(Value, Value)>,
+    bindings: BTreeMap<Text, Value>,
     kernels: BTreeMap<String, String>,
 }
 
@@ -1132,10 +1135,7 @@ impl References {
 
     /// The last binding entry whose id is the string `id`.
     pub fn binding(&self, id: &Text) -> Option<&Value> {
-        self.bindings
-            .iter()
-            .find(|(key, _)| matches!(key, Value::String(key) if key == id))
-            .map(|(_, entry)| entry)
+        self.bindings.get(id)
     }
 
     /// The kernel package's texts, as [`kernel_texts`] returns them.
@@ -1208,7 +1208,7 @@ pub fn references(
             sometimes.insert(name.clone());
         }
     }
-    let mut bindings: Vec<(Value, Value)> = Vec::new();
+    let mut bindings = BTreeMap::new();
     let listed = subscript(&declared_member, "bindings", "the GenMC declaration")?;
     for entry in members(listed, "the GenMC declaration's bindings")? {
         let id = subscript(&entry, "id", "a binding")?;
@@ -1218,9 +1218,8 @@ pub fn references(
         let Member::Value(value) = entry else {
             unreachable!("an entry with an id is an object");
         };
-        match bindings.iter_mut().find(|(key, _)| key == id) {
-            Some((_, slot)) => *slot = value.clone(),
-            None => bindings.push((id.clone(), value.clone())),
+        if let Value::String(id) = id {
+            bindings.insert(id.clone(), value.clone());
         }
     }
     let package = match subscript(&declared_member, "package", "the GenMC declaration")? {
