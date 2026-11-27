@@ -103,7 +103,7 @@ fn call(state: &Object, text: Option<&str>) -> Result<Value, String> {
     }
     let picks = get(state, "mbt::nondetPicks")?;
     let action = match act {
-        Value::String(text) => Some(text.as_str()),
+        Value::String(text) => text.to_str(),
         _ => None,
     };
     let names: &[&str] = match action {
@@ -148,7 +148,7 @@ fn pages(value: &Value) -> Result<Value, String> {
     let items: &[Value] = match member(value, "#set")? {
         Value::Array(items) => items,
         Value::Object(object) if object.is_empty() => &[],
-        Value::String(text) if text.as_str().is_empty() => &[],
+        Value::String(text) if text.is_empty() => &[],
         _ => return Err("'#set' holds items other than objects".to_owned()),
     };
     let mut pages = items

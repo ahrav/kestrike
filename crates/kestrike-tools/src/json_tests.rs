@@ -1,8 +1,8 @@
-//! Each expected text is the text of `json.dumps(value, separators=(",", ":"))` for the value the input holds.
-//! Python converts an integer to and from text up to 4,300 digits by default. The reader and the writer have
-//! no such limit, and the round trip of the 5,000-digit integer keeps all 5,000 digits.
+//! Each expected text of a round trip is the text of `json.dumps(value, separators=(",", ":"))` for the value
+//! the input holds. The reader and [`Integer`] hold an integer of at most 4,300 digits, the length up to which
+//! Python converts an integer to and from text by default; a longer integer token is refused.
 
-use crate::json::{Integer, MAX_DEPTH, Value, dump, parse};
+use crate::json::{Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, Value, dump, indented, parse};
 
 fn round_trip(text: &str) -> String {
     dump(&parse(text).unwrap_or_else(|error| panic!("{text:?} parses: {error}")))
@@ -10,7 +10,12 @@ fn round_trip(text: &str) -> String {
 
 #[test]
 fn objects_keep_first_appearance_order_and_a_repeated_key_takes_its_last_value() {
-    assert_eq!(round_trip(r#"{"b":1,"a":2,"b":3}"#), "{\"b\":3,\"a\":2}\n");
+    let expression = "json.dumps(json.loads('{\"b\":1,\"a\":2,\"b\":3}'), separators=(',', ':'))";
+    assert_eq!(
+        round_trip(r#"{"b":1,"a":2,"b":3}"#),
+        "{\"b\":3,\"a\":2}\n",
+        "{expression}"
+    );
     assert_eq!(
         round_trip(r#" {"a" : [ true , false ] , "c":{}} "#),
         "{\"a\":[true,false],\"c\":{}}\n"
@@ -28,54 +33,168 @@ fn escapes_read_every_form_and_write_python_escapes() {
 }
 
 #[test]
-fn integers_keep_their_digits_and_minus_zero_reads_as_zero() {
+fn each_python_form_reads_and_writes_back_compactly() {
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("json.dumps(json.loads('null'), separators=(',', ':'))", "null", "null"),
+        ("json.dumps(json.loads('[1.5,-0.0,1e3,1E-7,2.5e+20,0.1]'), separators=(',', ':'))", "[1.5,-0.0,1e3,1E-7,2.5e+20,0.1]", "[1.5,-0.0,1000.0,1e-07,2.5e+20,0.1]"),
+        ("json.dumps(json.loads('[NaN,Infinity,-Infinity]'), separators=(',', ':'))", "[NaN,Infinity,-Infinity]", "[NaN,Infinity,-Infinity]"),
+        ("json.dumps(json.loads('\"\\\\ud800\"'), separators=(',', ':'))", "\"\\ud800\"", "\"\\ud800\""),
+        ("json.dumps(json.loads('\"\\\\udc00x\"'), separators=(',', ':'))", "\"\\udc00x\"", "\"\\udc00x\""),
+        ("json.dumps(json.loads('\"\\\\ud800\\\\u0041\"'), separators=(',', ':'))", "\"\\ud800\\u0041\"", "\"\\ud800A\""),
+        ("json.dumps(json.loads('\"\\\\ud83d\\\\ude00\"'), separators=(',', ':'))", "\"\\ud83d\\ude00\"", "\"\\ud83d\\ude00\""),
+        ("json.dumps(json.loads('\"\\\\ud800\\\\ud800\"'), separators=(',', ':'))", "\"\\ud800\\ud800\"", "\"\\ud800\\ud800\""),
+        ("json.dumps(json.loads('\"\\\\udbff\\\\udfff\"'), separators=(',', ':'))", "\"\\udbff\\udfff\"", "\"\\udbff\\udfff\""),
+        ("json.dumps(json.loads('[-0,0,-12]'), separators=(',', ':'))", "[-0,0,-12]", "[0,0,-12]"),
+        ("json.dumps(json.loads('1e400'), separators=(',', ':'))", "1e400", "Infinity"),
+        ("json.dumps(json.loads('-1e400'), separators=(',', ':'))", "-1e400", "-Infinity"),
+        ("json.dumps(json.loads('{\"a\":null}'), separators=(',', ':'))", "{\"a\":null}", "{\"a\":null}"),
+        ("json.dumps(json.loads('[1E400, 123456789012345678901234567890.5]'), separators=(',', ':'))", "[1E400, 123456789012345678901234567890.5]", "[Infinity,1.2345678901234568e+29]"),
+    ];
+    for &(expression, text, python) in rows {
+        assert_eq!(round_trip(text), format!("{python}\n"), "{expression}");
+    }
+    let Ok(Value::String(lone)) = parse(r#""\udc80""#) else {
+        panic!("a lone surrogate escape reads as a string");
+    };
     assert_eq!(
-        round_trip("[123456789012345678901234567890,-5,0,-0]"),
-        "[123456789012345678901234567890,-5,0,0]\n"
+        lone,
+        Text::from_code_points([0xdc80]).expect("a code point")
     );
-    let digits = "9".repeat(5000);
-    assert_eq!(round_trip(&digits), format!("{digits}\n"));
+    assert!(matches!(parse("NaN"), Ok(Value::Float(value)) if value.is_nan()));
 }
 
-/// Each row: the text, whether it is a form the reader leaves out rather than malformed text, and the reader's
-/// offset and reason.
 #[test]
-fn each_form_outside_the_reader_is_refused_with_its_reason() {
-    #[rustfmt::skip]
-    let refused: [(&str, bool, usize, &str); 23] = [
-        ("null", true, 0, "null is refused"),
-        ("1.5", true, 0, "a fraction or an exponent is refused"),
-        ("1e3", true, 0, "a fraction or an exponent is refused"),
-        ("1E3", true, 0, "a fraction or an exponent is refused"),
-        ("NaN", true, 0, "a number beyond the integers is refused"),
-        ("Infinity", true, 0, "a number beyond the integers is refused"),
-        ("-Infinity", true, 1, "a number beyond the integers is refused"),
-        ("\"\\ud800\"", true, 1, "a lone surrogate escape is refused"),
-        ("\"\\udc00\"", true, 1, "a lone surrogate escape is refused"),
-        ("\"\\ud800\\u0041\"", true, 1, "a lone surrogate escape is refused"),
-        ("[1,]", false, 3, "expected a value"),
-        ("{\"a\":1,}", false, 7, "expected a key"),
-        ("\"a\nb\"", false, 2, "a control character in a string"),
-        ("01", false, 1, "text after the value"),
-        ("-", false, 1, "expected a digit"),
-        ("\"\\x\"", false, 2, "an invalid escape"),
-        ("\"\\u12\"", false, 2, "an invalid \\u escape"),
-        ("\"open", false, 5, "an unterminated string"),
-        ("{\"a\" 1}", false, 5, "expected ':'"),
-        ("[1 2]", false, 3, "expected ',' or ']'"),
-        ("", false, 0, "expected a value"),
-        ("\u{feff}1", false, 0, "expected a value"),
-        ("1 2", false, 2, "text after the value"),
-    ];
-    for (text, left_out, offset, reason) in refused {
-        let error = parse(text).expect_err(text);
-        let found = (error.offset(), error.reason());
+fn integers_keep_their_digits_up_to_the_conversion_limit() {
+    let digits = "9".repeat(MAX_INTEGER_DIGITS);
+    let expression = "json.loads('9' * 4300)";
+    assert_eq!(round_trip(&digits), format!("{digits}\n"), "{expression}");
+    let expression = "json.loads('9' * 4301) raises ValueError";
+    for text in [
+        format!("{digits}9"),
+        format!("-{digits}9"),
+        format!("[{digits}9]"),
+    ] {
+        let error = parse(&text).expect_err(expression);
         assert_eq!(
-            found,
-            (offset, reason),
-            "{text:?}, a form left out: {left_out}"
+            error.reason(),
+            "an integer of more digits than the reader takes"
         );
     }
+    assert_eq!(MAX_INTEGER_DIGITS, 4300);
+}
+
+#[test]
+fn an_integer_holds_no_more_digits_than_the_reader_takes() {
+    let digits = "9".repeat(4300);
+    for negative in [false, true] {
+        let sign = if negative { "-" } else { "" };
+        let held = Integer::from_digits(negative, &format!("000{digits}")).expect("4,300 digits");
+        let value = Value::Array(vec![Value::Integer(held)]);
+        let expression = format!("json.dumps([int('{sign}' + '9' * 4300)])");
+        assert_eq!(dump(&value), format!("[{sign}{digits}]\n"), "{expression}");
+        assert_eq!(
+            indented(&value).expect("an integer writes"),
+            format!("[\n  {sign}{digits}\n]"),
+            "{expression}"
+        );
+        assert_eq!(
+            Integer::from_digits(negative, &format!("{digits}9")),
+            None,
+            "int('{sign}' + '9' * 4301) raises ValueError"
+        );
+    }
+}
+
+#[test]
+fn each_form_python_refuses_is_refused_with_its_reason() {
+    #[rustfmt::skip]
+    let refused: &[(&str, usize, &str)] = &[
+        ("[1,]", 3, "expected a value"),
+        ("{\"a\":1,}", 7, "expected a key"),
+        ("\"a\nb\"", 2, "a control character in a string"),
+        ("01", 1, "text after the value"),
+        ("-", 1, "expected a digit"),
+        ("-NaN", 1, "expected a digit"),
+        ("\"\\x\"", 2, "an invalid escape"),
+        ("\"\\u12\"", 2, "an invalid \\u escape"),
+        ("\"\\ud800\\u12\"", 8, "an invalid \\u escape"),
+        ("\"open", 5, "an unterminated string"),
+        ("{\"a\" 1}", 5, "expected ':'"),
+        ("[1 2]", 3, "expected ',' or ']'"),
+        ("", 0, "expected a value"),
+        ("\u{feff}1", 0, "expected a value"),
+        ("1 2", 2, "text after the value"),
+        ("1.", 1, "text after the value"),
+        ("1e", 1, "text after the value"),
+        ("1e+", 1, "text after the value"),
+        (".5", 0, "expected a value"),
+        ("+1", 0, "expected a value"),
+        ("nul", 0, "expected a value"),
+    ];
+    for &(text, offset, reason) in refused {
+        let error = parse(text).expect_err(text);
+        assert_eq!(
+            (error.offset(), error.reason()),
+            (offset, reason),
+            "json.loads({text:?}) raises JSONDecodeError; the offset and the reason are the reader's own"
+        );
+    }
+}
+
+#[test]
+fn nesting_past_the_limit_is_refused_without_exhausting_the_stack() {
+    let arrays = |depth: usize| format!("{}1{}", "[".repeat(depth), "]".repeat(depth));
+    let objects = |depth: usize| format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth));
+    assert!(matches!(parse(&arrays(1000)), Ok(Value::Array(_))));
+    assert!(matches!(parse(&objects(1000)), Ok(Value::Object(_))));
+    for (text, offset) in [(arrays(1001), 1000), (objects(1001), 5000)] {
+        let error = parse(&text).expect_err("one level past the limit");
+        assert_eq!(
+            (error.offset(), error.reason()),
+            (offset, "nesting deeper than the reader takes")
+        );
+    }
+    let error = parse(&"[".repeat(200_000)).expect_err("200,000 open brackets");
+    assert_eq!(
+        (error.offset(), error.reason()),
+        (1000, "nesting deeper than the reader takes")
+    );
+    let error = parse(&"{\"a\":".repeat(200_000)).expect_err("200,000 open objects");
+    assert_eq!(
+        (error.offset(), error.reason()),
+        (5000, "nesting deeper than the reader takes")
+    );
+    assert_eq!(MAX_DEPTH, 1000);
+}
+
+#[test]
+fn indented_writes_sorted_keys_two_spaces_deep() {
+    let expression = "json.dumps(json.loads('{\"b\":[1,2.5,{\"z\":null,\"\u{e9}\":\"x\",\"a\":[]}],\"a\":{},\"A\":true,\"\\\\ud800\":\"\\\\udcff\",\"\u{1f600}\":-0.0,\"aa\":[[]],\"n\":1e16,\"m\":1e-05,\"s\":\"tab\\\\tq\\\\\"\\\\\\\\\\\\u007f\\\\u2028\"}'), indent=2, sort_keys=True, allow_nan=False)";
+    let text = "{\"b\":[1,2.5,{\"z\":null,\"\u{e9}\":\"x\",\"a\":[]}],\"a\":{},\"A\":true,\"\\ud800\":\"\\udcff\",\"\u{1f600}\":-0.0,\"aa\":[[]],\"n\":1e16,\"m\":1e-05,\"s\":\"tab\\tq\\\"\\\\\\u007f\\u2028\"}";
+    let python = "{\u{a}  \"A\": true,\u{a}  \"a\": {},\u{a}  \"aa\": [\u{a}    []\u{a}  ],\u{a}  \"b\": [\u{a}    1,\u{a}    2.5,\u{a}    {\u{a}      \"a\": [],\u{a}      \"z\": null,\u{a}      \"\\u00e9\": \"x\"\u{a}    }\u{a}  ],\u{a}  \"m\": 1e-05,\u{a}  \"n\": 1e+16,\u{a}  \"s\": \"tab\\tq\\\"\\\\\\u007f\\u2028\",\u{a}  \"\\ud800\": \"\\udcff\",\u{a}  \"\\ud83d\\ude00\": -0.0\u{a}}";
+    let value = parse(text).expect("the document parses");
+    assert_eq!(indented(&value), Ok(python.to_owned()), "{expression}");
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("json.dumps(json.loads('[]'), indent=2, sort_keys=True, allow_nan=False)", "[]", "[]"),
+        ("json.dumps(json.loads('{}'), indent=2, sort_keys=True, allow_nan=False)", "{}", "{}"),
+        ("json.dumps(json.loads('7'), indent=2, sort_keys=True, allow_nan=False)", "7", "7"),
+        ("json.dumps(json.loads('\"a\"'), indent=2, sort_keys=True, allow_nan=False)", "\"a\"", "\"a\""),
+        ("json.dumps(json.loads('[[]]'), indent=2, sort_keys=True, allow_nan=False)", "[[]]", "[\u{a}  []\u{a}]"),
+    ];
+    for &(expression, text, python) in rows {
+        let value = parse(text).expect("the value parses");
+        assert_eq!(indented(&value), Ok(python.to_owned()), "{expression}");
+    }
+    for text in ["NaN", "[Infinity]", "{\"a\":-Infinity}"] {
+        let value = parse(text).expect("the value parses");
+        let refused =
+            indented(&value).expect_err("json.dumps(..., allow_nan=False) raises ValueError");
+        assert!(!refused.value().is_finite(), "{text}");
+    }
+    let refused = indented(&Value::Float(f64::INFINITY)).expect_err("infinity has no JSON form");
+    assert_eq!(refused.value(), f64::INFINITY);
 }
 
 #[test]
@@ -93,8 +212,33 @@ fn integers_order_by_sign_then_magnitude() {
 }
 
 #[test]
-fn nesting_past_the_limit_is_refused() {
-    let deep = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
-    assert!(matches!(parse(&deep(MAX_DEPTH)), Ok(Value::Array(_))));
-    assert!(parse(&deep(MAX_DEPTH + 1)).is_err());
+fn an_escaped_surrogate_pair_joins_and_other_surrogates_stand_alone() {
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &[u32])] = &[
+        ("[hex(ord(c)) for c in json.loads(r'\"\\ud800\\udc00\"')] == ['0x10000']", r#""\ud800\udc00""#, &[0x10000]),
+        ("[hex(ord(c)) for c in json.loads(r'\"\\udbff\\udfff\"')] == ['0x10ffff']", r#""\udbff\udfff""#, &[0x10_ffff]),
+        ("[hex(ord(c)) for c in json.loads(r'\"\\udc00\\ud800\"')] == ['0xdc00', '0xd800']", r#""\udc00\ud800""#, &[0xdc00, 0xd800]),
+        ("[hex(ord(c)) for c in json.loads(r'\"\\ud800\\u0041\"')] == ['0xd800', '0x41']", r#""\ud800\u0041""#, &[0xd800, 0x41]),
+    ];
+    for &(python, text, codes) in rows {
+        let Ok(Value::String(found)) = parse(text) else {
+            panic!("{python}");
+        };
+        assert_eq!(found.code_points().collect::<Vec<u32>>(), codes, "{python}");
+    }
+}
+
+#[test]
+fn the_digit_limit_counts_digits_and_leaves_floats_alone() {
+    let digits = "9".repeat(4300);
+    let expression = "json.loads('-' + '9' * 4300) == -int('9' * 4300)";
+    let Ok(Value::Integer(found)) = parse(&format!("-{digits}")) else {
+        panic!("{expression}");
+    };
+    assert_eq!(found.to_string(), format!("-{digits}"), "{expression}");
+    let expression = "json.loads('9' * 4301 + '.5') == float('inf')";
+    assert!(
+        matches!(parse(&format!("{digits}9.5")), Ok(Value::Float(value)) if value == f64::INFINITY),
+        "{expression}"
+    );
 }
