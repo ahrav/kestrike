@@ -254,23 +254,31 @@ pub fn supervise(
     ended
 }
 
-fn drain(stream: Option<impl Read + Send + 'static>) -> io::Result<JoinHandle<Vec<u8>>> {
+fn drain(
+    stream: Option<impl Read + Send + 'static>,
+) -> io::Result<JoinHandle<io::Result<Vec<u8>>>> {
     thread::Builder::new().spawn(move || {
         let mut bytes = Vec::new();
         if let Some(mut stream) = stream {
-            let _ = stream.read_to_end(&mut bytes);
+            stream.read_to_end(&mut bytes)?;
         }
-        bytes
+        Ok(bytes)
     })
 }
 
-/// `capture` runs `command` with standard input inherited and returns its output. A signal recorded in
-/// `interrupt` while it runs kills the child with SIGKILL, waits up to [`GRACE`] for it and returns the
-/// interruption.
+fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    reader.join().expect("a reader thread returns its bytes")
+}
+
+/// `capture` runs `command` with standard input inherited and returns its output once the child has
+/// exited and both of its output pipes have closed. A signal recorded in `interrupt` before then kills a
+/// child that still runs with SIGKILL, waits up to [`GRACE`] for it and returns the interruption, leaving
+/// a pipe that a descendant holds to its reader.
 ///
 /// # Errors
 ///
-/// The outer error is a recorded signal; the inner one a start, a reader thread or a wait that fails.
+/// The outer error is a recorded signal; the inner one a start, a reader thread, a read or a wait that
+/// fails.
 pub(super) fn capture(
     command: &mut Command,
     interrupt: &Interrupt,
@@ -285,30 +293,46 @@ pub(super) fn capture(
         Err(error) => return Ok(Err(error)),
     };
     let readers = drain(child.stdout.take()).and_then(|out| Ok((out, drain(child.stderr.take())?)));
-    let status = readers.and_then(|readers| {
-        let status = exited_within(&mut child, Duration::MAX, Some(interrupt))?;
-        Ok((readers, status))
-    });
-    let ((out, err), status) = match status {
-        Ok((readers, Some(status))) => (readers, status),
-        Ok((_, None)) => {
-            let _ = child.kill();
-            let _ = exited_within(&mut child, GRACE, None);
-            return interrupt
-                .check()
-                .map(|()| unreachable!("a wait ends early only on a signal"));
-        }
+    let (out, err) = match readers {
+        Ok(readers) => readers,
         Err(error) => {
             let _ = child.kill();
             let _ = exited_within(&mut child, GRACE, None);
             return Ok(Err(error));
         }
     };
-    let stdout = out.join().expect("a reader thread returns its bytes");
-    let stderr = err.join().expect("a reader thread returns its bytes");
-    Ok(Ok(Output {
-        status,
-        stdout,
-        stderr,
-    }))
+    let mut status = None;
+    let mut pause = FIRST_PAUSE;
+    loop {
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(exited) => status = exited,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = exited_within(&mut child, GRACE, None);
+                    return Ok(Err(error));
+                }
+            }
+        }
+        if let Some(status) = status
+            && out.is_finished()
+            && err.is_finished()
+        {
+            let output = joined(out).and_then(|stdout| Ok((stdout, joined(err)?)));
+            return Ok(output.map(|(stdout, stderr)| Output {
+                status,
+                stdout,
+                stderr,
+            }));
+        }
+        if let Err(stop) = interrupt.check() {
+            if status.is_none() {
+                let _ = child.kill();
+                let _ = exited_within(&mut child, GRACE, None);
+            }
+            return Err(stop);
+        }
+        thread::sleep(pause);
+        pause = (pause * 2).min(POLL);
+    }
 }
