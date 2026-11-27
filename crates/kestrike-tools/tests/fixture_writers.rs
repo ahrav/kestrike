@@ -19,12 +19,23 @@ struct Writer {
     fixtures: &'static str,
     directed: (&'static str, &'static str),
     seeded: (&'static str, &'static str),
+    count: usize,
+    recipes: &'static [&'static str],
 }
 
 /// The `case.qnt` texts match `inputs` in `quint/<model>_check.py`.
 const WRITERS: [Writer; 3] = [
     Writer {
         tool: "escrow_fixtures",
+        count: 14,
+        recipes: &[
+            "an_exact_promise_succeeds_and_a_short_one_refuses",
+            "a_claim_beside_a_promise_spares_the_promised_units",
+            "two_builders_interleave_and_each_exit_refunds_once",
+            "the_reserve_refuses_a_promise_of_exactly_the_allocatable_units",
+            "every_exit_at_every_cut",
+            "refusals_beside_promises_and_claims",
+        ],
         model: "escrow",
         fixtures: "crates/kestrike/src/storage/builder_tests/escrow_replay_fixtures",
         directed: (
@@ -43,6 +54,27 @@ const WRITERS: [Writer; 3] = [
     },
     Writer {
         tool: "gate_fixtures",
+        count: 26,
+        recipes: &[
+            "passes",
+            "busy_then_foreign_registrant",
+            "acquire_conflict",
+            "report_times_out",
+            "register_conflict",
+            "submit_refused",
+            "device_gone",
+            "foreign_holder",
+            "other_type",
+            "duplicate_own_record",
+            "own_pair_not_holding",
+            "withheld_bytes",
+            "failed_report",
+            "deposing_report",
+            "expiry_under_the_register",
+            "withdrawal_under_the_acquire",
+            "close_under_the_report",
+            "close_before_the_register",
+        ],
         model: "gate",
         fixtures: "crates/kestrike/src/storage/volume/gate_replay_fixtures",
         directed: (
@@ -58,6 +90,15 @@ const WRITERS: [Writer; 3] = [
     },
     Writer {
         tool: "marklog_fixtures",
+        count: 12,
+        recipes: &[
+            "partly_landed",
+            "whole_replacement",
+            "out_of_key_order",
+            "raise_after_whole",
+            "crashes",
+            "whole_then_in_place",
+        ],
         model: "marklog",
         fixtures: "crates/kestrike/src/storage/marklog_replay_fixtures",
         directed: (
@@ -238,7 +279,10 @@ name=${out##*/}
 name=${name%.itf.json}
 [ -f "$replies/$name.call" ] || { echo "stand-in: no trace $name" >&2; exit 3; }
 [ "$(printf '%s\n' "$@")" = "$(cat "$replies/$name.call")" ] || { echo "stand-in: a call of another trace" >&2; exit 3; }
+here=$(pwd -P)
+[ "${here##*/}" = "$name" ] || { echo "stand-in: $name runs outside its own directory" >&2; exit 3; }
 [ -f case.qnt ] || { echo "stand-in: no case.qnt in the working directory" >&2; exit 3; }
+echo "$name" >> "$replies/calls"
 cat "$replies/$name.reply" > "$out"
 "#;
 
@@ -349,6 +393,34 @@ fn each_committed_trace_is_written_byte_for_byte() {
             entries,
             2 * traces.len(),
             "{}: one trace and one directory for each trace",
+            writer.tool
+        );
+        assert_eq!(
+            traces.len(),
+            writer.count,
+            "{}: the committed traces",
+            writer.tool
+        );
+        let mut order: Vec<String> = writer
+            .recipes
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        let mut seeds: Vec<String> = traces
+            .iter()
+            .map(|trace| trace.name.clone())
+            .filter(|name| name.starts_with("step_"))
+            .collect();
+        seeds.sort_by_key(|name| {
+            u64::from_str_radix(&name["step_".len()..], 16).expect("a seed is hexadecimal")
+        });
+        order.extend(seeds);
+        let calls =
+            fs::read_to_string(scratch.0.join("replies/calls")).expect("the calls log reads");
+        assert_eq!(
+            calls.lines().collect::<Vec<_>>(),
+            order,
+            "{}: the traces run in order",
             writer.tool
         );
     }
@@ -464,4 +536,89 @@ fn a_short_trace_exits_1_naming_the_trace_and_keeps_quints_bytes() {
         fs::read(scratch.0.join("replies/partly_landed.reply")).expect("the reply reads")
     );
     assert!(!output.join("whole_replacement").exists());
+}
+
+#[test]
+fn a_long_trace_exits_1_naming_the_trace() {
+    let writer = &WRITERS[2];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let long = |trace: &Committed| {
+        let mut data = trace.data.clone();
+        if let Some(Value::Array(states)) = data.get_mut("states") {
+            let last = states.last().cloned().expect("a trace has states");
+            states.push(last);
+        }
+        json::dump(&Value::Object(data))
+    };
+    let quint = stand_in(&scratch.0, writer, &output, long);
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        stderr(&result),
+        "marklog_fixtures: partly_landed: the trace stopped before its final action\n"
+    );
+}
+
+#[test]
+fn a_trace_with_null_exits_1_naming_its_file() {
+    let writer = &WRITERS[1];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, |trace| {
+        reply(trace).replacen("\"vars\"", "\"x\":null,\"vars\"", 1)
+    });
+    let result = write_traces(writer, &quint, &output);
+    assert_eq!(result.status.code(), Some(1));
+    let file = output.join("passes.itf.json");
+    let stderr = stderr(&result);
+    assert!(
+        stderr.starts_with(&format!(
+            "gate_fixtures: {}: null is refused at byte ",
+            file.display()
+        )),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_relative_output_resolves_against_the_working_directory() {
+    let writer = &WRITERS[2];
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let quint = stand_in(&scratch.0, writer, &output, reply);
+    let result = Command::new(BINARY)
+        .arg(top())
+        .arg(writer.tool)
+        .args([
+            "--quint".as_ref(),
+            quint.as_os_str(),
+            "--output=out".as_ref(),
+        ])
+        .current_dir(&scratch.0)
+        .output()
+        .expect("the binary starts");
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    assert!(output.join("step_6b0d.itf.json").exists());
+}
+
+#[test]
+fn an_empty_quint_value_exits_1_after_the_first_trace_directory_is_written() {
+    let scratch = Scratch::new();
+    let output = scratch.0.join("out");
+    let result = run(
+        "gate_fixtures",
+        &[
+            "--quint=--".as_ref(),
+            "--output".as_ref(),
+            output.as_os_str(),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        stderr(&result),
+        "gate_fixtures: argument --quint: the value `--` leaves no program\n"
+    );
+    assert!(output.join("passes/gate.qnt").exists() && output.join("passes/case.qnt").exists());
+    assert!(!output.join("busy_then_foreign_registrant").exists());
 }

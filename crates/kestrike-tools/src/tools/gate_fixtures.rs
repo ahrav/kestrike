@@ -61,13 +61,5 @@ pub fn run(top: &Path, args: &[OsString]) -> u8 {
 }
 
 fn trace(name: String, seed: u64, recipe: Option<&'static [&'static str]>) -> Trace {
-    let steps = recipe.map_or(STEPS, <[_]>::len);
-    Trace {
-        name,
-        seed,
-        steps,
-        recipe,
-        case: case::gate(steps, recipe),
-        meta: Vec::new(),
-    }
+    Trace::new(name, seed, recipe, STEPS, case::gate, Vec::new())
 }

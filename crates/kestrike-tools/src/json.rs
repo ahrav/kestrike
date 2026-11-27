@@ -28,7 +28,7 @@ pub enum Value {
 }
 
 /// The value of a JSON string: a sequence of Unicode scalar values.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Text(String);
 
 impl Text {
@@ -53,7 +53,7 @@ impl From<String> for Text {
 ///
 /// Zero has `negative == false` and `digits == "0"`, so each integer has one representation and [`Ord`]
 /// compares integers numerically.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Integer {
     negative: bool,
     digits: String,
@@ -84,6 +84,15 @@ impl Integer {
 
 impl From<u64> for Integer {
     fn from(value: u64) -> Self {
+        Self {
+            negative: false,
+            digits: value.to_string(),
+        }
+    }
+}
+
+impl From<usize> for Integer {
+    fn from(value: usize) -> Self {
         Self {
             negative: false,
             digits: value.to_string(),
@@ -176,8 +185,18 @@ impl Object {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
-    pub offset: usize,
-    pub reason: &'static str,
+    offset: usize,
+    reason: &'static str,
+}
+
+impl Error {
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
+    }
 }
 
 impl fmt::Display for Error {
@@ -209,14 +228,15 @@ struct Reader<'a> {
 
 impl Reader<'_> {
     fn error(&self, reason: &'static str) -> Error {
-        Error {
-            offset: self.at,
-            reason,
-        }
+        error_at(self.at, reason)
     }
 
     fn peek(&self) -> Option<u8> {
         self.text.get(self.at).copied()
+    }
+
+    fn rest_starts_with(&self, word: &[u8]) -> bool {
+        self.text[self.at..].starts_with(word)
     }
 
     fn space(&mut self) {
@@ -226,19 +246,11 @@ impl Reader<'_> {
     }
 
     fn literal(&mut self, word: &[u8]) -> bool {
-        let found = self.text[self.at..].starts_with(word);
+        let found = self.rest_starts_with(word);
         if found {
             self.at += word.len();
         }
         found
-    }
-
-    fn expect(&mut self, byte: u8, reason: &'static str) -> Result<(), Error> {
-        if self.peek() != Some(byte) {
-            return Err(self.error(reason));
-        }
-        self.at += 1;
-        Ok(())
     }
 
     fn value(&mut self, depth: usize) -> Result<Value, Error> {
@@ -249,10 +261,8 @@ impl Reader<'_> {
             Some(b'-' | b'0'..=b'9') => self.integer(),
             _ if self.literal(b"true") => Ok(Value::Bool(true)),
             _ if self.literal(b"false") => Ok(Value::Bool(false)),
-            _ if self.text[self.at..].starts_with(b"null") => Err(self.error("null is refused")),
-            _ if self.text[self.at..].starts_with(b"NaN")
-                || self.text[self.at..].starts_with(b"Infinity") =>
-            {
+            _ if self.rest_starts_with(b"null") => Err(self.error("null is refused")),
+            _ if self.rest_starts_with(b"NaN") || self.rest_starts_with(b"Infinity") => {
                 Err(self.error("a number beyond the integers is refused"))
             }
             _ => Err(self.error("expected a value")),
@@ -268,6 +278,22 @@ impl Reader<'_> {
         Ok(())
     }
 
+    /// Consumes `,` and the whitespace after it, or `close`, and returns whether `close` ended the list.
+    fn separator(&mut self, close: u8, reason: &'static str) -> Result<bool, Error> {
+        match self.peek() {
+            Some(b',') => {
+                self.at += 1;
+                self.space();
+                Ok(false)
+            }
+            Some(byte) if byte == close => {
+                self.at += 1;
+                Ok(true)
+            }
+            _ => Err(self.error(reason)),
+        }
+    }
+
     fn object(&mut self, depth: usize) -> Result<Value, Error> {
         self.nest(depth)?;
         let mut object = Object::new();
@@ -281,21 +307,16 @@ impl Reader<'_> {
             }
             let key = self.string()?;
             self.space();
-            self.expect(b':', "expected ':'")?;
+            if self.peek() != Some(b':') {
+                return Err(self.error("expected ':'"));
+            }
+            self.at += 1;
             self.space();
             let value = self.value(depth)?;
             object.insert(key, value);
             self.space();
-            match self.peek() {
-                Some(b',') => {
-                    self.at += 1;
-                    self.space();
-                }
-                Some(b'}') => {
-                    self.at += 1;
-                    return Ok(Value::Object(object));
-                }
-                _ => return Err(self.error("expected ',' or '}'")),
+            if self.separator(b'}', "expected ',' or '}'")? {
+                return Ok(Value::Object(object));
             }
         }
     }
@@ -310,16 +331,8 @@ impl Reader<'_> {
         loop {
             items.push(self.value(depth)?);
             self.space();
-            match self.peek() {
-                Some(b',') => {
-                    self.at += 1;
-                    self.space();
-                }
-                Some(b']') => {
-                    self.at += 1;
-                    return Ok(Value::Array(items));
-                }
-                _ => return Err(self.error("expected ',' or ']'")),
+            if self.separator(b']', "expected ',' or ']'")? {
+                return Ok(Value::Array(items));
             }
         }
     }
@@ -329,7 +342,7 @@ impl Reader<'_> {
         let negative = self.peek() == Some(b'-');
         if negative {
             self.at += 1;
-            if self.text[self.at..].starts_with(b"Infinity") {
+            if self.rest_starts_with(b"Infinity") {
                 return Err(self.error("a number beyond the integers is refused"));
             }
         }
@@ -344,10 +357,7 @@ impl Reader<'_> {
             _ => return Err(self.error("expected a digit")),
         }
         if matches!(self.peek(), Some(b'.' | b'e' | b'E')) {
-            return Err(Error {
-                offset: start,
-                reason: "a fraction or an exponent is refused",
-            });
+            return Err(error_at(start, "a fraction or an exponent is refused"));
         }
         let text = std::str::from_utf8(&self.text[digits..self.at]).expect("the digits are ASCII");
         Ok(Value::Integer(
@@ -357,78 +367,69 @@ impl Reader<'_> {
 
     fn string(&mut self) -> Result<Text, Error> {
         self.at += 1;
-        let mut text = Vec::new();
+        let mut text = String::new();
         loop {
-            let Some(byte) = self.peek() else {
-                return Err(self.error("an unterminated string"));
-            };
-            self.at += 1;
-            match byte {
-                b'"' => break,
-                b'\\' => {
-                    let escaped = match self.peek() {
-                        Some(b'u') => self.unicode()?,
-                        Some(simple) => {
-                            self.at += 1;
-                            match simple {
-                                b'"' => '"',
-                                b'\\' => '\\',
-                                b'/' => '/',
-                                b'b' => '\u{8}',
-                                b'f' => '\u{c}',
-                                b'n' => '\n',
-                                b'r' => '\r',
-                                b't' => '\t',
-                                _ => {
-                                    return Err(Error {
-                                        offset: self.at - 1,
-                                        reason: "an invalid escape",
-                                    });
-                                }
-                            }
-                        }
-                        None => return Err(self.error("an unterminated string")),
-                    };
-                    let mut buffer = [0; 4];
-                    text.extend_from_slice(escaped.encode_utf8(&mut buffer).as_bytes());
+            let start = self.at;
+            while self
+                .peek()
+                .is_some_and(|byte| byte != b'"' && byte != b'\\' && byte >= 0x20)
+            {
+                self.at += 1;
+            }
+            text.push_str(
+                std::str::from_utf8(&self.text[start..self.at])
+                    .expect("a run of whole UTF-8 sequences"),
+            );
+            match self.peek() {
+                Some(b'"') => {
+                    self.at += 1;
+                    return Ok(Text(text));
                 }
-                0..0x20 => {
-                    return Err(Error {
-                        offset: self.at - 1,
-                        reason: "a control character in a string",
-                    });
+                Some(b'\\') => {
+                    self.at += 1;
+                    text.push(self.escape()?);
                 }
-                _ => text.push(byte),
+                Some(_) => return Err(self.error("a control character in a string")),
+                None => return Err(self.error("an unterminated string")),
             }
         }
-        Ok(Text(String::from_utf8(text).expect(
-            "the text holds whole UTF-8 sequences and scalar values",
-        )))
     }
 
+    /// `self.at` must point to the byte after the backslash.
+    fn escape(&mut self) -> Result<char, Error> {
+        let escaped = match self.peek() {
+            Some(b'u') => return self.unicode(),
+            Some(b'"') => '"',
+            Some(b'\\') => '\\',
+            Some(b'/') => '/',
+            Some(b'b') => '\u{8}',
+            Some(b'f') => '\u{c}',
+            Some(b'n') => '\n',
+            Some(b'r') => '\r',
+            Some(b't') => '\t',
+            Some(_) => return Err(self.error("an invalid escape")),
+            None => return Err(self.error("an unterminated string")),
+        };
+        self.at += 1;
+        Ok(escaped)
+    }
     /// `self.at` must point to the `u` of the first escape. A high surrogate requires an immediately following
     /// `\u` escape encoding a low surrogate.
     fn unicode(&mut self) -> Result<char, Error> {
         let start = self.at - 1;
         let first = self.code_unit()?;
         let code = match first {
-            0xd800..0xdc00 if self.text[self.at..].starts_with(b"\\u") => {
+            0xd800..0xdc00 if self.rest_starts_with(b"\\u") => {
                 self.at += 1;
                 let second = self.code_unit()?;
                 if !(0xdc00..0xe000).contains(&second) {
-                    return Err(Error {
-                        offset: start,
-                        reason: "a lone surrogate escape is refused",
-                    });
+                    return Err(error_at(start, "a lone surrogate escape is refused"));
                 }
                 0x10000 + ((first - 0xd800) << 10) + (second - 0xdc00)
             }
             _ => first,
         };
-        char::from_u32(code).ok_or(Error {
-            offset: start,
-            reason: "a lone surrogate escape is refused",
-        })
+        char::from_u32(code).ok_or(error_at(start, "a lone surrogate escape is refused"))
     }
 
     fn code_unit(&mut self) -> Result<u32, Error> {
@@ -448,10 +449,19 @@ impl Reader<'_> {
     }
 }
 
+fn error_at(offset: usize, reason: &'static str) -> Error {
+    Error { offset, reason }
+}
+
 pub fn dump(value: &Value) -> String {
+    let mut out = text(value);
+    out.push('\n');
+    out
+}
+
+pub fn text(value: &Value) -> String {
     let mut out = String::new();
     write(value, &mut out);
-    out.push('\n');
     out
 }
 

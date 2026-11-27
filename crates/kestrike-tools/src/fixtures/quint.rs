@@ -20,7 +20,7 @@ pub enum Failure {
     /// `status` records the child's actual exit status, including a natural exit between `try_wait` and `kill`.
     Limit {
         limit: Duration,
-        status: ExitStatus,
+        status: Option<ExitStatus>,
     },
 }
 
@@ -69,7 +69,7 @@ pub fn run(
         let elapsed = start.elapsed();
         if elapsed >= limit {
             let _ = child.kill();
-            let status = child.wait().map_err(Failure::Wait)?;
+            let status = child.wait().ok();
             return Err(Failure::Limit { limit, status });
         }
         pause = (pause * 2).min(limit - elapsed).min(POLL);

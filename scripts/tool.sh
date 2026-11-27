@@ -15,7 +15,8 @@ pin=$(sed -n 's/^  STABLE: "\([^"]*\)"$/\1/p' "$workflow") || fail "cannot read 
 host=$(cd -- "$top" && env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustup show 2>/dev/null |
   sed -n 's/^Default host: //p') || true
 [[ -n $host ]] || fail "rustup names no host"
-installed=$(rustup toolchain list 2>/dev/null) || fail "rustup lists no toolchains"
+installed=$(cd -- "$top" && env -u RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL=0 rustup toolchain list 2>/dev/null) ||
+  fail "rustup lists no toolchains"
 grep -qE "^${pin//./\\.}-${host}( |\$)" <<<"$installed" ||
   fail "the pinned toolchain $pin-$host is not installed; install it with: rustup toolchain install $pin"
 

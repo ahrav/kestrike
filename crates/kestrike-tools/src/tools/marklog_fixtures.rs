@@ -1,8 +1,9 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use crate::fixtures::{self, Model, Trace, case, python_int};
+use crate::fixtures::{self, Model, Trace, case};
 use crate::json::{Integer, Object, Value};
+use crate::python;
 
 const MODEL: Model = Model {
     tool: "marklog_fixtures",
@@ -47,15 +48,7 @@ pub fn run(top: &Path, args: &[OsString]) -> u8 {
 }
 
 fn trace(name: String, seed: u64, recipe: Option<&'static [&'static str]>) -> Trace {
-    let steps = recipe.map_or(STEPS, <[_]>::len);
-    Trace {
-        name,
-        seed,
-        steps,
-        recipe,
-        case: case::marklog(steps, recipe),
-        meta: Vec::new(),
-    }
+    Trace::new(name, seed, recipe, STEPS, case::marklog, Vec::new())
 }
 
 /// Each state after the first records `call` as the action from `marklogCase::marklog::ev.act` followed by its
@@ -71,7 +64,7 @@ fn calls(data: &mut Object, trace: &Trace) -> Result<(), String> {
                 at + 1
             ));
         };
-        let value = call(state, trace.recipe.map(|recipe| recipe[at]))?;
+        let value = call(state, trace.recipe().map(|recipe| recipe[at]))?;
         state.insert("call", value);
     }
     Ok(())
@@ -102,14 +95,14 @@ fn call(state: &Object, text: Option<&str>) -> Result<Value, String> {
         _ => {
             return Err(format!(
                 "the action {} has no recorded picks",
-                crate::json::dump(&act).trim_end()
+                crate::json::text(&act)
             ));
         }
     };
     for &name in names {
         let value = member(member(picks, name)?, "value")?;
         call.push(if name == "k" {
-            Value::Integer(python_int(member(value, "#bigint")?)?)
+            Value::Integer(python::int(member(value, "#bigint")?)?)
         } else {
             pages(value)?
         });
@@ -139,7 +132,7 @@ fn pages(value: &Value) -> Result<Value, String> {
     };
     let mut pages = items
         .iter()
-        .map(|page| python_int(member(page, "#bigint")?))
+        .map(|page| python::int(member(page, "#bigint")?))
         .collect::<Result<Vec<_>, _>>()?;
     pages.sort();
     Ok(Value::Array(

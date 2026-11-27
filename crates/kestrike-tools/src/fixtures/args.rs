@@ -2,8 +2,8 @@
 //! options `--quint` and `--output` and the help option `-h`/`--help`.
 //!
 //! `--quint` and `--output` accept a value in the next argument or after `=`. A unique long-option prefix
-//! selects the matching option, and a repeated option keeps its last value. For `Err(2)`, `parse` prints the
-//! usage line and `<tool>: error: <message>` on standard error.
+//! selects the matching option, and a repeated option keeps its last value. For [`Parsed::Refused`] with code
+//! 2, the text is the usage line and `<tool>: error: <message>`.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -13,6 +13,18 @@ use std::os::unix::ffi::OsStrExt;
 pub struct Options {
     pub quint: Option<OsString>,
     pub output: Option<OsString>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Parsed {
+    Run(Options),
+    /// The caller writes the help to standard output and exits 0.
+    Help(String),
+    /// The caller writes `text` to standard error and exits with `code`.
+    Refused {
+        code: u8,
+        text: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,25 +51,27 @@ const OPTIONS: [(&[u8], Action); 4] = [
     (b"--output", Action::Output),
 ];
 
-/// `action` is `None` for an unknown option; `explicit` holds the text after `=` or after a short option's
-/// letter.
+/// `explicit` holds the text after `=` or after a short option's letter.
+#[derive(Clone, Copy)]
+struct Match<'a> {
+    action: Action,
+    string: &'a [u8],
+    explicit: Option<&'a [u8]>,
+}
+
 #[derive(Clone, Copy)]
 enum Kind<'a> {
     Value,
     Marker,
-    Option {
-        action: Option<Action>,
-        string: &'a [u8],
-        explicit: Option<&'a [u8]>,
-    },
+    Unknown,
+    Option(Match<'a>),
 }
 
-/// `parse` prints help or a diagnostic before returning `Err`, including `Err(0)` for help.
-pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Result<Options, u8> {
+pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Parsed {
     let usage = format!("usage: {tool} [-h] --quint QUINT --output OUTPUT");
-    let fail = |message: String| {
-        eprintln!("{usage}\n{tool}: error: {message}");
-        2
+    let refuse = |message: String| Parsed::Refused {
+        code: 2,
+        text: format!("{usage}\n{tool}: error: {message}\n"),
     };
     let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
     let mut kinds = Vec::with_capacity(args.len());
@@ -69,7 +83,10 @@ pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Result<Options, u8> 
             ended = true;
             Kind::Marker
         } else {
-            classify(arg).map_err(fail)?
+            match classify(arg) {
+                Ok(kind) => kind,
+                Err(message) => return refuse(message),
+            }
         });
     }
     let mut options = Options {
@@ -80,68 +97,50 @@ pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Result<Options, u8> 
     let mut extras = Vec::new();
     let mut at = 0;
     while at < args.len() {
-        let Kind::Option {
-            action: Some(action),
-            string,
-            explicit,
-        } = kinds[at]
-        else {
+        let Kind::Option(found) = kinds[at] else {
             extras.push(args[at]);
             at += 1;
             continue;
         };
-        let value = match (action, explicit) {
-            (Action::Help, Some(explicit)) if string[1] != b'-' && !explicit.is_empty() => {
-                if let Some(rest) = explicit.iter().position(|&letter| letter != b'h') {
-                    let message = format!(
+        let value = match (found.action, found.explicit) {
+            (Action::Help, Some(explicit)) => match help_explicit(found.string, explicit) {
+                Ok(()) => None,
+                Err(HelpRefusal::Ignored(rest)) => {
+                    return refuse(format!(
                         "argument -h/--help: ignored explicit argument {}",
-                        repr(&explicit[rest..])
-                    );
-                    return Err(fail(message));
+                        repr(rest)
+                    ));
                 }
-                None
-            }
-            (Action::Help, Some(_)) if string[1] != b'-' => {
-                eprintln!("{tool}: argument -h/--help: string index out of range");
-                return Err(1);
-            }
-            (Action::Help, Some(explicit)) => {
-                return Err(fail(format!(
-                    "argument -h/--help: ignored explicit argument {}",
-                    repr(explicit)
-                )));
-            }
+                Err(HelpRefusal::IndexError) => {
+                    let text = format!("{tool}: argument -h/--help: string index out of range\n");
+                    return Parsed::Refused { code: 1, text };
+                }
+            },
             (Action::Help, None) => None,
             (_, Some(explicit)) => Some(explicit),
-            (_, None) => match kinds.get(at + 1) {
+            (action, None) => match kinds.get(at + 1) {
                 Some(Kind::Value) => {
                     at += 1;
                     Some(args[at])
                 }
-                _ => {
-                    return Err(fail(format!(
-                        "argument {}: expected one argument",
-                        action.name()
-                    )));
-                }
+                _ => return refuse(format!("argument {}: expected one argument", action.name())),
             },
         };
         at += 1;
         let value = value
             .filter(|value| *value != b"--")
             .map(|value| OsStr::from_bytes(value).to_owned());
-        match action {
+        match found.action {
             Action::Help => {
-                println!(
+                return Parsed::Help(format!(
                     "{usage}\n\n{about}\n\noptional arguments:\n  -h, --help       show this help message and exit\n  \
-                     --quint QUINT\n  --output OUTPUT"
-                );
-                return Err(0);
+                     --quint QUINT\n  --output OUTPUT\n"
+                ));
             }
             Action::Quint => options.quint = value,
             Action::Output => options.output = value,
         }
-        seen.push(action);
+        seen.push(found.action);
     }
     let missing: Vec<&str> = [Action::Quint, Action::Output]
         .into_iter()
@@ -149,16 +148,38 @@ pub fn parse(tool: &str, about: &str, args: &[OsString]) -> Result<Options, u8> 
         .map(Action::name)
         .collect();
     if !missing.is_empty() {
-        return Err(fail(format!(
+        return refuse(format!(
             "the following arguments are required: {}",
             missing.join(", ")
-        )));
+        ));
     }
     if !extras.is_empty() {
         let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
-        return Err(fail(format!("unrecognized arguments: {}", shown.join(" "))));
+        return refuse(format!("unrecognized arguments: {}", shown.join(" ")));
     }
-    Ok(options)
+    Parsed::Run(options)
+}
+
+enum HelpRefusal<'a> {
+    Ignored(&'a [u8]),
+    IndexError,
+}
+
+/// `argparse` reads each letter after `-h` as one more short option and refuses the rest from the first
+/// letter other than `h`. For `-h=`, `parse` returns `Parsed::Refused` with code 1 and the message
+/// `string index out of range`. The long form `--help=` refuses any explicit value.
+fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusal<'a>> {
+    let short = string[1] != b'-';
+    if !short {
+        return Err(HelpRefusal::Ignored(explicit));
+    }
+    if explicit.is_empty() {
+        return Err(HelpRefusal::IndexError);
+    }
+    match explicit.iter().position(|&letter| letter != b'h') {
+        Some(rest) => Err(HelpRefusal::Ignored(&explicit[rest..])),
+        None => Ok(()),
+    }
 }
 
 fn action_of(string: &[u8]) -> Option<Action> {
@@ -173,11 +194,11 @@ fn classify(arg: &[u8]) -> Result<Kind<'_>, String> {
         return Ok(Kind::Value);
     }
     if let Some(action) = action_of(arg) {
-        return Ok(Kind::Option {
-            action: Some(action),
+        return Ok(Kind::Option(Match {
+            action,
             string: arg,
             explicit: None,
-        });
+        }));
     }
     if arg.len() == 1 {
         return Ok(Kind::Value);
@@ -185,25 +206,18 @@ fn classify(arg: &[u8]) -> Result<Kind<'_>, String> {
     if let Some(equals) = arg.iter().position(|&byte| byte == b'=') {
         let (string, explicit) = (&arg[..equals], &arg[equals + 1..]);
         if let Some(action) = action_of(string) {
-            return Ok(Kind::Option {
-                action: Some(action),
+            return Ok(Kind::Option(Match {
+                action,
                 string,
                 explicit: Some(explicit),
-            });
+            }));
         }
     }
-    let matches = prefix_matches(arg);
-    match matches.as_slice() {
+    match prefix_matches(arg).as_slice() {
         [] => {}
-        [found] => return Ok(*found),
-        _ => {
-            let names: Vec<String> = matches
-                .iter()
-                .map(|found| match found {
-                    Kind::Option { string, .. } => shown(string),
-                    _ => unreachable!("a prefix match is an option"),
-                })
-                .collect();
+        [found] => return Ok(Kind::Option(*found)),
+        matches => {
+            let names: Vec<String> = matches.iter().map(|found| shown(found.string)).collect();
             return Err(format!(
                 "ambiguous option: {} could match {}",
                 shown(arg),
@@ -214,17 +228,13 @@ fn classify(arg: &[u8]) -> Result<Kind<'_>, String> {
     if looks_negative(arg) || arg.contains(&b' ') {
         return Ok(Kind::Value);
     }
-    Ok(Kind::Option {
-        action: None,
-        string: arg,
-        explicit: None,
-    })
+    Ok(Kind::Unknown)
 }
 
 /// For `--` arguments, `prefix_matches` uses the bytes before the first `=` (or the entire argument) as the
 /// option prefix and any suffix after `=` as the explicit value. For an argument with exactly one leading `-`
 /// and at least two bytes, an option equal to the first two bytes takes the rest as its explicit value.
-fn prefix_matches(arg: &[u8]) -> Vec<Kind<'_>> {
+fn prefix_matches(arg: &[u8]) -> Vec<Match<'_>> {
     let mut matches = Vec::new();
     if arg[1] == b'-' {
         let (prefix, explicit) = match arg.iter().position(|&byte| byte == b'=') {
@@ -233,8 +243,8 @@ fn prefix_matches(arg: &[u8]) -> Vec<Kind<'_>> {
         };
         for &(string, action) in &OPTIONS {
             if string.starts_with(prefix) {
-                matches.push(Kind::Option {
-                    action: Some(action),
+                matches.push(Match {
+                    action,
                     string,
                     explicit,
                 });
@@ -243,14 +253,14 @@ fn prefix_matches(arg: &[u8]) -> Vec<Kind<'_>> {
     } else {
         for &(string, action) in &OPTIONS {
             if string == &arg[..2] {
-                matches.push(Kind::Option {
-                    action: Some(action),
+                matches.push(Match {
+                    action,
                     string,
                     explicit: Some(&arg[2..]),
                 });
             } else if string.starts_with(arg) {
-                matches.push(Kind::Option {
-                    action: Some(action),
+                matches.push(Match {
+                    action,
                     string,
                     explicit: None,
                 });
