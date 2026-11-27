@@ -9,10 +9,12 @@ pub mod environ;
 pub mod fixtures;
 pub mod git;
 pub mod json;
+pub mod orderings;
 pub mod ownership;
 pub mod paths;
 #[cfg(target_os = "linux")]
 pub mod plants;
+pub mod production_text;
 pub mod python;
 pub mod rust_text;
 pub mod shell;
