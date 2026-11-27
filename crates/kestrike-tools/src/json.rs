@@ -1,4 +1,5 @@
-//! A JSON reader that preserves document order, and the writers [`text`], [`dump`] and [`indented`].
+//! A JSON reader that preserves document order, and the writers [`text`], [`dump`], [`indented`] and
+//! [`indented_by`].
 //!
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
@@ -662,6 +663,31 @@ pub fn text(value: &Value) -> String {
 pub fn indented(value: &Value) -> Result<String, NonFinite> {
     let mut out = String::new();
     write(value, &mut out, Some(0))?;
+    Ok(out)
+}
+
+/// `indented_by` uses the layout of [`indented`] with `width` spaces per level, as Python's
+/// `json.dumps(value, indent=width, sort_keys=True)` writes it.
+///
+/// The indented layout starts each member and item on a line of its own with two spaces per level of
+/// depth, and a string writes each line break as an escape, so every line's leading spaces count its
+/// depth twice.
+///
+/// # Errors
+///
+/// `indented_by` refuses a non-finite float.
+pub fn indented_by(value: &Value, width: usize) -> Result<String, NonFinite> {
+    let two = indented(value)?;
+    let mut out = String::with_capacity(two.len());
+    for (at, line) in two.split('\n').enumerate() {
+        if at > 0 {
+            out.push('\n');
+        }
+        let body = line.trim_start_matches(' ');
+        let depth = (line.len() - body.len()) / 2;
+        out.push_str(&" ".repeat(depth * width));
+        out.push_str(body);
+    }
     Ok(out)
 }
 
