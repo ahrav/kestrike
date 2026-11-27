@@ -18,25 +18,19 @@ use super::options::Options;
 use super::pieces::text;
 use super::process::{INTERRUPT, capture, exit_code};
 use super::stop::{Fault, Stop};
-use crate::ownership::{foreign_toolchain_paths, status};
+pub(super) use crate::environ::Environ;
+use crate::environ::{get, set};
+use crate::git::REPOSITORY_VARIABLES;
+use crate::ownership::{self, foreign_toolchain_paths};
 use crate::paths;
 use crate::text::Text;
 
 pub(super) const CONFIG: &str = ".cargo/mutants.toml";
 const WORKFLOW: &str = ".github/workflows/agent-checks.yml";
-const OVERRIDES: [&str; 5] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_OBJECT_DIRECTORY",
-];
 const DEFAULT_PATH: &str = "/bin:/usr/bin";
 pub(super) const DEFAULT_TESTS: [&str; 8] = [
     "--lib", "--", "--skip", "bind::", "--skip", "native::", "--skip", "soak",
 ];
-
-pub(super) type Environ = Vec<(OsString, OsString)>;
 
 /// What step 1 fixed: the top level, the report's first fields, the artifacts directory, the
 /// environments of Git and of the tool, and the program that stands for `cargo`.
@@ -76,23 +70,10 @@ fn join(directory: &OsStr, entry: &OsStr) -> OsString {
     OsString::from_vec(joined)
 }
 
-fn get<'a>(environ: &'a Environ, name: &str) -> Option<&'a OsString> {
-    environ
-        .iter()
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value)
-}
-
-fn set(environ: &mut Environ, name: &str, value: OsString) {
-    environ.retain(|(key, _)| key != name);
-    environ.push((OsString::from(name), value));
-}
-
-/// `is_file` holds for a path whose target is a regular file; [`status`] decides which errors read as no
-/// file.
+/// `is_file` holds for a path whose target is a regular file; [`ownership::status`] decides which errors
+/// read as no file.
 pub(super) fn is_file(path: &Path) -> Result<bool, Fault> {
-    status(path)
-        .map(|status| status.is_some_and(|status| status.is_file()))
+    ownership::is_file(path)
         .map_err(|error| Fault::os(error.error(), Some(error.path().as_os_str())))
 }
 
@@ -289,21 +270,10 @@ fn host_machine(cargo: &OsStr, env: &Environ) -> Result<Text, Stop> {
     Ok(Text::from(machine))
 }
 
-fn listed(names: &[Text]) -> Text {
-    let mut joined = Text::new();
-    for (at, name) in names.iter().enumerate() {
-        if at > 0 {
-            joined.push_str(", ");
-        }
-        joined.push_text(name);
-    }
-    joined
-}
-
 /// `refuse_inherited` refuses a set Git repository or index variable and an inherited variable that
 /// changes the tool or the build profile.
 fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
-    let set_names: Vec<Text> = OVERRIDES
+    let set_names: Vec<Text> = REPOSITORY_VARIABLES
         .iter()
         .filter(|name| get(environ, name).is_some())
         .map(|&name| Text::from(name))
@@ -311,7 +281,7 @@ fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
     if !set_names.is_empty() {
         return Err(Stop::rejected(text!(
             "unset ",
-            listed(&set_names),
+            Text::join(", ", &set_names),
             "; the runner uses the invoking checkout's repository"
         )));
     }
@@ -319,7 +289,7 @@ fn refuse_inherited(environ: &Environ) -> Result<(), Stop> {
     if !inherited.is_empty() {
         return Err(Stop::rejected(text!(
             "unset ",
-            listed(&inherited),
+            Text::join(", ", &inherited),
             "; the runner sets the tool's options and the build profile"
         )));
     }
@@ -342,7 +312,7 @@ fn private_artifacts(artifacts: Option<&OsStr>, top: &Path) -> Result<PathBuf, S
             .collect();
         return Err(Stop::rejected(text!(
             "another user owns or can write ",
-            listed(&shown),
+            Text::join(", ", &shown),
             ", where Cargo would read configuration; pass --artifacts under a directory only you control"
         )));
     }

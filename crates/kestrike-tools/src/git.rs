@@ -1,13 +1,24 @@
 //! These functions pass argument vectors to Git and read its standard output as strict UTF-8. Every Git
 //! child of this module starts from `command`, which sets `GIT_NO_REPLACE_OBJECTS=1`, so Git reads each
 //! object as the repository stores it and no `refs/replace` entry stands in for one.
+//! [`REPOSITORY_VARIABLES`] names the variables that redirect Git to another repository.
 
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::{self, Write};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 
 use crate::text::{Text, strip_str};
+
+/// The variables that point Git at another repository, work tree, index or object store than the one the
+/// working directory names, in the order a refusal lists them.
+pub const REPOSITORY_VARIABLES: [&str; 5] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+];
 
 const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
     ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_DIFF_OPTS"];
@@ -123,33 +134,42 @@ pub fn blob_texts(specs: &[String]) -> Result<Vec<String>, GitError> {
         )));
     }
     let input: String = specs.iter().map(|spec| format!("{spec}\n")).collect();
-    let mut child = command()
+    let child = command()
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(GitError::Start)?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .expect("the child's standard input is piped");
-    let output = std::thread::scope(|scope| {
-        let writer = std::thread::Builder::new().spawn_scoped(scope, move || {
-            match stdin.write_all(input.as_bytes()) {
-                Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
-                _ => Ok(()),
-            }
-        });
-        let output = child.wait_with_output();
-        let written = writer.and_then(|handle| handle.join().expect("the writer thread returns"));
-        written.and(output)
-    })
-    .map_err(GitError::Io)?;
+    let output = fed(child, input.as_bytes()).map_err(GitError::Io)?;
     if !output.status.success() {
         return Err(failed(&["cat-file", "--batch"], &output.stderr));
     }
     batch_texts(&output.stdout, specs)
+}
+
+/// `fed` writes `input` to the standard input of `child`, which was spawned with all three streams piped,
+/// from a thread of its own while it collects both output streams, and waits for the child. A child that
+/// closes its input before reading all of it ends the write without an error.
+///
+/// # Errors
+///
+/// The writer thread cannot start, the write fails otherwise, or the wait fails.
+pub(crate) fn fed(mut child: Child, input: &[u8]) -> io::Result<Output> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("the child's standard input is piped");
+    std::thread::scope(|scope| {
+        let writer =
+            std::thread::Builder::new().spawn_scoped(scope, move || match stdin.write_all(input) {
+                Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
+                _ => Ok(()),
+            });
+        let output = child.wait_with_output();
+        let written = writer.and_then(|handle| handle.join().expect("the writer thread returns"));
+        written.and(output)
+    })
 }
 
 /// `batch_texts` reads one reply for each name of `specs`, in order: `<id> <type> <size>`, a line feed, `size`

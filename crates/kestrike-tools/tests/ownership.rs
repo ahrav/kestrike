@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kestrike_tools::ownership::{
-    PrivateError, foreign_toolchain_paths, make_private, shared_directories, traversed,
+    PrivateError, foreign_toolchain_paths, is_dir, is_file, is_link, make_private,
+    shared_directories, traversed,
 };
 
 fn mode(path: &Path) -> u32 {
@@ -371,4 +372,13 @@ fn a_stat_error_other_than_absence_reaches_the_caller_with_its_path() {
         }
         found => panic!("{expression}: {found:?}"),
     }
+}
+
+/// A path that holds a NUL byte names no file, directory or link, so each file test reads it as absent.
+#[test]
+fn a_path_with_a_nul_byte_is_no_file_directory_or_link() {
+    let path = Path::new("a\0b");
+    assert!(!is_link(path).expect("no error"));
+    assert!(!is_file(path).expect("no error"));
+    assert!(!is_dir(path).expect("no error"));
 }

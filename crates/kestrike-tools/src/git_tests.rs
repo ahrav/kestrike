@@ -148,3 +148,19 @@ fn an_unknown_commit_has_no_merge_base_but_fails() {
     let error = merge_base("HEAD", "f".repeat(40).as_str()).expect_err("the commit does not exist");
     assert!(matches!(error, GitError::Failed(_)), "{error:?}");
 }
+
+/// The names are Git's repository, work tree, index, common directory and object store variables, in the
+/// order a refusal lists them.
+#[test]
+fn the_repository_variables_are_the_five_in_order() {
+    assert_eq!(
+        crate::git::REPOSITORY_VARIABLES,
+        [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+        ]
+    );
+}
