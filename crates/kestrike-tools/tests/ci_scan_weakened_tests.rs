@@ -1,8 +1,8 @@
 //! Each case runs `scripts/ci-scan-weakened-tests.sh` in a scratch tree with a `scripts/tool.sh` stand-in to
 //! check CI-visible output and exit status.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, DirBuilder};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,14 +26,20 @@ impl Drop for Tree {
 
 impl Tree {
     fn new(name: &str) -> Self {
-        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-            "kestrike-ci-scan-{name}-{}-{}",
-            std::process::id(),
-            TREES.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("scripts")).expect("the scratch tree is made");
-        fs::create_dir_all(root.join("draws")).expect("the stand-in directory is made");
+        let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+        fs::create_dir_all(&scratch).expect("the scratch root is made");
+        let root = (0..1000)
+            .map(|_| {
+                scratch.join(format!(
+                    "kestrike-ci-scan-{name}-{}-{}",
+                    std::process::id(),
+                    TREES.fetch_add(1, Ordering::Relaxed)
+                ))
+            })
+            .find(|root| DirBuilder::new().mode(0o700).create(root).is_ok())
+            .expect("a new scratch directory is made");
+        fs::create_dir(root.join("scripts")).expect("the scratch tree is made");
+        fs::create_dir(root.join("draws")).expect("the stand-in directory is made");
         Self { root }
     }
 

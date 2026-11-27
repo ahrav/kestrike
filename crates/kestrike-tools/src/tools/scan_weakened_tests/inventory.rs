@@ -12,7 +12,6 @@ use super::digits::{integer, is_digits};
 use super::finding::short;
 use super::hunks::paired;
 use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
-use super::tree::files;
 use super::{Change, Class, Failure, Shown};
 
 pub const INVENTORY: &str = "scripts/test-inventory.json";
@@ -244,10 +243,9 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
     Ok(found)
 }
 
-/// `inventory_text` returns the inventory's text at `rev`, and an empty text where `rev` holds no entry at its
-/// path. [`files`] rejects a non-file entry and an inventory path missing beneath a link or a submodule.
-pub fn inventory_text(rev: &str) -> Result<String, Failure> {
-    if files(rev, &[INVENTORY])?.is_empty() {
+/// `held` indicates whether the inventory file exists at `rev`.
+pub fn inventory_text(rev: &str, held: bool) -> Result<String, Failure> {
+    if !held {
         return Ok(String::new());
     }
     let short = short(rev);

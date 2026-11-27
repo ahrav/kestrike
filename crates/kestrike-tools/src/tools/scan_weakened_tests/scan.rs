@@ -84,8 +84,8 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
             checked.push(path);
         }
     }
-    files(base, &checked)?;
-    files(head, &checked)?;
+    let base_held = files(base, &checked)?;
+    let head_held = files(head, &checked)?;
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])
@@ -144,8 +144,8 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         }
     };
     if paths.iter().any(within(INVENTORY)) {
-        let old = inventory_text(base)?;
-        let new = inventory_text(head)?;
+        let old = inventory_text(base, base_held.contains(&INVENTORY))?;
+        let new = inventory_text(head, head_held.contains(&INVENTORY))?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
     found.extend(removed(base, head, paths.iter().any(within(CASES)))?);

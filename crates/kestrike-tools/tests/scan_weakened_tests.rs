@@ -1,6 +1,7 @@
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, DirBuilder};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -205,7 +206,7 @@ impl Repo {
         fs::create_dir_all(root).expect("the scratch root is made");
         let temp = (0..1000)
             .map(|at| root.join(format!("kestrike-scan-{name}-{}-{at}", std::process::id())))
-            .find(|temp| fs::create_dir(temp).is_ok())
+            .find(|temp| DirBuilder::new().mode(0o700).create(temp).is_ok())
             .expect("a new scratch directory is made");
         let repo = temp.join("repo");
         fs::create_dir(&repo).expect("the repository directory is made");
