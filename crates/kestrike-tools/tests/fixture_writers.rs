@@ -653,24 +653,28 @@ fn a_relative_output_resolves_against_the_working_directory() {
     assert!(output.join("step_6b0d.itf.json").exists());
 }
 
-/// With `--quint=--`, the fixture writer creates the first trace directory, writes the model copy and `case.qnt`
-/// there, then exits with status 1.
+/// `--quint=--` names the program `--`, which no directory of the test's `PATH` holds: the writer creates
+/// the first trace directory, writes the model copy and `case.qnt` there, and exits 1 when the program
+/// fails to start.
 #[test]
-fn an_empty_quint_value_exits_1_after_the_first_trace_directory_is_written() {
+fn a_quint_value_of_two_dashes_names_a_program_that_fails_to_start() {
     let scratch = Scratch::new();
     let output = scratch.0.join("out");
-    let result = run(
-        "gate_fixtures",
-        &[
+    let result = Command::new(BINARY)
+        .arg(top())
+        .args([
+            "gate_fixtures".as_ref(),
             "--quint=--".as_ref(),
             "--output".as_ref(),
             output.as_os_str(),
-        ],
-    );
+        ])
+        .env("PATH", &scratch.0)
+        .output()
+        .expect("the binary starts");
     assert_eq!(result.status.code(), Some(1));
     assert_eq!(
         stderr(&result),
-        "gate_fixtures: argument --quint: the value `--` leaves no program\n"
+        "gate_fixtures: passes: Quint did not start: No such file or directory (os error 2)\n"
     );
     assert!(output.join("passes/gate.qnt").exists() && output.join("passes/case.qnt").exists());
     assert!(!output.join("busy_then_foreign_registrant").exists());
@@ -719,35 +723,29 @@ fn parsed(text: &str) -> Object {
     }
 }
 
+/// `--output=--` names the directory `--` of the working directory, and every trace is written there.
 #[test]
-fn an_empty_output_value_exits_1_before_quint_starts_and_writes_nothing() {
+fn an_output_value_of_two_dashes_names_a_directory_of_the_working_directory() {
+    let writer = &WRITERS[1];
     let scratch = Scratch::new();
-    let here = scratch.0.join("here");
-    fs::create_dir(&here).expect("the working directory is made");
-    let marker = scratch.0.join("called");
-    let quint = scratch.0.join("quint");
-    write_script(
-        &quint,
-        &format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
-    );
+    let output = scratch.0.join("--");
+    let quint = stand_in(&scratch.0, writer, &output, reply);
     let result = Command::new(BINARY)
         .arg(top())
+        .arg(writer.tool)
         .args([
-            "gate_fixtures".as_ref(),
             "--quint".as_ref(),
             quint.as_os_str(),
+            "--output=--".as_ref(),
         ])
-        .arg("--output=--")
-        .current_dir(&here)
+        .current_dir(&scratch.0)
         .output()
         .expect("the binary starts");
-    assert_eq!(result.status.code(), Some(1));
-    assert_eq!(
-        stderr(&result),
-        "gate_fixtures: argument --output: the value `--` leaves no path\n"
-    );
-    assert_eq!(fs::read_dir(&here).expect("the directory lists").count(), 0);
-    assert!(!marker.exists(), "Quint never starts");
+    assert_eq!(result.status.code(), Some(0), "{}", stderr(&result));
+    for trace in committed(writer) {
+        let written = output.join(format!("{}.itf.json", trace.name));
+        assert!(written.exists(), "{}", written.display());
+    }
 }
 
 #[test]

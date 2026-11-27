@@ -25,9 +25,9 @@ pub struct Opt {
 #[derive(Clone, Copy, Debug)]
 pub enum Kind {
     Help,
-    /// An option that takes one value. `required` asks only that the option appear: an explicit `--`
-    /// satisfies it without a call of `check`, and every other value, the empty string included, is checked
-    /// at each occurrence `parse` reaches.
+    /// An option that takes one value. `check` judges the value of each occurrence `parse` reaches, the
+    /// empty string and an explicit `--` (as in `--name=--`) included. `required` asks that the option
+    /// appear.
     Value {
         required: bool,
         check: Check,
@@ -40,27 +40,20 @@ impl Opt {
     }
 }
 
-/// `parse` records the value `--` as `Given::Empty`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Given {
-    Absent,
-    Empty,
-    Value(OsString),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Values(Vec<(&'static [&'static str], Given)>);
+pub struct Values(Vec<(&'static [&'static str], Option<OsString>)>);
 
 impl Values {
-    /// Returns what the command line gave for the row that lists `name`; any of a row's names selects it.
+    /// Returns the value the command line gave for the row that lists `name`, `None` when the command
+    /// line left the option out; any of a row's names selects it. A required option's value is `Some`.
     ///
     /// # Panics
     ///
     /// `get` panics when no row of the option table lists `name`.
     #[track_caller]
-    pub fn get(&self, name: &str) -> &Given {
+    pub fn get(&self, name: &str) -> Option<&OsStr> {
         match self.0.iter().find(|(names, _)| names.contains(&name)) {
-            Some((_, given)) => given,
+            Some((_, value)) => value.as_deref(),
             None => panic!("the option table names {name}"),
         }
     }
@@ -117,11 +110,6 @@ enum Arg<'a> {
     Value,
     Unknown,
     Option(Match<'a>),
-}
-
-enum HelpRefusal<'a> {
-    Ignored(&'a [u8]),
-    IndexError,
 }
 
 impl<'t> Reader<'t> {
@@ -193,10 +181,10 @@ impl<'t> Reader<'t> {
 
     /// `parse` classifies every argument before it reads any value, so a classification error takes
     /// precedence over help and value errors. A value-taking option consumes the next argument only when it
-    /// lacks an explicit value and the next argument has kind `Arg::Value`. `parse` records `b"--"` as
-    /// `Given::Empty` and calls the option's `check` for every other supplied value; a later occurrence replaces
-    /// an earlier one. `parse` returns `Parsed::Help` immediately upon accepting help. Missing required
-    /// options take precedence over leftover arguments.
+    /// lacks an explicit value and the next argument has kind `Arg::Value`. `parse` calls the option's
+    /// `check` for every supplied value; a later occurrence replaces an earlier one. `parse` returns
+    /// `Parsed::Help` immediately upon accepting help. Missing required options take precedence over
+    /// leftover arguments.
     pub fn parse(&self, args: &[OsString]) -> Parsed {
         let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
         let mut kinds = Vec::with_capacity(args.len());
@@ -214,7 +202,7 @@ impl<'t> Reader<'t> {
                 }
             });
         }
-        let mut values: Vec<Given> = vec![Given::Absent; self.options.len()];
+        let mut values: Vec<Option<OsString>> = vec![None; self.options.len()];
         let mut extras = Vec::new();
         let mut at = 0;
         while at < args.len() {
@@ -229,21 +217,13 @@ impl<'t> Reader<'t> {
                     let Some(explicit) = found.explicit else {
                         return Parsed::Help(self.help.to_owned());
                     };
-                    return match help_explicit(found.string, explicit) {
-                        Ok(()) => Parsed::Help(self.help.to_owned()),
-                        Err(HelpRefusal::Ignored(rest)) => self.refuse(format!(
+                    return match ignored(found.string, explicit) {
+                        None => Parsed::Help(self.help.to_owned()),
+                        Some(rest) => self.refuse(format!(
                             "argument {}: ignored explicit argument {}",
                             option.name(),
                             Text::from_os(OsStr::from_bytes(rest)).repr()
                         )),
-                        Err(HelpRefusal::IndexError) => Parsed::Refused {
-                            code: 1,
-                            text: format!(
-                                "{}: argument {}: string index out of range\n",
-                                self.tool,
-                                option.name()
-                            ),
-                        },
                     };
                 }
                 Kind::Value { check, .. } => check,
@@ -260,23 +240,18 @@ impl<'t> Reader<'t> {
                 }
             };
             at += 1;
-            values[found.option] = if value == b"--" {
-                Given::Empty
-            } else {
-                let value = OsStr::from_bytes(value);
-                if let Err(message) = check(&Text::from_os(value)) {
-                    return self.refuse(format!("argument {}: {message}", option.name()));
-                }
-                Given::Value(value.to_owned())
-            };
+            let value = OsStr::from_bytes(value);
+            if let Err(message) = check(&Text::from_os(value)) {
+                return self.refuse(format!("argument {}: {message}", option.name()));
+            }
+            values[found.option] = Some(value.to_owned());
         }
         let missing: Vec<String> = self
             .options
             .iter()
             .zip(&values)
-            .filter(|(option, given)| {
-                matches!(option.kind, Kind::Value { required: true, .. })
-                    && **given == Given::Absent
+            .filter(|(option, value)| {
+                matches!(option.kind, Kind::Value { required: true, .. }) && value.is_none()
             })
             .map(|(option, _)| option.name())
             .collect();
@@ -380,21 +355,17 @@ impl<'t> Reader<'t> {
     }
 }
 
-/// `help_explicit` judges the text attached to a help name: any text after `--help=` is ignored and
-/// refused, an empty attachment to `-h` (as in `-h=`) is the code-1 refusal, and an attachment of `h`s alone
-/// (as in `-hh`) is help.
-fn help_explicit<'a>(string: &[u8], explicit: &'a [u8]) -> Result<(), HelpRefusal<'a>> {
+/// `ignored` returns the part of the text attached to the help name `string` that `parse` refuses, `None`
+/// when the argument is help. After a long name (as in `--help=x`, `--help=`) and after `-h=` with nothing
+/// behind it, that part is the whole text. After `-h`, an attachment of `h`s alone (as in `-hh`) is help,
+/// and any other attachment is refused from its first byte that differs from `h`.
+fn ignored<'a>(string: &[u8], explicit: &'a [u8]) -> Option<&'a [u8]> {
     let short = string[1] != b'-';
-    if !short {
-        return Err(HelpRefusal::Ignored(explicit));
+    if !short || explicit.is_empty() {
+        return Some(explicit);
     }
-    if explicit.is_empty() {
-        return Err(HelpRefusal::IndexError);
-    }
-    match explicit.iter().position(|&letter| letter != b'h') {
-        Some(rest) => Err(HelpRefusal::Ignored(&explicit[rest..])),
-        None => Ok(()),
-    }
+    let rest = explicit.iter().position(|&letter| letter != b'h')?;
+    Some(&explicit[rest..])
 }
 
 /// `looks_negative` matches the `argparse` pattern `^-\d+$|^-\d*\.\d+$` with ASCII digits; `$` also
