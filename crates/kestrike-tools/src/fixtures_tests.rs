@@ -1,52 +1,44 @@
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder};
-use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+use sha2::{Digest, Sha256};
 
 use crate::fixtures::quint::{Failure, run};
 use crate::fixtures::{Model, Style, Trace, case, generate, keep};
-use crate::json::{Integer, Value, parse};
-use crate::python;
+use crate::json::{Value, parse};
+use crate::paths_tests::Scratch;
 use crate::tools;
 
-/// `Scratch` owns a new directory of mode 0700 under the temporary directory and removes it on drop.
-struct Scratch(PathBuf);
+const GATE: Model = Model {
+    tool: "gate_fixtures",
+    about: "About.",
+    name: "gate",
+    style: Style::Format,
+    limit: Duration::from_secs(120),
+};
 
-impl Scratch {
-    fn new(label: &str) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        loop {
-            let at = NEXT.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "kestrike-tools-{label}-{}-{at}",
-                std::process::id()
-            ));
-            match DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => {
-                    return Self(path.canonicalize().expect("the scratch directory resolves"));
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => panic!("{}: {error}", path.display()),
-            }
-        }
-    }
+fn script(path: &Path, text: &str) {
+    fs::write(path, text).expect("the stand-in is written");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .expect("the stand-in is executable");
 }
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn checkout() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn seeded(name: &str, steps: usize) -> Trace {
+    Trace::new(name.to_owned(), 1, None, steps, case::gate, Vec::new())
 }
 
 #[test]
 fn the_limit_ends_a_sleeping_child_with_sigkill() {
     let scratch = Scratch::new("limit");
-    let directory = &scratch.0;
     let script =
         "trap 'echo term > terminated; exit 7' TERM; sleep 5 </dev/null >/dev/null 2>&1 & wait";
     let args: Vec<OsString> = ["-c", script].map(OsString::from).to_vec();
@@ -54,7 +46,7 @@ fn the_limit_ends_a_sleeping_child_with_sigkill() {
     let outcome = run(
         OsStr::new("sh"),
         &args,
-        directory,
+        &scratch.0,
         Stdio::null(),
         Duration::from_millis(300),
     );
@@ -72,7 +64,7 @@ fn the_limit_ends_a_sleeping_child_with_sigkill() {
         "{elapsed:?}"
     );
     assert!(
-        !directory.join("terminated").exists(),
+        !scratch.0.join("terminated").exists(),
         "the child's TERM trap never runs"
     );
 }
@@ -120,48 +112,11 @@ fn a_child_exit_status_reaches_the_caller() {
 }
 
 #[test]
-fn python_int_reads_the_forms_python_reads() {
-    let int = |text: &str| python::int(&parse(text).expect("the value parses"));
-    let integer = |digits: &str| Integer::from_digits(false, digits).expect("digits");
-    assert_eq!(int(r#""1_0""#), Ok(integer("10")));
-    assert_eq!(int(r#"" +7 ""#), Ok(integer("7")));
-    assert_eq!(int(r#""\u00a0-0\u3000""#), Ok(integer("0")));
-    assert_eq!(int(r#""007""#), Ok(integer("7")));
-    assert_eq!(int("true"), Ok(integer("1")));
-    assert_eq!(int("12"), Ok(integer("12")));
-    for refused in [
-        r#""1__0""#,
-        r#""_1""#,
-        r#""1_""#,
-        r#""""#,
-        r#""0x1""#,
-        "[]",
-        "{}",
-        r#""- 1""#,
-    ] {
-        assert!(int(refused).is_err(), "{refused}");
-    }
-}
-
-#[test]
-fn python_len_counts_characters_items_and_members() {
-    let len = |text: &str| python::len(&parse(text).expect("the value parses"));
-    assert_eq!(len(r#""\u00e9a""#), Some(2));
-    assert_eq!(len("[1,[2,3]]"), Some(2));
-    assert_eq!(len(r#"{"a":1}"#), Some(1));
-    assert_eq!(len("7"), None);
-    assert_eq!(python::len(&Value::Bool(true)), None);
-}
-
-#[test]
 fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() {
     for (name, style) in [("gate", Style::Format), ("grace", Style::Record)] {
         let scratch = Scratch::new("writer-limit");
-        let scratch = &scratch.0;
-        let quint = scratch.join("quint");
-        fs::write(&quint, "#!/bin/sh\nexec sleep 5\n").expect("the stand-in is written");
-        fs::set_permissions(&quint, fs::Permissions::from_mode(0o755))
-            .expect("the stand-in is executable");
+        let quint = scratch.0.join("quint");
+        script(&quint, "#!/bin/sh\nexec sleep 5\n");
         let model = Model {
             tool: "writer",
             about: "About.",
@@ -169,21 +124,19 @@ fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() 
             style,
             limit: Duration::from_millis(300),
         };
-        let traces = ["first", "second"]
-            .map(|name| Trace::new(name.to_owned(), 1, None, 12, case::gate, Vec::new()));
-        let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let output = scratch.join("out");
+        let traces = [seeded("first", 12), seeded("second", 12)];
+        let output = scratch.0.join("out");
         let outcome = generate(
             &model,
-            &top,
-            Some(quint.as_os_str()),
+            &checkout(),
+            quint.as_os_str(),
             &output,
             &traces,
             keep,
         );
         assert_eq!(
             outcome,
-            Err("first: Quint ran past 0.3 seconds and was killed".to_owned()),
+            Err("first: Quint ran past 0.3 seconds and was sent SIGKILL".to_owned()),
             "{style:?}"
         );
         assert!(output.join("first/case.qnt").exists());
@@ -191,41 +144,119 @@ fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() 
     }
 }
 
+/// A step count whose successor `usize` cannot hold fails the state-count check in every build profile,
+/// and Quint's bytes stay at the trace path.
 #[test]
-fn a_seeded_trace_of_usize_max_steps_fails_its_state_count() {
-    let scratch = Scratch::new("writer-count");
+fn a_step_count_of_usize_max_fails_the_state_count_check() {
+    let scratch = Scratch::new("max-steps");
     let quint = scratch.0.join("quint");
-    let script = "#!/bin/sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = --out-itf ] && out=$2; shift; done\n\
-                  printf '{\"states\":[]}' > \"$out\"\n";
-    fs::write(&quint, script).expect("the stand-in is written");
-    fs::set_permissions(&quint, fs::Permissions::from_mode(0o755))
-        .expect("the stand-in is executable");
-    let model = Model {
-        tool: "writer",
-        about: "About.",
-        name: "grace",
-        style: Style::Record,
-        limit: Duration::from_secs(120),
-    };
-    let traces = ["first", "second"]
-        .map(|name| Trace::new(name.to_owned(), 1, None, usize::MAX, case::gate, Vec::new()));
-    let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let raw = r##"{"#meta":{"format":"ITF"},"states":[]}"##;
+    script(
+        &quint,
+        &format!("#!/bin/sh\nfor arg; do out=$arg; done\nprintf '%s' '{raw}' > \"$out\"\n"),
+    );
     let output = scratch.0.join("out");
     let outcome = generate(
-        &model,
-        &top,
-        Some(quint.as_os_str()),
+        &GATE,
+        &checkout(),
+        quint.as_os_str(),
         &output,
-        &traces,
+        &[seeded("huge", usize::MAX)],
         keep,
     );
     assert_eq!(
         outcome,
-        Err("first: the trace stopped before its final action".to_owned())
+        Err("huge: the trace stopped before its final action".to_owned())
     );
     assert_eq!(
-        fs::read(output.join("first.itf.json")).expect("Quint's trace stays"),
-        b"{\"states\":[]}"
+        fs::read_to_string(output.join("huge.itf.json")).expect("Quint's trace stays"),
+        raw
     );
-    assert!(!output.join("second").exists());
+}
+
+/// The model's digest comes from one read before the first trace, and each trace directory gets a fresh
+/// read of the model, so a model changed during a run gives the later traces the new text under the first
+/// digest.
+#[test]
+fn the_model_digest_is_read_once_and_each_copy_is_read_anew() {
+    let scratch = Scratch::new("model-race");
+    let top = scratch.0.join("top");
+    fs::create_dir_all(top.join("quint")).expect("the private top is made");
+    let model = top.join("quint/gate.qnt");
+    fs::write(&model, "module gate { val a = 1 }\n").expect("the model is written");
+    let quint = scratch.0.join("quint");
+    script(
+        &quint,
+        &format!(
+            "#!/bin/sh\nfor arg; do out=$arg; done\nprintf 'module gate {{ val b = 2 }}\\n' > '{}'\n\
+             printf '%s' '{{\"#meta\":{{\"format\":\"ITF\"}},\"states\":[{{}}]}}' > \"$out\"\n",
+            model.display()
+        ),
+    );
+    let output = scratch.0.join("out");
+    let outcome = generate(
+        &GATE,
+        &top,
+        quint.as_os_str(),
+        &output,
+        &[seeded("first", 0), seeded("second", 0)],
+        keep,
+    );
+    assert_eq!(outcome, Ok(()));
+    assert_eq!(
+        fs::read_to_string(output.join("second/gate.qnt")).expect("the copy reads"),
+        "module gate { val b = 2 }\n"
+    );
+    let digest: String = Sha256::digest(b"module gate { val a = 1 }\n")
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let written = fs::read_to_string(output.join("second.itf.json")).expect("the trace reads");
+    let Ok(Value::Object(data)) = parse(&written) else {
+        panic!("the trace is an object: {written}");
+    };
+    let Some(Value::Object(meta)) = data.get("#meta") else {
+        panic!("the trace has #meta: {written}");
+    };
+    let Some(Value::Object(record)) = meta.get("gate") else {
+        panic!("#meta holds the writer's record: {written}");
+    };
+    assert_eq!(
+        record.get("model_sha256"),
+        Some(&Value::String(digest.as_str().into()))
+    );
+}
+
+/// A Quint that exits 0 without writing leaves the file already at the trace path in place, and the writer
+/// reads that file as the trace and writes it again under its own record.
+#[test]
+fn a_file_left_at_the_trace_path_is_read_as_the_trace_when_quint_writes_none() {
+    let scratch = Scratch::new("leftover");
+    let quint = scratch.0.join("quint");
+    script(&quint, "#!/bin/sh\nexit 0\n");
+    let output = scratch.0.join("out");
+    fs::create_dir_all(&output).expect("the output directory is made");
+    fs::write(
+        output.join("first.itf.json"),
+        r##"{"#meta":{"format":"ITF","source":"old"},"states":[{"left":"over"}]}"##,
+    )
+    .expect("the leftover trace is written");
+    let outcome = generate(
+        &GATE,
+        &checkout(),
+        quint.as_os_str(),
+        &output,
+        &[seeded("first", 0)],
+        keep,
+    );
+    assert_eq!(outcome, Ok(()));
+    let written = fs::read_to_string(output.join("first.itf.json")).expect("the trace reads");
+    assert!(
+        written.starts_with(r##"{"#meta":{"format":"ITF","gate":{"model_sha256":""##)
+            && written.ends_with(
+                r#""seed":"0x1","steps":0}},"states":[{"left":"over"}]}
+"#
+            ),
+        "{written}"
+    );
 }

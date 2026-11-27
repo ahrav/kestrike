@@ -1,7 +1,8 @@
-use std::fs;
+use std::fs::{self, DirBuilder};
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use kestrike_tools::ownership::{
     PrivateError, foreign_toolchain_paths, make_private, shared_directories, traversed,
@@ -26,31 +27,37 @@ struct Layout {
 }
 
 impl Layout {
+    /// `new` checks the scratch directory's lineage with [`shared_directories`], against the process's
+    /// real uid, then creates the layout's root with mode 0700 under a fresh name, so no other account
+    /// reaches the shared entries the layout holds. A name that already exists is left as it is and the
+    /// next name is tried.
     fn new(name: &str) -> Self {
         let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-        let uid = fs::metadata(&scratch)
-            .expect("the scratch directory exists")
-            .uid();
-        let shared: Vec<&Path> = scratch
-            .ancestors()
-            .filter(|ancestor| {
-                let status =
-                    fs::metadata(ancestor).expect("an ancestor of the scratch directory exists");
-                ![uid, 0].contains(&status.uid()) || status.mode() & 0o022 != 0
-            })
-            .collect();
         assert_eq!(
             fs::canonicalize(&scratch).ok().as_ref(),
             Some(&scratch),
             "the scratch directory's ancestors hold no link"
         );
+        let shared = shared_directories(&scratch).expect("the scratch lineage reads");
         assert!(
             shared.is_empty(),
             "another user owns or can write {shared:?}; run the tests under a private directory"
         );
-        let base = scratch.join(format!("ownership-{name}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base);
-        directory(&base, 0o755);
+        let foreign = foreign_toolchain_paths(&scratch).expect("the scratch lineage reads");
+        assert!(
+            foreign.is_empty(),
+            "another user can configure Cargo through {foreign:?}; run the tests under a private directory"
+        );
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let base = loop {
+            let at = NEXT.fetch_add(1, Ordering::Relaxed);
+            let base = scratch.join(format!("ownership-{name}-{}-{at}", std::process::id()));
+            match DirBuilder::new().mode(0o700).create(&base) {
+                Ok(()) => break base,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("{}: {error}", base.display()),
+            }
+        };
         let at = |relative: &str| base.join(relative);
         directory(&at("group"), 0o775);
         directory(&at("group/inner"), 0o755);
@@ -58,15 +65,20 @@ impl Layout {
         symlink("group", at("link")).expect("the link is made");
         directory(&at("private"), 0o755);
         symlink("private", at("link2")).expect("the link is made");
+        directory(&at("into"), 0o755);
         directory(&at("into/work"), 0o755);
         symlink("../group/cargo", at("into/.cargo")).expect("the link is made");
+        directory(&at("cfgfile"), 0o755);
         directory(&at("cfgfile/work"), 0o755);
         directory(&at("cfgfile/.cargo"), 0o755);
         file(&at("cfgfile/.cargo/config.toml"), 0o666);
+        directory(&at("cfgdir"), 0o755);
         directory(&at("cfgdir/work"), 0o755);
         directory(&at("cfgdir/.cargo"), 0o777);
+        directory(&at("dangle"), 0o755);
         directory(&at("dangle/work"), 0o755);
         symlink("missing", at("dangle/rust-toolchain")).expect("the link is made");
+        directory(&at("clean"), 0o755);
         directory(&at("clean/work"), 0o755);
         directory(&at("clean/.cargo"), 0o755);
         file(&at("clean/.cargo/config.toml"), 0o644);
@@ -77,6 +89,17 @@ impl Layout {
         directory(&at("present-shared"), 0o775);
         file(&at("file"), 0o644);
         file(&at("file-shared"), 0o664);
+        file(&at("group/inner/rust-toolchain.toml"), 0o644);
+        directory(&at("group/.cargo"), 0o755);
+        file(&at("group/.cargo/config"), 0o644);
+        directory(&at("other-shared"), 0o757);
+        directory(&at("cfgother"), 0o755);
+        directory(&at("cfgother/work"), 0o755);
+        directory(&at("cfgother/.cargo"), 0o755);
+        file(&at("cfgother/.cargo/config.toml"), 0o646);
+        directory(&at("owner"), 0o755);
+        directory(&at("owner/work"), 0o755);
+        symlink("/", at("owner/rust-toolchain")).expect("the link is made");
         Self { base }
     }
 
@@ -121,11 +144,23 @@ fn shared_directories_names_a_group_writable_ancestor_and_a_link_into_one() {
         ("shared_directories(BASE/absent/x)", "absent/x", &[]),
         ("shared_directories(BASE/file/x)", "file/x", &[]),
         ("shared_directories(BASE/group/sh)", "group/sh", &["BASE/group/sh", "BASE/group"]),
+        ("shared_directories(BASE/other-shared/x)", "other-shared/x", &["BASE/other-shared"]),
     ];
     for &(expression, path, python) in rows {
         let found =
             shared_directories(&layout.at(path)).expect("each stat succeeds or finds nothing");
         assert_eq!(found, layout.expand(python), "{expression}");
+    }
+    let base = layout.base.to_str().expect("the scratch path is UTF-8");
+    #[rustfmt::skip]
+    let spellings: [(&str, String, String); 2] = [
+        ("shared_directories(Path('/' + BASE + '/group/./inner/'))", format!("/{base}/group/./inner/"), format!("/{base}/group")),
+        ("shared_directories(Path('//' + BASE + '//group/inner/'))", format!("//{base}//group/inner/"), format!("{base}/group")),
+    ];
+    for (expression, path, python) in spellings {
+        let found = shared_directories(Path::new(&path)).expect("each stat succeeds");
+        let found: Vec<&std::ffi::OsStr> = found.iter().map(|path| path.as_os_str()).collect();
+        assert_eq!(found, [python.as_str()], "{expression}");
     }
 }
 
@@ -148,11 +183,11 @@ fn traversed_follows_links_and_parents_and_stops_following_after_forty_links() {
         let found = traversed(&layout.at(path)).expect("each link reads");
         assert_eq!(found, layout.expand(python), "{expression}");
     }
-    let expression = "traversed(Path('a/b/c'))";
-    let python = [PathBuf::from("/"), PathBuf::from("/b")];
+    let expression = "traversed(Path('drop' + BASE + '/link/inner'))";
+    let base = layout.base.to_str().expect("the scratch path is UTF-8");
     assert_eq!(
-        traversed(Path::new("a/b/c")).expect("no link is read"),
-        python,
+        traversed(Path::new(&format!("drop{base}/link/inner"))).expect("each link reads"),
+        layout.expand(&["ANCESTORS", "BASE", "BASE", "BASE/group"]),
         "{expression}"
     );
 }
@@ -167,12 +202,26 @@ fn foreign_toolchain_paths_names_each_entry_another_user_can_write() {
         ("foreign_toolchain_paths(BASE/cfgdir/work)", "cfgdir/work", &["BASE/cfgdir/.cargo"]),
         ("foreign_toolchain_paths(BASE/dangle/work)", "dangle/work", &["BASE/dangle/rust-toolchain"]),
         ("foreign_toolchain_paths(BASE/clean/work)", "clean/work", &[]),
-        ("foreign_toolchain_paths(BASE/group/inner/work)", "group/inner/work", &["BASE/group"]),
+        ("foreign_toolchain_paths(BASE/group/inner/work)", "group/inner/work",
+         &["BASE/group", "BASE/group/inner/rust-toolchain.toml", "BASE/group/.cargo", "BASE/group/.cargo/config"]),
+        ("foreign_toolchain_paths(BASE/cfgother/work)", "cfgother/work", &["BASE/cfgother/.cargo/config.toml"]),
     ];
     for &(expression, path, python) in rows {
         let found =
             foreign_toolchain_paths(&layout.at(path)).expect("each stat succeeds or finds nothing");
         assert_eq!(found, layout.expand(python), "{expression}");
+    }
+    let me = fs::metadata(&layout.base).expect("the root exists").uid();
+    let root = fs::metadata("/").expect("the root directory exists");
+    if me != 0 && root.uid() == 0 && root.mode() & 0o022 == 0 {
+        let expression =
+            "foreign_toolchain_paths(BASE/owner/work), with owner/rust-toolchain a link to /";
+        let found = foreign_toolchain_paths(&layout.at("owner/work")).expect("each stat succeeds");
+        assert_eq!(
+            found,
+            layout.expand(&["BASE/owner/rust-toolchain"]),
+            "{expression}"
+        );
     }
 }
 
@@ -196,6 +245,7 @@ fn make_private_creates_missing_directories_and_refuses_a_shared_one() {
         ("make_private(BASE/file)", "file", None),
         ("make_private(BASE/file-shared)", "file-shared", Some("file-shared")),
         ("make_private(BASE/new2/../x)", "new2/../x", None),
+        ("make_private(BASE/other-shared)", "other-shared", Some("other-shared")),
     ];
     for &(expression, path, python) in rows {
         match (make_private(&layout.at(path)), python) {
@@ -220,11 +270,25 @@ fn make_private_creates_missing_directories_and_refuses_a_shared_one() {
         ("oct(os.stat(BASE/x).st_mode & 0o7777)", "x", 0o700),
         ("oct(os.stat(BASE/present).st_mode & 0o7777)", "present", 0o755),
         ("oct(os.stat(BASE/present-shared).st_mode & 0o7777)", "present-shared", 0o775),
+        ("oct(os.stat(BASE/other-shared).st_mode & 0o7777)", "other-shared", 0o757),
     ];
     for &(expression, path, python) in modes {
         assert_eq!(mode(&layout.at(path)), python, "{expression}");
     }
     assert!(layout.at("file").is_file(), "(BASE/file).is_file() is True");
+    #[rustfmt::skip]
+    let links: &[(&str, &str, &str, u32)] = &[
+        ("os.readlink(BASE/link2), oct(os.stat(BASE/private).st_mode & 0o7777)", "link2", "private", 0o755),
+        ("os.readlink(BASE/link), oct(os.stat(BASE/group).st_mode & 0o7777)", "link", "group", 0o775),
+    ];
+    for &(expression, link, target, python) in links {
+        assert_eq!(
+            fs::read_link(layout.at(link)).ok(),
+            Some(PathBuf::from(target)),
+            "{expression}"
+        );
+        assert_eq!(mode(&layout.at(target)), python, "{expression}");
+    }
 }
 
 #[test]
@@ -239,6 +303,13 @@ fn make_private_refuses_a_name_a_dangling_link_holds() {
                 "{expression}"
             );
             assert_eq!(error.path(), layout.at("dangle/rust-toolchain"));
+            let reason = error.error().to_string();
+            let wrapped = PrivateError::Io(error);
+            assert!(std::error::Error::source(&wrapped).is_none());
+            assert_eq!(
+                wrapped.to_string(),
+                format!("{}: {reason}", layout.at("dangle/rust-toolchain").display())
+            );
         }
         found => panic!("{expression}: {found:?}"),
     }
@@ -246,6 +317,35 @@ fn make_private_refuses_a_name_a_dangling_link_holds() {
         fs::symlink_metadata(layout.at("dangle/rust-toolchain"))
             .is_ok_and(|status| status.is_symlink())
     );
+    assert_eq!(
+        fs::read_link(layout.at("dangle/rust-toolchain")).ok(),
+        Some(PathBuf::from("missing")),
+        "os.readlink(BASE/dangle/rust-toolchain) == 'missing'"
+    );
+    assert!(
+        fs::symlink_metadata(layout.at("dangle/missing")).is_err(),
+        "os.path.lexists(BASE/dangle/missing) is False"
+    );
+}
+
+#[test]
+fn make_private_creates_the_parents_of_a_name_holding_a_nul_and_refuses_the_name() {
+    let layout = Layout::new("nul");
+    let expression = "make_private(BASE/new/'a\\x00b') raises ValueError after it creates BASE/new";
+    let path = layout.at("new/a\0b");
+    match make_private(&path) {
+        Err(PrivateError::Io(error)) => {
+            assert_eq!(
+                error.error().kind(),
+                io::ErrorKind::InvalidInput,
+                "{expression}"
+            );
+            assert_eq!(error.path(), path, "{expression}");
+        }
+        found => panic!("{expression}: {found:?}"),
+    }
+    assert!(layout.at("new").is_dir(), "{expression}");
+    assert_eq!(mode(&layout.at("new")), 0o700, "{expression}");
 }
 
 #[test]

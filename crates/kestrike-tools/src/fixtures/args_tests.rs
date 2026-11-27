@@ -8,51 +8,37 @@ fn read(args: &[&str]) -> Parsed {
     parse("tool", "About.", &args)
 }
 
-fn run(quint: Option<&str>, output: Option<&str>) -> Parsed {
+fn run(quint: &str, output: &str) -> Parsed {
     Parsed::Run(Options {
-        quint: quint.map(OsString::from),
-        output: output.map(OsString::from),
+        quint: OsString::from(quint),
+        output: OsString::from(output),
     })
 }
 
-fn refused(code: u8, message: &str) -> Parsed {
+fn refused(message: &str) -> Parsed {
     let text = format!("usage: tool [-h] --quint QUINT --output OUTPUT\ntool: error: {message}\n");
-    Parsed::Refused { code, text }
+    Parsed::Refused { code: 2, text }
 }
 
 #[test]
 fn values_follow_an_equals_sign_a_prefix_or_the_next_argument_and_the_last_wins() {
-    assert_eq!(
-        read(&["--quint", "q", "--output", "o"]),
-        run(Some("q"), Some("o"))
-    );
-    assert_eq!(
-        read(&["--qu", "a", "--o=b", "--quint=c"]),
-        run(Some("c"), Some("b"))
-    );
-    assert_eq!(
-        read(&["--quint", "-5", "--output", "o"]),
-        run(Some("-5"), Some("o"))
-    );
+    assert_eq!(read(&["--quint", "q", "--output", "o"]), run("q", "o"));
+    assert_eq!(read(&["--qu", "a", "--o=b", "--quint=c"]), run("c", "b"));
+    assert_eq!(read(&["--quint", "-5", "--output", "o"]), run("-5", "o"));
     assert_eq!(
         read(&["--quint", "-5\n", "--output", "-"]),
-        run(Some("-5\n"), Some("-"))
+        run("-5\n", "-")
     );
-    assert_eq!(
-        read(&["--quint", "-a b", "--output", ""]),
-        run(Some("-a b"), Some(""))
-    );
-    assert_eq!(read(&["--quint=--", "--output", "o"]), run(None, Some("o")));
-    assert_eq!(
-        read(&["--quint=", "--output", "o"]),
-        run(Some(""), Some("o"))
-    );
+    assert_eq!(read(&["--quint", "-a b", "--output", ""]), run("-a b", ""));
+    assert_eq!(read(&["--quint=--", "--output", "o"]), run("--", "o"));
+    assert_eq!(read(&["--qu=--", "--out=--"]), run("--", "--"));
+    assert_eq!(read(&["--quint=", "--output", "o"]), run("", "o"));
 }
 
 #[test]
 fn each_refusal_carries_the_message_argparse_prints() {
     let required = "the following arguments are required: --quint, --output";
-    let cases: [(&[&str], &str); 12] = [
+    let cases: [(&[&str], &str); 15] = [
         (&[], required),
         (&["x", "--", "y"], required),
         (
@@ -80,6 +66,15 @@ fn each_refusal_carries_the_message_argparse_prints() {
             &["--help=x"],
             "argument -h/--help: ignored explicit argument 'x'",
         ),
+        (&["-h="], "argument -h/--help: ignored explicit argument ''"),
+        (
+            &["--help="],
+            "argument -h/--help: ignored explicit argument ''",
+        ),
+        (
+            &["--quint", "a", "--output", "o", "-h="],
+            "argument -h/--help: ignored explicit argument ''",
+        ),
         (
             &["--=x", "-h"],
             "ambiguous option: --=x could match --help, --quint, --output",
@@ -94,7 +89,7 @@ fn each_refusal_carries_the_message_argparse_prints() {
         ),
     ];
     for (args, message) in cases {
-        assert_eq!(read(args), refused(2, message), "{args:?}");
+        assert_eq!(read(args), refused(message), "{args:?}");
     }
     let bytes = [
         b"--quint".to_vec(),
@@ -106,13 +101,8 @@ fn each_refusal_carries_the_message_argparse_prints() {
     let args: Vec<OsString> = bytes.into_iter().map(OsString::from_vec).collect();
     assert_eq!(
         parse("tool", "About.", &args),
-        refused(2, "unrecognized arguments: x\\udcff")
+        refused("unrecognized arguments: x\\udcff")
     );
-    let index = Parsed::Refused {
-        code: 1,
-        text: "tool: argument -h/--help: string index out of range\n".to_owned(),
-    };
-    assert_eq!(read(&["-h="]), index);
 }
 
 #[test]

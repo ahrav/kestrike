@@ -1,3 +1,10 @@
+//! Traces of the attach-gate model, `quint/gate.qnt`, for the replay against `Volume`.
+//!
+//! A directed trace follows one recipe; a seeded trace takes [`STEPS`] steps of the model's own `step`
+//! under the seed its name carries. Every trace records under `#meta.gate` the model's digest, its seed,
+//! its number of steps and a directed trace's recipe, and the replay refuses a trace whose digest differs
+//! from the model's.
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
@@ -28,6 +35,8 @@ macro_rules! reported {
 
 pub const REPORTED: &[&str] = reported!();
 
+/// The first four recipes equal `RUNS` of `quint/gate_check.py`, and [`SUBMIT`] and [`REPORTED`] equal its
+/// `SUBMIT` and `REPORTED`; `quint/check.py` runs those recipes as checked runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 18] = [
     ("passes", reported!["report(\"sole\")", SUBMIT]),

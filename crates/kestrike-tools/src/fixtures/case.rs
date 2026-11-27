@@ -1,6 +1,7 @@
 //! Each public function returns Quint module text that imports its model with the supplied constants. For a
 //! directed trace the text adds the action `recipe`, which restricts each turn to the recipe's action at that
-//! turn.
+//! turn. The text equals what `inputs` of `quint/escrow_check.py`, `quint/gate_check.py` and
+//! `quint/marklog_check.py` returns for a case without mutations or extra text.
 
 use std::fmt::Write;
 

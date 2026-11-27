@@ -1,3 +1,12 @@
+//! Traces of the watermark-log model, `quint/marklog.qnt`, for the replay against the file log.
+//!
+//! A directed trace follows one recipe; a seeded trace takes [`STEPS`] steps of the model's own `step`
+//! under the seed its name carries. Every state after the first records under `call` the action taken and
+//! its arguments: a batch and the keys a crash landed as sorted lists of pages, and a write's page. Every
+//! trace records under `#meta.marklog` the model's digest, its seed, its number of steps and a directed
+//! trace's recipe. The replay refuses a trace whose digest differs from the model's or whose states number
+//! other than its steps plus one.
+
 use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
@@ -18,6 +27,8 @@ pub const STEPS: usize = 14;
 const RECIPE_SEED: u64 = 0x6b00;
 pub const SEEDS: [u64; 6] = [0x6b01, 0x6b02, 0x6b03, 0x6b05, 0x6b08, 0x6b0d];
 
+/// The first three recipes equal `RUNS` of `quint/marklog_check.py`, which `quint/check.py` runs as checked
+/// runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 6] = [
     ("partly_landed", &[
@@ -25,14 +36,18 @@ pub const RECIPES: [(&str, &[&str]); 6] = [
     ]),
     ("whole_replacement", &["read(Set(3))", "crash(Set(1, 2), Set())", "read(Set(1, 2))"]),
     ("out_of_key_order", &["read(Set(2))", "read(Set(1))", "restart", "write(2)", "read(Set(2))"]),
+    // The process that replaced the file whole raises a held mark in place, and then a new one.
     ("raise_after_whole", &[
         "read(Set(1, 2))", "write(1)", "read(Set(1))", "write(2)", "read(Set(2, 3))", "restart",
         "read(Set(1, 2, 3))",
     ]),
+    // A crash that lands nothing, one that lands every slot, and one that loses the one new mark of its raise.
     ("crashes", &[
         "read(Set(2))", "write(2)", "crash(Set(2), Set())", "crash(Set(2), Set(2))", "write(2)",
         "crash(Set(1, 2), Set(2))", "read(Set(1, 2))", "read(Set(1, 2, 3))",
     ]),
+    // A whole replacement that a crash completes, read again by the next process, and three marks raised in
+    // place.
     ("whole_then_in_place", &[
         "crash(Set(1, 2, 3), Set(1, 2, 3))", "read(Set(1, 2, 3))", "write(1)", "write(2)", "write(3)",
         "read(Set(3, 2, 1))", "restart", "read(Set(1))",
@@ -74,7 +89,7 @@ fn calls(data: &mut Object, trace: &Trace) -> Result<(), String> {
 }
 
 fn call(state: &Object, text: Option<&str>) -> Result<Value, String> {
-    let act = member(get(state, "marklogCase::marklog::ev")?, "act")?.clone();
+    let act = member(get(state, "marklogCase::marklog::ev")?, "act")?;
     let mut call = vec![act.clone()];
     if let Some(text) = text {
         let sets = sets(text);
@@ -90,15 +105,19 @@ fn call(state: &Object, text: Option<&str>) -> Result<Value, String> {
         return Ok(Value::Array(call));
     }
     let picks = get(state, "mbt::nondetPicks")?;
-    let names: &[&str] = match &act {
-        Value::String(act) if *act == "read" => &["batch"],
-        Value::String(act) if *act == "crash" => &["batch", "landed"],
-        Value::String(act) if *act == "write" => &["k"],
-        Value::String(act) if *act == "restart" => &[],
+    let action = match act {
+        Value::String(text) => text.to_str(),
+        _ => None,
+    };
+    let names: &[&str] = match action {
+        Some("read") => &["batch"],
+        Some("crash") => &["batch", "landed"],
+        Some("write") => &["k"],
+        Some("restart") => &[],
         _ => {
             return Err(format!(
                 "the action {} has no recorded picks",
-                crate::json::text(&act)
+                crate::json::text(act)
             ));
         }
     };
@@ -126,6 +145,8 @@ fn member<'a>(value: &'a Value, key: &str) -> Result<&'a Value, String> {
     }
 }
 
+/// `pages` reads the `#set` of `value` as a sorted list of pages. An empty object or an empty string under
+/// `#set` reads as the empty set, as an empty array does.
 fn pages(value: &Value) -> Result<Value, String> {
     let items: &[Value] = match member(value, "#set")? {
         Value::Array(items) => items,
