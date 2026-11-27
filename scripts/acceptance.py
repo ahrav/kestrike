@@ -10,7 +10,8 @@ frame's body digests and this ticket by its own, the committed frame, statistics
 the sizing worksheet, and holds:
   columns       safety, containment, retention, progress and conservation, each mapped to #120 properties and
                 requirements.
-  sources       each evidence source, one receipt identity: its issue, evidence kind (a frame evidence kind), judge,
+  sources       each evidence source, one receipt identity: its issue (a ticket `#N`, or an issue ISSUES names),
+                evidence kind (a frame evidence kind), judge,
                 the classes and columns it may credit and, for an `obligation` source, its catalog records and
                 for a model source the `verification/quint/expected.json` case families those records name; the
                 #122 source names FAMILIES. An `obligation` source is model evidence of Quint records, simulation
@@ -183,7 +184,8 @@ def check_source(name, s, record, ctx, owner):
     keys = SOURCE_KEYS | ({"records"} | ({"families"} if s.get("kind") == "model" else set())
                           if s.get("judge") == "obligation" else set())
     need(set(s) == keys, f"source {name} keys are not {sorted(keys)}")
-    need(mf.TICKET.fullmatch(str(s["issue"])) and s["kind"] in mf.EVIDENCE and text(s["evidence"]), f"source {name}")
+    need((mf.TICKET.fullmatch(str(s["issue"])) or any(s["issue"] == issue for issue, _ in ISSUES))
+         and s["kind"] in mf.EVIDENCE and text(s["evidence"]), f"source {name}")
     need(s["judge"] in JUDGES and s["kind"] in JUDGES[s["judge"]],
          f"source {name}: judge {s['judge']!r} produces no {s['kind']} evidence")
     need(texts(s["classes"]) and set(s["classes"]) <= set(record["classes"]), f"source {name} classes")

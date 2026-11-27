@@ -93,7 +93,7 @@ fn a_writer_at_the_limit_exits_with_the_trace_named_and_writes_no_later_trace() 
     let outcome = generate(
         &GATE,
         &checkout(),
-        Some(quint.as_os_str()),
+        quint.as_os_str(),
         &output,
         &traces,
         keep,
@@ -122,7 +122,7 @@ fn a_step_count_of_usize_max_fails_the_state_count_check() {
     let outcome = generate(
         &GATE,
         &checkout(),
-        Some(quint.as_os_str()),
+        quint.as_os_str(),
         &output,
         &[seeded("huge", usize::MAX)],
         keep,
@@ -161,7 +161,7 @@ fn the_model_digest_is_read_once_and_each_copy_is_read_anew() {
     let outcome = generate(
         &GATE,
         &top,
-        Some(quint.as_os_str()),
+        quint.as_os_str(),
         &output,
         &[seeded("first", 0), seeded("second", 0)],
         keep,
@@ -209,7 +209,7 @@ fn a_file_left_at_the_trace_path_is_read_as_the_trace_when_quint_writes_none() {
     let outcome = generate(
         &GATE,
         &checkout(),
-        Some(quint.as_os_str()),
+        quint.as_os_str(),
         &output,
         &[seeded("first", 0)],
         keep,

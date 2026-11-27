@@ -100,17 +100,13 @@ pub fn write(
         }
         Parsed::Refused { code, text } => return report(&text, code),
     };
-    let outcome = options
-        .output
-        .ok_or_else(|| "argument --output: the value `--` leaves no path".to_owned())
-        .and_then(|output| {
-            paths::resolve(Path::new(&output)).map_err(|error| format!("--output: {error}"))
-        })
+    let outcome = paths::resolve(Path::new(&options.output))
+        .map_err(|error| format!("--output: {error}"))
         .and_then(|output| {
             generate(
                 model,
                 top,
-                options.quint.as_deref(),
+                &options.quint,
                 &output,
                 traces,
                 rewrite,
@@ -152,7 +148,7 @@ fn at<E: fmt::Display>(path: &Path) -> impl FnOnce(E) -> String + '_ {
 pub(crate) fn generate(
     model: &Model,
     top: &Path,
-    quint: Option<&OsStr>,
+    quint: &OsStr,
     output: &Path,
     traces: &[Trace],
     rewrite: Rewrite,
@@ -173,10 +169,6 @@ pub(crate) fn generate(
             let path = directory.join(name);
             fs::write(&path, text).map_err(at(&path))?;
         }
-        // If `quint` is `None`, `generate` reports the `--quint` error after writing the model and `case.qnt`
-        // to the trace directory.
-        let quint =
-            quint.ok_or_else(|| "argument --quint: the value `--` leaves no program".to_owned())?;
         quint::run(quint, &arguments(model, trace, &file), &directory, limit)
             .map_err(|failure| format!("{}: {failure}", trace.name))?;
         let mut data = read_trace(&file)?;

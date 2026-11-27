@@ -1,6 +1,6 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
-use crate::args::{Given, Kind, Opt, Parsed, Reader, any};
+use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::text::Text;
 
 fn given(value: &Text) -> Result<(), String> {
@@ -48,21 +48,27 @@ const OPTIONS: [Opt; 8] = [
 ];
 
 fn read(args: &[&str]) -> Parsed {
-    let reader = Reader::new("tool", "usage: tool [options]", "help\n", false, &OPTIONS);
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &OPTIONS,
+    );
     let args: Vec<OsString> = args.iter().map(OsString::from).collect();
     reader.parse(&args)
 }
 
-fn run(values: &[(usize, Option<&str>)]) -> Vec<Given> {
-    let mut given = vec![Given::Absent; OPTIONS.len()];
+fn run(values: &[(usize, &'static str)]) -> Vec<Option<&'static OsStr>> {
+    let mut given = vec![None; OPTIONS.len()];
     for &(index, value) in values {
-        given[index] = value.map_or(Given::Empty, |value| Given::Value(OsString::from(value)));
+        given[index] = Some(OsStr::new(value));
     }
     given
 }
 
 enum Outcome {
-    Run(Vec<Given>),
+    Run(Vec<Option<&'static OsStr>>),
     Refused(Parsed),
     Help,
 }
@@ -82,17 +88,22 @@ const PARSER: &str = "def given(v):\n    if not v: raise argparse.ArgumentTypeEr
     p.add_argument('--max-mutants', type=positive); p.add_argument('--shard'); p.add_argument('--tests'); \
     p.add_argument('--artifacts', type=given); p.add_argument('--cargo', type=given)";
 
+/// Each row's first field is the result of `PARSER` on Python 3.12.3. Python 3.9.25 gives another result
+/// on the rows with a value `--` after `=`, which it reads as the empty list `[]` without a call of the
+/// option's type, and on the rows with `-h=`, where it raises `IndexError`.
 #[test]
 fn long_options_without_prefixes_keep_the_last_value_and_check_each_occurrence() {
     #[rustfmt::skip]
     let rows: &[(&str, &[&str], Outcome)] = &[
         ("{'base': 'b', 'head': 'h', 'max_mutants': 3, 'shard': '0/2', 'tests': '-x y', 'artifacts': 'a', 'cargo': 'c'}",
          &["--base", "b", "--head=h", "--max-mutants", "3", "--shard", "0/2", "--tests", "-x y", "--artifacts", "a", "--cargo", "c"],
-         Outcome::Run(run(&[(1, Some("b")), (2, Some("h")), (3, Some("3")), (4, Some("0/2")), (5, Some("-x y")), (6, Some("a")), (7, Some("c"))]))),
-        ("{'base': 'b'}", &["--base", "a", "--base", "b"], Outcome::Run(run(&[(1, Some("b"))]))),
-        ("{'max_mutants': 7}", &["--max-mutants", "5", "--max-mutants", "7"], Outcome::Run(run(&[(3, Some("7"))]))),
-        ("{'base': []}", &["--base=--"], Outcome::Run(run(&[(1, None)]))),
-        ("{'shard': '-5'}", &["--shard=1/2", "--shard", "-5"], Outcome::Run(run(&[(4, Some("-5"))]))),
+         Outcome::Run(run(&[(1, "b"), (2, "h"), (3, "3"), (4, "0/2"), (5, "-x y"), (6, "a"), (7, "c")]))),
+        ("{'base': 'b'}", &["--base", "a", "--base", "b"], Outcome::Run(run(&[(1, "b")]))),
+        ("{'max_mutants': 7}", &["--max-mutants", "5", "--max-mutants", "7"], Outcome::Run(run(&[(3, "7")]))),
+        ("{'base': '--'}", &["--base=--"], Outcome::Run(run(&[(1, "--")]))),
+        ("{'base': 'b'}", &["--base=--", "--base", "b"], Outcome::Run(run(&[(1, "b")]))),
+        ("{'shard': '--'}", &["--shard=--"], Outcome::Run(run(&[(4, "--")]))),
+        ("{'shard': '-5'}", &["--shard=1/2", "--shard", "-5"], Outcome::Run(run(&[(4, "-5")]))),
         ("argument --base: a value", &["--base=", "--base", "b"], Outcome::Refused(refused("argument --base: a value"))),
         ("argument --base: a value", &["--base", "b", "--base="], Outcome::Refused(refused("argument --base: a value"))),
         ("argument --max-mutants: a positive integer", &["--max-mutants", "0", "--max-mutants", "3"], Outcome::Refused(refused("argument --max-mutants: a positive integer"))),
@@ -106,10 +117,13 @@ fn long_options_without_prefixes_keep_the_last_value_and_check_each_occurrence()
         ("argument --base: expected one argument", &["--base", "--head", "h"], Outcome::Refused(refused("argument --base: expected one argument"))),
         ("argument --tests: expected one argument", &["--tests", "--"], Outcome::Refused(refused("argument --tests: expected one argument"))),
         ("argument --cargo: expected one argument", &["--cargo", "a b", "--cargo", "-c"], Outcome::Refused(refused("argument --cargo: expected one argument"))),
-        ("{'max_mutants': []}", &["--max-mutants=--"], Outcome::Run(run(&[(3, None)]))),
-        ("{'shard': '-.5'}", &["--shard", "-.5"], Outcome::Run(run(&[(4, Some("-.5"))]))),
+        ("argument --max-mutants: a positive integer", &["--max-mutants=--"], Outcome::Refused(refused("argument --max-mutants: a positive integer"))),
+        ("{'shard': '-.5'}", &["--shard", "-.5"], Outcome::Run(run(&[(4, "-.5")]))),
         ("argument --max-mutants: a positive integer", &["--max-mutants", "0", "-h"], Outcome::Refused(refused("argument --max-mutants: a positive integer"))),
         ("argument --max-mutants: a positive integer", &["--max-mutants", "0", "--base"], Outcome::Refused(refused("argument --max-mutants: a positive integer"))),
+        ("argument -h/--help: ignored explicit argument ''", &["-h="], Outcome::Refused(refused("argument -h/--help: ignored explicit argument ''"))),
+        ("argument -h/--help: ignored explicit argument ''", &["--help="], Outcome::Refused(refused("argument -h/--help: ignored explicit argument ''"))),
+        ("argument -h/--help: ignored explicit argument ''", &["--base", "b", "-h="], Outcome::Refused(refused("argument -h/--help: ignored explicit argument ''"))),
         ("help", &["-hh"], Outcome::Help),
         ("help", &["-h"], Outcome::Help),
         ("help", &["--help"], Outcome::Help),
@@ -121,7 +135,7 @@ fn long_options_without_prefixes_keep_the_last_value_and_check_each_occurrence()
                 for (option, given) in OPTIONS.iter().zip(given) {
                     assert_eq!(
                         values.get(option.names[0]),
-                        given,
+                        *given,
                         "{PARSER}; p.parse_args({args:?}) gives {python}"
                     );
                 }
@@ -161,7 +175,13 @@ fn every_name_of_a_row_selects_its_value() {
     ];
     let parser = "p = argparse.ArgumentParser(prog='tool', allow_abbrev=False); \
         p.add_argument('--out', '--output', type=given)";
-    let reader = Reader::new("tool", "usage: tool [options]", "help\n", false, &NAMED);
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &NAMED,
+    );
     for args in [
         ["--output", "a", "--out", "b"],
         ["--out", "a", "--output", "b"],
@@ -173,16 +193,16 @@ fn every_name_of_a_row_selects_its_value() {
         for name in ["--out", "--output"] {
             assert_eq!(
                 values.get(name),
-                &Given::Value(OsString::from("b")),
+                Some(OsStr::new("b")),
                 "{parser}; p.parse_args({args:?}) gives Namespace(out='b')"
             );
         }
-        assert_eq!(values.get("--help"), &Given::Absent);
+        assert_eq!(values.get("--help"), None);
     }
     let Parsed::Run(values) = reader.parse(&[]) else {
         panic!("{parser}; p.parse_args([]) gives Namespace(out=None)");
     };
-    assert_eq!(values.get("--output"), &Given::Absent);
+    assert_eq!(values.get("--output"), None);
 }
 
 #[test]
@@ -200,7 +220,7 @@ const HELP: Opt = Opt {
 };
 
 fn table(options: &[Opt]) {
-    Reader::new("tool", "usage", "help\n", true, options);
+    Reader::new("tool", "usage", "help\n", Prefixes::Select, options);
 }
 
 #[test]
