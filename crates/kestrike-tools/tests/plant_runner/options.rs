@@ -5,7 +5,7 @@ use kestrike_tools::json::Integer;
 use kestrike_tools::plants::Outcome;
 use kestrike_tools::text::Text;
 
-use super::repository::Repository;
+use super::repository::{Repository, executable};
 
 fn integer(digits: &str) -> Integer {
     Integer::from_digits(false, digits).expect("digits")
@@ -66,10 +66,12 @@ fn plant_keeps_every_occurrence_in_both_forms() {
 #[test]
 fn counts_read_as_python_reads_an_integer() {
     let repository = Repository::new();
+    executable(&repository.bin.join("-\u{663}"), "#!/bin/sh\nexit 0\n");
     let digits = "1".repeat(4300);
     let call = repository.call(&[
         "--workers",
         " 3\n",
+        "--campaign=-\u{663}",
         "--for",
         "1_0",
         "--rounds",
@@ -80,7 +82,12 @@ fn counts_read_as_python_reads_an_integer() {
     let Outcome::Run(inputs) = repository.prepare(&call) else {
         panic!("the counts run");
     };
+    let Outcome::Run(least) = repository.prepare(&repository.call(&["--workers", "1"])) else {
+        panic!("a count of 1 runs");
+    };
+    assert_eq!(least.options().workers(), &integer("1"));
     let options = inputs.options();
+    assert_eq!(inputs.campaign(), repository.bin.join("-\u{663}"));
     assert_eq!(options.workers(), &integer("3"));
     assert_eq!(options.seconds(), &integer("10"));
     assert_eq!(options.rounds(), &integer(&digits));
@@ -137,6 +144,14 @@ fn the_reader_refuses_each_bad_value() {
         (
             &["--plant"],
             "argument --plant: expected one argument".to_owned(),
+        ),
+        (
+            &["--workers", "\u{663}"],
+            "argument --workers: invalid positive value: '\u{663}'".to_owned(),
+        ),
+        (
+            &["--campaign", "-\u{663}"],
+            "argument --campaign: expected one argument".to_owned(),
         ),
         (
             &["--wor", "w"],

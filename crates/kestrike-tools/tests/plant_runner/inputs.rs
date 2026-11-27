@@ -156,10 +156,18 @@ fn campaign_names_a_file_the_user_may_execute() {
         ),
         (repository.call(&["--campaign", "../bin"]), none("../bin")),
         (repository.call(&["--campaign", ""]), none("")),
-        (repository.call(&[]).unset("PATH"), none("campaign")),
     ];
     for (call, expected) in rows {
         assert_eq!(repository.refused(&call), expected, "{:?}", call.args);
+    }
+    if ["/bin/git", "/usr/bin/git"]
+        .iter()
+        .any(|git| Path::new(git).exists())
+    {
+        let call = repository.call(&[]).unset("PATH");
+        assert_eq!(repository.refused(&call), none("campaign"));
+    } else {
+        eprintln!("the unset PATH row did not run: Git lies off the C library's default path");
     }
     let sealed = repository.bin.join("sealed");
     write(&sealed, CAMPAIGN);
@@ -189,7 +197,7 @@ fn campaign_is_resolved_and_hashed() {
         ),
         other => panic!("{:?} runs, not {other:?}", call.args),
     };
-    let digest = hexdigest(CAMPAIGN.as_bytes());
+    let digest = "306c6ca7407560340797866e077e053627ad409277d1b9da58106fce4cf717cb".to_owned();
     let first = repository.scratch.join("first");
     private_dir(&first);
     write(&first.join("campaign"), "not executable\n");
@@ -228,6 +236,19 @@ fn campaign_is_resolved_and_hashed() {
         "the first of two PATH variables is read and passed to Git"
     );
     assert_eq!(found, (local, hexdigest(b"#!/bin/sh\nexit 1\n")));
+    let large = repository.bin.join("large");
+    let text = format!("#!/bin/sh\nexit 0\n{}", "#".repeat(3 << 19));
+    executable(&large, &text);
+    let summed = std::process::Command::new("sha256sum")
+        .arg(&large)
+        .output()
+        .expect("sha256sum starts");
+    let summed = String::from_utf8(summed.stdout).expect("UTF-8");
+    let summed = summed.split(' ').next().expect("a digest").to_owned();
+    assert_eq!(
+        runs(&repository.call(&["--campaign", "large"])),
+        (large, summed)
+    );
 }
 
 fn foreign(parent: &Path) -> String {
@@ -281,7 +302,7 @@ fn the_work_directory_is_new_private_and_outside_the_checkout() {
             inside(&format!("{top}/rel")),
         ),
         (
-            repository.call(&["--work", &format!("{}/w", shown(&shared_dir))]),
+            repository.call(&["--work", &format!("{}/x/w", shown(&shared_dir))]),
             shared(&shown(&shared_dir), CHOSEN_WAY),
         ),
         (
@@ -292,6 +313,31 @@ fn the_work_directory_is_new_private_and_outside_the_checkout() {
     for (call, expected) in rows {
         assert_eq!(repository.refused(&call), expected, "{:?}", call.env.last());
     }
+    let configured = repository.scratch.join("configured");
+    private_dir(&configured.join(".cargo"));
+    let config = configured.join(".cargo/config.toml");
+    write(&config, "[build]\n");
+    chmod(&config, 0o664);
+    for (call, way) in [
+        (
+            repository.call(&["--work", &shown(&configured.join("w"))]),
+            CHOSEN_WAY,
+        ),
+        (repository.call(&[]).set("TMPDIR", &configured), DEFAULT_WAY),
+    ] {
+        assert_eq!(repository.refused(&call), shared(&shown(&config), way));
+    }
+    let missing = repository.scratch.join("missing");
+    let reason = repository.refused(&repository.call(&[]).set("TMPDIR", &missing));
+    let prefix = format!(
+        "rejected: the work directory: {}/plant-runner-",
+        shown(&missing)
+    );
+    let letters = reason
+        .strip_prefix(&prefix)
+        .and_then(|rest| rest.strip_suffix(": No such file or directory (os error 2)"))
+        .unwrap_or_else(|| panic!("{reason}"));
+    assert_eq!(letters.len(), 8, "{reason}");
     let open = fs::metadata("/tmp").is_ok_and(|tmp| tmp.permissions().mode() & 0o002 != 0);
     if !open {
         eprintln!("the /tmp rows did not run: no other user can write /tmp here");
@@ -590,4 +636,92 @@ fn a_parent_whose_links_loop_is_refused() {
             shown(&looped)
         )
     );
+}
+
+/// A run hands on each record as `plant.json` orders its members, the `files` list as written and the
+/// patch's bytes, and an environment of the first variable of each name with `GIT_NO_REPLACE_OBJECTS=1`
+/// in place of the caller's.
+#[test]
+fn a_run_hands_on_the_record_and_environment_as_given() {
+    let repository = Repository::new();
+    let both = format!("{}{}", patch("src/lib.rs"), patch("src/util.rs"));
+    let mut members = super::repository::members("alpha", "src/lib.rs");
+    members.reverse();
+    for (name, value) in &mut members {
+        match name.as_str() {
+            "files" => *value = "[\"src/util.rs\", \"src/lib.rs\"]".to_owned(),
+            "fix" => *value = "{\"commit\": \"0123abc\", \"pull_request\": 12}".to_owned(),
+            _ => {}
+        }
+    }
+    repository.write(
+        "verification/plants/alpha/plant.json",
+        super::repository::record(&members),
+    );
+    repository.write("verification/plants/alpha/plant.patch", &both);
+    repository.commit();
+    let mut call = repository.call(&["--plant", "alpha"]);
+    call.env.insert(
+        0,
+        (
+            OsString::from("GIT_NO_REPLACE_OBJECTS"),
+            OsString::from("0"),
+        ),
+    );
+    call.env
+        .push((OsString::from("PATH"), OsString::from("/nonexistent")));
+    let Outcome::Run(inputs) = repository.prepare(&call) else {
+        panic!("the reordered record runs");
+    };
+    let [alpha] = inputs.plants() else {
+        panic!("one plant is selected");
+    };
+    let order: Vec<String> = alpha
+        .record()
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .collect();
+    let written: Vec<String> = members.iter().map(|(name, _)| name.clone()).collect();
+    assert_eq!(order, written);
+    let fix: Vec<&(Text, kestrike_tools::json::Value)> = alpha.fix().iter().collect();
+    assert_eq!(
+        fix,
+        [
+            &(
+                Text::from("commit"),
+                kestrike_tools::json::Value::String(Text::from("0123abc"))
+            ),
+            &(
+                Text::from("pull_request"),
+                kestrike_tools::json::Value::Integer(Integer::from(12u64))
+            )
+        ]
+    );
+    assert_eq!(
+        alpha.files(),
+        [&Text::from("src/util.rs"), &Text::from("src/lib.rs")]
+    );
+    assert_eq!(alpha.patch(), both.as_bytes());
+    let mut expected = repository.env();
+    expected.push((
+        OsString::from("GIT_NO_REPLACE_OBJECTS"),
+        OsString::from("1"),
+    ));
+    assert_eq!(inputs.env(), &expected);
+}
+
+/// The checkout's top is Git's answer with its edge whitespace stripped, so a checkout whose directory
+/// name ends in a space is read as the name without it, and the head commit of that missing directory
+/// is refused.
+#[test]
+fn the_top_loses_its_edge_whitespace() {
+    let repository = Repository::new();
+    let spaced = repository.scratch.join("checkout ");
+    fs::rename(&repository.top, &spaced).expect("renamed");
+    let outcome = repository.prepare(&repository.call(&[]).here(&spaced));
+    fs::rename(&spaced, &repository.top).expect("renamed back");
+    let Outcome::Rejected(reason) = outcome else {
+        panic!("the stripped top is refused, not {outcome:?}");
+    };
+    assert_eq!(reason.to_string(), "the checkout names no HEAD commit");
 }

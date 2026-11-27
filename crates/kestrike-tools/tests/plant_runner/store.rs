@@ -18,10 +18,7 @@ fn differs(paths: &str) -> String {
 #[test]
 fn the_store_and_its_parent_are_directories_of_the_checkout() {
     let repository = Repository::new();
-    let (parent, store) = (
-        repository.path("verification"),
-        repository.path("verification/plants"),
-    );
+    let parent = repository.path("verification");
     let moved = repository.scratch.join("verification");
     fs::rename(&parent, &moved).expect("moved");
     symlink(&moved, &parent).expect("linked");
@@ -54,7 +51,6 @@ fn the_store_and_its_parent_are_directories_of_the_checkout() {
             shown(&repository.path("verification/plants"))
         )
     );
-    assert!(store.ends_with("verification/plants"));
 }
 
 /// A store the user cannot list is refused with the operating system's error.
@@ -169,6 +165,36 @@ fn the_store_differs_from_head_at_untracked_and_ignored_paths_but_the_score() {
         inputs.score(),
         repository.path("verification/plants/score.json")
     );
+    let repository = Repository::new();
+    repository.write("verification/plants/notes-score.json", "{}\n");
+    repository.write("verification/plants/score.jso", "{}\n");
+    assert_eq!(
+        repository.refused(&repository.call(&[])),
+        differs("verification/plants/notes-score.json, verification/plants/score.jso")
+    );
+}
+
+/// A staged rename of a tracked file of the store to `score.json` shows in `git status` as one rename row
+/// whose file name is the score's, so the removal of its source is passed over and the run goes on.
+#[test]
+fn a_rename_to_the_score_hides_its_source() {
+    let repository = Repository::new();
+    repository.write("verification/plants/notes.txt", "notes\n");
+    repository.commit();
+    repository.git(&[
+        "mv",
+        "verification/plants/notes.txt",
+        "verification/plants/score.json",
+    ]);
+    let status = repository.git(&["status", "--porcelain", "--", "verification/plants"]);
+    assert_eq!(
+        status,
+        "R  verification/plants/notes.txt -> verification/plants/score.json\n"
+    );
+    let Outcome::Run(inputs) = repository.prepare(&repository.call(&[])) else {
+        panic!("the rename is passed over");
+    };
+    assert_eq!(inputs.plants().len(), 2);
 }
 
 /// A plant directory the head holds and the store lacks is a difference, though `git status` reports
