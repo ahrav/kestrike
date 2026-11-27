@@ -1337,11 +1337,24 @@ fn gets_are_answered_while_the_lane_holds_a_store_request() {
 
 #[test]
 fn a_threaded_lane_runs_the_whole_open_on_the_lane_thread() {
+    type Turn = (
+        u64,
+        bool,
+        Open,
+        Option<Result<bool, crate::storage::CaptureError>>,
+        bool,
+    );
+    let inline = std::env::var_os("DUTIES_DIAG_INLINE").is_some();
+    let turns: RefCell<Vec<Turn>> =
+        RefCell::new(vec![(u64::MAX, true, Open::Viewing, None, true); 1 << 14]);
+    let count = Cell::new(0_usize);
+    let script_turn = Cell::new((0_u64, false));
     staged_over(warm_volume_certified(0), |mut stage| {
         let store = Locked::of(&stage.store);
         let storage = stage.storage;
         let opened = Cell::new(false);
         std::thread::scope(|scope| {
+            let was = crate::storage::INLINE_RECOVERY.with(|cell| cell.replace(inline));
             let lane = Lane::start(
                 &HostGate::qualified(),
                 scope,
@@ -1350,18 +1363,44 @@ fn a_threaded_lane_runs_the_whole_open_on_the_lane_thread() {
                 CpuSet::current().unwrap(),
             )
             .unwrap();
+            crate::storage::INLINE_RECOVERY.with(|cell| cell.set(was));
             let mut duties = duties_over(lane);
             let (served, _) = stage.serve_until(
-                |_, _, stop| {
+                |_, turn, stop| {
+                    let set = opened.get();
                     if opened.get() {
                         stop.store(true, Ordering::Release);
                     }
+                    script_turn.set((turn, set));
                 },
                 |owner, now| {
                     let exit = duties.turn(owner, now);
-                    opened.set(duties.open == Open::Opened && log_open(storage));
+                    let open = duties.open;
+                    let read =
+                        (open == Open::Opened).then(|| storage.with_suffix(|log| log.is_open()));
+                    opened.set(open == Open::Opened && matches!(read, Some(Ok(true))));
+                    let (turn, set) = script_turn.get();
+                    if let Some(slot) = turns.borrow_mut().get_mut(count.get()) {
+                        *slot = (turn, set, open, read, opened.get());
+                    }
+                    count.set(count.get() + 1);
                     exit
                 },
+            );
+            let mut seen_true = false;
+            let mut false_after_true = false;
+            turns.borrow_mut().truncate(count.get());
+            for (turn, set, open, read, flag) in turns.borrow().iter() {
+                eprintln!(
+                    "DIAG turn={turn} stop_set={set} open={open:?} read={read:?} flag={flag}"
+                );
+                false_after_true |= seen_true && !flag;
+                seen_true |= *flag;
+            }
+            eprintln!(
+                "DIAG exit={:?} inline={inline} turns={} false_after_true={false_after_true}",
+                served.exit,
+                count.get()
             );
             assert_eq!(served.exit, Exit::Stopped);
             drop(duties.end());
