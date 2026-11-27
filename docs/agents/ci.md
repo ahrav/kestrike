@@ -1457,10 +1457,17 @@ prints and a nonempty reason:
 Weakens-Test: CLASS:PATH: REASON
 ```
 
-A case is a top-level entry of `crates/kestrike-tools/tests` that
-[the tools guide](tools.md#adding-a-tool) names, read from the Git trees of the
-merge base and the head: a regular file `<id>.rs`, or a directory `<id>` with
-a regular `mod.rs`, where `<id>` matches `[a-z][a-z0-9_]*` and is not `tools`.
+The report and the hint write each control character of a key as `\r` or
+`\x7f`; the acknowledging line carries the character itself, as Git stores
+the path.
+
+The scanner reads its rule for a case from the Git trees of the merge base and
+the head, apart from the build's check of the directory that
+[the tools guide](tools.md#adding-a-tool) describes. A case is a top-level
+entry of `crates/kestrike-tools/tests`: a regular file `<id>.rs`, or a
+directory `<id>` with a regular `mod.rs`, where `<id>` matches
+`[a-z][a-z0-9_]*` and is not `tools`; the rule counts `std` and the Rust
+keywords, which the build refuses.
 A tree without a regular `tools.rs`, the root of the one test executable, also
 recognizes `<id>/main.rs`, at the base and at the head alike. A case of the base
 blocks when the head holds no case of the same id; a change of shape for the

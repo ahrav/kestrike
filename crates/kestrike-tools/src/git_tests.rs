@@ -41,8 +41,9 @@ fn a_reply_that_ends_before_an_answer_is_truncated() {
 }
 
 /// A reply is `<id> <type> <size>`, a line feed, `size` bytes and a line feed, or `<name> missing` for its own
-/// request's name. A body cut before its size or its line feed, a header of another form, a `missing` line for
-/// another name and bytes after the last reply are each the reader's truncation error, which names the request.
+/// request's name. A body cut before its size or its line feed, a header of another form and a `missing` line
+/// for another name are each the reader's truncation error, which names the request with its control
+/// characters escaped; bytes after the last reply are a truncation error that names the count of answers.
 #[test]
 fn a_reply_of_another_form_is_truncated() {
     for (reply, name) in [
@@ -76,17 +77,34 @@ fn a_reply_of_another_form_is_truncated() {
         error.to_string(),
         "git cat-file --batch: the reply ends before its answer for HEAD:a"
     );
-}
-
-/// A name that holds a line feed would be two requests, so `blob_texts` refuses it as a name.
-#[test]
-fn a_name_that_holds_a_line_feed_is_refused_as_a_name() {
-    let error = blob_texts(&specs(&["HEAD:a", "HEAD:a\nb"])).expect_err("the name is refused");
-    assert!(matches!(error, GitError::Name(_)), "{error:?}");
+    let error =
+        batch_texts(b"1111 blob 2\nab", &specs(&["HEAD:a\r::b"])).expect_err("the body is cut");
     assert_eq!(
         error.to_string(),
-        "git cat-file --batch: the name 'HEAD:a\\nb' holds a line feed"
+        "git cat-file --batch: the reply ends before its answer for HEAD:a\\r::b"
     );
+}
+
+/// Git reads a line feed in a batch name as a request separator, reads a name up to a NUL and strips a final
+/// carriage return, so `blob_texts` refuses each such name as a name, wherever it stands in the batch.
+#[test]
+fn a_name_that_git_would_read_as_another_is_refused_as_a_name() {
+    for (name, said) in [
+        ("HEAD:a\nb", "'HEAD:a\\nb' holds a line feed"),
+        ("HEAD:a\0b", "'HEAD:a\\x00b' holds a NUL"),
+        ("HEAD:a\r\r", "'HEAD:a\\r\\r' ends in a carriage return"),
+    ] {
+        let error = blob_texts(&specs(&["HEAD:a", name])).expect_err("the name is refused");
+        assert!(matches!(error, GitError::Name(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!("git cat-file --batch: the name {said}")
+        );
+    }
+    assert!(!matches!(
+        blob_texts(&specs(&["HEAD:a\rb"])),
+        Err(GitError::Name(_))
+    ));
 }
 
 #[test]

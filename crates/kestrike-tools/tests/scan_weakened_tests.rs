@@ -1171,6 +1171,14 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             vec![],
             "the key '' under a could name another path",
         ),
+        (
+            vec![(
+                INVENTORY.to_owned(),
+                r#"{"a\r::error::b": {"": {"seeds": 4}}}"#.to_owned(),
+            )],
+            vec![],
+            "the key '' under a\\r::error::b could name another path\n",
+        ),
         (vec![(INVENTORY.to_owned(), deep)], vec![], INVENTORY),
         (
             vec![(INVENTORY.to_owned(), String::new())],
@@ -1205,6 +1213,7 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             "{}",
             run.stderr
         );
+        assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
         repo.reset(&repo.base);
     }
 }
@@ -2567,31 +2576,150 @@ fn a_diffed_path_that_is_no_file_at_either_commit_exits_two() {
 }
 
 /// Git reads no replacement object: a replace ref that maps the head's tree to the base's leaves the scan
-/// reading the head's own tree, where an existing test gains an ignore.
+/// reading the head's own tree, where an existing test gains an ignore, which the blob reader finds, and a
+/// budget falls, which the zero-context diff finds.
 #[test]
 fn a_replace_ref_leaves_the_heads_own_tree_scanned() {
     let repo = Repo::new("replace-ref");
-    let head = repo.ignore_second("ignore");
+    repo.ignore_second("ignore");
+    let lowered = repo.edit("src/model.rs", "SEEDS: u64 = 48", "SEEDS: u64 = 47");
+    let head = repo.change(&[("src/model.rs", &lowered)]);
     let tree = |rev: &str| repo.git(&["rev-parse", &format!("{rev}^{{tree}}")]);
     repo.git(&["replace", &tree(&head), &tree(&repo.base)]);
     assert_eq!(repo.git(&["diff", "--name-only", &repo.base, &head]), "");
-    assert_blocks(
-        &repo.scan_head(&head),
-        &format!("{KEY} second: not ignored -> #[ignore]"),
+    let run = repo.scan_head(&head);
+    let expected = format!(
+        "blocks {KEY} second: not ignored -> #[ignore]\n\
+         blocks budget-lowered:src/model.rs SEEDS at line 3: 48 -> 47\n"
+    );
+    assert_eq!(
+        run.outcome(),
+        (Some(1), expected.as_str()),
+        "{}",
+        run.stderr
+    );
+}
+
+/// A gitlink added at a Rust path is refused whatever the submodule setting of the repository says: the scan
+/// lists the changed paths with every submodule shown.
+#[test]
+fn a_gitlink_that_the_submodule_setting_hides_exits_two() {
+    let repo = Repo::new("hidden-gitlink");
+    let link = format!("160000,{},tests/t.rs", repo.base);
+    repo.git(&["update-index", "--add", "--cacheinfo", &link]);
+    repo.git(&["commit", "-q", "-m", "gitlink"]);
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["config", "diff.ignoreSubmodules", "all"]);
+    assert_eq!(repo.git(&["diff", "--name-only", &repo.base, &head]), "");
+    let run = repo.scan_head(&head);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "scan-weakened-tests: tests/t.rs at {} is not a file\n",
+            &head[..12]
+        )
+    );
+}
+
+/// A timeout file of mode 100755 at both commits is a file, and its raised deadline reports.
+#[test]
+fn an_executable_timeout_file_is_read_as_a_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new("executable-lane");
+    let lane = "scripts/rust-lane.sh";
+    fs::set_permissions(repo.repo.join(lane), fs::Permissions::from_mode(0o755))
+        .expect("the mode is set");
+    repo.git(&["add", "--", lane]);
+    repo.git(&["commit", "-q", "-m", "executable"]);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    let head = repo.change(&[(lane, "  step check deadline 30m cargo check\n")]);
+    for rev in [&base, &head] {
+        let entry = repo.git(&["ls-tree", rev, "--", lane]);
+        assert!(entry.starts_with("100755 "), "{entry}");
+    }
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    let expected = format!("reports timeout-raised:{lane} deadline at line 1: 25 -> 30\n");
+    assert_eq!(
+        run.outcome(),
+        (Some(0), expected.as_str()),
+        "{}",
+        run.stderr
+    );
+}
+
+/// A changed Rust path that becomes a link in the second batch of the mode check is refused.
+#[test]
+fn a_link_in_a_later_batch_of_the_mode_check_exits_two() {
+    let repo = Repo::new("batch-link");
+    let names: Vec<String> = (0..300)
+        .map(|index| format!("src/many/f{index:03}.rs"))
+        .collect();
+    for name in &names {
+        repo.write(name, b"fn f() {}\n");
+    }
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "many files"]);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    for name in &names[..299] {
+        repo.write(name, b"fn f() {}\n// x\n");
+    }
+    repo.git(&["add", "-A"]);
+    fs::remove_file(repo.repo.join(&names[299])).expect("the file is removed");
+    let head = repo.link(&names[299], "f000.rs", "link the last file");
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "scan-weakened-tests: {} at {} is not a file\n",
+            names[299],
+            &head[..12]
+        )
+    );
+}
+
+/// A key whose path holds a carriage return is written `\r` in the report and the hint; a commit line that
+/// carries the carriage return itself acknowledges it, and the line with the written spelling does not.
+#[test]
+fn a_carriage_return_in_a_path_is_acknowledged_by_the_raw_character() {
+    let repo = Repo::new("raw-acknowledgement");
+    let path = "src/a\rb.rs";
+    let base = repo.change(&[(path, "const SEEDS: u64 = 12;\n")]);
+    let shown = "Lower it\n\nWeakens-Test: budget-lowered:src/a\\rb.rs: written spelling\n";
+    let head = repo.commit(&[(path, "const SEEDS: u64 = 11;\n")], shown, &[]);
+    let line = "budget-lowered:src/a\\rb.rs SEEDS at line 1: 12 -> 11";
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    let expected = format!("blocks {line}\n");
+    assert_eq!(
+        run.outcome(),
+        (Some(1), expected.as_str()),
+        "{}",
+        run.stderr
+    );
+    let raw = format!("Acknowledge it\n\nWeakens-Test: budget-lowered:{path}: raw character\n");
+    let acknowledged = repo.commit(&[], &raw, &[]);
+    let run = repo.scan(&["--base", &base, "--head", &acknowledged]);
+    let expected = format!("acknowledged {line} (Weakens-Test: raw character)\n");
+    assert_eq!(
+        run.outcome(),
+        (Some(0), expected.as_str()),
+        "{}",
+        run.stderr
     );
 }
 
 const CASES: &str = "crates/kestrike-tools/tests";
 
 /// A case of the tools crate that stands at the base and whose id is absent at the head blocks, keyed by the
-/// base entry's path: a deleted case file, a deleted case directory, a case renamed to another id, which is
+/// base entry's path: a deleted case file, whose removed assertion still reports, a deleted case directory, a case renamed to another id, which is
 /// the absence of its old id, and a directory whose `mod.rs` becomes `main.rs` beside the root `tools.rs`.
 #[test]
 fn a_removed_case_of_the_tools_crate_blocks() {
     let repo = Repo::new("case-removed");
     let base = repo.change(&[
         (&format!("{CASES}/tools.rs"), "mod one;\n"),
-        (&format!("{CASES}/one.rs"), "fn one() {}\n"),
+        (&format!("{CASES}/one.rs"), &test_fn("one")),
         (&format!("{CASES}/two/mod.rs"), "mod helper;\n"),
         (&format!("{CASES}/two/helper.rs"), "fn two() {}\n"),
         (&format!("{CASES}/three.rs"), "fn three() {}\n"),
@@ -2601,7 +2729,14 @@ fn a_removed_case_of_the_tools_crate_blocks() {
     };
     let path = |name: &str| format!("{CASES}/{name}");
     for (files, deleted, expected) in [
-        (vec![], vec![path("one.rs")], block("one.rs", "one")),
+        (
+            vec![],
+            vec![path("one.rs")],
+            format!(
+                "reports assertions-removed:{CASES}/one.rs assert lines: 1 removed -> 0 added\n{}",
+                block("one.rs", "one")
+            ),
+        ),
         (
             vec![],
             vec![path("two/mod.rs"), path("two/helper.rs")],

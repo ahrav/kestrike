@@ -9,11 +9,11 @@ use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
 use crate::git::{blob_texts, git, git_text, merge_base};
 use crate::json::Integer;
 use crate::stream::emit;
-use crate::text::strip_str;
+use crate::text::{escaped, strip_str};
 
 use super::cases::{CASES, removed};
 use super::declarations::{conditions, declarations, plain};
-use super::finding::{escaped, short};
+use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
@@ -54,6 +54,7 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         "diff",
         "--no-relative",
         "--no-renames",
+        "--ignore-submodules=none",
         "--name-only",
         "-z",
         base,
@@ -75,11 +76,9 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .copied()
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
-    if !diffed.is_empty() {
-        // A diffed path that is a link, a tree or a submodule at either commit is refused here.
-        files(base, &diffed)?;
-        files(head, &diffed)?;
-    }
+    // A diffed path that is a link, a tree or a submodule at either commit is refused here.
+    files(base, &diffed)?;
+    files(head, &diffed)?;
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])

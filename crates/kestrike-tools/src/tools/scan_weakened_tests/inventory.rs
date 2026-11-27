@@ -6,10 +6,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::git::blob_texts;
 use crate::json::{self, Value};
-use crate::text::Text;
+use crate::text::{Text, escaped};
 
 use super::digits::{integer, is_digits};
-use super::finding::{escaped, short};
+use super::finding::short;
 use super::hunks::paired;
 use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
 use super::tree::files;
@@ -40,6 +40,8 @@ impl<'v> Document<'v> {
                     if key.is_empty() || ALIASING.is_match(key.as_bytes()) {
                         let under = if path.is_empty() {
                             "the root".to_owned()
+                        } else if key.is_empty() {
+                            escaped(&path.to_string())
                         } else {
                             path.to_string()
                         };

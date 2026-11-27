@@ -125,6 +125,19 @@ pub(crate) fn push_repr(code: u32, out: &mut String) {
     }
 }
 
+/// `escaped` keeps a field that holds embedded CR or LF characters on one output line.
+pub(crate) fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for code in text.chars() {
+        if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {
+            push_repr(u32::from(code), &mut out);
+        } else {
+            out.push(code);
+        }
+    }
+    out
+}
+
 /// `push_backslashed` matches Python's UTF-8 `backslashreplace` handler: it appends a scalar value as it is
 /// and a surrogate as `\udXXX`.
 pub(crate) fn push_backslashed(code: u32, out: &mut String) {

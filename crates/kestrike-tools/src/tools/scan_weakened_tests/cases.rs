@@ -1,8 +1,8 @@
 //! A case of the tools crate is a top-level entry of its test directory: a regular file `<id>.rs`, or a
 //! directory `<id>` whose root file is regular, with `<id>` matching `[a-z][a-z0-9_]*` and other than `tools`.
 //! A directory's root is `mod.rs`, or also `main.rs` at a commit without the regular file `tools.rs`, the root
-//! of the one test executable, where each case was a test executable of its own. The scan reads both
-//! commits' trees, and a case of the base that the head lacks under its id blocks.
+//! of the one test executable; at such a commit each case is a test executable of its own. The scan reads
+//! both commits' trees, and a case of the base that the head lacks under its id blocks.
 
 use std::collections::HashSet;
 

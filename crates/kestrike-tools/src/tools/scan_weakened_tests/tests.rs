@@ -2,6 +2,7 @@ use super::digits::{integer, is_digits};
 use super::hunks::{Hunk, hunks, paired};
 use super::inventory::inventory_changes;
 use super::patterns::*;
+use super::tree::records;
 use super::{Failure, Shown};
 
 type Cases = &'static [(
@@ -384,9 +385,10 @@ fn an_inventory_reports_falls_absences_and_rises_in_document_order() {
 }
 
 /// An integer budget or timeout whose new value is a text, a float, a boolean or null is refused, and so is a
-/// `bound` or `member` text whose new value is no text. A value that was no integer, and a new object or list,
-/// compare as before: a new integer after a boolean is no finding, and an object or a list in place of a
-/// count or a text reads as its absence.
+/// `bound` or `member` text whose new value is no text. A budget that was a boolean or a float, and a field
+/// outside the budgets, the timeouts and the texts, compares with no refusal whatever its new scalar: a new
+/// integer after a boolean is no finding, and an object or a list in place of a count or a text reads as its
+/// absence.
 #[test]
 fn a_count_or_a_bound_text_that_changes_its_type_is_refused() {
     for (field, old, new, kinds) in [
@@ -428,6 +430,50 @@ fn a_count_or_a_bound_text_that_changes_its_type_is_refused() {
         found,
         ["executions: 3 -> absent", "bound depth: 4 -> absent"]
     );
+    let old = r#"{"seeds": true, "seconds": 2.0, "name": 3, "label": "depth: 4"}"#;
+    let new = r#"{"seeds": false, "seconds": 1.0, "name": "3", "label": 4}"#;
+    assert_eq!(
+        inventory_changes(old, new).expect("the inventories compare"),
+        []
+    );
+}
+
+/// A record of `git ls-tree -z` is `<mode> <type> <id>`, a tab and a path, which keeps every byte after the
+/// first tab; a record with no tab, with two or four words, or with an empty word is refused, naming the
+/// commit's short id and the record.
+#[test]
+fn a_tree_record_of_another_form_is_refused() {
+    let commit = "0123456789abcdef";
+    assert_eq!(
+        records(
+            commit,
+            "100644 blob 1111\ta\tb.rs\x00040000 tree 2222\tc\x00"
+        )
+        .expect("the records read"),
+        [
+            ("100644".to_owned(), "a\tb.rs".to_owned()),
+            ("040000".to_owned(), "c".to_owned())
+        ]
+    );
+    for record in [
+        "100644 blob 1111 a.rs",
+        "100644 1111\ta.rs",
+        "100644 blob 1111 x\ta.rs",
+        "100644  blob 1111\ta.rs",
+        "100644\tblob 1111\ta.rs",
+        "",
+    ] {
+        let listed = format!("100644 blob 1111\tz.rs\0{record}\0");
+        let error = records(commit, &listed).expect_err("the record is refused");
+        assert!(matches!(error, Failure::Refused(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "git ls-tree at 0123456789ab: the record {} has another form",
+                crate::text::Text::from(record).repr()
+            )
+        );
+    }
 }
 
 #[test]
