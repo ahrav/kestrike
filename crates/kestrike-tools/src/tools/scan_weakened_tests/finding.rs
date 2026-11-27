@@ -9,6 +9,7 @@ pub enum Class {
     TimeoutRaised,
     AssertionsRemoved,
     IgnoreNew,
+    CaseRemoved,
 }
 
 impl Class {
@@ -19,11 +20,15 @@ impl Class {
             Self::TimeoutRaised => "timeout-raised",
             Self::AssertionsRemoved => "assertions-removed",
             Self::IgnoreNew => "ignore-new",
+            Self::CaseRemoved => "case-removed",
         }
     }
 
     pub fn blocks(self) -> bool {
-        matches!(self, Self::IgnoreExisting | Self::BudgetLowered)
+        matches!(
+            self,
+            Self::IgnoreExisting | Self::BudgetLowered | Self::CaseRemoved
+        )
     }
 }
 
@@ -76,4 +81,12 @@ impl Finding {
     pub fn key(&self) -> String {
         format!("{}:{}", self.change.class.as_str(), self.path)
     }
+}
+
+/// `short` is the first twelve code points of a commit name, as the report and the refusals write it.
+pub(super) fn short(commit: &str) -> &str {
+    commit
+        .char_indices()
+        .nth(12)
+        .map_or(commit, |(at, _)| &commit[..at])
 }
