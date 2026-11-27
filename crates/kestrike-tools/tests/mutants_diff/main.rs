@@ -1,6 +1,7 @@
 //! The cases of the `mutants-diff` tool. Each process case starts the built binary against the stand-ins
 //! of [`standins`] over a fixture repository; four cases call the tool's functions, two of them in a
 //! process of their own.
+#![cfg(target_os = "linux")]
 
 mod fixture;
 mod functions;
