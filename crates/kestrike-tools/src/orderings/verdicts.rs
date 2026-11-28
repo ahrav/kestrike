@@ -321,4 +321,4 @@ pub fn genmc_result(
 
 #[cfg(test)]
 #[path = "verdicts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -19,7 +19,7 @@ const RUN_TEST: &str =
 const FILL_MODEL: &str = "crates/kestrike/src/storage/fill_model.rs";
 
 /// The files the GenMC lane writes for one case.
-struct Lane<'a> {
+pub(crate) struct Lane<'a> {
     text: &'a str,
     graph: &'a str,
     code: &'a str,
@@ -31,7 +31,7 @@ struct Lane<'a> {
 }
 
 impl<'a> Lane<'a> {
-    fn new(text: &'a str, graph: &'a str, code: &'a str) -> Self {
+    pub(crate) fn new(text: &'a str, graph: &'a str, code: &'a str) -> Self {
         Self {
             text,
             graph,
@@ -44,7 +44,7 @@ impl<'a> Lane<'a> {
         }
     }
 
-    fn write(&self, evidence: &Path, declared: &Value) {
+    pub(crate) fn write(&self, evidence: &Path, declared: &Value) {
         let file = |name: &str, text: &str| {
             fs::write(evidence.join(name), text).expect("the lane's file writes");
         };
