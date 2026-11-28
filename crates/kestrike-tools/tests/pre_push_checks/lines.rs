@@ -533,3 +533,35 @@ fn an_unrelated_edit_reads_no_self_test_presence() {
         "{traced}"
     );
 }
+
+/// A ref line's local field reaches Git as an argument of its own, so a field shaped as an option is read
+/// as one: `--output=<file>` over a known remote commit plans the line and leaves the file truncated by
+/// the history read, with no check.
+#[test]
+fn a_local_field_shaped_as_an_option_reaches_git_as_one() {
+    if let Some(row) = child() {
+        let local = format!("--output={}", row.get("VICTIM"));
+        let plan = planned(&[line(&local, &row.get("BASE"))]);
+        assert_eq!(checks(&plan), vec![]);
+        return;
+    }
+    let (repository, base) = fixture("option-field");
+    let victim = repository.top.join("../victim");
+    std::fs::File::create_new(&victim)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, b"kept\n"))
+        .expect("the file is made");
+    repository.in_child(
+        &id(
+            module_path!(),
+            "a_local_field_shaped_as_an_option_reaches_git_as_one",
+        ),
+        &[
+            ("BASE", &base),
+            (
+                "VICTIM",
+                victim.to_str().expect("the scratch path is UTF-8"),
+            ),
+        ],
+    );
+    assert_eq!(std::fs::read(&victim).expect("the file reads"), b"");
+}
