@@ -47,6 +47,8 @@ pub const LIMIT: Duration = Duration::from_secs(10);
 /// The longest run of the tool in a case.
 pub const RUN_LIMIT: Duration = Duration::from_secs(120);
 
+const LOCK: &str = "# the checkout's lock\nversion = 4\n";
+
 const PYTHON: &str = r#"#!/bin/sh
 isolated=no
 if [ "$1" = -I ]; then isolated=yes; shift; fi
@@ -104,6 +106,19 @@ else lock=own; fi
 printf '%s %s %s\n' "${CARGO_BUILD_BUILD_DIR-unset}" "${CARGO_CACHE_RUSTC_INFO-unset}" "$lock" >> "$STUB_LOG.build"
 printf '%s\n' "$#" "$@" >> "$STUB_LOG.args"
 pwd -P >> "$STUB_LOG.cwd"
+if [ -n "${STUB_BUILT-}" ]; then
+  own=$(git rev-parse HEAD)
+  printf '%s\n' "$own" > "$STUB_BUILT"
+  : > "$STUB_LOG.unit.$$"
+  n=0
+  while [ "$(ls "$STUB_LOG".unit.* 2>/dev/null | wc -l)" -lt 2 ] && [ ! -e "$STUB_LOG.release" ] && [ "$n" -lt 3000 ]; do sleep 0.01; n=$((n + 1)); done
+  printf '%s %s\n' "$own" "$(cat "$STUB_BUILT")" >> "$STUB_LOG.units"
+fi
+if [ -n "${STUB_HOLD-}" ]; then
+  printf '%s\n' "$$" > "$STUB_LOG.leader.tmp" && mv "$STUB_LOG.leader.tmp" "$STUB_LOG.leader"
+  n=0
+  while [ ! -e "$STUB_LOG.release" ] && [ "$n" -lt 6000 ]; do sleep 0.01; n=$((n + 1)); done
+fi
 exit "${STUB_CARGO:-0}"
 "#;
 
@@ -164,6 +179,7 @@ pub struct Fixture {
     pub log: PathBuf,
     pub tmp: PathBuf,
     pub bin: PathBuf,
+    pub top: PathBuf,
     pub env: Vec<(OsString, OsString)>,
     pub base: String,
 }
@@ -194,7 +210,8 @@ impl Fixture {
         fs::create_dir_all(root).expect("the scratch root is made");
         let temp = fresh(root, "pre-push-tool-");
         let (repo, tmp, bin) = (temp.join("repo"), temp.join("tmp"), temp.join("bin"));
-        for dir in [&repo, &tmp, &bin] {
+        let top = temp.join("top");
+        for dir in [&repo, &tmp, &bin, &top] {
             DirBuilder::new()
                 .mode(0o700)
                 .create(dir)
@@ -202,6 +219,7 @@ impl Fixture {
         }
         executable(&bin.join("python3"), PYTHON);
         executable(&bin.join("cargo"), CARGO);
+        fs::write(top.join("Cargo.lock"), LOCK).expect("the checkout's lock is written");
         let log = temp.join("stub.log");
         let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
             .chain(
@@ -229,7 +247,7 @@ impl Fixture {
             ("GIT_COMMITTER_NAME", "t".into()),
             ("GIT_COMMITTER_EMAIL", "t@example.com".into()),
             ("STUB_LOG", log.clone().into_os_string()),
-            ("STUB_TOP", top().as_os_str().to_owned()),
+            ("STUB_TOP", top.clone().into_os_string()),
             ("PATH", searched),
             ("TMPDIR", tmp.clone().into_os_string()),
         ] {
@@ -241,6 +259,7 @@ impl Fixture {
             log,
             tmp,
             bin,
+            top,
             env,
             base: String::new(),
         };
@@ -417,7 +436,7 @@ impl Fixture {
     pub fn tool(&self) -> Command {
         let mut command = self.command(BINARY);
         command
-            .arg(top())
+            .arg(&self.top)
             .args(["pre-push-checks", "origin", "url"]);
         command
     }

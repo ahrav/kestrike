@@ -1,6 +1,8 @@
 use std::io::Cursor;
 
-use super::{Exposure, exposed, foreign_link, letters, planted, unrunnable, writable};
+use super::{
+    Exposure, Taken, Unusable, exposed, foreign_entry, letters, planted, unrunnable, writable,
+};
 use crate::hook::{Check, ORDER};
 
 /// A directory another user than the real user and root owns is refused whatever its mode, the sticky
@@ -110,7 +112,7 @@ fn a_link_is_judged_by_its_owner_where_others_can_write_its_directory() {
 /// absent name and a link that names itself return none, and so does every path read for the links'
 /// owner.
 #[test]
-fn the_walk_returns_the_first_link_another_user_owns_in_a_shared_directory() {
+fn the_walk_returns_the_first_entry_another_user_owns_in_a_shared_directory() {
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     let scratch = crate::paths::tests::Scratch::new("foreign-link");
@@ -128,25 +130,35 @@ fn the_walk_returns_the_first_link_another_user_owns_in_a_shared_directory() {
     symlink("loop", closed.join("loop")).expect("the link is made");
     let me = crate::ownership::real_uid();
     let other = me + 1;
+    let linked = |path: std::path::PathBuf| Some((path, Exposure::Linked));
+    let private = Some((shared.join("private"), Exposure::Planted));
     let rows = [
-        (shared.join("own"), Some(shared.join("own"))),
-        (shared.join("own/inner"), Some(shared.join("own"))),
-        (shared.join("chain"), Some(shared.join("chain"))),
+        (shared.join("own"), linked(shared.join("own"))),
+        (shared.join("own/inner"), linked(shared.join("own"))),
+        (shared.join("chain"), linked(shared.join("chain"))),
+        (shared.join("private/../own"), private.clone()),
         (
-            shared.join("private/../own"),
-            Some(shared.join("private/../own")),
+            closed.join("../shared/own"),
+            linked(closed.join("../shared/own")),
         ),
-        (closed.join("through/inner"), Some(shared.join("own"))),
-        (closed.join("direct/inner"), None),
-        (shared.join("private/inner"), None),
+        (closed.join("through/inner"), linked(shared.join("own"))),
+        (closed.join("direct/inner"), private.clone()),
+        (closed.join("direct"), None),
+        (shared.join("private/inner"), private),
+        (shared.join("private"), None),
         (shared.join("absent/inner"), None),
         (closed.join("loop/inner"), None),
     ];
     for (path, expected) in rows {
-        assert_eq!(foreign_link(&path, me), Ok(None), "{}", path.display());
+        assert_eq!(
+            foreign_entry(&scratch.0, &path, me),
+            Ok(None),
+            "{}",
+            path.display()
+        );
         if me != 0 {
             assert_eq!(
-                foreign_link(&path, other),
+                foreign_entry(&scratch.0, &path, other),
                 Ok(expected),
                 "{}",
                 path.display()
@@ -156,7 +168,10 @@ fn the_walk_returns_the_first_link_another_user_owns_in_a_shared_directory() {
     std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700))
         .expect("the mode is set");
     if me != 0 {
-        assert_eq!(foreign_link(&shared.join("own"), other), Ok(None));
+        assert_eq!(
+            foreign_entry(&scratch.0, &shared.join("own/inner"), other),
+            Ok(None)
+        );
     }
 }
 
@@ -190,4 +205,155 @@ fn off_linux_the_host_stop_row_alone_is_skipped_with_its_line() {
     let line = unrunnable(Check::HostStop, false).expect("the row is skipped off Linux");
     assert!(line.contains("run on Linux alone"), "{line}");
     assert!(line.contains("the workspace job runs them"), "{line}");
+}
+
+#[test]
+fn a_directory_on_the_way_is_judged_by_its_owner_and_the_mode_of_the_directory_that_holds_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let user = 1000;
+    for (shape, owner, holder, expected) in [
+        (
+            "a directory another user made in a sticky directory everyone can write",
+            1001,
+            0o041_777,
+            true,
+        ),
+        (
+            "a root-owned directory that reads as another id in a directory no other account can write",
+            65_534,
+            0o040_555,
+            false,
+        ),
+        (
+            "a directory of another account that is no root in a directory only root can write",
+            1001,
+            0o040_755,
+            false,
+        ),
+        (
+            "the pushing user's own directory in a sticky directory everyone can write",
+            1000,
+            0o041_777,
+            false,
+        ),
+    ] {
+        assert_eq!(planted(owner, holder, user), expected, "{shape}");
+    }
+
+    let scratch = crate::paths::tests::Scratch::new("foreign-entry");
+    let layout = &scratch.0;
+    for (directory, mode) in [
+        ("shared", 0o1777),
+        ("shared/made", 0o755),
+        ("shared/made/parent", 0o700),
+        ("closed", 0o755),
+        ("closed/tmp", 0o1777),
+        ("closed/tmp/parent", 0o700),
+        ("home", 0o755),
+        ("home/account", 0o755),
+        ("home/account/scratch", 0o700),
+        ("home/account/scratch/parent", 0o700),
+    ] {
+        let path = layout.join(directory);
+        std::fs::create_dir(&path).expect("the directory is made");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("the mode is set");
+    }
+    let me = crate::ownership::real_uid();
+    let other = me + 1;
+    let made = Some((layout.join("shared/made"), Exposure::Planted));
+    for (row, parent, reader, expected) in [
+        (1, "shared/made/parent", other, made),
+        (2, "closed/tmp/parent", other, None),
+        (3, "home/account/scratch/parent", other, None),
+        (4, "shared/made/parent", me, None),
+    ] {
+        if reader == me || me != 0 {
+            assert_eq!(
+                foreign_entry(layout, &layout.join(parent), reader),
+                Ok(expected),
+                "row {row}: {parent}"
+            );
+        }
+    }
+}
+
+#[test]
+fn each_refusal_s_line_names_the_directory_and_the_entry_it_is_refused_for() {
+    let line = |unusable: Unusable| unusable.line().expect("the refusal has a line");
+    let advice = "set TMPDIR to a directory that you own and only you can write";
+    let exposed = |at: &str, exposure| Unusable::Exposed {
+        parent: "/tmp/build/tmp".into(),
+        at: at.into(),
+        exposure,
+    };
+    assert_eq!(
+        line(exposed("/tmp/build", Exposure::Planted)),
+        (
+            format!(
+                "pre-push: the scratch directory /tmp/build/tmp is reached through /tmp/build, which \
+                 another user owns in a directory that its group or other users can write; {advice}"
+            ),
+            2
+        )
+    );
+    assert_eq!(
+        line(exposed("/tmp/build", Exposure::Linked)),
+        (
+            format!(
+                "pre-push: the scratch directory /tmp/build/tmp is reached through the link \
+                 /tmp/build, which another user owns; {advice}"
+            ),
+            2
+        )
+    );
+    assert_eq!(
+        line(exposed("/tmp/build", Exposure::Writable)),
+        (
+            format!(
+                "pre-push: the scratch directory /tmp/build/tmp is reached through /tmp/build, which \
+                 is writable by its group or by other users and has no sticky bit; {advice}"
+            ),
+            2
+        )
+    );
+    assert_eq!(
+        line(exposed("/tmp/build/tmp", Exposure::Owned)),
+        (
+            format!(
+                "pre-push: the scratch directory /tmp/build/tmp is owned by another user; {advice}"
+            ),
+            2
+        )
+    );
+    for (state, words) in [
+        (Taken::Link, "is a link"),
+        (Taken::Other, "is no directory"),
+        (Taken::Owned, "is owned by another user"),
+        (
+            Taken::Writable,
+            "is writable by its group or by other users",
+        ),
+    ] {
+        let taken = Unusable::Taken {
+            at: "/work/target/tools/pre-push.d".into(),
+            state,
+        };
+        assert_eq!(
+            line(taken),
+            (
+                format!(
+                    "pre-push: the worktree directory /work/target/tools/pre-push.d {words}; remove \
+                     it, and the next push makes it"
+                ),
+                2
+            )
+        );
+    }
+    assert_eq!(Unusable::Cancelled(143).line(), Err(143));
+    assert_eq!(
+        Unusable::Fault("x: y".to_owned()).line(),
+        Ok(("pre-push-checks: x: y".to_owned(), 1))
+    );
 }

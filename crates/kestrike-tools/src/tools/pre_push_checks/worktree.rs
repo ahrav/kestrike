@@ -21,10 +21,13 @@
 //! directory's owner and root can rename the entry there, so `/tmp` passes. Any user can make a link in
 //! such a directory and replace it later, so [`scratch`] also refuses a parent whose path passes through
 //! a link that a user other than the real user and root owns in a directory its group or every user can
-//! write; a link in a directory that only its owner can write is trusted with that owner. The tool
-//! trusts the owner of a directory above the parent, whoever that is: where root's directories read as
-//! another id, as in a user namespace that maps the real user alone, a `TMPDIR` the user owns still
-//! passes, and a sticky `/tmp` whose owner reads as another id is refused.
+//! write. In a directory writable only by its owner, the directory owner's trust extends to links in that directory.
+//! [`foreign_entry`] tests the owner of each entry along the path.
+//! In a group-writable or world-writable directory, an entry passes the [`foreign_entry`] owner test only if the tool's real user or root owns it.
+//! In a directory writable only by its owner, an entry of any owner passes the [`foreign_entry`] owner test.
+//! When a user namespace maps only a nonroot real UID, root-owned directories appear to have the overflow UID.
+//! When only the owner of `/` can write to `/`, `/tmp` with the overflow UID passes the [`foreign_entry`] owner test on the path to a user-owned `TMPDIR`.
+//! [`scratch`] rejects that `/tmp` as the scratch directory itself.
 //!
 //! Cargo and rustup search the ancestors of their working directory for configuration. For a row with
 //! `tools_target`, [`refusal`] fails the row before Cargo starts when [`foreign_toolchain_paths`] names
@@ -50,7 +53,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::thread;
 
@@ -63,6 +66,7 @@ use crate::ownership::{
 use crate::text::{Text, strip_str};
 
 use super::cancel::{self, Unwaited};
+use super::lock::{self, Unheld};
 use super::{Exit, NAME, fail, say};
 
 const PREFIX: &str = "kestrike-pre-push-";
@@ -70,11 +74,28 @@ const LETTERS: &[u8; 37] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
 const NAME_LENGTH: usize = 8;
 const NAME_ATTEMPTS: usize = 10_000;
 
+/// The name of the tool's directory under [`TOOLS_TARGET`]. A Cargo profile's name holds letters, digits,
+/// `-` and `_`. The dot distinguishes `pre-push.d` from Cargo profile names.
+pub(super) const OWN: &str = "pre-push.d";
+
+/// [`OWN`] contains the lock file named by [`LOCK`].
+pub(super) const LOCK: &str = "lock";
+
+const CONFIGURATION: [&str; 4] = [
+    ".cargo/config.toml",
+    ".cargo/config",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+];
+
+/// The most bytes of one configuration file that [`differs`] compares.
+const CONFIGURATION_LIMIT: u64 = 1 << 20;
+
 /// The sticky bit of a directory's mode: only an entry's owner, the directory's owner and root can rename
 /// or remove the entry.
 const STICKY: u32 = 0o1000;
 
-/// The most links [`foreign_link`] reads on one path, the most Linux follows in one path's resolution.
+/// The most links [`foreign_entry`] reads on one path, the most Linux follows in one path's resolution.
 const MAX_LINKS: usize = 40;
 
 #[cfg(test)]
@@ -117,7 +138,8 @@ pub(super) fn run_checks(
     tip: &Text,
     checks: &[Check],
 ) -> Result<Vec<String>, Exit> {
-    let tree = match make_tree() {
+    let shared = checks.iter().any(|check| check.row().tools_target);
+    let tree = match make_tree(shared.then_some(top)) {
         Ok(tree) => tree,
         Err(error) => {
             cancel::check()?;
@@ -186,6 +208,7 @@ fn checks_in(
             continue;
         }
         let mut started = git::command(environ, program);
+        let mut held = None;
         if row.tools_target {
             let target = top.join(TOOLS_TARGET);
             if let Some(reason) = refusal(tree, &target)? {
@@ -193,10 +216,39 @@ fn checks_in(
                 continue;
             }
             copy_lock(top, tree)?;
+            for name in CONFIGURATION {
+                if differs(&top.join(name), &tree.join(name)) {
+                    let said = say(&format!(
+                        "pre-push: {}: the working copy's {name} differs from the tip's, and the \
+                         row's build reads it beside the tip's",
+                        short(tip)
+                    ));
+                    cancel::check().map_err(Ended::Cancelled)?;
+                    said.map_err(Ended::Stream)?;
+                }
+            }
             started
                 .env("CARGO_TARGET_DIR", &target)
                 .env("CARGO_BUILD_BUILD_DIR", &target)
                 .env("CARGO_CACHE_RUSTC_INFO", "0");
+            let path = tree.parent().unwrap_or(tree).join(LOCK);
+            let waiting = || {
+                say(&format!(
+                    "pre-push: {}: waiting for the lock {}, which another push of this checkout holds",
+                    short(tip),
+                    shown(&path)
+                ))
+            };
+            held = match lock::take(&path, waiting) {
+                Ok(lock) => Some(lock),
+                Err(Unheld::Refused(reason)) => {
+                    failures.push(format!("{command}: {reason}"));
+                    continue;
+                }
+                Err(Unheld::Cancelled(code)) => return Err(Ended::Cancelled(code)),
+                Err(Unheld::Unsaid(code)) => return Err(Ended::Stream(code)),
+                Err(Unheld::Fault(message)) => return Err(Ended::Fault(message)),
+            };
         }
         let mut child = started
             .args(args)
@@ -206,6 +258,7 @@ fn checks_in(
             .map_err(|error| Ended::Fault(format!("{program}: {error}")))?;
         let status =
             cancel::wait(&mut child, || true).map_err(|unwaited| ended(program, unwaited))?;
+        drop(held);
         if !status.success() {
             failures.push(command);
         }
@@ -236,7 +289,7 @@ fn refusal(tree: &Path, target: &Path) -> Result<Option<String>, Ended> {
         let named: Vec<Text> = foreign.iter().map(|path| shown(path)).collect();
         return Ok(Some(format!(
             "another user owns or can write {}, and so can configure Cargo or rustup in the tip's \
-             worktree; set TMPDIR to a directory only you control",
+             worktree, which stands under the checkout",
             Text::join(", ", &named)
         )));
     }
@@ -279,6 +332,27 @@ fn copy_lock(top: &Path, tree: &Path) -> Result<(), Ended> {
     };
     copy.write_all(&bytes)
         .map_err(|error| fault(&target, &error))
+}
+
+/// `differs` reads up to one byte past [`CONFIGURATION_LIMIT`] through the same descriptor to detect oversized files.
+/// An unreadable file, a non-regular entry and an oversized file each count as differing.
+fn differs(ours: &Path, theirs: &Path) -> bool {
+    let read = |path: &Path| match ownership::open_regular(path) {
+        Ok(Opened::Absent) => Some(None),
+        Ok(Opened::File(file)) => {
+            let mut bytes = Vec::new();
+            let read = file
+                .take(CONFIGURATION_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            (u64::try_from(read).ok()? <= CONFIGURATION_LIMIT).then_some(Some(bytes))
+        }
+        Ok(Opened::Other) | Err(_) => None,
+    };
+    match (read(ours), read(theirs)) {
+        (Some(ours), Some(theirs)) => ours != theirs,
+        _ => true,
+    }
 }
 
 /// `ended` is how a run of `program` ended where [`cancel::wait`] gave no status.
@@ -414,6 +488,8 @@ pub(super) enum Exposure {
     Writable,
     /// A link on the way that [`planted`] holds for.
     Linked,
+    /// The path traversal encounters a directory whose owner and parent mode satisfy [`planted`].
+    Planted,
 }
 
 /// `exposed` judges the scratch parent by its owner and its mode, for the real user `user`: a directory
@@ -433,45 +509,61 @@ pub(super) fn writable(mode: u32) -> bool {
     mode & SHARED != 0 && mode & STICKY == 0
 }
 
-/// `planted` holds for a link that `owner` owns in a directory of mode `holder`, for the real user `user`:
-/// the mode gives the directory's group or every user write access, so any of them can make an entry
-/// there, and the link's owner, who can replace the link, is neither `user` nor root. A link in a
-/// directory that only its owner can write is trusted with that owner.
+/// `planted` holds when the mode `holder` of a directory has a group or other write bit and `owner`, the
+/// owner of an entry in that directory, differs from both `user` and root.
 pub(super) fn planted(owner: u32, holder: u32, user: u32) -> bool {
     holder & SHARED != 0 && ![user, 0].contains(&owner)
 }
 
-/// `foreign_link` returns the first link that [`planted`] holds for, for the real user `user`, among the
-/// links that resolving the absolute `path` passes through, the path's own name included. It reads each
-/// name from the root down with `lstat`, and at a link it goes on from the link's directory through the
-/// link's target and the names that follow. It returns `None` where the walk reaches an absent name, the
-/// path's end or the link after the first [`MAX_LINKS`] before it meets such a link.
+/// `foreign_entry` resolves the absolute `path` from the root with `lstat`, following each link through
+/// its target, and returns the first eligible link or intermediate directory whose owner and containing
+/// directory's mode satisfy [`planted`].
+/// It returns a link with [`Exposure::Linked`].
+/// It returns a directory that has a later name on the path with [`Exposure::Planted`].
+/// `foreign_entry` treats `trusted` and its ancestors as trusted entries.
+/// `foreign_entry` returns `None` when it encounters an absent name or exhausts the path.
 ///
 /// # Errors
 ///
 /// [`Unusable::Fault`] where an `lstat` fails with another error than an absent path's, or a link
 /// cannot be read.
-pub(super) fn foreign_link(path: &Path, user: u32) -> Result<Option<PathBuf>, Unusable> {
+pub(super) fn foreign_entry(
+    trusted: &Path,
+    path: &Path,
+    user: u32,
+) -> Result<Option<(PathBuf, Exposure)>, Unusable> {
     let fault = |at: &Path, error: io::Error| Unusable::Fault(format!("{}: {error}", shown(at)));
     let mut path = path.to_path_buf();
     for _ in 0..=MAX_LINKS {
         let (mut holder, mut mode) = (PathBuf::from("/"), 0);
         let mut names = path.components();
-        let (link, owner) = loop {
+        let link = loop {
             let Some(name) = names.next() else {
                 return Ok(None);
             };
             let entry = holder.join(name);
-            match fs::symlink_metadata(&entry) {
-                Ok(found) if found.is_symlink() => break (entry, found.uid()),
-                Ok(found) => (holder, mode) = (entry, found.mode()),
+            let found = match fs::symlink_metadata(&entry) {
+                Ok(found) => found,
                 Err(error) if ignored(&error) => return Ok(None),
                 Err(error) => return Err(fault(&entry, error)),
+            };
+            let passed = found.is_dir() && !names.as_path().as_os_str().is_empty();
+            let exposure = if found.is_symlink() {
+                Some(Exposure::Linked)
+            } else {
+                (passed && name != Component::ParentDir).then_some(Exposure::Planted)
+            };
+            if let Some(exposure) = exposure
+                && !trusted.starts_with(&entry)
+                && planted(found.uid(), mode, user)
+            {
+                return Ok(Some((entry, exposure)));
             }
+            if found.is_symlink() {
+                break entry;
+            }
+            (holder, mode) = (entry, found.mode());
         };
-        if planted(owner, mode, user) {
-            return Ok(Some(link));
-        }
         let target = fs::read_link(&link).map_err(|error| fault(&link, error))?;
         path = holder.join(target).join(names.as_path());
     }
@@ -482,8 +574,8 @@ pub(super) fn foreign_link(path: &Path, user: u32) -> Result<Option<PathBuf>, Un
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Unusable {
     /// The scratch parent `parent` is refused for `at`: itself, by [`exposed`], a directory its path is
-    /// reached through, by [`writable`], or a link on the way, by [`foreign_link`]. `pre-push:
-    /// <sentence>` names both and the cause, and the exit is 2.
+    /// reached through, by [`writable`], or a link or a directory on the way, by [`foreign_entry`].
+    /// `pre-push: <sentence>` names both and the cause, and the exit is 2.
     Exposed {
         parent: PathBuf,
         at: PathBuf,
@@ -494,49 +586,123 @@ pub(super) enum Unusable {
     Cancelled(u8),
     /// A failed step of the tool's own; `pre-push-checks: <text>` is printed, and the exit is 1.
     Fault(String),
+    /// [`own`] refuses the entry `at` for `state`. `exit` prints `pre-push: <sentence>` and returns 2.
+    Taken { at: PathBuf, state: Taken },
+}
+
+/// The state of an entry that [`own`] refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Taken {
+    Link,
+    Other,
+    Owned,
+    Writable,
+}
+
+/// Only its owner and root can replace an entry of a directory whose mode has no group or other write
+/// bit.
+fn own(top: &Path) -> Result<PathBuf, Unusable> {
+    let read = || {
+        let fault =
+            |at: &Path, error: io::Error| Unusable::Fault(format!("{}: {error}", shown(at)));
+        let target = top.join(TOOLS_TARGET);
+        let at = target.join(OWN);
+        fs::create_dir_all(&target).map_err(|error| fault(&target, error))?;
+        match DirBuilder::new().mode(0o700).create(&at) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
+                return Err(fault(&at, error));
+            }
+            _ => {}
+        }
+        let found = fs::symlink_metadata(&at).map_err(|error| fault(&at, error))?;
+        let state = if found.is_symlink() {
+            Taken::Link
+        } else if !found.is_dir() {
+            Taken::Other
+        } else if found.uid() != real_uid() {
+            Taken::Owned
+        } else if found.mode() & SHARED != 0 {
+            Taken::Writable
+        } else {
+            return Ok(at);
+        };
+        Err(Unusable::Taken { at, state })
+    };
+    let read = read();
+    cancel::check().map_err(Unusable::Cancelled)?;
+    read
 }
 
 impl Unusable {
     /// `exit` prints the line of `self`, where it has one, and returns its exit code.
     fn exit(&self) -> Exit {
+        match self.line() {
+            Ok((line, code)) => fail(&line, code),
+            Err(code) => code,
+        }
+    }
+
+    /// `line` returns `Err(code)` for a recorded signal; otherwise it returns `Ok((line, code))`, where
+    /// `exit` prints `line` and returns `code`.
+    pub(super) fn line(&self) -> Result<(String, Exit), Exit> {
         match self {
             Self::Exposed {
                 parent,
                 at,
                 exposure,
             } => {
-                let cause = match exposure {
-                    Exposure::Owned => "is owned by another user",
-                    Exposure::Writable => {
-                        "is writable by its group or by other users and has no sticky bit"
+                let (parent, entry) = (shown(parent), shown(at));
+                let named = match exposure {
+                    Exposure::Linked => format!(
+                        "the scratch directory {parent} is reached through the link {entry}, which \
+                         another user owns"
+                    ),
+                    Exposure::Planted => format!(
+                        "the scratch directory {parent} is reached through {entry}, which another \
+                         user owns in a directory that its group or other users can write"
+                    ),
+                    Exposure::Owned | Exposure::Writable => {
+                        let cause = if *exposure == Exposure::Owned {
+                            "is owned by another user"
+                        } else {
+                            "is writable by its group or by other users and has no sticky bit"
+                        };
+                        if parent == entry {
+                            format!("the scratch directory {parent} {cause}")
+                        } else {
+                            format!(
+                                "the scratch directory {parent} is reached through {entry}, which \
+                                 {cause}"
+                            )
+                        }
                     }
-                    Exposure::Linked => "another user owns",
                 };
-                let named = if *exposure == Exposure::Linked {
+                Ok((
                     format!(
-                        "the scratch directory {} is reached through the link {}, which {cause}",
-                        shown(parent),
-                        shown(at)
-                    )
-                } else if at == parent {
-                    format!("the scratch directory {} {cause}", shown(parent))
-                } else {
-                    format!(
-                        "the scratch directory {} is reached through {}, which {cause}",
-                        shown(parent),
-                        shown(at)
-                    )
-                };
-                fail(
-                    &format!(
                         "pre-push: {named}; set TMPDIR to a directory that you own and only you can \
                          write"
                     ),
                     2,
-                )
+                ))
             }
-            Self::Cancelled(code) => *code,
-            Self::Fault(text) => fail(&format!("{NAME}: {text}"), 1),
+            Self::Cancelled(code) => Err(*code),
+            Self::Fault(text) => Ok((format!("{NAME}: {text}"), 1)),
+            Self::Taken { at, state } => {
+                let state = match state {
+                    Taken::Link => "is a link",
+                    Taken::Other => "is no directory",
+                    Taken::Owned => "is owned by another user",
+                    Taken::Writable => "is writable by its group or by other users",
+                };
+                Ok((
+                    format!(
+                        "pre-push: the worktree directory {} {state}; remove it, and the next push \
+                         makes it",
+                        shown(at)
+                    ),
+                    2,
+                ))
+            }
         }
     }
 }
@@ -551,12 +717,12 @@ fn parent() -> Result<PathBuf, Unusable> {
 
 /// `checked` is [`judged`] for the tool's real user.
 pub(super) fn checked(chosen: &OsStr) -> Result<PathBuf, Unusable> {
-    judged(chosen, real_uid())
+    judged(Path::new("/"), chosen, real_uid())
 }
 
 /// `judged` makes `chosen` absolute against the working directory and reads, for the real user `user`,
 /// the status of each directory in which that path looks a name up, from the root down and through the
-/// links on the way, then the owner of each link on the way, and then the status of the path itself,
+/// links along the path, then the owner of each entry [`foreign_entry`] tests, then the status of the path itself,
 /// following links. A path that names no directory, an absent one included, is returned as it is, and
 /// the `mkdir` under it reports the failure.
 ///
@@ -564,10 +730,10 @@ pub(super) fn checked(chosen: &OsStr) -> Result<PathBuf, Unusable> {
 ///
 /// [`Unusable::Cancelled`] where a signal is recorded once the statuses are read, whatever the reads
 /// gave; else [`Unusable::Exposed`] for the first directory above the path that is [`writable`], for the
-/// link [`foreign_link`] returns, or for the path itself where [`exposed`] refuses it, and
+/// entry [`foreign_entry`] returns, or for the path itself where [`exposed`] refuses it, and
 /// [`Unusable::Fault`] where the working directory or a link on the way cannot be read, or a `stat` or
 /// an `lstat` fails with another error than an absent path's.
-pub(super) fn judged(chosen: &OsStr, user: u32) -> Result<PathBuf, Unusable> {
+pub(super) fn judged(trusted: &Path, chosen: &OsStr, user: u32) -> Result<PathBuf, Unusable> {
     let fault = |error: crate::ownership::PathError| Unusable::Fault(error.to_string());
     let read = || {
         let parent =
@@ -583,8 +749,7 @@ pub(super) fn judged(chosen: &OsStr, user: u32) -> Result<PathBuf, Unusable> {
                 });
             }
         }
-        if let Some(at) = foreign_link(&parent, user)? {
-            let exposure = Exposure::Linked;
+        if let Some((at, exposure)) = foreign_entry(trusted, &parent, user)? {
             return Err(Unusable::Exposed {
                 parent,
                 at,
@@ -622,11 +787,14 @@ pub(super) fn scratch() -> Result<(), Exit> {
 ///
 /// # Errors
 ///
-/// [`parent`] refuses the parent, cannot read it or finds a signal recorded, the random bytes cannot be
+/// [`own`] or [`parent`] refuses the directory, cannot read it, or detects a recorded signal, the random bytes cannot be
 /// read, a `mkdir` fails with another error than a taken name, or every name drawn is taken; the text
 /// names the path where a `mkdir` failed.
-fn make_tree() -> Result<PathBuf, Unusable> {
-    let parent = parent()?;
+fn make_tree(top: Option<&Path>) -> Result<PathBuf, Unusable> {
+    let parent = match top {
+        Some(top) => own(top)?,
+        None => parent()?,
+    };
     let random = |error: io::Error| Unusable::Fault(format!("/dev/urandom: {error}"));
     let mut source = File::open("/dev/urandom").map_err(random)?;
     for _ in 0..NAME_ATTEMPTS {

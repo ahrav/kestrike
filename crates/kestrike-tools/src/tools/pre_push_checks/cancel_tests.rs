@@ -303,11 +303,24 @@ fn only_an_exit_or_a_death_by_signal_ends_a_leader() {
     }
 }
 
-/// `pipe` returns the read and write ends of a new pipe.
+/// `pipe` returns the read and write ends of a new pipe, both close-on-exec.
 fn pipe() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
     let mut ends = [0; 2];
-    // SAFETY: `pipe` writes two descriptors into `ends`, which outlives the call.
-    assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+    // SAFETY: `pipe2` writes two descriptors into `ends`, which outlives the call.
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) },
+        0
+    );
+    // SAFETY: `pipe` writes two descriptors into `ends`, which outlives the call, and `fcntl` takes an
+    // open descriptor and integer flags.
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        assert_eq!(libc::pipe(ends.as_mut_ptr()), 0);
+        for end in ends {
+            assert_eq!(libc::fcntl(end, libc::F_SETFD, libc::FD_CLOEXEC), 0);
+        }
+    }
     // SAFETY: each descriptor is open and owned by nothing else.
     unsafe {
         use std::os::fd::FromRawFd;
@@ -517,14 +530,14 @@ fn the_scratch_check_judges_the_parent_and_each_link_for_the_user_it_is_given() 
     std::os::unix::fs::symlink("private", &link).expect("the link is made");
     let me = crate::ownership::real_uid();
     for path in [&private, &link] {
-        assert_eq!(judged(path.as_os_str(), me), Ok(path.clone()));
+        assert_eq!(judged(&scratch.0, path.as_os_str(), me), Ok(path.clone()));
     }
     if me == 0 {
         return;
     }
     for (path, exposure) in [(&private, Exposure::Owned), (&link, Exposure::Linked)] {
         assert_eq!(
-            judged(path.as_os_str(), me + 1),
+            judged(&scratch.0, path.as_os_str(), me + 1),
             Err(Unusable::Exposed {
                 parent: path.clone(),
                 at: path.clone(),
