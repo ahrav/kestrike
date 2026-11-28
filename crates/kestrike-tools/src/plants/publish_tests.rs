@@ -220,7 +220,11 @@ fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
     fs::write(&elsewhere, "kept\n").expect("written");
     symlink(&elsewhere, &target).expect("linked");
     let later: i128 = 4_102_444_800_123_456_789;
-    assert_ne!(read_umask().expect("the umask reads") & 0o022, 0, "the umask clears group write");
+    assert_ne!(
+        read_umask().expect("the umask reads") & 0o022,
+        0,
+        "the umask clears group write"
+    );
     let staging = Staging::new(Creation::Exact(0o4766))
         .suffix(".weaken")
         .modified(later);
