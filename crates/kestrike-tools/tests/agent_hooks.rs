@@ -470,18 +470,17 @@ const DEAF_TOOL: &str =
 /// arguments, on its own standard input.
 const LAUNCHER: &str = "#!/bin/sh\nexec \"$TOOLS_BINARY\" \"$TOOLS_TOP\" \"$@\"\n";
 
-/// The launcher's stand-in that writes the value of its environment's `refs`, or `absent`, to `tool.refs`
-/// in the repository.
-const NAMER: &str =
-    "#!/bin/sh\nprintf '%s' \"${refs-absent}\" > \"$(dirname -- \"$0\")/../tool.refs\"\n";
+/// The launcher's stand-in that writes the values of its environment's `refs`, `LC_ALL` and `TMOUT`, each
+/// `absent` where the environment lacks it, to `tool.environment` in the repository.
+const NAMER: &str = "#!/bin/sh\nprintf '%s|%s|%s' \"${refs-absent}\" \"${LC_ALL-absent}\" \"${TMOUT-absent}\" > \"$(dirname -- \"$0\")/../tool.environment\"\n";
 
 /// The global hook's stand-in that writes its standard input to `guard.input` beside itself and exits 37.
 const KEEPER: &str = "#!/bin/sh\ncat > \"$(dirname -- \"$0\")/guard.input\"\nexit 37\n";
 
 /// The global hook's stand-in that reads no byte of its standard input: it makes `guard.ran` beside
-/// itself, writes the value of its environment's `refs`, or `absent`, to `guard.refs` there, and exits
-/// with the value of `GUARD_EXIT`, or 0.
-const DEAF_GUARD: &str = "#!/bin/sh\n: > \"$(dirname -- \"$0\")/guard.ran\"\nprintf '%s' \"${refs-absent}\" > \"$(dirname -- \"$0\")/guard.refs\"\nexit \"${GUARD_EXIT:-0}\"\n";
+/// itself, writes the values of its environment's `refs`, `LC_ALL` and `TMOUT`, each `absent` where the
+/// environment lacks it, to `guard.environment` there, and exits with the value of `GUARD_EXIT`, or 0.
+const DEAF_GUARD: &str = "#!/bin/sh\n: > \"$(dirname -- \"$0\")/guard.ran\"\nprintf '%s|%s|%s' \"${refs-absent}\" \"${LC_ALL-absent}\" \"${TMOUT-absent}\" > \"$(dirname -- \"$0\")/guard.environment\"\nexit \"${GUARD_EXIT:-0}\"\n";
 
 /// `hook_text` is the text of the checkout's `.githooks/pre-push`.
 fn hook_text() -> String {
@@ -802,21 +801,30 @@ fn pre_push_ends_with_exit_1_before_the_tool_starts_when_its_input_cannot_be_rea
     );
 }
 
-/// The ref lines stay in the hook's shell: neither reader's environment holds a variable `refs`, with
-/// one in the hook's own environment.
+/// Each reader starts in the hook's environment less a variable `refs`: the ref lines stay in the hook's
+/// shell, and the locale and the time limit that the hook sets for its own read reach neither reader. The
+/// rows give the hook an `LC_ALL` and a `TMOUT` of its own and none.
 #[test]
-fn pre_push_gives_its_readers_no_variable_named_refs() {
+fn pre_push_starts_its_readers_in_its_own_environment_less_the_ref_lines() {
     let repo = Repo::new("pre-push-environment");
     let hooks = repo.guard(DEAF_GUARD);
-    let mut command = repo.hook_with(&hook_text(), NAMER);
-    command.env("refs", "inherited");
-    let done = finished(spawn_with_input(&mut command, DELETION));
-    assert_eq!(done.code, Some(0), "{done}");
+    let checked = hook_text();
     let read = |path: PathBuf| {
         fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
     };
-    assert_eq!(read(repo.path.join("tool.refs")), "absent");
-    assert_eq!(read(hooks.join("guard.refs")), "absent");
+    for (given, expected) in [(true, "absent|POSIX|7"), (false, "absent|absent|absent")] {
+        let mut command = repo.hook_with(&checked, NAMER);
+        command.env("refs", "inherited");
+        if given {
+            command.env("LC_ALL", "POSIX").env("TMOUT", "7");
+        } else {
+            command.env_remove("LC_ALL").env_remove("TMOUT");
+        }
+        let done = finished(spawn_with_input(&mut command, DELETION));
+        assert_eq!(done.code, Some(0), "{done}");
+        assert_eq!(read(repo.path.join("tool.environment")), expected);
+        assert_eq!(read(hooks.join("guard.environment")), expected);
+    }
 }
 
 /// The built tool's refusal of a malformed ref line passes through the hook: exit 2 with the tool's
