@@ -4,8 +4,9 @@
 use kestrike_tools::host_stop::Signal;
 
 use super::plane::{CALLER, STATUS};
-use super::steps::{Step, free_lock, links, syncs};
+use super::steps::{Step, links, syncs};
 use super::{COPY, Case, listing};
+use crate::host_stop_support::free_lock;
 
 const ENOSPC: i32 = libc::ENOSPC;
 

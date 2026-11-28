@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use kestrike_tools::gameday::ReadError;
-use kestrike_tools::host_stop::{Disk, Files, Links, Lock, LockError, lock};
+use kestrike_tools::host_stop::{Disk, Files, Links};
 use kestrike_tools::text::Text;
 
 use super::plane::{Shared, State};
@@ -180,23 +180,6 @@ impl Files for Reader<'_> {
 
 /// How long a lock that no case holds on purpose is taken again before its refusal stands.
 pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(2);
-
-/// The lock of `directory`, which no command holds: taken again for up to [`LOCK_WAIT`] while a
-/// process of the test run holds a descriptor it inherited between its fork and its exec.
-pub(crate) fn free_lock(directory: &Path) -> Lock {
-    let until = Instant::now() + LOCK_WAIT;
-    loop {
-        match lock(&Disk, directory) {
-            Ok(held) => return held,
-            Err(LockError::Taken(error))
-                if error.raw_os_error() == Some(libc::EWOULDBLOCK) && Instant::now() < until =>
-            {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("{}: the lock is not free: {error:?}", directory.display()),
-        }
-    }
-}
 
 /// The system error `code`.
 pub(crate) fn errno(code: i32) -> io::Error {
