@@ -123,7 +123,8 @@ and each unit test file is declared by its owner, so no tool, case or
 unit test file has a registration line. A port still adds one sorted `pub mod` line to
 `crates/kestrike-tools/src/lib.rs` for a new library module and a line under `[dependencies]` of
 `crates/kestrike-tools/Cargo.toml` for a dependency it needs. A port that brings rules from a Python file
-that stays in the tree adds a row to [Rules held twice](#rules-held-twice).
+that stays in the tree, a file its script loads included, adds a row to
+[Rules held twice](#rules-held-twice).
 
 1. Write the tool as one module under `crates/kestrike-tools/src/tools/`: a file `<module>.rs`, or a
    directory `<module>/` with `mod.rs`. Its root holds `pub const NAME: &str = "<tool>";` and the entry
@@ -210,13 +211,14 @@ port deletes it.
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/marklog_check.py` | The text of `case.qnt` for a case of the marklog model without mutations or extra text: `case::marklog` and `inputs`. |
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/reclaim_check.py` | The text of `case.qnt` for a case of the reclaim model without mutations or extra text: `case::bounded` and `inputs`. |
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/register_check.py` | The text of `case.qnt` for a case of the register model without mutations or extra text: `case::bounded` and `inputs`. |
+| `crates/kestrike-tools/src/git.rs` | `scripts/red-green.py` | The five Git variables that point Git at another repository, work tree, index or object store, in the order a refusal lists them: `REPOSITORY_VARIABLES` in the Rust module and `OVERRIDES` in the Python file. |
 | `crates/kestrike-tools/src/ownership.rs` | `scripts/red-green.py` | The directory checks `shared_directories`, `traversed`, `make_private` and `foreign_toolchain_paths`, with `TOOLCHAIN_FILES` and `SHARED`, under the same names in both. |
 | `crates/kestrike-tools/src/production_text.rs` | `scripts/classify-atomics.py` | The test-only reading of a Rust source: `closing`, `item_end`, `readings`, `macro_spans`, `own_comma`, `analyzed`, `spliced` and `blanked`, with the patterns `RUN`, `ITEM` and `PROVEN`, and `MACRO`, which the Rust module holds as `MACRO_DEFINITION` and `MACRO_BANG`. |
 | `crates/kestrike-tools/src/python.rs` | `scripts/red-green.py` | The line printer `say`: the characters it escapes and the one newline it ends a line with. |
 | `crates/kestrike-tools/src/rust_text.rs` | `scripts/classify-atomics.py` | `blank` and `code`, which blank a Rust source's comments and literal contents. |
 | `crates/kestrike-tools/src/rust_text.rs` | `scripts/judge-rc11.py` | The lexer of Rust source: `lexemes` in the Rust module, `rust_lexemes` with `RUST_LEXEME` in the Python file, and `BLOCK_EDGE` in both. |
 | `crates/kestrike-tools/src/tools/escrow_fixtures.rs` | `quint/escrow_check.py` | The four checked runs, each with its volume: the first four rows of `RECIPES` and `RUNS`. |
-| `crates/kestrike-tools/src/tools/gate_fixtures.rs` | `quint/gate_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`, with `SUBMIT` and `REPORTED` in both. |
+| `crates/kestrike-tools/src/tools/gate_fixtures.rs` | `quint/gate_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`, with `SUBMIT` in both. The turns up to a submitted report are `REPORTED` in the Python file and the macro `reported!` in the Rust module, whose constant `REPORTED` holds the macro's turns and is read by no recipe. The second checked run writes those turns out after its first turn in the Rust module. |
 | `crates/kestrike-tools/src/tools/grace_fixtures.rs` | `quint/grace_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`. |
 | `crates/kestrike-tools/src/tools/lookup_fixtures.rs` | `quint/lookup_check.py` | The three checked runs: the first three rows of `RECIPES` and `RUNS`. |
 | `crates/kestrike-tools/src/tools/marklog_fixtures.rs` | `quint/marklog_check.py` | The three checked runs: the first three rows of `RECIPES` and `RUNS`. |
@@ -226,7 +228,8 @@ port deletes it.
 The checked runs of the seven rows under `crates/kestrike-tools/src/tools/` are each compared with the
 committed replay traces: `scripts/test-quint-check.py` compares each run of `RUNS` with its trace's recipe,
 and `crates/kestrike-tools/tests/fixture_writers.rs` compares each trace a tool writes with the committed
-one.
+one. Neither compares which recipes are the checked runs, so the count in a row and in the comment on
+`RECIPES` is kept by hand.
 
 ## What a port keeps
 
