@@ -24,6 +24,25 @@ fn mask(status: &str, field: &str) -> u64 {
     u64::from_str_radix(line.trim(), 16).expect("a hexadecimal mask")
 }
 
+#[test]
+fn the_signals_are_the_system_numbers_under_their_names() {
+    for (signal, number, name) in [
+        (Signal::Interrupt, libc::SIGINT, "SIGINT"),
+        (Signal::Terminate, libc::SIGTERM, "SIGTERM"),
+        (Signal::Hangup, libc::SIGHUP, "SIGHUP"),
+    ] {
+        assert_eq!((signal.number(), signal.name()), (number, name));
+        assert_eq!(
+            kestrike_tools::host_stop::Interrupted(signal).to_string(),
+            name
+        );
+    }
+    assert_eq!(
+        Signal::ALL,
+        [Signal::Interrupt, Signal::Terminate, Signal::Hangup]
+    );
+}
+
 fn bit(signal: Signal) -> u64 {
     1 << (signal.number() - 1)
 }
@@ -53,7 +72,14 @@ fn installed(place: &Path) {
         0,
         "the window starts with SIGHUP ignored"
     );
+    let thread = || fs::read_to_string("/proc/thread-self/status").expect("the status reads");
+    let blocked = mask(&thread(), "SigBlk:");
     install(&DELIVERED).expect("the handlers install");
+    assert_eq!(
+        mask(&thread(), "SigBlk:"),
+        blocked,
+        "the registrations leave the thread's mask as they found it"
+    );
     let status = own();
     let (caught, ignored) = (mask(&status, "SigCgt:"), mask(&status, "SigIgn:"));
     assert_ne!(caught & bit(Signal::Interrupt), 0);

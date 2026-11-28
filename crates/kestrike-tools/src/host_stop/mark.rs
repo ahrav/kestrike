@@ -15,8 +15,10 @@ use std::path::Path;
 
 use super::files::{Files, Links, proc_path};
 use crate::plants::files::strerror;
+use crate::text::Text;
 
-/// The step of a write that failed before the link.
+/// The step of a write that failed, up to and including the link. [`Step::Link`] with `EEXIST`
+/// reports an entry already at the name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     /// The name is other than one path component; no step ran.
@@ -33,12 +35,14 @@ pub enum Step {
 /// A mark the write left other than standing whole and synced.
 #[derive(Debug)]
 pub enum Unwritten {
-    /// A step before the link failed: no entry has the name, and an entry that stood there before
-    /// keeps its bytes.
+    /// A failure through the link step leaves the destination unchanged: an absent name stays absent,
+    /// and an existing entry keeps its bytes.
     Failed { step: Step, error: io::Error },
-    /// A write took no byte: no entry has the name.
+    /// A write returned `0` before the link, leaving the destination unchanged.
     Stalled,
-    /// A sync after the link failed with `error`; the name is removed and the removal synced.
+    /// After a post-link sync fails with `error`, `publish` removes the name and successfully syncs
+    /// the directory. If the directory sync returned `error`, `publish` syncs the same descriptor after
+    /// removal.
     Removed { error: io::Error },
     /// A sync after the link failed with `error`; the name is removed, and the directory's sync after
     /// the removal failed with `removal`, so the mark may stand again after a crash.
@@ -70,31 +74,39 @@ impl Unwritten {
 
     /// The sentence that names this failure of the mark at `path`: the system's text of the error for
     /// a failed step, and for a failure after the link what stands and whether a crash may change it.
-    pub fn sentence(&self, path: &Path) -> String {
-        let shown = path.display();
+    pub fn sentence(&self, path: &Path) -> Text {
+        let mut sentence = Text::new();
+        let shown = Text::from_os(path.as_os_str());
         match self {
-            Self::Failed { error, .. } => strerror(error),
+            Self::Failed { error, .. } => sentence.push_str(&strerror(error)),
             Self::Stalled => {
-                let name = path.file_name().unwrap_or(path.as_os_str()).display();
-                format!("a write of {name} made no progress")
+                sentence.push_str("a write of ");
+                sentence.push_text(&Text::from_os(path.file_name().unwrap_or(path.as_os_str())));
+                sentence.push_str(" made no progress");
             }
             Self::Removed { error } => {
-                format!(
-                    "{shown} cannot be synced, so the mark is removed: {}",
-                    strerror(error)
-                )
+                sentence.push_text(&shown);
+                sentence.push_str(" cannot be synced, so the mark is removed: ");
+                sentence.push_str(&strerror(error));
             }
-            Self::RemovalUnsynced { error, .. } => format!(
-                "{shown} cannot be synced ({}), so it is removed; the removal is unsynced, so the mark \
-                 may stand again after a crash",
-                strerror(error)
-            ),
-            Self::Stands { error, .. } => format!(
-                "{shown} stands, but it cannot be synced ({}) and cannot be removed, so it may not \
-                 survive a crash",
-                strerror(error)
-            ),
+            Self::RemovalUnsynced { error, .. } => {
+                sentence.push_text(&shown);
+                sentence.push_str(&format!(
+                    " cannot be synced ({}), so it is removed; the removal is unsynced, so the mark \
+                     may stand again after a crash",
+                    strerror(error)
+                ));
+            }
+            Self::Stands { error, .. } => {
+                sentence.push_text(&shown);
+                sentence.push_str(&format!(
+                    " stands, but it cannot be synced ({}) and cannot be removed, so it may not \
+                     survive a crash",
+                    strerror(error)
+                ));
+            }
         }
+        sentence
     }
 }
 
@@ -128,7 +140,10 @@ pub fn publish(
         .map_err(failed(Step::OpenUnnamed))?;
     let mut rest = data;
     while !rest.is_empty() {
-        let written = files.write(&unnamed, rest).map_err(failed(Step::Write))?;
+        let written = match files.write(&unnamed, rest) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            written => written.map_err(failed(Step::Write))?,
+        };
         if written == 0 {
             return Err(Unwritten::Stalled);
         }
@@ -162,8 +177,8 @@ fn one_component(name: &OsStr) -> bool {
         && !bytes.contains(&0)
 }
 
-/// Syncs the entries of `directory`, opened following a link, so an entry made or removed in it
-/// survives a crash.
+/// Syncs the entries of `directory`, opened following a link. On storage that honors a directory's
+/// sync, entry creation and removal survive a crash.
 ///
 /// # Errors
 ///

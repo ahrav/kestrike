@@ -72,7 +72,16 @@ fn the_lock_opens_the_directory_without_following_a_link() {
         }
         assert_eq!(files.steps(), ["open_directory"], "{path}");
     }
-    let held = lock(&Disk, &directory).expect("the directory itself locks");
+    let interrupted = Observed::failing(&[Fault {
+        step: "try_lock",
+        nth: 1,
+        errno: libc::EINTR,
+    }]);
+    let held = lock(&interrupted, &directory).expect("an interrupted flock runs again");
+    assert_eq!(
+        interrupted.steps(),
+        ["open_directory", "try_lock", "try_lock"]
+    );
     drop(held);
 }
 
@@ -86,7 +95,14 @@ fn the_probe_refuses_a_directory_without_unnamed_files_or_their_link() {
     let files = Observed::default();
     probe(&files, &root).expect("the directory takes unnamed files");
     assert_eq!(files.steps(), ["open_unnamed", "exists"]);
-    assert_eq!(files.seen()[0].path.as_deref(), Some(root.as_path()));
+    let seen = files.seen();
+    assert_eq!(seen[0].path.as_deref(), Some(root.as_path()));
+    let unnamed = seen[0].fds[0];
+    assert_eq!(
+        seen[1].path.as_deref(),
+        Some(Path::new(&format!("/proc/self/fd/{unnamed}"))),
+        "the probe resolves the unnamed file's own descriptor"
+    );
     assert_eq!(listing(&root), Vec::<String>::new());
     let unsupported = Observed::failing(&[Fault {
         step: "open_unnamed",
@@ -105,8 +121,10 @@ fn the_probe_refuses_a_directory_without_unnamed_files_or_their_link() {
     }]);
     match probe(&unresolved, &root) {
         Err(ProbeError::Unresolved(path)) => {
-            assert!(path.starts_with("/proc/self/fd/"), "{}", path.display());
-            assert_eq!(unresolved.seen()[1].path.as_deref(), Some(path.as_path()));
+            let seen = unresolved.seen();
+            let unnamed = seen[0].fds[0];
+            assert_eq!(path, Path::new(&format!("/proc/self/fd/{unnamed}")));
+            assert_eq!(seen[1].path.as_deref(), Some(path.as_path()));
         }
         other => panic!("{other:?}"),
     }

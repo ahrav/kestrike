@@ -2,14 +2,18 @@
 //! and the states a kill before and after the link leaves.
 
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{Child, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use kestrike_tools::host_stop::{Disk, Step, Unwritten, publish, sync_directory};
 
-use super::{Fault, Observed, PLACE, ROLE, Scratch, listing, start_window, wait_for};
+use super::{Fault, MARKER_LIMIT, Observed, PLACE, ROLE, Scratch, listing, passed, start_window};
 
 const MARKS: [&str; 6] = [
     "roles",
@@ -131,7 +135,7 @@ fn a_failure_before_the_link_leaves_no_entry() {
             }
             assert!(!failed.linked() && !failed.stands());
             let path = directory.join(file_name(mark));
-            assert_eq!(failed.sentence(&path), "Input/output error");
+            assert_eq!(failed.sentence(&path).to_string(), "Input/output error");
             assert_eq!(listing(&directory), Vec::<String>::new(), "{mark} {step}");
             assert_eq!(
                 files.steps().last(),
@@ -141,7 +145,7 @@ fn a_failure_before_the_link_leaves_no_entry() {
         }
         let directory = scratch.dir(&format!("{mark}-stalled"));
         let files = Observed {
-            stall: true,
+            stall: Some(1),
             ..Observed::default()
         };
         let stalled = publish(
@@ -154,9 +158,10 @@ fn a_failure_before_the_link_leaves_no_entry() {
             panic!("a write that takes no byte fails")
         };
         assert!(matches!(stalled, Unwritten::Stalled), "{stalled:?}");
+        assert!(!stalled.linked() && !stalled.stands());
         let path = directory.join(file_name(mark));
         assert_eq!(
-            stalled.sentence(&path),
+            stalled.sentence(&path).to_string(),
             format!("a write of {} made no progress", file_name(mark))
         );
         assert_eq!(
@@ -168,6 +173,50 @@ fn a_failure_before_the_link_leaves_no_entry() {
             1
         );
         assert_eq!(listing(&directory), Vec::<String>::new());
+        for (case, fault, stall) in [
+            (
+                "failed",
+                Some(Fault {
+                    step: "write",
+                    nth: 2,
+                    errno: libc::ENOSPC,
+                }),
+                None,
+            ),
+            ("stalled", None, Some(2)),
+        ] {
+            let directory = scratch.dir(&format!("{mark}-partial-{case}"));
+            let files = Observed {
+                faults: fault.into_iter().collect(),
+                write_cap: Some(7),
+                stall,
+                ..Observed::default()
+            };
+            let ended = publish(
+                &files,
+                &directory,
+                OsStr::new(&file_name(mark)),
+                &bytes_of(mark),
+            )
+            .expect_err("the second write ends the mark");
+            match (case, &ended) {
+                ("failed", Unwritten::Failed { step, error }) => {
+                    assert_eq!(
+                        (*step, error.raw_os_error()),
+                        (Step::Write, Some(libc::ENOSPC))
+                    );
+                }
+                ("stalled", Unwritten::Stalled) => {}
+                (case, other) => panic!("{mark} {case}: {other:?}"),
+            }
+            assert!(!ended.linked() && !ended.stands());
+            assert_eq!(
+                files.steps(),
+                ["open_directory", "open_unnamed", "write", "write"],
+                "{mark} {case}"
+            );
+            assert_eq!(listing(&directory), Vec::<String>::new(), "{mark} {case}");
+        }
     }
 }
 
@@ -263,8 +312,9 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
             let failed = publish(&files, &directory, OsStr::new(&name), &bytes_of(mark))
                 .expect_err("the planted sync fails");
             assert!(failed.linked(), "{mark} {case}");
+            assert_eq!(failed.stands(), case.ends_with("stands"), "{mark} {case}");
             let path = directory.join(&name);
-            let sentence = failed.sentence(&path);
+            let sentence = failed.sentence(&path).to_string();
             let shown = path.display();
             match (case, &failed) {
                 ("file sync" | "directory sync", Unwritten::Removed { error }) => {
@@ -377,6 +427,33 @@ fn short_writes_leave_the_mark_whole() {
             bytes_of(mark)
         );
     }
+    let directory = scratch.dir("interrupted");
+    let files = Observed {
+        faults: vec![Fault {
+            step: "write",
+            nth: 2,
+            errno: libc::EINTR,
+        }],
+        write_cap: Some(7),
+        ..Observed::default()
+    };
+    publish(
+        &files,
+        &directory,
+        OsStr::new("stop.json"),
+        &bytes_of("stop"),
+    )
+    .expect("an interrupted write runs again");
+    let writes = files
+        .steps()
+        .iter()
+        .filter(|step| **step == "write")
+        .count();
+    assert_eq!(writes, bytes_of("stop").len().div_ceil(7) + 1);
+    assert_eq!(
+        fs::read(directory.join("stop.json")).expect("reads"),
+        bytes_of("stop")
+    );
     let directory = scratch.dir("over");
     let files = Observed {
         overreport: true,
@@ -448,8 +525,9 @@ fn a_name_other_than_one_component_takes_no_step() {
         );
         assert!(files.steps().is_empty(), "{name:?}");
         let failed = failed.expect_err("refused");
+        assert!(!failed.linked() && !failed.stands());
         assert_eq!(
-            failed.sentence(&scratch.0.join("x")),
+            failed.sentence(&scratch.0.join("x")).to_string(),
             "a mark's name is one path component"
         );
     }
@@ -473,30 +551,64 @@ fn a_directory_sync_opens_and_syncs_the_directory() {
 const KILL_CASE: &str =
     "host_stop::marks::a_kill_before_the_link_leaves_no_entry_and_after_it_the_mark_stands";
 
-/// `paused_write` writes the stop mark in `PLACE/marks` and pauses at the step `window` names, where
-/// the parent kills the process.
+/// `paused_write` writes the mark the window names in `PLACE/marks` and pauses at the step its cut
+/// names, where the parent kills the process. With the file's second sync failed, the first directory
+/// sync is the removal's.
 fn paused_write(window: &str, place: &Path) {
-    let (step, nth) = match window {
-        "link" => ("link", 1),
-        "file sync" => ("fsync", 2),
-        _ => ("fsync_directory", 1),
+    let (mark, cut) = window
+        .split_once(':')
+        .expect("a window names its mark and its cut");
+    let sync_fails = Fault {
+        step: "fsync",
+        nth: 2,
+        errno: libc::EIO,
+    };
+    let (step, nth, faults) = match cut {
+        "link" => ("link", 1, vec![]),
+        "file sync" => ("fsync", 2, vec![]),
+        "directory sync" => ("fsync_directory", 1, vec![]),
+        "removal" => ("unlink", 1, vec![sync_fails]),
+        "removal sync" => ("fsync_directory", 1, vec![sync_fails]),
+        other => panic!("no window {other}"),
     };
     let files = Observed {
+        faults,
         pause: Some((step, nth, place.join("ready"))),
         ..Observed::default()
     };
     let written = publish(
         &files,
         &place.join("marks"),
-        OsStr::new("stop.json"),
-        &bytes_of("stop"),
+        OsStr::new(&file_name(mark)),
+        &bytes_of(mark),
     );
     panic!("the write returned {written:?} at a step that pauses");
 }
 
-/// A writer killed with SIGKILL before the link leaves no entry, since the unnamed file has no name;
-/// one killed after the link, before or after the file's second sync, leaves the mark standing with
-/// all its bytes.
+/// If the writer exits or [`MARKER_LIMIT`] elapses before `paused` observes `ready`, `paused` attempts
+/// to kill the writer, reaps it, and fails the case with its log.
+fn paused(writer: &mut Child, ready: &Path, log: &Path) {
+    let start = Instant::now();
+    loop {
+        if ready.exists() {
+            return;
+        }
+        let ended = writer.try_wait().expect("the writer is waited on");
+        let late = start.elapsed() >= MARKER_LIMIT;
+        if ended.is_some() || late {
+            let _ = writer.kill();
+            let status = writer.wait().expect("the writer is reaped");
+            let text = fs::read_to_string(log).unwrap_or_default();
+            panic!("the writer ended {status} before its pause (late: {late}):\n{text}");
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The link publishes the mark: SIGKILL at the `link` cut leaves the mark directory empty. At the
+/// `file sync` and `directory sync` cuts, SIGKILL leaves the complete mark. In the removal after a
+/// failed sync, SIGKILL at the `removal` cut leaves the complete mark and at the `removal sync` cut
+/// leaves the directory empty.
 #[test]
 fn a_kill_before_the_link_leaves_no_entry_and_after_it_the_mark_stands() {
     if let (Some(window), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
@@ -504,34 +616,107 @@ fn a_kill_before_the_link_leaves_no_entry_and_after_it_the_mark_stands() {
         return;
     }
     let scratch = Scratch::new("marks-kill");
-    for (window, stands) in [
-        ("link", false),
-        ("file sync", true),
-        ("directory sync", true),
-    ] {
-        let place = scratch.dir(&window.replace(' ', "-"));
-        let marks = place.join("marks");
-        fs::create_dir(&marks).expect("the mark directory is made");
-        let mut writer = start_window(KILL_CASE, window, &place, "")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the writer starts");
-        wait_for(&place.join("ready"));
-        writer.kill().expect("the writer is killed");
-        let status = writer.wait().expect("the writer is reaped");
-        assert_eq!(
-            std::os::unix::process::ExitStatusExt::signal(&status),
-            Some(libc::SIGKILL)
-        );
-        if stands {
-            assert_eq!(listing(&marks), ["stop.json"], "{window}");
-            assert_eq!(
-                fs::read(marks.join("stop.json")).expect("reads"),
-                bytes_of("stop")
-            );
-        } else {
-            assert_eq!(listing(&marks), Vec::<String>::new(), "{window}");
+    for mark in MARKS {
+        for (cut, stands) in [
+            ("link", false),
+            ("file sync", true),
+            ("directory sync", true),
+            ("removal", true),
+            ("removal sync", false),
+        ] {
+            let place = scratch.dir(&format!("{mark}-{}", cut.replace(' ', "-")));
+            let marks = place.join("marks");
+            fs::create_dir(&marks).expect("the mark directory is made");
+            let log = place.join("log");
+            let mut writer = start_window(KILL_CASE, &format!("{mark}:{cut}"), &place, "")
+                .stdout(Stdio::null())
+                .stderr(File::create(&log).expect("the log is made"))
+                .spawn()
+                .expect("the writer starts");
+            paused(&mut writer, &place.join("ready"), &log);
+            writer.kill().expect("the writer is killed");
+            let status = writer.wait().expect("the writer is reaped");
+            assert_eq!(status.signal(), Some(libc::SIGKILL), "{mark} {cut}");
+            if stands {
+                assert_eq!(listing(&marks), [file_name(mark)], "{mark} {cut}");
+                assert_eq!(
+                    fs::read(marks.join(file_name(mark))).expect("reads"),
+                    bytes_of(mark)
+                );
+            } else {
+                assert_eq!(listing(&marks), Vec::<String>::new(), "{mark} {cut}");
+            }
         }
     }
+}
+
+const MODE_CASE: &str = "host_stop::marks::a_mark_has_mode_0644_under_an_umask_of_0";
+
+/// The child process isolates the process-wide `umask`; `000` preserves every requested permission
+/// bit.
+#[test]
+fn a_mark_has_mode_0644_under_an_umask_of_0() {
+    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        assert_eq!(umask(), 0);
+        for mark in MARKS {
+            let path = Path::new(&place).join(file_name(mark));
+            publish(
+                &Disk,
+                Path::new(&place),
+                OsStr::new(&file_name(mark)),
+                &bytes_of(mark),
+            )
+            .expect("the mark is written");
+            let mode = fs::metadata(&path).expect("stands").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o644, "{mark}");
+        }
+        return;
+    }
+    let scratch = Scratch::new("marks-mode");
+    let output = start_window(MODE_CASE, "mode", &scratch.0, "umask 000;")
+        .output()
+        .expect("the window starts");
+    passed("mode", &output);
+    assert_eq!(
+        listing(&scratch.0).len(),
+        MARKS.len(),
+        "the window wrote each mark"
+    );
+}
+
+/// The sentence renders the invalid UTF-8 byte `0xff` as `\udcff` in both the full path and the
+/// stalled write's name.
+#[test]
+fn a_sentence_keeps_a_path_byte_other_than_utf8() {
+    let scratch = Scratch::new("marks-bytes");
+    let directory = scratch.0.join(OsStr::from_bytes(b"evidence-\xff"));
+    fs::create_dir(&directory).expect("the directory is made");
+    let files = Observed::failing(&[Fault {
+        step: "fsync",
+        nth: 2,
+        errno: libc::EIO,
+    }]);
+    let failed = publish(
+        &files,
+        &directory,
+        OsStr::new("stop.json"),
+        &bytes_of("stop"),
+    )
+    .expect_err("the planted sync fails");
+    let sentence = failed.sentence(&directory.join("stop.json")).to_string();
+    assert!(
+        sentence.contains("evidence-\\udcff/stop.json cannot be synced"),
+        "{sentence}"
+    );
+    assert!(!sentence.contains('\u{fffd}'), "{sentence}");
+    let files = Observed {
+        stall: Some(1),
+        ..Observed::default()
+    };
+    let name = OsStr::from_bytes(b"stop-\xff.json");
+    let stalled = publish(&files, &directory, name, &bytes_of("stop")).expect_err("stalls");
+    assert_eq!(
+        stalled.sentence(&directory.join(name)).to_string(),
+        "a write of stop-\\udcff.json made no progress"
+    );
 }
