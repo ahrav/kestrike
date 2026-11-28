@@ -78,10 +78,10 @@ pub(crate) fn judged(root: &Path) -> Result<Evidence, String> {
 }
 
 pub(crate) fn ends(evidence: &Evidence) -> bool {
-    let at = evidence
+    let restoration = evidence
         .file("injection/restoration.json")
-        .map(|restoration| member(restoration, "time").clone());
-    ends_observation(evidence.package(), at.as_ref())
+        .expect("the loaded copy holds a restoration");
+    ends_observation(evidence.package(), Some(member(restoration, "time")))
 }
 
 pub(crate) fn marks_in(root: &Path) -> Vec<String> {
@@ -172,13 +172,13 @@ impl Case {
         self.in_context(|cx| entry(&command, cx))
     }
 
-    /// Runs `restore` over `root` with no reviewed record and returns its exit code.
-    pub(crate) fn restore_at(&mut self, root: &Path) -> u8 {
+    /// Runs `restore` over `root` with `reviewed` and returns its exit code.
+    pub(crate) fn restore_at(&mut self, root: &Path, reviewed: Option<&Path>) -> u8 {
         self.plane.borrow_mut().deadline = None;
         let command = Command::Restore {
             operator: self.write_operator(),
             evidence: root.as_os_str().to_owned(),
-            reviewed: None,
+            reviewed: reviewed.map(Path::to_path_buf),
         };
         self.in_context(|cx| entry(&command, cx))
     }
@@ -241,7 +241,8 @@ impl Case {
     }
 
     /// The relative path of each file under `root` whose sync a file step makes, in order, shared
-    /// with the plant that records them.
+    /// with the plant that records them. The seal syncs each file it reads once the read ends, so
+    /// the list stands for the files read; a read that fails before its sync is absent from it.
     pub(crate) fn reads_under(&self, root: &Path) -> Rc<RefCell<Vec<String>>> {
         let read = Rc::new(RefCell::new(Vec::new()));
         let (seen, root) = (Rc::clone(&read), root.to_path_buf());
@@ -255,5 +256,35 @@ impl Case {
             None
         }));
         read
+    }
+}
+
+impl Case {
+    /// Each file step under `root` in order, shared with the plant that records them: `file <rel>`
+    /// for a file's sync, `directory <rel>` for a directory's, the root as an empty `<rel>`, and
+    /// `link <name>` for a mark's link.
+    pub(crate) fn steps_under(&self, root: &Path) -> Rc<RefCell<Vec<String>>> {
+        let steps = Rc::new(RefCell::new(Vec::new()));
+        let (seen, root) = (Rc::clone(&steps), root.to_path_buf());
+        self.plant(Box::new(move |_, step| {
+            let relative = |path: &Path| {
+                path.strip_prefix(&root)
+                    .ok()
+                    .map(|rel| rel.to_string_lossy().into_owned())
+            };
+            let shown = match step {
+                Step::Fsync(fd) => relative(&named_fd(*fd))
+                    .filter(|rel| !rel.ends_with("(deleted)"))
+                    .map(|rel| format!("file {rel}")),
+                Step::FsyncDirectory(path) => relative(path).map(|rel| format!("directory {rel}")),
+                Step::Link(name) => Some(format!("link {}", name.to_string_lossy())),
+                _ => None,
+            };
+            if let Some(shown) = shown {
+                seen.borrow_mut().push(shown);
+            }
+            None
+        }));
+        steps
     }
 }

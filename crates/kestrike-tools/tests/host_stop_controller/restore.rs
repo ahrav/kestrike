@@ -7,6 +7,7 @@ use kestrike_tools::host_stop::{
     Number, Request, Signal, System, check_reviewed, check_stopped, launch_time,
 };
 use kestrike_tools::json::{Object, Text, Value};
+use kestrike_tools::python::repr_float;
 
 use super::plane::{Action, CALLER, CHANGES, RECORD, STATUS, Shape, State, calendar, string};
 use super::restoring::{digest, replace_mark, restore_alone, write_json};
@@ -71,8 +72,25 @@ fn restore_writes_restoration_once_the_target_runs_with_both_checks_ok() {
     let (launched, start) = (case.plane.borrow().t, case.log().len());
     assert_eq!(case.restore(None), 0, "{}", case.output());
     case.keep("restore-clean");
+    assert!(
+        case.stdout().ends_with(&format!(
+            "host-stop-controller: {TARGET} runs again with both status checks ok\n"
+        )),
+        "{}",
+        case.stdout()
+    );
+    assert_eq!(case.stderr(), "");
     let marks = case.marks();
     let restoration = &marks["restoration"];
+    let Value::Object(fields) = restoration else {
+        panic!("the restoration is an object")
+    };
+    let keys: Vec<String> = fields.iter().map(|(key, _)| key.to_string()).collect();
+    assert_eq!(keys, ["instance", "reviewed_sha256", "state", "time"]);
+    assert!(
+        matches!(member(restoration, "time"), Value::Float(_)),
+        "{restoration:?}"
+    );
     assert_eq!(text_of(restoration, "instance"), TARGET);
     assert_eq!(text_of(restoration, "state"), "running");
     assert_eq!(member(restoration, "reviewed_sha256"), &Value::Null);
@@ -134,6 +152,10 @@ fn a_start_at_the_bound_a_run_prints_ends_no_observation_under_a_clock_error() {
     assert_eq!(case.restore(None), 0, "{}", case.output());
     let restoration = case.marks()["restoration"].clone();
     assert_eq!(time(&restoration), late - 2.0 * SKEW);
+    assert!(
+        matches!(member(&restoration, "time"), Value::Float(_)),
+        "a launch read as float seconds decides the time: {restoration:?}"
+    );
     assert!(!ends_observation(
         &package,
         Some(member(&restoration, "time"))
@@ -211,10 +233,15 @@ fn the_restoration_is_dated_by_the_targets_launch_between_the_marks_and_the_read
                 assert_eq!(case.restore(None), 1, "{name}: {}", case.output());
                 assert!(!case.marks().contains_key("restoration"), "{name}");
                 let output = case.output();
-                assert!(
-                    output.contains("before the stopped report"),
-                    "{name}: {output}"
+                let line = format!(
+                    "host-stop-controller: the restoration was not shown within 15 s, so it is \
+                     unrecorded and the evidence is not to be judged as it stands: the target's \
+                     record dates its last launch at {}, more than 5 s before the stopped report \
+                     at {}, so it shows no start after the stop\n",
+                    repr_float(stopped - SKEW - 0.25),
+                    repr_float(stopped)
                 );
+                assert!(case.stdout().ends_with(&line), "{name}: {output}");
                 assert!(
                     output.contains("the evidence is not to be judged as it stands"),
                     "{name}: {output}"
@@ -227,11 +254,15 @@ fn the_restoration_is_dated_by_the_targets_launch_between_the_marks_and_the_read
             }
             Some(dated) => {
                 assert_eq!(case.restore(None), 0, "{name}: {}", case.output());
-                assert_eq!(
-                    time(&case.marks()["restoration"]),
-                    dated(stopped, ready),
-                    "{name}"
-                );
+                let restoration = case.marks()["restoration"].clone();
+                assert_eq!(time(&restoration), dated(stopped, ready), "{name}");
+                if name == "a launch the skew before the stopped report" {
+                    let kind = member(&restoration, "time");
+                    assert!(
+                        matches!(kind, Value::Float(_)),
+                        "the floor decides: {kind:?}"
+                    );
+                }
                 let mut expected = vec![CALLER.to_owned()];
                 for _ in 0..records {
                     expected.extend([STATUS.to_owned(), RECORD.to_owned()]);
@@ -547,7 +578,7 @@ fn after_an_abort_restore_needs_the_reviewed_record_of_that_abort() {
     assert_eq!(case.restore(Some(&path)), 0, "{}", case.output());
     case.keep("restore-reviewed");
     let reviewed_digest = digest(&path);
-    assert!(case.output().contains(&format!(
+    assert!(case.stdout().contains(&format!(
         "host-stop-controller: reviewed record sha256 {reviewed_digest}\n"
     )));
     let restoration = case.marks()["restoration"].clone();
@@ -704,8 +735,20 @@ fn restore_waits_for_the_system_check_as_well_as_the_instance_check() {
         target.system = "impaired".to_owned();
         plane.stopping = None;
     }
+    let begin = case.log().len();
     assert_eq!(case.restore(None), 1, "{}", case.output());
     assert!(!case.marks().contains_key("restoration"));
+    let ops = case.ops();
+    assert!(
+        !ops[begin..].iter().any(|op| op == RECORD),
+        "{:?}",
+        &ops[begin..]
+    );
+    assert!(
+        case.stdout().ends_with("'system': 'impaired'}\n"),
+        "{}",
+        case.stdout()
+    );
 }
 
 #[test]
@@ -981,10 +1024,8 @@ fn a_signal_during_restores_checks_ends_it_before_any_call() {
         if name == "ahead of the entry" {
             case.delivered.deliver(Signal::Terminate);
         } else {
-            let mut lookups = 0;
-            case.signal_at(Signal::Terminate, move |step| {
-                lookups += usize::from(matches!(step, Step::Lstat(_)));
-                lookups == 4
+            case.signal_at(Signal::Terminate, |step| {
+                matches!(step, Step::Lstat(path) if path.ends_with("injection/collected.json"))
             });
         }
         let start = case.log().len();
@@ -1159,12 +1200,12 @@ fn restore_refuses_a_mark_whose_lookup_fails() {
     case.start_target(0);
     let names: Vec<String> = case.marks().keys().cloned().collect();
     assert_eq!(names, ["abort", "roles", "stop", "stopped"]);
-    for (lookup, name) in [(1, "restoration"), (2, "stopped"), (3, "abort")] {
-        let mut seen = 0;
+    for name in ["restoration", "stopped", "abort"] {
+        let looked = format!("injection/{name}.json");
         let mut failed = false;
         case.plant(Box::new(move |_, step| {
-            seen += usize::from(matches!(step, Step::Lstat(_)));
-            (!failed && seen == lookup).then(|| {
+            let named = matches!(step, Step::Lstat(path) if path.ends_with(&looked));
+            (!failed && named).then(|| {
                 failed = true;
                 errno(libc::EIO)
             })
@@ -1243,4 +1284,39 @@ fn a_restore_with_no_aws_on_its_path_exits_2_at_the_caller_check() {
          answer: no directory of PATH holds an executable aws; nothing written\n"
     );
     assert!(!case.marks().contains_key("restoration"));
+}
+
+/// The caller check runs before the deadline starts: a caller's reply that takes longer than
+/// `deadline_seconds` is cut at the call's own bound alone, and the poll then runs to a
+/// restoration.
+#[test]
+fn a_slow_caller_check_runs_outside_the_restore_deadline() {
+    let mut case = Case::new("restore-slow-caller");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    shorten_bounds(&mut case, 20);
+    case.start_target(0);
+    case.plane
+        .borrow_mut()
+        .script(CALLER, vec![Action::Delay(30.0)]);
+    let start = case.log().len();
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    let log = case.log();
+    let caller = &log[start];
+    assert_eq!(caller.op, CALLER);
+    assert_eq!((caller.timeout, caller.cut), (60.0, false), "{caller:?}");
+    assert_eq!(log[start + 1].op, STATUS);
+}
+
+/// An `injection/` that takes no unnamed file is refused before the stop mark is read and before
+/// any call, with the probe's sentence.
+#[test]
+fn restore_refuses_an_injection_that_takes_no_unnamed_file() {
+    let mut case = Case::new("restore-probe");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    case.fail_once(libc::EACCES, |step| matches!(step, Step::OpenUnnamed(_)));
+    case.assert_restore_refused(
+        None,
+        "injection takes no unnamed file, so no mark can be written there: Permission denied",
+    );
 }

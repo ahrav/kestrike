@@ -9,9 +9,10 @@ use std::os::unix::fs::symlink;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 
-use kestrike_tools::host_stop::{Disk, Signal, lock};
+use kestrike_tools::host_stop::{Disk, Record, Signal, lock};
+use kestrike_tools::host_stop_controller::{Command, entry};
 use kestrike_tools::json::{Text, Value};
-use kestrike_tools::python::hexdigest;
+use kestrike_tools::python::{hexdigest, repr_float};
 
 use super::plane::Action;
 use super::restore::flip_first_guardrail;
@@ -286,7 +287,21 @@ fn the_seal_names_each_collected_file_and_a_row_removed_after_it_is_refused() {
     case.keep_tree(&root, &format!("{name}-1"));
     let evidence = judged(&root).expect("the sealed copy loads");
     assert_eq!(evidence.seal_sha256(), sha);
-    assert_eq!(time(&mark), case.plane.borrow().wall());
+    let now = case.plane.borrow().wall();
+    assert_eq!(time(&mark), now);
+    let sealed = evidence
+        .file("injection/collected.json")
+        .expect("the load holds the seal");
+    assert_eq!(time(sealed), now);
+    let Value::Object(named) = member(&mark, "files") else {
+        panic!("the seal's files")
+    };
+    let line = format!(
+        "host-stop-controller: sealed {} files at {}; injection/collected.json sha256 {sha}\n",
+        named.len(),
+        repr_float(now)
+    );
+    assert!(case.stdout().ends_with(&line), "{}", case.stdout());
     let coverage = parse(&root.join("coverage.json"));
     let mut expected: Vec<String> = match &coverage {
         Value::Object(coverage) => coverage.iter().map(|(key, _)| key.to_string()).collect(),
@@ -354,6 +369,14 @@ fn a_seal_before_the_window_ends_or_off_its_collections_is_refused() {
     let end = window_end().0;
     case.plane.borrow_mut().t = end - 1.0;
     case.assert_seal_refused(&root, "its collections may still grow");
+    assert!(
+        case.stderr().ends_with(
+            "host-stop-controller: refused: the run window ends at 400, after the seal's time \
+             399.0, so its collections may still grow; nothing written\n"
+        ),
+        "{}",
+        case.stderr()
+    );
     case.plane.borrow_mut().t += 31.0;
     type Change = Box<dyn FnOnce(&mut Value)>;
     let cases: Vec<(&str, Change, String)> = vec![
@@ -425,9 +448,15 @@ fn a_seal_at_the_run_windows_end_is_written_and_a_second_racing_seal_is_refused(
     case.plant(Box::new(move |_, step| {
         matches!(step, Step::Lstat(path) if *path == looked).then(|| errno(libc::ENOENT))
     }));
+    let read = case.reads_under(&root);
     case.assert_seal_refused(
         &root,
         "injection/collected.json exists: the seal is written once",
+    );
+    assert_eq!(
+        *read.borrow(),
+        ["package.json"],
+        "the listing refuses, after the package's read"
     );
     assert_eq!(fs::read(&seal).expect("the seal reads"), first);
     case.plants.borrow_mut().truncate(start);
@@ -522,16 +551,42 @@ fn a_backwards_span_or_an_off_schema_row_is_refused_before_the_seal() {
 fn a_signal_during_the_collection_reads_ends_the_seal_with_nothing_written() {
     let mut case = Case::new("seal-signal-reads");
     let root = case.restored_copy();
-    let witness = root.join("witness.jsonl");
-    case.signal_at(Signal::Terminate, move |step| syncs_at(step, &witness));
+    for rel in ["coverage.json", "witness.jsonl"] {
+        let start = case.plants.borrow().len();
+        let read = case.reads_under(&root);
+        let signalled = root.join(rel);
+        case.signal_at(Signal::Terminate, move |step| syncs_at(step, &signalled));
+        let seen = case.output().len();
+        assert_eq!(case.seal_at(&root), 2, "{}", case.output());
+        let output = case.output();
+        assert!(
+            output[seen..].contains("signal SIGTERM before any mark; nothing written"),
+            "{output}"
+        );
+        assert_eq!(read.borrow().last().map(String::as_str), Some(rel), "{rel}");
+        assert!(!root.join("injection/collected.json").exists());
+        drop(lock(&Disk, &root.join("injection")).expect("the lock is free"));
+        case.plants.borrow_mut().truncate(start);
+    }
+}
+
+/// A signal that stands when the seal arms its record raises at the read that follows, ahead of
+/// the lookup of a standing seal: the seal exits 2 with the signal's line in place of the
+/// refusal of the standing mark.
+#[test]
+fn a_signal_standing_at_the_seals_start_raises_before_the_lookup_of_a_standing_seal() {
+    let mut case = Case::new("seal-signal-start");
+    let root = case.restored_copy();
+    case.advance_to(window_end().0 + 30.0);
+    assert_eq!(case.seal_at(&root), 0, "{}", case.output());
+    case.delivered.deliver(Signal::Terminate);
+    let seen = case.output().len();
     assert_eq!(case.seal_at(&root), 2, "{}", case.output());
-    assert!(
-        case.output().contains("signal SIGTERM"),
-        "{}",
-        case.output()
+    let output = case.output();
+    assert_eq!(
+        &output[seen..],
+        "host-stop-controller: signal SIGTERM before any mark; nothing written\n"
     );
-    assert!(!root.join("injection/collected.json").exists());
-    drop(lock(&Disk, &root.join("injection")).expect("the lock is free"));
 }
 
 /// A signal delivered during the mark's write waits for it: the seal exits 0 with its mark.
@@ -592,21 +647,50 @@ fn an_entry_outside_the_layout_in_the_root_or_records_writes_no_seal() {
     assert_eq!(case.seal_at(&root), 0, "{}", case.output());
 }
 
-/// A signal delivered while a seal's refusal is printed leaves the refusal as printed: the entry
-/// disarmed the record before it printed.
+/// A signal delivered while a seal's refusal is printed leaves the refusal as printed, with exit
+/// 2: the entry disarmed the record before it printed, and the record stays disarmed with the
+/// signal stored.
 #[test]
 fn a_signal_while_a_seals_refusal_is_printed_leaves_the_refusal() {
     let mut case = Case::new("seal-signal-print");
     let root = case.restored_copy();
     fs::remove_file(root.join("blockers.jsonl")).expect("removed");
     let delivered = case.delivered;
+    let mut record = Record::new(delivered);
+    let armed = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen_armed = std::rc::Rc::clone(&armed);
     case.writes = Some(std::rc::Rc::new(move |bytes: &[u8]| {
         if String::from_utf8_lossy(bytes).contains("refused") {
             delivered.deliver(Signal::Terminate);
+            seen_armed.set(Some(delivered.stored().is_some()));
         }
         None
     }));
-    case.assert_seal_refused(&root, "blockers.jsonl is missing; nothing written");
+    let command = Command::Seal {
+        operator: case.write_operator(),
+        evidence: root.as_os_str().to_owned(),
+    };
+    let seen = case.output().len();
+    assert_eq!(case.in_context_on(&mut record, |cx| entry(&command, cx)), 2);
+    let output = case.output();
+    assert_eq!(
+        &output[seen..],
+        "host-stop-controller: refused: blockers.jsonl is missing; nothing written\n"
+    );
+    assert_eq!(
+        armed.get(),
+        Some(true),
+        "the signal was delivered during the print"
+    );
+    assert!(
+        !record.is_armed(),
+        "the entry disarmed the record before it printed"
+    );
+    assert_eq!(
+        record.pending(),
+        Some(Signal::Terminate),
+        "the signal stays stored"
+    );
 }
 
 /// A failed sync of a collection, of `records/` or of the evidence directory writes no seal, and
@@ -625,7 +709,12 @@ fn a_failed_sync_of_a_collection_or_its_directory_writes_no_seal() {
             "records/receipts.jsonl",
             "records/receipts.jsonl cannot be read and synced".to_owned(),
         ),
+        (
+            "injection/roles.json",
+            "injection/roles.json cannot be read and synced".to_owned(),
+        ),
         ("records", "records cannot be synced".to_owned()),
+        ("injection", "injection cannot be synced".to_owned()),
         ("", format!("{shown} cannot be synced")),
     ] {
         let failed = if rel.is_empty() {
@@ -640,7 +729,42 @@ fn a_failed_sync_of_a_collection_or_its_directory_writes_no_seal() {
         case.assert_seal_refused(&root, &reason);
         case.plants.borrow_mut().truncate(start);
     }
+    let steps = case.steps_under(&root);
     assert_eq!(case.seal_at(&root), 0, "{}", case.output());
+    let steps = steps.borrow();
+    let link = steps
+        .iter()
+        .position(|step| step == "link collected.json")
+        .expect("the mark is linked");
+    let reads: Vec<&str> = steps[..link]
+        .iter()
+        .filter_map(|step| step.strip_prefix("file "))
+        .collect();
+    let Value::Object(files) =
+        member(&parse(&root.join("injection/collected.json")), "files").clone()
+    else {
+        panic!("the seal's files")
+    };
+    let mut expected = vec!["package.json".to_owned(), "injection/roles.json".to_owned()];
+    expected.extend(
+        files
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .filter(|rel| rel != "injection/roles.json"),
+    );
+    assert_eq!(
+        reads, expected,
+        "each file the seal names is read and synced, in order"
+    );
+    let last_read = steps[..link]
+        .iter()
+        .rposition(|step| step.starts_with("file "))
+        .expect("a file is read");
+    let dirs: Vec<&str> = steps[last_read..link]
+        .iter()
+        .filter_map(|step| step.strip_prefix("directory "))
+        .collect();
+    assert_eq!(dirs[..3], ["records", "injection", ""], "{steps:?}");
 }
 
 /// A seal while another holds the evidence's lock is refused. A write that fails before the link
@@ -716,11 +840,19 @@ fn a_seal_held_by_a_restore_is_refused_and_one_unwritten_or_left_standing_ends_w
         output[seen..].contains("collected.json stands, but it cannot be synced"),
         "{output}"
     );
-    let sha = digest(&mark);
+    let stderr = case.stderr();
+    let unwritten = stderr.lines().last().expect("the unwritten line");
     assert!(
-        output[seen..].contains(&format!("injection/collected.json sha256 {sha}\n")),
-        "{output}"
+        unwritten.starts_with("host-stop-controller: ")
+            && unwritten.contains("collected.json stands, but it cannot be synced"),
+        "{stderr}"
     );
+    let sha = digest(&mark);
+    let linked = format!(
+        "host-stop-controller: the mark this seal linked: injection/collected.json sha256 {sha}\n"
+    );
+    assert!(output[seen..].contains(&linked), "{output}");
+    assert!(case.stdout().ends_with(&linked), "{}", case.stdout());
     case.plants.borrow_mut().truncate(start);
     let Value::Object(files) = member(&parse(&mark), "files").clone() else {
         panic!("the seal's files")
@@ -834,6 +966,7 @@ fn an_empty_evidence_path_seals_and_restores_nothing_in_the_working_directory() 
         let place = Scratch::new("seal-empty-child");
         let (status, shown) = child(EMPTY, &place.0, &[]);
         assert!(status.success(), "{shown}");
+        assert!(shown.contains("1 passed"), "{shown}");
         return;
     }
     let mut case = Case::new("seal-empty");
@@ -846,11 +979,16 @@ fn an_empty_evidence_path_seals_and_restores_nothing_in_the_working_directory() 
     assert!(!root.join("injection/collected.json").exists());
     fs::remove_file(root.join("injection/restoration.json")).expect("removed");
     let seen = case.output().len();
-    assert_eq!(case.restore_at(Path::new("")), 2, "{}", case.output());
+    assert_eq!(case.restore_at(Path::new(""), None), 2, "{}", case.output());
     assert!(case.output()[seen..].contains("no evidence directory is named"));
     let restored = root.join("injection/restoration.json").exists();
     assert_eq!((case.log().len(), restored), (calls, false));
-    assert_eq!(case.restore_at(Path::new(".")), 0, "{}", case.output());
+    assert_eq!(
+        case.restore_at(Path::new("."), None),
+        0,
+        "{}",
+        case.output()
+    );
     assert_eq!(case.seal_at(Path::new(".")), 0, "{}", case.output());
 }
 
@@ -929,16 +1067,20 @@ fn a_restore_after_the_seal_writes_its_restoration_and_exits_1_when_it_may_end_o
             .expect("the target")
             .launched = launched;
         let seen = case.output().len();
-        assert_eq!(case.restore_at(&root), code, "{}", case.output());
+        assert_eq!(case.restore_at(&root, None), code, "{}", case.output());
         let restoration = parse(&root.join("injection/restoration.json"));
         assert_eq!(time(&restoration), launched - SKEW);
         case.keep_tree(&root, &format!("{name}-{}", at + 1));
         if code == 1 {
             let output = case.output();
-            assert!(
-                output[seen..].contains("the judge refuses this evidence while the mark stands"),
-                "{output}"
+            let line = format!(
+                "host-stop-controller: the restoration dates {}, less than the clock error after \
+                 the run window's end 400, and the seal does not name it, so the judge refuses \
+                 this evidence while the mark stands\n",
+                repr_float(launched - SKEW)
             );
+            assert!(output[seen..].contains(&line), "{output}");
+            assert!(case.stdout().ends_with(&line), "{}", case.stdout());
             let refused = judged(&root).expect_err("the judge refuses the copy");
             assert!(
                 refused.contains("injection/restoration.json stands unsealed"),
@@ -1073,7 +1215,7 @@ fn a_restore_after_the_seal_refuses_a_sealed_mark_missing_or_changed_before_any_
         change(&root);
         case.start_target(0);
         let (calls, seen, before) = (case.log().len(), case.output().len(), marks_in(&root));
-        assert_eq!(case.restore_at(&root), 2, "{name}: {}", case.output());
+        assert_eq!(case.restore_at(&root, None), 2, "{name}: {}", case.output());
         let output = case.output();
         assert!(
             output[seen..].contains(reason),
@@ -1085,4 +1227,29 @@ fn a_restore_after_the_seal_refuses_a_sealed_mark_missing_or_changed_before_any_
             "{name}"
         );
     }
+}
+
+/// An `injection/` that takes no unnamed file and a `records` that is a regular file are refused
+/// before the seal's lock and before any file is read, respectively; the copy restored seals.
+#[test]
+fn a_seal_refuses_an_injection_that_takes_no_unnamed_file_or_a_records_file() {
+    let mut case = Case::new("seal-probe");
+    let root = case.restored_copy();
+    case.advance_to(window_end().0 + 30.0);
+    let start = case.plants.borrow().len();
+    case.fail_once(libc::EACCES, |step| matches!(step, Step::OpenUnnamed(_)));
+    case.assert_seal_refused(
+        &root,
+        "injection takes no unnamed file, so no mark can be written there: Permission denied",
+    );
+    case.plants.borrow_mut().truncate(start);
+    let records = case.scratch.0.join("records-kept");
+    fs::rename(root.join("records"), &records).expect("records is moved aside");
+    fs::write(root.join("records"), b"").expect("a file named records");
+    let read = case.reads_under(&root);
+    case.assert_seal_refused(&root, "records is no directory: Not a directory");
+    assert!(read.borrow().is_empty(), "{:?}", read.borrow());
+    fs::remove_file(root.join("records")).expect("removed");
+    fs::rename(&records, root.join("records")).expect("records is restored");
+    assert_eq!(case.seal_at(&root), 0, "{}", case.output());
 }

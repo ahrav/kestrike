@@ -2,8 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder};
-use std::os::unix::fs::DirBuilderExt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -14,6 +13,7 @@ use kestrike_tools::json::{Object, Value};
 use kestrike_tools::python::hexdigest;
 
 use super::plane::{Action, Plane, STATUS, State, string};
+use super::sealing::copy_tree;
 use super::stop_run::time;
 use super::{Case, Output, listing, steps};
 use crate::host_stop_support::{TARGET, json, tree};
@@ -41,33 +41,14 @@ impl Case {
             .open(&lines)
             .and_then(|mut file| std::io::Write::write_all(&mut file, self.output().as_bytes()))
             .unwrap_or_else(|error| panic!("{}: {error}", lines.display()));
-        let kept = Path::new(&root).join(name);
-        DirBuilder::new()
-            .mode(0o700)
-            .create(&kept)
-            .unwrap_or_else(|error| panic!("{}: {error}", kept.display()));
-        for relative in listing(from) {
-            let (from, to) = (from.join(&relative), kept.join(&relative));
-            if fs::symlink_metadata(&from).is_ok_and(|found| found.is_dir()) {
-                DirBuilder::new()
-                    .mode(0o700)
-                    .create(&to)
-                    .expect("a kept directory is made");
-            } else {
-                fs::copy(&from, &to).expect("a kept file is copied");
-            }
-        }
+        copy_tree(from, &Path::new(&root).join(name), &[]);
     }
+
     /// On exit 0, the restoration timestamp is at least [`Case::floor`] and at most the last
     /// `STATUS` timestamp plus `plane.step`.
     pub(crate) fn restore(&mut self, reviewed: Option<&Path>) -> u8 {
-        self.plane.borrow_mut().deadline = None;
-        let command = Command::Restore {
-            operator: self.write_operator(),
-            evidence: self.evidence.clone().into_os_string(),
-            reviewed: reviewed.map(Path::to_path_buf),
-        };
-        let code = self.in_context(|cx| entry(&command, cx));
+        let evidence = self.evidence.clone();
+        let code = self.restore_at(&evidence, reviewed);
         if code == 0 {
             let restored = time(&self.marks()["restoration"]);
             let plane = self.plane.borrow();
