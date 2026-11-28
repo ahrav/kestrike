@@ -15,14 +15,14 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
-use crate::environ::{self, Environ};
+use crate::environ::Environ;
 use crate::git::fed;
-use crate::python::returncode as code;
-use crate::text::Text;
-use crate::text::newlines;
+use crate::text::{Text, newlines};
 
 /// The options every call passes before `-C DIR`.
 pub const FIXED: [&str; 9] = [
@@ -109,14 +109,34 @@ fn command(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Command, CallEr
         .env_clear()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    environ::check(env).map_err(CallError::Start)?;
-    environ::give(&mut command, env);
+    let mut given: Vec<&OsStr> = Vec::with_capacity(env.len());
+    for (name, value) in env {
+        if name.as_bytes().iter().skip(1).any(|&byte| byte == b'=') {
+            return Err(CallError::Start(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "illegal environment variable name",
+            )));
+        }
+        if !given.contains(&name.as_os_str()) {
+            given.push(name);
+            command.env(name, value);
+        }
+    }
     Ok(command)
 }
 
 fn step(args: &[&OsStr]) -> Text {
     args.first()
         .map_or_else(Text::new, |first| Text::from_os(first))
+}
+
+/// `code` is the exit code, or the negated number of the signal that ended the call.
+fn code(status: ExitStatus) -> i32 {
+    match (status.code(), status.signal()) {
+        (Some(code), _) => code,
+        (None, Some(signal)) => -signal,
+        (None, None) => unreachable!("a waited child exited or a signal ended it"),
+    }
 }
 
 /// `text` runs `git FIXED -C dir ARGS` in `env` with the caller's standard input and returns its exit

@@ -5,16 +5,23 @@
 
 pub mod args;
 pub mod classes;
+pub mod decimal;
 pub mod environ;
 pub mod fixtures;
+#[cfg(target_os = "linux")]
+pub mod gameday;
+pub mod genmc;
 pub mod git;
+pub mod hook;
 #[cfg(target_os = "linux")]
 pub mod host_stop;
 pub mod json;
+pub mod orderings;
 pub mod ownership;
 pub mod paths;
 #[cfg(target_os = "linux")]
 pub mod plants;
+pub mod production_text;
 pub mod python;
 pub mod rust_text;
 pub mod shell;

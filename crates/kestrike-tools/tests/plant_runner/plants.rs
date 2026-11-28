@@ -161,6 +161,43 @@ fn an_unreadable_record_names_the_readers_text() {
     ]);
 }
 
+/// A valid record in a form other than plain UTF-8 is refused with the reader's text: a leading byte
+/// order mark, UTF-16 LE with and without its mark, and an encoded surrogate in `restores`. The reader
+/// takes strict UTF-8 alone.
+#[test]
+fn a_record_outside_strict_utf_8_is_unreadable() {
+    let valid = record(&members("alpha", "src/lib.rs"));
+    let utf16 = |marked: bool| {
+        let mut bytes: Vec<u8> = if marked { vec![0xff, 0xfe] } else { Vec::new() };
+        bytes.extend(valid.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes
+    };
+    let surrogate = valid.replace("the defect the fix removed", "\u{0}");
+    let at = surrogate.find('\u{0}').expect("the marker");
+    let mut encoded = surrogate.into_bytes();
+    encoded.splice(at..=at, [0xed, 0xa0, 0x80]);
+    let mut marked = vec![0xef, 0xbb, 0xbf];
+    marked.extend(valid.as_bytes());
+    let (marked16, plain16) = (utf16(true), utf16(false));
+    rows(&[
+        (
+            "plant.json is unreadable: expected a value at byte 0",
+            &|r| r.write(JSON, &marked),
+        ),
+        (
+            "plant.json is unreadable: invalid utf-8 sequence of 1 bytes from index 0",
+            &|r| r.write(JSON, &marked16),
+        ),
+        ("plant.json is unreadable: expected a key at byte 1", &|r| {
+            r.write(JSON, &plain16)
+        }),
+        (
+            "plant.json is unreadable: invalid utf-8 sequence of 1 bytes from index 114",
+            &|r| r.write(JSON, &encoded),
+        ),
+    ]);
+}
+
 const FIELDS: &str = "plant.json holds exactly the fields id, row, fix, files, restores, proof, \
                       expected, miss_cause";
 

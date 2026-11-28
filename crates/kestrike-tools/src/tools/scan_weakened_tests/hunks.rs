@@ -5,6 +5,7 @@ use std::ffi::OsString;
 
 use regex::bytes::{Captures, NoExpand};
 
+use crate::environ::Environ;
 use crate::git::git_text;
 use crate::json::Integer;
 use crate::rust_text::code;
@@ -27,11 +28,13 @@ impl Hunk {
     }
 }
 
-fn patch(base: &str, head: &str, paths: &[&str]) -> Result<String, Failure> {
+fn patch(environ: &Environ, base: &str, head: &str, paths: &[&str]) -> Result<String, Failure> {
     let mut args: Vec<OsString> = [
         "--no-literal-pathspecs",
         "-c",
         "core.quotePath=false",
+        "-c",
+        "core.precomposeUnicode=false",
         "diff",
         "--no-relative",
         "--no-renames",
@@ -57,7 +60,7 @@ fn patch(base: &str, head: &str, paths: &[&str]) -> Result<String, Failure> {
             .iter()
             .map(|path| OsString::from(format!(":(top,literal){path}"))),
     );
-    Ok(git_text(&args)?)
+    Ok(git_text(environ, &args)?)
 }
 
 /// `hunks` reads the hunks of a zero-context diff in order. A `diff --git ` line closes the open hunk, and
@@ -98,13 +101,14 @@ pub fn hunks<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Vec<Hunk>, 
 /// order when the `diff --git` headers equal the expected headers of `paths`; otherwise it reads each path of
 /// the batch in a diff of its own.
 pub fn path_hunks(
+    environ: &Environ,
     base: &str,
     head: &str,
     paths: &[&str],
 ) -> Result<HashMap<String, Vec<Hunk>>, Failure> {
     let mut found = HashMap::new();
     for batch in paths.chunks(DIFF_BATCH) {
-        let text = patch(base, head, batch)?;
+        let text = patch(environ, base, head, batch)?;
         let mut headers = Vec::new();
         let mut sections: Vec<Vec<&str>> = Vec::new();
         for line in text.split('\n') {
@@ -124,7 +128,7 @@ pub fn path_hunks(
             }
         } else {
             for path in batch {
-                let text = patch(base, head, &[path])?;
+                let text = patch(environ, base, head, &[path])?;
                 found.insert((*path).to_owned(), hunks(text.split('\n'))?);
             }
         }

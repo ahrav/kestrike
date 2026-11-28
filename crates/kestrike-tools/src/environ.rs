@@ -1,5 +1,5 @@
 //! An environment held as a value: the variables a child process is given, in order, which [`get`] reads
-//! and [`set`] changes without touching the process's own environment.
+//! and [`set`] and [`remove`] change without touching the process's own environment.
 
 use std::ffi::OsString;
 use std::io;
@@ -46,6 +46,23 @@ pub fn give(command: &mut Command, environ: &[(OsString, OsString)]) {
     for (name, value) in environ.iter().rev() {
         command.env(name, value);
     }
+}
+
+/// `first_of_each` keeps the first variable of each name, the one a lookup of the name reads, the others
+/// in order.
+pub fn first_of_each(environ: Environ) -> Environ {
+    let mut kept: Environ = Vec::with_capacity(environ.len());
+    for (name, value) in environ {
+        if !kept.iter().any(|(seen, _)| *seen == name) {
+            kept.push((name, value));
+        }
+    }
+    kept
+}
+
+/// `remove` removes every variable named `name`, keeping the others in order.
+pub fn remove(environ: &mut Environ, name: &str) {
+    environ.retain(|(key, _)| key != name);
 }
 
 #[cfg(test)]
