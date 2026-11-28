@@ -12,7 +12,8 @@
 //! standard error, and `128 + n` the first of SIGINT, SIGTERM and SIGHUP that arrived, which [`cancel`]
 //! records whatever disposition the tool inherited. The record is read between steps and while a check
 //! runs; a Git read and a scan run to their end, and the record is acted on once they return, whatever
-//! they returned. On a record the tool prints nothing more.
+//! they returned. On a record the tool prints nothing more, apart from a line that names a running check
+//! whose SIGKILL or reap failed.
 
 mod cancel;
 mod worktree;

@@ -31,6 +31,9 @@ const NAME_ATTEMPTS: usize = 10_000;
 enum Ended {
     /// A signal was recorded; the field is the exit code.
     Cancelled(u8),
+    /// A signal was recorded and the running check could not be stopped or reaped:
+    /// `pre-push-checks: <message>` is printed once the worktree is removed, and the field is the exit code.
+    Unstopped(u8, String),
     /// A failed write to standard error; the field is the exit code.
     Stream(u8),
     /// `git worktree add` failed: `pre-push: <error>` is printed once the worktree is removed, and the exit
@@ -47,7 +50,8 @@ enum Ended {
 ///
 /// # Errors
 ///
-/// The exit code where the push ends here: `128 + n` for a recorded signal, 120 for a failed write to
+/// The exit code where the push ends here: `128 + n` for a recorded signal, after a line that names the
+/// running check where it could not be stopped or reaped, 120 for a failed write to
 /// standard error, 2 for a failed `git worktree add`, and 1 where the directory cannot be made or
 /// removed or a check cannot be started or waited on.
 pub(super) fn run_checks(
@@ -69,9 +73,14 @@ pub(super) fn run_checks(
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),
     };
+    if let Err(Ended::Unstopped(code, message)) = &ran {
+        say(&format!("{NAME}: {message}"))?;
+        return Err(*code);
+    }
     cancel::check()?;
     match ran {
         Err(Ended::Cancelled(code) | Ended::Stream(code)) => return Err(code),
+        Err(Ended::Unstopped(..)) => unreachable!("an unstopped check returned above"),
         Err(Ended::Git(error)) => {
             removed?;
             say(&format!("pre-push: {error}"))?;
@@ -127,6 +136,9 @@ fn checks_in(
             .map_err(|error| Ended::Fault(format!("{program}: {error}")))?;
         let status = cancel::wait(&mut child).map_err(|unwaited| match unwaited {
             Unwaited::Cancelled(code) => Ended::Cancelled(code),
+            Unwaited::Unstopped(code, error) => {
+                Ended::Unstopped(code, format!("{program}: {error}"))
+            }
             Unwaited::Failed(error) => Ended::Fault(format!("{program}: {error}")),
         })?;
         if !status.success() {

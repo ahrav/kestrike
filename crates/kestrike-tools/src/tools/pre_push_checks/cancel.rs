@@ -5,6 +5,9 @@
 //! group receives: while the check's leader is the tool's child and not yet reaped, its process id cannot
 //! name another process, and on a record the group and the leader get SIGKILL, and the reap comes last. A
 //! leader already reaped gets no signal.
+//!
+//! A check starts with the three signals at their default dispositions, since `execve` resets each caught
+//! signal to its default, and with no signal blocked, since `Command` clears the child's signal mask.
 
 use std::io;
 use std::process::{Child, ExitStatus};
@@ -67,10 +70,15 @@ fn code(signal: i32) -> u8 {
 
 /// Why a check gave no exit status.
 pub(super) enum Unwaited {
-    /// A signal was recorded: the check's group was stopped and its leader reaped; the field is the exit
-    /// code.
+    /// On a recorded signal, `wait` sent SIGKILL to the check's group and leader, then reaped the leader;
+    /// the field is the exit code.
     Cancelled(u8),
-    /// The wait failed; the check's group was sent SIGKILL.
+    /// On a recorded signal, the SIGKILL or the reap failed, so the check's group may still run; the
+    /// fields are the exit code and the error.
+    Unstopped(u8, io::Error),
+    /// Polling the check failed. With `WNOHANG`, `waitpid` fails with `ECHILD` alone: the check is no
+    /// longer this process's child and its process id may name another process, so `wait` signals
+    /// neither the leader nor its group.
     Failed(io::Error),
 }
 
@@ -82,15 +90,13 @@ pub(super) fn wait(check: &mut Child) -> Result<ExitStatus, Unwaited> {
         match check.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {}
-            Err(error) => {
-                stop(check);
-                return Err(Unwaited::Failed(error));
-            }
+            Err(error) => return Err(Unwaited::Failed(error)),
         }
         if let Err(code) = self::check() {
-            stop(check);
-            let _ = check.wait();
-            return Err(Unwaited::Cancelled(code));
+            return Err(match stop(check).and_then(|()| check.wait()) {
+                Ok(_) => Unwaited::Cancelled(code),
+                Err(error) => Unwaited::Unstopped(code, error),
+            });
         }
         thread::sleep(pause);
         pause = (pause * 2).min(LONGEST_PAUSE);
@@ -99,9 +105,18 @@ pub(super) fn wait(check: &mut Child) -> Result<ExitStatus, Unwaited> {
 
 /// `stop` sends SIGKILL to the group `check` leads and to the leader, which the caller has not reaped, so
 /// its process id still names it and its group. A leader that left its group still ends.
-fn stop(check: &mut Child) {
+///
+/// # Errors
+///
+/// `killpg` or the kill of the leader fails; `stop` attempts both and returns the first error.
+fn stop(check: &mut Child) -> io::Result<()> {
     let group = libc::pid_t::try_from(check.id()).expect("a process id fits pid_t");
     // SAFETY: `killpg` takes two integers and touches no memory of the caller.
-    unsafe { libc::killpg(group, libc::SIGKILL) };
-    let _ = check.kill();
+    let grouped = if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    };
+    let killed = check.kill();
+    grouped.and(killed)
 }
