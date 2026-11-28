@@ -219,7 +219,7 @@ fn an_object_of_two_hundred_thousand_members_reads_within_the_deadline() {
             };
             let refused = decode(&repeated, &Text::from("f")).expect_err("a repeat is refused");
             let named = match crate::json::parse_unique(&repeated) {
-                Err(crate::json::UniqueError::Repeated(name)) => name.to_string(),
+                Err(crate::json::UniqueError::Repeated(name, _)) => name.to_string(),
                 other => panic!("the repeat is refused by name, not {other:?}"),
             };
             (strict, unique, refused.message().to_string(), named)
