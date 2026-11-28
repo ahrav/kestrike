@@ -33,6 +33,8 @@ fn patch(environ: &Environ, base: &str, head: &str, paths: &[&str]) -> Result<St
         "--no-literal-pathspecs",
         "-c",
         "core.quotePath=false",
+        "-c",
+        "core.precomposeUnicode=false",
         "diff",
         "--no-relative",
         "--no-renames",

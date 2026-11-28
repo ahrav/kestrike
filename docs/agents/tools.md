@@ -1,6 +1,7 @@
 # Tools
 
-Read this before you start, add or change a tool under `crates/kestrike-tools`, or port a script to one.
+Read this before you start, add or change a tool under `crates/kestrike-tools`, port a script to one, or
+change a file that a row of [Rules held twice](#rules-held-twice) names.
 The repository's tools are modules of one Rust binary. A caller starts a tool through one launcher, and a
 port keeps its script's contract.
 
@@ -122,7 +123,9 @@ A port adds files. The package's `build.rs` lists `crates/kestrike-tools/src/too
 and each unit test file is declared by its owner, so no tool, case or
 unit test file has a registration line. A port still adds one sorted `pub mod` line to
 `crates/kestrike-tools/src/lib.rs` for a new library module and a line under `[dependencies]` of
-`crates/kestrike-tools/Cargo.toml` for a dependency it needs.
+`crates/kestrike-tools/Cargo.toml` for a dependency it needs. A port that brings rules from a Python file
+that stays in the tree, a file its script loads included, adds a row to
+[Rules held twice](#rules-held-twice).
 
 1. Write the tool as one module under `crates/kestrike-tools/src/tools/`: a file `<module>.rs`, or a
    directory `<module>/` with `mod.rs`. Its root holds `pub const NAME: &str = "<tool>";` and the entry
@@ -193,7 +196,59 @@ build directory reruns it at the next build, and each generated list asserts at 
 build with `the package moved after its build script ran; remove the build directory`.
 
 The change that makes a tool startable deletes its script and the script's self-test with `git rm`, and
-edits each caller's command text.
+edits each caller's command text. The same change removes each row of
+[Rules held twice](#rules-held-twice) that names a file it deletes.
+
+## Rules held twice
+
+Each row names a Rust module and a Python file that stays in the tree. The two hold the same rules and no
+check reads both files, so an editor of one reads the other. Where an edit changes a rule a row lists,
+change both files in one pull request and show that they agree on recorded inputs, or port the Python file
+and remove its rows. A Python file stays when no ticket of its own port deletes it.
+
+| Rust module | Python file that stays | Rules held in both |
+| --- | --- | --- |
+| `crates/kestrike-tools/src/decimal.rs` | `scripts/gameday-judge.py` | The number rules of the strict JSON read and of a package's windows: `nearest_double` and `spells_shortest` in the Rust module hold the test of `double` in the Python file, a token's nearest double and whether the token has the decimal value of that double's shortest form, within the exponent range of Python's `decimal` module (`EMAX` and `ETINY` in the Rust module); `whole_quotient` holds the test of the interval count in `check_package`, a whole number from 1 to the bound its caller passes, `MAX_INTERVALS`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/escrow_check.py` | The text of `case.qnt` for a case of the escrow model without mutations or extra text: `case::escrow` and `inputs`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/gate_check.py` | The text of `case.qnt` for a case of the gate model without mutations or extra text: `case::gate` and `inputs`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/grace_check.py` | The text of `case.qnt` for a case of the grace model without mutations or extra text: `case::bounded` and `inputs`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/lookup_check.py` | The text of `case.qnt` for a case of the lookup model without mutations or extra text: `case::bounded` and `inputs`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/marklog_check.py` | The text of `case.qnt` for a case of the marklog model without mutations or extra text: `case::marklog` and `inputs`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/reclaim_check.py` | The text of `case.qnt` for a case of the reclaim model without mutations or extra text: `case::bounded` and `inputs`. |
+| `crates/kestrike-tools/src/fixtures/case.rs` | `quint/register_check.py` | The text of `case.qnt` for a case of the register model without mutations or extra text: `case::bounded` and `inputs`. |
+| `crates/kestrike-tools/src/gameday/` | `scripts/gameday-judge.py` | The rules that read a game-day package for GD-2, under the same names in both: `Refusal` and `need`; `read_file`; `decode` and `parsed`; `exact` and `shown`; `finite`, `encodable`, `calendar`, `member_of` and `conform`; `VERSION`, `REQUEST`, `PACKAGE_SCHEMA` and `LAYOUT`; `fleet_bound`, `declared_bound` and `check_package` with `FLEET_BOUNDS`; `gd2_entry`; `roles_reach`; and the constants they read, `CATALOG` and `FILE_LIMIT` among them. |
+| `crates/kestrike-tools/src/gameday/` | `scripts/gameday-judge.py` | The load of a game-day evidence directory, under the same names in both: `open_dir`, `entries` and `ordered`; `read_evidence`, `package_of`, `collected`, `layout_of`, `admit` and `load_evidence`; `check_seal`; `check_order`, `ends_observation` and `later`; and the constants they read, `LAYOUT_DIRS`, `COLLECTED` and `MARKS`. |
+| `crates/kestrike-tools/src/genmc/case.rs` | `scripts/judge-genmc.py` | The judgment of one case run: `check_line`, `check_graph` and `judge_case`, with the patterns `ABORTS`, `ERROR_EVENT`, `GRAPH_EVENT`, `GRAPH_ERROR` and `TEXT_EVENT`, under the same names in both. |
+| `crates/kestrike-tools/src/genmc/correspondence.rs` | `scripts/judge-genmc.py` | A case's litmus tests against its expectation: `check_correspondence`. |
+| `crates/kestrike-tools/src/genmc/evidence.rs` | `scripts/judge-genmc.py` | The lane's recorded build and command: `check_config` with `SHAPING_TABLES`, `SHAPING_BUILD_KEYS`, `SHAPING_ENV_PREFIXES` and `ADMITTED_TARGET`, and `check_command`, under the same names in both. |
+| `crates/kestrike-tools/src/genmc/refusal.rs` | `scripts/judge-rc11.py` | The judge's refusal and its completions, `Refusal`; the interrupted exits, `INTERRUPTED`; `read_json`; and `single`, under the same names in both. |
+| `crates/kestrike-tools/src/genmc/refusal.rs` | `scripts/judge-genmc.py` | The drift refusal: `DRIFT` in both, `Refusal::drift` in the Rust module and `Drift` in the Python file. |
+| `crates/kestrike-tools/src/genmc/sources.rs` | `scripts/judge-genmc.py` | The sources of a GenMC case build and the forms a transcription check compares: `INCLUDED`, `code`, `normalized`, `bodies`, `read_source` and `package_sources`, under the same names in both, and the text that stands for each lexeme kind, `lexeme_text` in the Rust module and `LEXEME_TEXT` in the Python file. |
+| `crates/kestrike-tools/src/genmc/transcription.rs` | `scripts/judge-genmc.py` | The transcription check: `ORDERING`, `STRENGTH`, `arguments`, `strengths`, `locate`, `transcription_drift` and `check_transcription`, under the same names in both, and the method rule of each binding kind, `kind_rule` in the Rust module and `KINDS` in the Python file. |
+| `crates/kestrike-tools/src/git.rs` | `scripts/pre-push-checks.py` | The four pathspec-mode variables that the push's environment removes: `PATHSPEC_MODES` in both. |
+| `crates/kestrike-tools/src/git.rs` | `scripts/red-green.py` | The five Git variables that point Git at another repository, work tree, index or object store, in the order a refusal lists them: `REPOSITORY_VARIABLES` in the Rust module and `OVERRIDES` in the Python file. |
+| `crates/kestrike-tools/src/hook/` | `scripts/pre-push-checks.py` | The decisions of a push before its checks start, under the same names in both: the checks in run order with their argument vectors (`ORDER`), the path lists that select them, among them `SELECTION_INPUTS`, `LINKS_SCRIPTS`, `JUDGES_DIRS`, `JUDGES_FILES`, `JUDGES_SOURCES`, `GAMEDAY_OWN`, `JUDGE_READS`, `HOST_STOP_OWN`, `RECORD_DIRS` and `CHAOS_TREES`, and `checks_for`, `chaos_change`, `gameday_input` and `host_stop_input`; `comparison_base`, `destination_refs`, `verus_sources`, `link_inputs`, `ignored_tests` and `changes_ignore`; `shown`, `record_values`, `tip_records`, `pushed_records` and `account_numbers`; and the patterns `SELECTION_PATTERN` and `CHAOS_RECORD`, and `ACCOUNT_NUMBER`, which the Rust module holds as `account_number`. |
+| `crates/kestrike-tools/src/host_stop/` | `scripts/host-stop-controller.py` | The layer under the controller's commands. A mark's write and its withdrawal: `publish` in both, with `sync` and `withdraw` in the Python file, and `Unwritten::sentence` in the Rust module, which holds the three sentences of `withdraw` and the sentence of a write that makes no progress. The evidence lock, the probe and the lookup: `lock`, `probe` and `stands` in both, with `unlock` in the Python file, which the Rust module holds as the drop of `Lock`. The `aws` call of `aws_cli`, which the Rust module holds as `launch` and `command`: the arguments after the call's own, the variables added to the environment, the cut in whole seconds, and the two sentences of `CallFailed` with the last 400 characters of the standard error (`TAIL` in the Rust module). The signal record: `SIGNALS` and `Interrupted`, with `on_signal`, `release` and `hold` of `Controller` in the Python file, and `Signal::ALL`, `Delivered` and `Record` in the Rust module. The controller's checks of its inputs and of each AWS reply, under the same names in both: the constants `ACTION`, `RESTORATION`, `BOUNDS`, `LIMIT_SECONDS`, `POLL_SECONDS`, `CALL_SECONDS`, `SKEW_SECONDS`, `DETAIL_MAX`, `MAX_INSTANCES`, `ALARM_NAME_MAX`, `MISSING_DATA` and `USER_SHUTDOWN`; the shapes `OPERATOR`, `SHARD_LINE` and `REVIEWED`; the patterns `REGION`, `INSTANCE`, `ISO`, `USER_STOP`, `STEPS_TAIL` and `LAUNCH`; `whole`, `nested`, `optional_text`, `query_kind`, `read_statuses`, `read_record`, `launch_time` and `read_alarms`; `read_bytes` and `read_json`; `encoded`; `instance_id`, `iso_time`, `gd2_of`, `steps_tail`, `plain`, `read_operator`, `check_run`, `read_snapshot`, `build_roles`, `check_reviewed` and `check_stopped`. Under other names: a reply that fails its decoding or a field's check raises `CallFailed` in the Python file and is `FailedCall::Reply` in the Rust module; the type check of a reply's field is `field` in the Python file and `off_type` with `list`, `dict` and `text` in the Rust module; a call's output read as one strict JSON object stands in `aws_cli` in the Python file and is `reply` in the Rust module; `HEALTH` is `health`; the POSIX seconds of a calendar second, which the Python file takes from `calendar.timegm` and `time.strptime`, are `posix_seconds`; and the `Arn` of the caller's reply, which `require_caller` reads in the Python file, is `caller_arn`. |
+| `crates/kestrike-tools/src/host_stop/mark.rs` | `scripts/fis-controller.py` | The sync of a directory's entries: `sync_directory` in both. |
+| `crates/kestrike-tools/src/json.rs` | `scripts/gameday-judge.py` | The strict JSON read, which refuses a repeated key, a constant that is no number, and a number with a fraction or an exponent whose value is not the shortest form of a finite double: `parse_strict` in the Rust module, and `DECODER` with `distinct_keys`, `no_constant` and `double` in the Python file. |
+| `crates/kestrike-tools/src/ownership.rs` | `scripts/red-green.py` | The directory checks `shared_directories`, `traversed`, `make_private` and `foreign_toolchain_paths`, with `TOOLCHAIN_FILES` and `SHARED`, under the same names in both. |
+| `crates/kestrike-tools/src/production_text.rs` | `scripts/classify-atomics.py` | The test-only reading of a Rust source: `closing`, `item_end`, `readings`, `macro_spans`, `own_comma`, `analyzed`, `spliced` and `blanked`, with the patterns `RUN`, `ITEM` and `PROVEN`, and `MACRO`, which the Rust module holds as `MACRO_DEFINITION` and `MACRO_BANG`. |
+| `crates/kestrike-tools/src/python.rs` | `scripts/red-green.py` | The line printer `say`: the characters it escapes and the one newline it ends a line with. |
+| `crates/kestrike-tools/src/rust_text.rs` | `scripts/classify-atomics.py` | `blank` and `code`, which blank a Rust source's comments and literal contents. |
+| `crates/kestrike-tools/src/rust_text.rs` | `scripts/judge-rc11.py` | The lexer of Rust source: `lexemes` in the Rust module, `rust_lexemes` with `RUST_LEXEME` in the Python file, and `BLOCK_EDGE` in both. |
+| `crates/kestrike-tools/src/tools/escrow_fixtures.rs` | `quint/escrow_check.py` | The four checked runs, each with its volume: the first four rows of `RECIPES` and `RUNS`. |
+| `crates/kestrike-tools/src/tools/gate_fixtures.rs` | `quint/gate_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`, with `SUBMIT` in both. The turns up to a submitted report are `REPORTED` in the Python file and the macro `reported!` in the Rust module, whose constant `REPORTED` holds the macro's turns and is read by no recipe. The second checked run writes those turns out after its first turn in the Rust module. |
+| `crates/kestrike-tools/src/tools/grace_fixtures.rs` | `quint/grace_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`. |
+| `crates/kestrike-tools/src/tools/lookup_fixtures.rs` | `quint/lookup_check.py` | The three checked runs: the first three rows of `RECIPES` and `RUNS`. |
+| `crates/kestrike-tools/src/tools/marklog_fixtures.rs` | `quint/marklog_check.py` | The three checked runs: the first three rows of `RECIPES` and `RUNS`. |
+| `crates/kestrike-tools/src/tools/reclaim_fixtures.rs` | `quint/reclaim_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`. |
+| `crates/kestrike-tools/src/tools/register_fixtures.rs` | `quint/register_check.py` | The three checked runs: the first three rows of `RECIPES` and `RUNS`. |
+
+The checked runs of the seven rows under `crates/kestrike-tools/src/tools/` are each compared with the
+committed replay traces: `scripts/test-quint-check.py` compares each run of `RUNS` with its trace's recipe,
+and `crates/kestrike-tools/tests/fixture_writers.rs` compares each trace a tool writes with the committed
+one. Neither compares which recipes are the checked runs, so the count in a row and in the comment on
+`RECIPES` is kept by hand.
 
 ## What a port keeps
 

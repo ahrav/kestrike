@@ -217,7 +217,7 @@ static ARM: LazyLock<Regex> = LazyLock::new(|| {
     ))
 });
 
-static MACRO: LazyLock<Regex> = LazyLock::new(|| {
+pub(super) static MACRO: LazyLock<Regex> = LazyLock::new(|| {
     compiled(&format!(
         r"(?:macro_rules{SPACE}*!{SPACE}*(?:r#)?{WORD}+|{WORD}+{SPACE}*!){SPACE}*[(\[{{]"
     ))
@@ -270,7 +270,7 @@ pub fn line_of(text: &str, offset: usize) -> usize {
 }
 
 /// The offset past the bracket that closes the one at `start`, or the end of `text`.
-fn call_end(text: &str, start: usize) -> usize {
+pub(super) fn call_end(text: &str, start: usize) -> usize {
     let mut depth = 0_isize;
     for (index, c) in text[start..].char_indices() {
         match c {
@@ -286,7 +286,7 @@ fn call_end(text: &str, start: usize) -> usize {
 }
 
 /// The offset of the innermost bracket open at `offset`.
-fn opener(scanned: &str, offset: usize) -> Option<usize> {
+pub(super) fn opener(scanned: &str, offset: usize) -> Option<usize> {
     let mut depth = 0_usize;
     for (index, &byte) in scanned.as_bytes()[..offset].iter().enumerate().rev() {
         match byte {
@@ -301,7 +301,7 @@ fn opener(scanned: &str, offset: usize) -> Option<usize> {
 
 /// The offset of the `{` that opens the body of an item whose header continues at `index`, or `None` when
 /// a `;` outside brackets ends it as a declaration.
-fn body_open(text: &str, index: usize) -> Option<usize> {
+pub(super) fn body_open(text: &str, index: usize) -> Option<usize> {
     let mut depth = 0_isize;
     for (position, &byte) in text.as_bytes().iter().enumerate().skip(index) {
         match byte {

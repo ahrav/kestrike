@@ -1,6 +1,7 @@
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, DirBuilder};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -172,6 +173,11 @@ impl Run {
     }
 }
 
+fn one_line(text: &str) -> bool {
+    text.strip_suffix('\n')
+        .is_some_and(|line| !line.contains(['\n', '\r']))
+}
+
 fn assert_blocks(run: &Run, line: &str) {
     assert_eq!(run.code, Some(1), "{}{}", run.stdout, run.stderr);
     assert!(
@@ -200,7 +206,7 @@ impl Repo {
         fs::create_dir_all(root).expect("the scratch root is made");
         let temp = (0..1000)
             .map(|at| root.join(format!("kestrike-scan-{name}-{}-{at}", std::process::id())))
-            .find(|temp| fs::create_dir(temp).is_ok())
+            .find(|temp| DirBuilder::new().mode(0o700).create(temp).is_ok())
             .expect("a new scratch directory is made");
         let repo = temp.join("repo");
         fs::create_dir(&repo).expect("the repository directory is made");
@@ -303,6 +309,22 @@ impl Repo {
 
     fn change(&self, files: &[(&str, &str)]) -> String {
         self.commit(files, "change", &[])
+    }
+
+    fn dated(&self, date: &str, message: &str) -> String {
+        let output = self
+            .command("git")
+            .args(["commit", "-q", "--allow-empty", "-m", message])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .expect("git starts");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.git(&["rev-parse", "HEAD"])
     }
 
     fn edit(&self, path: &str, old: &str, new: &str) -> String {
@@ -1124,6 +1146,11 @@ type Refusal = (Vec<(String, String)>, Vec<&'static str>, &'static str);
 #[test]
 fn an_inventory_that_cannot_be_compared_exits_two() {
     let repo = Repo::new("cannot-compare");
+    let ignored = repo.edit(
+        "src/a_tests.rs",
+        "#[test]\nfn second",
+        "#[test]\n#[ignore]\nfn second",
+    );
     let [a, b, f] = rows();
     let J::O(mut decoy) = document(&[b.with("seeds", J::N(3)), a.clone(), f.clone()], 10) else {
         panic!("the document is an object");
@@ -1179,6 +1206,30 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             vec![],
             "the key '' under a\\r::error::b could name another path\n",
         ),
+        (
+            vec![(
+                INVENTORY.to_owned(),
+                r#"{"a\r::error::b": {"x.y": 4}}"#.to_owned(),
+            )],
+            vec![],
+            "the key 'x.y' under a\\r::error::b could name another path\n",
+        ),
+        (
+            vec![(
+                INVENTORY.to_owned(),
+                r#"{"a\r::error::b": [{"id": "x.y"}]}"#.to_owned(),
+            )],
+            vec![],
+            "the id 'x.y' under a\\r::error::b could name another path\n",
+        ),
+        (
+            vec![(
+                INVENTORY.to_owned(),
+                r#"{"a\r::error::b": [{"id": "x"}, {"id": "x"}]}"#.to_owned(),
+            )],
+            vec![],
+            "two values share the path a\\r::error::b[x].id\n",
+        ),
         (vec![(INVENTORY.to_owned(), deep)], vec![], INVENTORY),
         (
             vec![(INVENTORY.to_owned(), String::new())],
@@ -1187,6 +1238,14 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
         ),
         (
             vec![(INVENTORY.to_owned(), "not json".to_owned())],
+            vec![],
+            INVENTORY,
+        ),
+        (
+            vec![
+                (INVENTORY.to_owned(), "not json".to_owned()),
+                ("src/a_tests.rs".to_owned(), ignored.clone()),
+            ],
             vec![],
             INVENTORY,
         ),
@@ -1206,14 +1265,14 @@ fn an_inventory_that_cannot_be_compared_exits_two() {
             .collect();
         let head = repo.change(&files);
         let run = repo.scan_head(&head);
-        assert_eq!(run.code, Some(2), "{message}: {}{}", run.stdout, run.stderr);
+        assert_eq!(run.outcome(), (Some(2), ""), "{message}: {}", run.stderr);
         assert!(run.stderr.contains(message), "{}", run.stderr);
         assert!(
             run.stderr.starts_with("scan-weakened-tests: "),
             "{}",
             run.stderr
         );
-        assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
+        assert!(one_line(&run.stderr), "{}", run.stderr);
         repo.reset(&repo.base);
     }
 }
@@ -1589,7 +1648,7 @@ fn a_range_with_no_blocking_finding_reads_no_commit_message() {
 fn an_unreadable_head_or_an_unwritable_summary_exits_two() {
     let repo = Repo::new("unreadable-head");
     let run = repo.scan(&["--base", &repo.base, "--head", "no-such-ref"]);
-    assert_eq!(run.code, Some(2));
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     let rest = run
         .stderr
         .strip_prefix("scan-weakened-tests: git rev-parse ")
@@ -1615,7 +1674,7 @@ fn an_unreadable_head_or_an_unwritable_summary_exits_two() {
         "{}",
         run.stderr
     );
-    assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
+    assert!(one_line(&run.stderr), "{}", run.stderr);
 }
 
 #[test]
@@ -1972,8 +2031,7 @@ fn a_carriage_return_in_a_path_is_written_escaped() {
     );
 }
 
-/// A line feed, U+007F and U+0085 in an inventory key are written as `repr` writes them, and U+00A0, which
-/// lies past U+009F, is written as it is.
+/// A line feed, U+007F, U+0085 and U+00A0 in an inventory key are each written as `repr` writes them.
 #[test]
 fn a_control_character_in_an_inventory_key_is_written_escaped() {
     let repo = Repo::new("key-line-feed");
@@ -1982,7 +2040,7 @@ fn a_control_character_in_an_inventory_key_is_written_escaped() {
     let head = repo.change(&[(INVENTORY, &format!(r#"{{"{key}": {{"seeds": 1}}}}"#))]);
     let run = repo.scan(&["--base", &base, "--head", &head]);
     let line =
-        format!("blocks budget-lowered:{INVENTORY} x\\n\\x7f\\x85\u{a0}::error::y.seeds: 2 -> 1\n");
+        format!("blocks budget-lowered:{INVENTORY} x\\n\\x7f\\x85\\xa0::error::y.seeds: 2 -> 1\n");
     assert_eq!(run.outcome(), (Some(1), line.as_str()), "{}", run.stderr);
 }
 
@@ -2092,20 +2150,253 @@ fn a_base_past_the_fork_point_charges_the_head_with_its_own_commits_only() {
     );
     repo.reset(&branch);
     let weakened = repo.ignore_second("ignore");
-    let run = repo.scan(&["--base", &ahead, "--head", &weakened]);
-    let expected = format!("blocks {KEY} second: not ignored -> #[ignore]\n");
-    assert_eq!(
-        run.outcome(),
-        (Some(1), expected.as_str()),
-        "{}",
-        run.stderr
+    let summary = repo.temp.join("summary.md");
+    let run = repo.scan_env(
+        &["--base", &ahead, "--head", &weakened],
+        &[(
+            "GITHUB_STEP_SUMMARY",
+            summary.to_str().expect("the path is UTF-8"),
+        )],
     );
-    let range = format!(
-        "in {}..{}: Weakens-Test: {KEY}: <reason>",
+    let expected = format!("blocks {KEY} second: not ignored -> #[ignore]\n");
+    let hint = format!(
+        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {}..{}: \
+         Weakens-Test: {KEY}: <reason>\n",
+        &ahead[..12],
+        &weakened[..12]
+    );
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(1), expected.as_str(), hint.as_str())
+    );
+    let compared = format!(
+        "Weakened-test scan of {}..{}:\n\n```text\n{expected}```\n",
         &repo.base[..12],
         &weakened[..12]
     );
-    assert!(run.stderr.contains(&range), "{}", run.stderr);
+    assert_eq!(
+        fs::read_to_string(&summary).expect("the summary reads"),
+        compared
+    );
+}
+
+/// The scan credits acknowledgements in the requested `base..head` range. Both best common ancestors of `old`
+/// and `head`, `left` and `right`, carry a `Weakens-Test` acknowledgement, so the range from whichever one
+/// `git merge-base` prints to `head` holds the other, which `old` reaches.
+#[test]
+fn an_acknowledgement_in_a_commit_the_requested_base_reaches_is_not_credited() {
+    let repo = Repo::new("two-merge-bases");
+    let line = format!("Weakens-Test: {KEY}: written before the range");
+    let left = repo.commit(&[], &format!("left\n\n{line}"), &[]);
+    repo.reset(&repo.base);
+    let right = repo.commit(&[], &format!("right\n\n{line}"), &[]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "old merge", &left]);
+    let old = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&left);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "new merge", &right]);
+    let head = repo.ignore_second("ignore");
+    let mut forks: Vec<String> = repo
+        .git(&["merge-base", "--all", &old, &head])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    forks.sort();
+    let mut parents = [left, right];
+    parents.sort();
+    assert_eq!(forks, parents, "the range has two best common ancestors");
+    let finding = format!("{KEY} second: not ignored -> #[ignore]");
+
+    let run = repo.scan(&["--base", &old, "--head", &head]);
+    let hint = format!(
+        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {}..{}: \
+         Weakens-Test: {KEY}: <reason>\n",
+        &old[..12],
+        &head[..12]
+    );
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (
+            Some(1),
+            format!("blocks {finding}\n").as_str(),
+            hint.as_str()
+        )
+    );
+
+    let merged = format!("{head}^");
+    repo.reset(&merged);
+    let one = repo.commit(&[], "side one", &[]);
+    repo.reset(&merged);
+    repo.commit(&[], "side two", &[]);
+    let message = format!("side merge\n\nWeakens-Test: {KEY}: written in the range");
+    repo.git(&["merge", "-q", "--no-ff", "-m", &message, &one]);
+    let side = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&head);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "take the side", &side]);
+    let within = repo.git(&["rev-parse", "HEAD"]);
+    assert_eq!(
+        repo.git(&["rev-parse", &format!("{within}^2")]),
+        side,
+        "the merge that carries the line is the second parent"
+    );
+    let run = repo.scan(&["--base", &old, "--head", &within]);
+    let credited = format!("acknowledged {finding} (Weakens-Test: written in the range)\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(0), credited.as_str(), "")
+    );
+
+    let run = repo.scan_head(&head);
+    let credited = format!("acknowledged {finding} (Weakens-Test: written before the range)\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(0), credited.as_str(), "")
+    );
+}
+
+/// Git bounds the base side of a range walk by committer date, so `git rev-list base..head` lists `fork`,
+/// which `base` reaches through commits dated before `fork`. The scan treats `fork` as base history.
+#[test]
+fn a_commit_the_base_reaches_through_commits_dated_before_it_is_not_credited() {
+    let repo = Repo::new("dated-base-side");
+    let message = format!("fork\n\nWeakens-Test: {KEY}: written on the fork");
+    let fork = repo.commit(&[], &message, &[]);
+    for at in 0..8 {
+        repo.dated(&format!("2000-01-01T00:00:0{at}Z"), "dated");
+    }
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&fork);
+    let head = repo.ignore_second("ignore");
+    let finding = format!("{KEY} second: not ignored -> #[ignore]");
+    let hint = format!(
+        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {}..{}: \
+         Weakens-Test: {KEY}: <reason>\n",
+        &base[..12],
+        &head[..12]
+    );
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (
+            Some(1),
+            format!("blocks {finding}\n").as_str(),
+            hint.as_str()
+        )
+    );
+    let message = format!("acknowledge\n\nWeakens-Test: {KEY}: written in the range");
+    let within = repo.commit(&[], &message, &[]);
+    let run = repo.scan(&["--base", &base, "--head", &within]);
+    let credited = format!("acknowledged {finding} (Weakens-Test: written in the range)\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(0), credited.as_str(), "")
+    );
+}
+
+/// The range of a pull request's scan starts at the first parent of its test merge. That parent reaches
+/// `earlier` through a merged branch whose other commits are dated before `earlier`, and the pull request
+/// branches from `earlier`. The scan treats `earlier` as base history, so the pull request's ignore blocks.
+#[test]
+fn a_commit_of_a_merged_branch_dated_before_it_is_not_credited_to_a_later_pull_request() {
+    let repo = Repo::new("dated-merged-branch");
+    let message = format!("earlier\n\nWeakens-Test: {KEY}: written in a merged branch");
+    let earlier = repo.commit(&[], &message, &[]);
+    for at in 0..8 {
+        repo.dated(&format!("2000-01-01T00:00:0{at}Z"), "dated");
+    }
+    let branch = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&repo.base);
+    repo.commit(&[], "main moves", &[]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge the branch", &branch]);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&earlier);
+    let pull = repo.ignore_second("ignore");
+    repo.reset(&base);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "test merge", &pull]);
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let run = repo.scan(&["--base", "HEAD^1"]);
+    let hint = format!(
+        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {}..{}: \
+         Weakens-Test: {KEY}: <reason>\n",
+        &base[..12],
+        &head[..12]
+    );
+    let blocks = format!("blocks {KEY} second: not ignored -> #[ignore]\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(1), blocks.as_str(), hint.as_str())
+    );
+}
+
+/// Two merges of the same parents have both parents as best common ancestors, and the comparison starts at
+/// the ancestor that `git merge-base` prints. `left` and `right` each carry an ignore with its
+/// `Weakens-Test` acknowledgement, so the scan of `old..new` blocks on the ignore of the other parent until
+/// the message of the amended merge acknowledges it.
+#[test]
+fn a_merge_made_again_is_charged_with_the_ignore_of_the_parent_git_does_not_print() {
+    let repo = Repo::new("merged-again");
+    let gone = "ignore-existing:src/gone_tests.rs";
+    let left = repo.ignore_second(&format!("left\n\nWeakens-Test: {KEY}: written on the left"));
+    repo.reset(&repo.base);
+    let ignored = test_fn("gone").replace("#[test]\n", "#[test]\n#[ignore]\n");
+    let right = repo.commit(
+        &[("src/gone_tests.rs", &ignored)],
+        &format!("right\n\nWeakens-Test: {gone}: written on the right"),
+        &[],
+    );
+    repo.git(&["merge", "-q", "--no-ff", "-m", "old merge", &left]);
+    let old = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&left);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "new merge", &right]);
+    let new = repo.git(&["rev-parse", "HEAD"]);
+    let tree = |commit: &str| repo.git(&["rev-parse", &format!("{commit}^{{tree}}")]);
+    assert_eq!(tree(&old), tree(&new), "the two merges hold one tree");
+    assert_eq!(repo.git(&["rev-list", &format!("{old}..{new}")]), new);
+    let mut forks: Vec<String> = repo
+        .git(&["merge-base", "--all", &old, &new])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    forks.sort();
+    let mut parents = [left.clone(), right];
+    parents.sort();
+    assert_eq!(forks, parents, "the range has two best common ancestors");
+    let charged = |head: &str| {
+        if repo.git(&["merge-base", &old, head]) == left {
+            (gone, format!("{gone} gone: not ignored -> #[ignore]"))
+        } else {
+            (KEY, format!("{KEY} second: not ignored -> #[ignore]"))
+        }
+    };
+
+    let (key, finding) = charged(&new);
+    let run = repo.scan(&["--base", &old, "--head", &new]);
+    let hint = format!(
+        "scan-weakened-tests: {key} blocks; acknowledge it with a commit-message line in {}..{}: \
+         Weakens-Test: {key}: <reason>\n",
+        &old[..12],
+        &new[..12]
+    );
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (
+            Some(1),
+            format!("blocks {finding}\n").as_str(),
+            hint.as_str()
+        )
+    );
+
+    let message = format!(
+        "new merge\n\nWeakens-Test: {KEY}: written in the merge\nWeakens-Test: {gone}: written in the merge"
+    );
+    repo.git(&["commit", "-q", "--amend", "-m", &message]);
+    let amended = repo.git(&["rev-parse", "HEAD"]);
+    let (_, finding) = charged(&amended);
+    let run = repo.scan(&["--base", &old, "--head", &amended]);
+    let credited = format!("acknowledged {finding} (Weakens-Test: written in the merge)\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(0), credited.as_str(), "")
+    );
 }
 
 #[test]
@@ -2134,17 +2425,17 @@ fn ci_scans_a_pull_request_from_the_first_parent_of_its_test_merge() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/agent-checks.yml");
     let workflow = fs::read_to_string(workflow).expect("the workflow reads");
     assert_eq!(
-        workflow
-            .matches("scripts/tool.sh scan-weakened-tests")
-            .count(),
+        workflow.matches("scan-weakened-tests").count(),
         1,
         "one step runs the scan"
     );
-    assert!(workflow.contains(
-        "          SCAN_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' \
-         || github.event.before || 'origin/main' }}\n        \
-         run: bash scripts/tool.sh scan-weakened-tests --base \"$SCAN_BASE\"\n"
-    ));
+    assert!(workflow.contains(SCAN_STEP), "{SCAN_STEP}");
+    let wrapper =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ci-scan-weakened-tests.sh");
+    let wrapper = fs::read_to_string(wrapper).expect("the wrapper reads");
+    assert!(
+        wrapper.contains("\nbash scripts/tool.sh scan-weakened-tests \"$@\" 2>&1 || status=$?\n")
+    );
     let repo = Repo::new("first-parent");
     let key = format!("budget-lowered:{INVENTORY}");
     let [a, b, f] = rows();
@@ -2253,7 +2544,7 @@ fn a_workflow_diff_that_is_not_utf8_exits_two_and_names_its_command() {
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     assert!(
         run.stderr.starts_with(
-            "scan-weakened-tests: git --no-literal-pathspecs -c core.quotePath=false diff "
+            "scan-weakened-tests: git --no-literal-pathspecs -c core.quotePath=false -c core.precomposeUnicode=false diff "
         ),
         "{}",
         run.stderr
@@ -2447,7 +2738,7 @@ fn an_empty_summary_variable_or_an_empty_report_writes_no_summary() {
     let run = repo.scan_env(&["--base", &repo.base], &[("GITHUB_STEP_SUMMARY", "")]);
     assert_eq!(run.code, Some(1));
     assert!(!run.stderr.contains("step summary"), "{}", run.stderr);
-    assert_eq!(run.stderr.lines().count(), 1, "{}", run.stderr);
+    assert!(one_line(&run.stderr), "{}", run.stderr);
 }
 
 #[test]
@@ -2917,4 +3208,617 @@ fn a_main_rs_root_is_a_case_at_a_commit_without_tools_rs() {
         "{}",
         run.stderr
     );
+}
+
+/// The step that runs the scan, from its name line to its `run` line: the step's own `env` sets the scan's
+/// base, and its one `run` line starts the wrapper that guards the runner's command processing.
+const SCAN_STEP: &str = "      - name: Weakened-test scan\n        env:\n          SCAN_BASE: ${{ \
+                         github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || \
+                         'origin/main' }}\n        run: bash scripts/ci-scan-weakened-tests.sh --base \
+                         \"$SCAN_BASE\"\n";
+
+/// A path that holds the runner's legacy command text `##[error]` keeps its bytes in the report line: the
+/// CI step's wrapper stops command processing around the scan, and an acknowledgement repeats the key as the
+/// report spells it.
+#[test]
+fn a_legacy_command_text_in_a_path_keeps_its_bytes() {
+    let repo = Repo::new("legacy-command");
+    let head = repo.change(&[(
+        "src/##[error]a_tests.rs",
+        &format!("#[ignore]\n{}", test_fn("arrives")),
+    )]);
+    let run = repo.scan_head(&head);
+    assert_eq!(
+        run.outcome(),
+        (
+            Some(0),
+            "reports ignore-new:src/##[error]a_tests.rs arrives: absent -> #[ignore]\n"
+        ),
+        "{}",
+        run.stderr
+    );
+}
+
+impl Repo {
+    fn gitlink(&self, path: &str, message: &str) -> String {
+        let entry = format!("160000,{},{path}", self.base);
+        self.git(&["update-index", "--add", "--cacheinfo", &entry]);
+        self.commit(&[], message, &[])
+    }
+
+    fn refused(&self, base: &str, head: &str, line: &str) {
+        let run = self.scan(&["--base", base, "--head", head]);
+        assert_eq!(run.outcome(), (Some(2), ""), "{line}: {}", run.stderr);
+        assert_eq!(run.stderr, format!("scan-weakened-tests: {line}\n"));
+    }
+}
+
+/// A fixed input or a changed Rust path with no entry at a commit, under a directory that is a link or a
+/// submodule there, is refused as lying under that entry, at the base and at the head. The fixed inputs are
+/// checked when the diff names none of them: the inventory under a link at both ends, the workflow file under
+/// a link at the head alone, and the lane script that is a link at both ends while its target changes. An ancestor that is a regular file leaves the path absent, which
+/// reads as a deleted or an added file.
+#[test]
+fn a_path_under_a_link_or_a_submodule_at_either_commit_exits_two() {
+    let repo = Repo::new("linked-ancestor");
+    let [a, b, f] = rows();
+    let lane = fs::read_to_string(repo.repo.join("scripts/rust-lane.sh")).expect("the lane reads");
+    let lowered = |seeds| inventory(&[a.clone(), b.with("seeds", J::N(seeds)), f.clone()]);
+    let short = |commit: &str| commit[..12].to_owned();
+    repo.git(&["rm", "-r", "-q", "scripts"]);
+    repo.commit(
+        &[
+            ("moved/test-inventory.json", &lowered(3)),
+            ("moved/rust-lane.sh", &lane),
+        ],
+        "move",
+        &[],
+    );
+    let linked = repo.link("scripts", "moved", "link the scripts");
+    let restore = |message: &str| {
+        repo.git(&["rm", "-q", "--cached", "scripts"]);
+        let _ = fs::remove_file(repo.repo.join("scripts"));
+        repo.commit(
+            &[
+                (INVENTORY, &inventory(&rows())),
+                ("scripts/rust-lane.sh", &lane),
+            ],
+            message,
+            &[],
+        )
+    };
+    let restored = restore("restore the scripts");
+    repo.reset(&linked);
+    let relowered = repo.change(&[("moved/test-inventory.json", &lowered(2))]);
+    repo.reset(&repo.base);
+    repo.git(&["rm", "-r", "-q", "scripts"]);
+    let submodule = repo.gitlink("scripts", "a submodule at scripts");
+    let unlinked = restore("restore the scripts beside the submodule");
+    repo.reset(&repo.base);
+    repo.git(&["rm", "-r", "-q", "scripts"]);
+    let file = repo.change(&[("scripts", "a file\n")]);
+    let after_file = restore("restore the scripts beside the file");
+    repo.reset(&repo.base);
+    let tests = test_fn("first") + &test_fn("second");
+    let rust = repo.change(&[("tests/t.rs", &tests)]);
+    repo.git(&["rm", "-r", "-q", "tests"]);
+    let ignored = tests.replace("#[test]\nfn second", "#[test]\n#[ignore]\nfn second");
+    repo.commit(&[("moved_tests/t.rs", &ignored)], "move the tests", &[]);
+    let rust_linked = repo.link("tests", "moved_tests", "link the tests");
+    repo.reset(&repo.base);
+    let workflow = ".github/workflows/agent-checks.yml";
+    let flow = fs::read_to_string(repo.repo.join(workflow)).expect("the workflow reads");
+    let unflowed = repo.commit(&[], "drop the workflow", &[workflow]);
+    repo.change(&[("elsewhere/agent-checks.yml", &flow.replace("15", "20"))]);
+    let flow_linked = repo.link(".github/workflows", "../elsewhere", "link the workflows");
+    repo.reset(&repo.base);
+    let lane_path = "scripts/rust-lane.sh";
+    repo.git(&["rm", "-q", lane_path]);
+    repo.change(&[("scripts/lane.txt", &lane)]);
+    let lane_linked = repo.link(lane_path, "lane.txt", "link the lane");
+    let lane_raised = repo.change(&[("scripts/lane.txt", &lane.replace("25m", "40m"))]);
+    let under = |path: &str, commit: &str, ancestor: &str, kind: &str| {
+        format!(
+            "{path} at {} lies under {ancestor}, which is {kind}",
+            short(commit)
+        )
+    };
+    for (base, head, line) in [
+        (
+            &repo.base,
+            &linked,
+            under(lane_path, &linked, "scripts", "a link"),
+        ),
+        (
+            &linked,
+            &restored,
+            under(lane_path, &linked, "scripts", "a link"),
+        ),
+        (
+            &linked,
+            &relowered,
+            under(INVENTORY, &linked, "scripts", "a link"),
+        ),
+        (
+            &repo.base,
+            &submodule,
+            under(lane_path, &submodule, "scripts", "a submodule"),
+        ),
+        (
+            &submodule,
+            &unlinked,
+            under(lane_path, &submodule, "scripts", "a submodule"),
+        ),
+        (
+            &rust,
+            &rust_linked,
+            under("tests/t.rs", &rust_linked, "tests", "a link"),
+        ),
+        (
+            &unflowed,
+            &flow_linked,
+            under(workflow, &flow_linked, ".github/workflows", "a link"),
+        ),
+        (
+            &lane_linked,
+            &lane_raised,
+            format!("{lane_path} at {} is not a file", short(&lane_linked)),
+        ),
+    ] {
+        repo.refused(base, head, &line);
+    }
+    for (base, head) in [(&repo.base, &file), (&file, &after_file)] {
+        let run = repo.scan(&["--base", base, "--head", head]);
+        assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+        assert_eq!(run.stderr, "");
+    }
+}
+
+/// The tools crate's test directory is refused at a commit where it is a link or a submodule, or lies under
+/// one, whatever paths the range changes: the cases a checkout reads stand behind that entry.
+#[test]
+fn a_case_directory_under_a_link_or_a_submodule_exits_two() {
+    let repo = Repo::new("linked-cases");
+    let short = |commit: &str| commit[..12].to_owned();
+    repo.change(&[
+        ("other/tests/tools.rs", "mod one;\n"),
+        ("other/tests/one.rs", &test_fn("one")),
+    ]);
+    let crate_linked = repo.link("crates/kestrike-tools", "../other", "link the crate");
+    let crate_gone = repo.commit(&[], "remove a case", &["other/tests/one.rs"]);
+    repo.reset(&repo.base);
+    repo.change(&[
+        ("elsewhere/tools.rs", "mod one;\n"),
+        ("elsewhere/one.rs", &test_fn("one")),
+    ]);
+    let cases_linked = repo.link(CASES, "../../elsewhere", "link the cases");
+    let cases_gone = repo.commit(&[], "remove a case", &["elsewhere/one.rs"]);
+    repo.reset(&repo.base);
+    let cases_module = repo.gitlink(CASES, "a submodule at the cases");
+    let cases_later = repo.change(&[("src/later.rs", "fn later() {}\n")]);
+    repo.reset(&repo.base);
+    let crates_module = repo.gitlink("crates", "a submodule at crates");
+    repo.git(&["rm", "-q", "--cached", "crates"]);
+    let crates_later = repo.change(&[("src/later.rs", "fn later() {}\n")]);
+    repo.reset(&repo.base);
+    let data = repo.change(&[(&format!("{CASES}/data.txt"), "data\n")]);
+    repo.git(&["rm", "-q", "--", &format!("{CASES}/data.txt")]);
+    repo.change(&[("elsewhere2/data.txt", "data\n")]);
+    let data_linked = repo.link(CASES, "../../elsewhere2", "link the cases over a data file");
+    for (base, head, line) in [
+        (
+            &data,
+            &data_linked,
+            format!("{CASES} at {} is a link", short(&data_linked)),
+        ),
+        (
+            &crate_linked,
+            &crate_gone,
+            format!(
+                "{CASES} at {} lies under crates/kestrike-tools, which is a link",
+                short(&crate_gone)
+            ),
+        ),
+        (
+            &cases_linked,
+            &cases_gone,
+            format!("{CASES} at {} is a link", short(&cases_gone)),
+        ),
+        (
+            &cases_module,
+            &cases_later,
+            format!("{CASES} at {} is a submodule", short(&cases_later)),
+        ),
+        (
+            &crates_module,
+            &crates_later,
+            format!(
+                "{CASES} at {} lies under crates, which is a submodule",
+                short(&crates_module)
+            ),
+        ),
+    ] {
+        repo.refused(base, head, &line);
+    }
+}
+
+/// A refusal that holds a path, a request or Git's own standard error is one line: a blob that is not UTF-8
+/// at a path with a carriage return, a failed Git call whose argument holds one, Git's standard error of many
+/// lines, and an inventory value whose key holds a line feed.
+#[test]
+fn a_refusal_that_holds_a_line_break_is_written_escaped() {
+    let repo = Repo::new("refusal-lines");
+    repo.write("src/a\r::error::b.rs", b"// \xff\n");
+    repo.git(&["add", "--", "src/a\r::error::b.rs"]);
+    let blob = repo.commit(&[], "a byte outside UTF-8", &[]);
+    repo.refused(
+        &repo.base,
+        &blob,
+        &format!("{blob}:src/a\\r::error::b.rs: invalid utf-8 sequence of 1 bytes from index 3"),
+    );
+    repo.reset(&repo.base);
+    let wide = "src/a\u{202e}\u{e0001}b.rs";
+    repo.write(wide, b"// \xff\n");
+    repo.git(&["add", "--", wide]);
+    let wide_blob = repo.commit(&[], "a byte outside UTF-8 under wide code points", &[]);
+    repo.refused(
+        &repo.base,
+        &wide_blob,
+        &format!(
+            "{wide_blob}:src/a\\u202e\\U000e0001b.rs: invalid utf-8 sequence of 1 bytes from index 3"
+        ),
+    );
+    repo.reset(&repo.base);
+    let run = repo.scan_env(&["--base", "a\r::error::b"], &[("LC_ALL", "C")]);
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        "scan-weakened-tests: git rev-parse --verify --end-of-options a\\r::error::b^{commit}: \
+         fatal: Needed a single revision\n"
+    );
+    let run = repo.scan_env(
+        &["--base", "no-such-revision"],
+        &[("GIT_TRACE", "1"), ("LC_ALL", "C")],
+    );
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
+    assert!(one_line(&run.stderr), "{}", run.stderr);
+    assert!(run.stderr.contains("trace: "), "{}", run.stderr);
+    assert!(
+        run.stderr.ends_with("\\nfatal: Needed a single revision\n"),
+        "{}",
+        run.stderr
+    );
+    repo.reset(&repo.base);
+    let old = repo.change(&[(INVENTORY, r#"{"a\n::x": {"seeds": 4}}"#)]);
+    let new = repo.change(&[(INVENTORY, r#"{"a\n::x": {"seeds": "4"}}"#)]);
+    repo.refused(
+        &old,
+        &new,
+        &format!("{INVENTORY}: the value at a\\n::x.seeds changes from an integer to a text"),
+    );
+}
+
+/// A code point that reorders or breaks a displayed line is written as `repr` writes it in a report line: a
+/// bidirectional control, a line or paragraph separator and a byte order mark. A path of printable code
+/// points outside ASCII keeps its bytes.
+#[test]
+fn a_bidirectional_control_in_a_path_is_written_escaped() {
+    let repo = Repo::new("bidi-path");
+    for (code, written) in [
+        ('\u{202e}', "\\u202e"),
+        ('\u{2066}', "\\u2066"),
+        ('\u{200f}', "\\u200f"),
+        ('\u{2028}', "\\u2028"),
+        ('\u{2029}', "\\u2029"),
+        ('\u{feff}', "\\ufeff"),
+        ('\u{e9}', "\u{e9}"),
+    ] {
+        let head = repo.change(&[(
+            &format!("src/a{code}b_tests.rs"),
+            &format!("#[ignore]\n{}", test_fn("arrives")),
+        )]);
+        let run = repo.scan_head(&head);
+        let line =
+            format!("reports ignore-new:src/a{written}b_tests.rs arrives: absent -> #[ignore]\n");
+        assert_eq!(run.outcome(), (Some(0), line.as_str()), "{}", run.stderr);
+        repo.reset(&repo.base);
+    }
+}
+
+/// The scan writes U+202E as `\u202e` in the hint, the acknowledged reason and the step summary, which
+/// preserves display order. The scan matches U+202E literally in `Weakens-Test:` keys.
+#[test]
+fn a_bidirectional_control_in_a_hint_or_a_reason_is_written_escaped() {
+    let repo = Repo::new("bidi-hint");
+    let path = "src/a\u{202e}b.rs";
+    let base = repo.change(&[(path, "const SEEDS: u64 = 12;\n")]);
+    let head = repo.change(&[(path, "const SEEDS: u64 = 11;\n")]);
+    let key = "budget-lowered:src/a\\u202eb.rs";
+    let line = format!("{key} SEEDS at line 1: 12 -> 11");
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    assert_eq!(
+        (run.code, run.bytes.as_slice()),
+        (Some(1), format!("blocks {line}\n").as_bytes()),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        run.stderr,
+        format!(
+            "scan-weakened-tests: {key} blocks; acknowledge it with a commit-message line in {}..{}: \
+             Weakens-Test: {key}: <reason>\n",
+            &base[..12],
+            &head[..12]
+        )
+    );
+    let message =
+        format!("Acknowledge it\n\nWeakens-Test: budget-lowered:{path}: x\u{202e}::error::y\n");
+    let acknowledged = repo.commit(&[], &message, &[]);
+    let summary = repo.temp.join("summary.md");
+    let run = repo.scan_env(
+        &["--base", &base, "--head", &acknowledged],
+        &[(
+            "GITHUB_STEP_SUMMARY",
+            summary.to_str().expect("the path is UTF-8"),
+        )],
+    );
+    let expected = format!("acknowledged {line} (Weakens-Test: x\\u202e::error::y)\n");
+    assert_eq!(
+        (run.code, run.bytes.as_slice()),
+        (Some(0), expected.as_bytes()),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.stderr, "");
+    let text = fs::read_to_string(&summary).expect("the summary reads");
+    assert_eq!(
+        text,
+        format!(
+            "Weakened-test scan of {}..{}:\n\n```text\n{expected}```\n",
+            &base[..12],
+            &acknowledged[..12]
+        )
+    );
+}
+
+impl Repo {
+    fn add_bytes(&self, names: &[&[u8]]) -> String {
+        use std::ffi::OsStr;
+        for &name in names {
+            let path = self.repo.join(OsStr::from_bytes(name));
+            fs::create_dir_all(path.parent().expect("a file has a parent"))
+                .expect("the parent is made");
+            fs::write(&path, "fixture\n").expect("the file is written");
+            let added = self
+                .command("git")
+                .args(["add", "--"])
+                .arg(OsStr::from_bytes(name))
+                .status()
+                .expect("git starts");
+            assert!(added.success());
+        }
+        self.commit(&[], "names outside UTF-8", &[])
+    }
+}
+
+/// A range with an unchanged name that is not UTF-8 beside an ancestor of a changed Rust file and beside the
+/// inventory exits 0 with nothing on either stream.
+#[test]
+fn a_name_outside_utf8_beside_a_scanned_path_exits_zero_with_nothing_printed() {
+    let repo = Repo::new("quiet-neighbors");
+    let neighbors = repo.add_bytes(&[b"src/\xff", b"scripts/\xff"]);
+    let changed = repo.change(&[("src/deep/x.rs", "fn x() {}\n")]);
+    let run = repo.scan(&["--base", &neighbors, "--head", &changed]);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+}
+
+/// An unchanged name that is not UTF-8 in a fixture of the tools crate's test directory, on a range that
+/// changes nothing under that directory, exits 0 with nothing on either stream.
+#[test]
+fn a_name_outside_utf8_in_an_unchanged_case_directory_exits_zero_with_nothing_printed() {
+    let repo = Repo::new("quiet-cases");
+    let fixture = repo.add_bytes(&[b"crates/kestrike-tools/tests/fixtures/\xff"]);
+    let changed = repo.change(&[("src/later.rs", "fn later() {}\n")]);
+    let run = repo.scan(&["--base", &fixture, "--head", &changed]);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+}
+
+/// Two Rust paths 1,900 directories deep in one batch, whose ancestors' names together pass 6 MiB, the most
+/// any Linux host gives a program's arguments, exit 0 with nothing on either stream as added files.
+#[test]
+fn a_path_whose_ancestors_pass_the_argument_limit_exits_zero_with_nothing_printed() {
+    let repo = Repo::new("deep-path");
+    let ancestors: usize = (1..=1900).map(|depth| 2 * depth).sum();
+    assert!(2 * ancestors > 6 * 1024 * 1024);
+    let blob = repo.git(&["rev-parse", &format!("{}:src/model.rs", repo.base)]);
+    for top in ["a/", "b/"] {
+        let deep = format!("{}x.rs", top.repeat(1900));
+        let entry = format!("100644,{blob},{deep}");
+        repo.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    }
+    let head = repo.commit(&[], "a deep path", &[]);
+    let run = repo.scan_head(&head);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
+}
+
+impl Repo {
+    fn git_stdin(&self, args: &[&str], input: &str) -> String {
+        use std::io::Write;
+        let mut child = self
+            .command("git")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("git starts");
+        child
+            .stdin
+            .take()
+            .expect("the input is piped")
+            .write_all(input.as_bytes())
+            .expect("the input is written");
+        let output = child.wait_with_output().expect("git exits");
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout)
+            .expect("git writes UTF-8")
+            .trim()
+            .to_owned()
+    }
+}
+
+/// An inventory entry that is a tree at either commit, the empty tree included, is refused as no file,
+/// although an empty tree lists no path under it in the diff.
+#[test]
+fn an_inventory_that_is_an_empty_tree_at_either_commit_exits_two() {
+    let repo = Repo::new("empty-tree-inventory");
+    let empty = repo.git_stdin(&["mktree"], "");
+    let scripts: String = repo
+        .git(&["ls-tree", &repo.base, "scripts/"])
+        .lines()
+        .map(|line| {
+            let (head, path) = line.split_once('\t').expect("a record holds a tab");
+            let name = path
+                .strip_prefix("scripts/")
+                .expect("the path lies in scripts");
+            if name == "test-inventory.json" {
+                format!("040000 tree {empty}\t{name}\n")
+            } else {
+                format!("{head}\t{name}\n")
+            }
+        })
+        .collect();
+    let scripts = repo.git_stdin(&["mktree"], &scripts);
+    let root: String = repo
+        .git(&["ls-tree", &repo.base])
+        .lines()
+        .map(|line| {
+            let (head, name) = line.split_once('\t').expect("a record holds a tab");
+            if name == "scripts" {
+                format!("040000 tree {scripts}\t{name}\n")
+            } else {
+                format!("{head}\t{name}\n")
+            }
+        })
+        .collect();
+    let root = repo.git_stdin(&["mktree"], &root);
+    let tree = repo.git(&[
+        "commit-tree",
+        &root,
+        "-p",
+        &repo.base,
+        "-m",
+        "an empty tree",
+    ]);
+    let base_tree = format!("{}^{{tree}}", repo.base);
+    let file = repo.git(&["commit-tree", &base_tree, "-p", &tree, "-m", "a file again"]);
+    let line = format!("{INVENTORY} at {} is not a file", &tree[..12]);
+    repo.refused(&repo.base, &tree, &line);
+    repo.refused(&tree, &file, &line);
+}
+
+/// A link that stands only in the second batch of ancestor probes, `src/d256` above the 257th deleted file,
+/// is refused at the head.
+#[test]
+fn a_link_in_a_later_batch_of_ancestor_probes_exits_two() {
+    let repo = Repo::new("later-probe");
+    let names: Vec<String> = (0..257).map(|at| format!("src/d{at:03}/t.rs")).collect();
+    let files: Vec<(&str, &str)> = names
+        .iter()
+        .map(|name| (name.as_str(), "fn t() {}\n"))
+        .collect();
+    let base = repo.change(&files);
+    for name in &names {
+        repo.git(&["rm", "-q", "--", name]);
+    }
+    let head = repo.link("src/d256", "d000", "link the last directory");
+    repo.refused(
+        &base,
+        &head,
+        &format!(
+            "src/d256/t.rs at {} lies under src/d256, which is a link",
+            &head[..12]
+        ),
+    );
+}
+
+impl Repo {
+    /// `doubled` commits, on `parent`, the top-level tree of `parent` with the entry `name` replaced by the
+    /// `git mktree` lines `entries`.
+    fn doubled(&self, parent: &str, name: &str, entries: &str, twice: &str) -> String {
+        let kept: String = self
+            .git(&["ls-tree", parent])
+            .lines()
+            .filter(|line| line.split_once('\t').map(|(_, path)| path) != Some(name))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let tree = self.git_stdin(&["mktree"], &format!("{kept}{entries}"));
+        let head = self.git(&["commit-tree", &tree, "-p", parent, "-m", "one path twice"]);
+        let listed = self.git(&["ls-tree", &head, "--", twice]);
+        assert_eq!(listed.lines().count(), 2, "{listed}");
+        head
+    }
+}
+
+/// A listing that names one path twice with two modes is refused. The scan asks for the test directory by
+/// name, and for `src` as the directory above a deleted file when `src` is a link and a submodule. The third
+/// row checks the scan's exit status and output for `src` listed as both a tree and a link: exit 0 with
+/// both streams empty.
+#[test]
+fn a_path_listed_twice_with_two_modes_exits_two_where_a_listing_names_it() {
+    let repo = Repo::new("two-entries");
+    let link = repo.git_stdin(&["hash-object", "-w", "--stdin"], "elsewhere");
+    let cases = repo.change(&[(&format!("{CASES}/c.rs"), "fn c() {}\n")]);
+    let held = repo.git(&["rev-parse", &format!("{cases}:{CASES}")]);
+    let tools = repo.git_stdin(
+        &["mktree"],
+        &format!("120000 blob {link}\ttests\n040000 tree {held}\ttests\n"),
+    );
+    let crates = repo.git_stdin(
+        &["mktree"],
+        &format!("040000 tree {tools}\tkestrike-tools\n"),
+    );
+    let head = repo.doubled(
+        &cases,
+        "crates",
+        &format!("040000 tree {crates}\tcrates\n"),
+        CASES,
+    );
+    repo.refused(
+        &cases,
+        &head,
+        &format!(
+            "git ls-tree at {}: the path '{CASES}' has two entries",
+            &head[..12]
+        ),
+    );
+    let head = repo.doubled(
+        &repo.base,
+        "src",
+        &format!(
+            "120000 blob {link}\tsrc\n160000 commit {}\tsrc\n",
+            repo.base
+        ),
+        "src",
+    );
+    repo.refused(
+        &repo.base,
+        &head,
+        &format!(
+            "git ls-tree at {}: the path 'src' has two entries",
+            &head[..12]
+        ),
+    );
+    let src = repo.git(&["rev-parse", &format!("{}:src", repo.base)]);
+    let head = repo.doubled(
+        &repo.base,
+        "src",
+        &format!("120000 blob {link}\tsrc\n040000 tree {src}\tsrc\n"),
+        "src",
+    );
+    let run = repo.scan_head(&head);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
 }

@@ -1,10 +1,17 @@
-//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, [`hexdigest`] for the SHA-256
-//! hex of bytes, and [`say`], which writes one line with its control characters and surrogates escaped.
+//! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` for floats,
+//! [`hexdigest`] for the SHA-256 hex of bytes, and [`say`], which writes one line with its control
+//! characters and surrogates escaped.
+//!
+//! A JSON value stands for the Python value `json.loads` gives for it: an object is a `dict`, an array a
+//! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
 
 use std::io::{self, Write};
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 
 use sha2::{Digest, Sha256};
 
+use crate::classes::is_digit;
 use crate::json::{Integer, MAX_INTEGER_DIGITS, Value};
 use crate::text::{Text, is_space, push_backslashed, push_repr};
 
@@ -139,6 +146,71 @@ pub fn repr_float(value: f64) -> String {
     format!("{sign}{}.{}", &digits[..before], &digits[before..])
 }
 
+/// `repr` follows Python's `repr` of the value: `None`, `True` and `False`, an integer's digits, a float
+/// as [`repr_float`] writes it, a string as [`Text::repr`] writes it, a list as `[a, b]` and an object as
+/// `{'k': v}`, members in document order.
+pub fn repr(value: &Value) -> String {
+    let mut out = String::new();
+    push_value_repr(value, &mut out);
+    out
+}
+
+fn push_value_repr(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("None"),
+        Value::Bool(true) => out.push_str("True"),
+        Value::Bool(false) => out.push_str("False"),
+        Value::Integer(integer) => out.push_str(&integer.to_string()),
+        Value::Float(value) => out.push_str(&repr_float(*value)),
+        Value::String(text) => out.push_str(&text.repr()),
+        Value::Array(items) => {
+            out.push('[');
+            for (at, item) in items.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                push_value_repr(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(object) => {
+            out.push('{');
+            for (at, (key, member)) in object.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&key.repr());
+                out.push_str(": ");
+                push_value_repr(member, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// `str_of` follows Python's `str` of the value: a string is itself, and every other value is its
+/// [`repr`].
+pub fn str_of(value: &Value) -> Text {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => Text::from(repr(value)),
+    }
+}
+
+/// `truthy` follows Python's truth of the value: `None`, `False`, a zero integer, a zero float of either
+/// sign, and an empty string, list or object are false, and every other value is true, `NaN` included.
+pub fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Integer(integer) => *integer != Integer::from(0u64),
+        Value::Float(value) => *value != 0.0,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+    }
+}
+
 /// `round` rounds the exact binary value of a finite float to `digits` decimal places, breaking ties to
 /// even, as Python's `round(value, digits)` does. When `digits` exceeds [`MAX_ROUND_DIGITS`], the rounded
 /// decimal converts back to the original `f64`. An integer stays as it is, a boolean becomes the integer 0
@@ -180,6 +252,93 @@ pub fn hexdigest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub fn returncode(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| -signal))
+        .or_else(|| status.stopped_signal().map(|signal| -signal))
+        .expect("a waited child exited, or a signal ended or stopped it")
+}
+
+/// `equal` compares objects by their members in any order and arrays by their items in order, and uses
+/// `Value`'s `PartialEq` implementation for scalar comparisons.
+pub fn equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .iter()
+                        .any(|(other, found)| other == key && equal(value, found))
+                })
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| equal(left, right))
+        }
+        _ => left == right,
+    }
+}
+
+/// The value of a decimal digit, a code point of category `Nd`. Those code points stand in runs of ten
+/// from zero to nine, and adjoining runs each start at zero, so the count of digits right before it
+/// gives its value modulo ten.
+fn digit_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return c.to_digit(10);
+    }
+    if !is_digit(c) {
+        return None;
+    }
+    let mut before = 0;
+    let mut code = u32::from(c);
+    while let Some(previous) = code.checked_sub(1).and_then(char::from_u32) {
+        if !is_digit(previous) {
+            break;
+        }
+        before += 1;
+        code -= 1;
+    }
+    Some(before % 10)
+}
+
+/// `text` with each non-ASCII decimal digit (category `Nd`) written as the ASCII digit of its value, the
+/// form in which Python's `int` reads a string's digits.
+pub fn ascii_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| match digit_value(c) {
+            Some(value) if !c.is_ascii() => char::from_digit(value, 10).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// `decimal` applies Python's `int` to `digits`, a run of Unicode decimal digits (category `Nd`).
+///
+/// # Errors
+///
+/// `decimal` accepts 1 through [`MAX_INTEGER_DIGITS`] digits, including leading zeros, and returns an
+/// error for any other text.
+pub fn decimal(digits: &str) -> Result<Integer, String> {
+    let ascii: Option<String> = digits
+        .chars()
+        .map(|c| digit_value(c).and_then(|value| char::from_digit(value, 10)))
+        .collect();
+    let ascii = ascii
+        .filter(|ascii| !ascii.is_empty())
+        .ok_or_else(|| format!("no decimal digits: {}", Text::from(digits).repr()))?;
+    if ascii.len() > MAX_INTEGER_DIGITS {
+        return Err(format!(
+            "a string of {} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion",
+            ascii.len()
+        ));
+    }
+    Ok(Integer::from_digits(false, &ascii).expect("ASCII digits within the limit"))
 }
 
 #[cfg(test)]
