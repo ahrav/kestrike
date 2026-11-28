@@ -45,12 +45,12 @@ const STREAM_FAILED: u8 = 120;
 type Exit = u8;
 
 /// `run` installs the signal record, then runs the push's checks and returns the exit code.
-pub fn run(_top: &Path, args: &[OsString]) -> u8 {
+pub fn run(top: &Path, args: &[OsString]) -> u8 {
     if let Err(error) = cancel::install() {
         return fail(&format!("{NAME}: the signal handlers: {error}"), 2);
     }
     let destination = args.first().map_or(OsStr::new(""), OsString::as_os_str);
-    push(destination).unwrap_or_else(|code| code)
+    push(top, destination).unwrap_or_else(|code| code)
 }
 
 /// `say` writes `line` and a line feed to standard error; a failed write is exit 120. While standard error
@@ -82,7 +82,7 @@ fn refused(failure: &Failure) -> Exit {
 
 /// `push` reads the ref lines from standard input, plans them, and runs the scans, the guard and the checks
 /// in that order. It returns the exit code, through `Err` where the push ends early.
-fn push(destination: &OsStr) -> Result<Exit, Exit> {
+fn push(top: &Path, destination: &OsStr) -> Result<Exit, Exit> {
     let mut input = Vec::new();
     let read = io::stdin().lock().read_to_end(&mut input);
     cancel::check()?;
@@ -130,7 +130,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     cancel::check()?;
     failures.extend(guarded.map_err(|failure| refused(&failure))?);
     for (tip, checks) in plan.checks() {
-        failures.extend(worktree::run_checks(environ, tip, &checks)?);
+        failures.extend(worktree::run_checks(environ, top, tip, &checks)?);
     }
     for failure in &failures {
         let said = say(&format!("pre-push: failed: {failure}"));

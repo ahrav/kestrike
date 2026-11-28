@@ -25,20 +25,27 @@ pub enum Check {
     HostStop,
 }
 
-/// One check: its argument vector, run in a worktree of the tip, and the path whose presence at the tip
-/// the selection asks for where it asks.
+/// One check: its argument vector, run in a worktree of the tip, the path whose presence at the tip the
+/// selection asks for where it asks, and whether its Cargo build goes to [`TOOLS_TARGET`] under the
+/// checkout's top level in place of the worktree's own target directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Row {
     pub check: Check,
     pub argv: &'static [&'static str],
     pub held: Option<&'static str>,
+    pub tools_target: bool,
 }
+
+/// The directory under the checkout's top level that `scripts/tool.sh` builds into, which a row with
+/// `tools_target` names to Cargo as `CARGO_TARGET_DIR`, so its build outlasts the tip's worktree.
+pub const TOOLS_TARGET: &str = "target/tools";
 
 const CONTRACT: &str = "chaos/ledger.json";
 const REPLAY: &str = "scripts/chaos-receipt-replay.py";
 const JUDGES: &str = "chaos/tests/test_judges.py";
 const GAMEDAY: &str = "scripts/test-gameday-judge.py";
-const HOST_STOP: &str = "scripts/test-host-stop-controller.py";
+/// The module of the host stop controller's cases, whose presence at a tip says the tip holds them.
+const HOST_STOP: &str = "crates/kestrike-tools/tests/host_stop_controller/mod.rs";
 
 /// The checks in run order; the row of `check` stands at index `check as usize`.
 pub const ORDER: [Row; 10] = [
@@ -46,26 +53,31 @@ pub const ORDER: [Row; 10] = [
         check: Check::SelectTests,
         argv: &["python3", "scripts/test-select-tests.py"],
         held: None,
+        tools_target: false,
     },
     Row {
         check: Check::Admit,
         argv: &["python3", "scripts/verify-receipts.py", "admit"],
         held: None,
+        tools_target: false,
     },
     Row {
         check: Check::Reconcile,
         argv: &["python3", "scripts/judge-verus.py", "reconcile"],
         held: None,
+        tools_target: false,
     },
     Row {
         check: Check::Links,
         argv: &["python3", "scripts/model-links.py", "check"],
         held: Some("scripts/model-links.py"),
+        tools_target: false,
     },
     Row {
         check: Check::LinksSelfTest,
         argv: &["python3", "scripts/test-model-links.py"],
         held: None,
+        tools_target: false,
     },
     Row {
         check: Check::Contract,
@@ -84,26 +96,43 @@ pub const ORDER: [Row; 10] = [
             "chaos/READINESS.md",
         ],
         held: Some(CONTRACT),
+        tools_target: false,
     },
     Row {
         check: Check::Replay,
         argv: &["python3", "-I", REPLAY],
         held: Some(REPLAY),
+        tools_target: false,
     },
     Row {
         check: Check::Judges,
         argv: &["python3", "-I", JUDGES],
         held: Some(JUDGES),
+        tools_target: false,
     },
     Row {
         check: Check::Gameday,
         argv: &["python3", "-I", GAMEDAY],
         held: Some(GAMEDAY),
+        tools_target: false,
     },
     Row {
         check: Check::HostStop,
-        argv: &["python3", "-I", HOST_STOP],
+        argv: &[
+            "cargo",
+            "test",
+            "--package",
+            "kestrike-tools",
+            "--test",
+            "tools",
+            "--",
+            "host_stop::",
+            "host_stop_checks::",
+            "host_stop_controller::",
+            "host_stop_support::",
+        ],
         held: Some(HOST_STOP),
+        tools_target: true,
     },
 ];
 
@@ -212,10 +241,27 @@ pub(super) const JUDGE_READS: [&str; 15] = [
 
 const GAMEDAY_FIXTURES: &str = "scripts/gameday-fixtures/";
 
-/// The host stop controller and its self-test, whose change runs the self-test at any tip.
-pub(super) const HOST_STOP_OWN: [&str; 2] = ["scripts/host-stop-controller.py", HOST_STOP];
+/// The directories of the host stop controller's Rust modules, its tool root and its cases, a change at
+/// or under which runs the cases at any tip.
+const HOST_STOP_OWN: [&str; 8] = [
+    "crates/kestrike-tools/src/host_stop/",
+    "crates/kestrike-tools/src/host_stop_controller/",
+    "crates/kestrike-tools/src/gameday/",
+    "crates/kestrike-tools/src/tools/host_stop_controller/",
+    "crates/kestrike-tools/tests/host_stop/",
+    "crates/kestrike-tools/tests/host_stop_checks/",
+    "crates/kestrike-tools/tests/host_stop_controller/",
+    "crates/kestrike-tools/tests/host_stop_support/",
+];
 
+/// The files of the tree the host stop controller's cases read: its fixtures, the held fixture, the
+/// catalog and the two files that declare the package's list bounds.
 const HOST_STOP_FIXTURES: [&str; 2] = ["scripts/host-stop-fixtures/", GAMEDAY_FIXTURES];
+const HOST_STOP_READS: [&str; 3] = [
+    "verification/readiness/gamedays.json",
+    "crates/kestrike/src/failover/zone_loop/directory.rs",
+    "crates/kestrike/src/failover/standbys.rs",
+];
 
 /// `gameday_input` holds for a path whose change runs the game-day judge's self-test at a tip that holds it.
 pub(super) fn gameday_input(path: &str) -> bool {
@@ -225,11 +271,18 @@ pub(super) fn gameday_input(path: &str) -> bool {
         || path.starts_with(GAMEDAY_FIXTURES)
 }
 
-/// `host_stop_input` holds for a path the host stop controller's self-test loads or reads.
+/// `host_stop_own` holds for a path at or under a directory of [`HOST_STOP_OWN`], a change to which runs
+/// the host stop controller's cases at any tip.
+pub(super) fn host_stop_own(path: &str) -> bool {
+    HOST_STOP_OWN
+        .iter()
+        .any(|prefix| path.starts_with(prefix) || prefix.strip_suffix('/') == Some(path))
+}
+
+/// `host_stop_input` holds for a path the host stop controller's cases read from the tree, whose change
+/// runs them at a tip that holds them.
 pub(super) fn host_stop_input(path: &str) -> bool {
-    HOST_STOP_OWN.contains(&path)
-        || path == "scripts/fis-controller.py"
-        || JUDGE_READS.contains(&path)
+    HOST_STOP_READS.contains(&path)
         || HOST_STOP_FIXTURES
             .iter()
             .any(|prefix| path.starts_with(prefix))
@@ -243,7 +296,7 @@ pub(super) fn chaos_change<S: AsRef<str>>(paths: &[S]) -> bool {
 }
 
 /// Whether the tip holds the script of a check that a change to one of its inputs runs only where it is
-/// held. [`Held::default`] holds the judges', the game-day and the host stop self-tests, and not the replay,
+/// held. [`Held::default`] holds the judges' and the game-day self-tests and the host stop cases, and not the replay,
 /// the defaults of the selection's cases; [`super::Plan`] reads each field from the tip, and a field may be
 /// `false` wherever none of its check's inputs changed, since the selection then asks nothing of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,8 +324,9 @@ impl Default for Held {
 /// check; `None` stands for a file whose bytes Git printed but the selector cannot decode or iterate, and
 /// then any change runs that check, which reports the defect. `ignore_changed` says an ignore attribute of a Rust test, or the name of the fn it
 /// marks, changed. A change to the replay itself runs it at any tip, so a push that removes it fails on the
-/// missing file; the game-day judge, the host stop controller and their self-tests run their self-test at
-/// any tip for the same reason.
+/// missing file; the game-day judge and its self-test run their self-test at any tip for the same reason. A
+/// change at or under a directory of the host stop controller's Rust modules or cases runs its cases at
+/// any tip, where a tip that lacks them matches no case and the weakened-test scan reports the removal.
 pub fn checks_for<S: AsRef<str>>(
     paths: &[S],
     sources: Option<&Members>,
@@ -323,7 +377,7 @@ pub fn checks_for<S: AsRef<str>>(
     if any(&|path| GAMEDAY_OWN.contains(&path)) || held.gameday && any(&gameday_input) {
         checks.push(Check::Gameday);
     }
-    if any(&|path| HOST_STOP_OWN.contains(&path)) || held.host_stop && any(&host_stop_input) {
+    if any(&host_stop_own) || held.host_stop && any(&host_stop_input) {
         checks.push(Check::HostStop);
     }
     checks

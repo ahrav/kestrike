@@ -1270,7 +1270,7 @@ writer inside that directory.
 
 ### The host stop controller
 
-`python3 scripts/host-stop-controller.py run --operator F --package F
+`bash scripts/tool.sh host-stop-controller run --operator F --package F
 --evidence DIR` stops the one target instance of a GD-2 run and writes the
 marks under `DIR/injection/` in
 [the evidence layout](#the-evidence-layout-the-rules-and-the-record) of the
@@ -1288,8 +1288,8 @@ while the catalog marks a GD-2 prerequisite `TBD - BLOCKS EXECUTION`, and a
 run that lacks the approval, a declared target, the caller, a fresh snapshot
 cut at or after the start of the package's baseline window, a run inside the
 package's run window or every declared instance running. It
-aborts on the judge's pre-stop reach conditions (`roles_reach`), loaded by
-path, and on an alarm that is not
+aborts on the judge's pre-stop reach conditions (`roles_reach`) and on an
+alarm that is not
 `OK`, changed state since the read before the stop, or is configured so that
 it can read `OK` without data. That check covers the alarm's configuration:
 it does not show that a guardrail's source still reports, so the owner
@@ -1322,8 +1322,8 @@ bound. A record that dates no return (unread, of another state, without a
 ends `restore` with exit 1 and no mark; the judge reads the whole run window
 where no restoration stands, so that evidence is not to be judged as it
 stands. That a start from `stopped` sets `LaunchTime` is read from the AWS
-CLI reference ("the time that the instance was last launched"); the self-test's
-fake pins the field, and no test reads a real control plane.
+CLI reference ("the time that the instance was last launched"); the cases'
+stand-in pins the field, and no test reads a real control plane.
 `restore` reads and writes the marks by the pathname
 `DIR/injection`, so the operator keeps that directory under that name until
 `restore` ends. `seal --operator F --evidence DIR`, run once the run window
@@ -1357,14 +1357,18 @@ count lowered to match is refused. A collection that was short when sealed
 is the collector's declaration, and a seal removed and written again reads
 as the first, so the operator keeps the digest `seal` printed.
 The five AWS calls of `run` and `restore` run under the environment the run
-read at its start. The script's header states the operator file, the
+read at its start. The tool's help,
+`bash scripts/tool.sh host-stop-controller -h`, states the operator file, the
 snapshot's two file shapes, the five AWS calls and the reply fields it reads.
-`python3 -I scripts/test-host-stop-controller.py` runs it
-over an in-process fake control plane and judges what it wrote on a copy of
-the held fixture; no test calls a real control plane. The pre-push hook runs
-it for a push that changes the controller, its self-test, its fixtures, the
-held fixture or a file it loads or reads, as [the pre-push checks](#pre-push-checks)
-list.
+The controller's Rust cases, under `crates/kestrike-tools/tests/host_stop/`,
+`host_stop_checks/`, `host_stop_controller/` and `host_stop_support/`, run it
+over an in-process stand-in control plane and judge what it wrote on a copy of
+the held fixture; two of them start the built binary against a stand-in `aws`
+that the test executable plays. No test calls a real control plane. The
+`workspace` job runs the cases with every case of the crate, and the pre-push
+hook runs them for a push that changes the controller's Rust modules, its
+cases, its fixtures, the held fixture or a file they read, as
+[the pre-push checks](#pre-push-checks) list.
 
 ## Lane admission
 
@@ -1406,8 +1410,10 @@ directory writable by others without the sticky bit, that user can swap
 either between the steps that name it. The default `/tmp` is sticky. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
-replay, the judges' test and the game-day judge's and the host stop
-controller's self-tests run in the hook and by hand; no CI job runs them.
+replay, the judges' test and the game-day judge's self-test run in the hook
+and by hand; no CI job runs them. The hook also runs the host stop
+controller's Rust cases, which the `workspace` job runs with every case of
+the crate.
 
 Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`.
 For each pushed tip the tool lists the files the push changes against the
@@ -1463,17 +1469,27 @@ require:
   `verification/readiness/failover.json`. A change to the judge or its
   self-test runs it at any tip, so a push that removes the self-test fails on
   the missing file;
-- `python3 -I scripts/test-host-stop-controller.py`, at a tip that holds it,
-  for a change to `scripts/host-stop-controller.py`, its self-test, a path
-  under `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`,
-  `scripts/fis-controller.py`, or a file the game-day judge reads
-  (`scripts/gameday-judge.py`, `scripts/readiness.py`, a script of its `OWNING`
-  tuple, `scripts/fis-profiles.json`, `verification/readiness/gamedays.json` or
-  a file that declares one of its `FLEET_BOUNDS`). A change to the controller
-  or its self-test runs it at any tip, so a push that removes the self-test
-  fails on the missing file.
+- the host stop controller's Rust cases,
+  `cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::`,
+  built with `CARGO_TARGET_DIR` set to `target/tools` under the checkout's
+  top level, the directory `scripts/tool.sh` builds into, so the build
+  outlasts the tip's worktree. A change at or under
+  `crates/kestrike-tools/src/host_stop/`,
+  `crates/kestrike-tools/src/host_stop_controller/`,
+  `crates/kestrike-tools/src/gameday/`, the tool's root
+  `crates/kestrike-tools/src/tools/host_stop_controller/` or one of the case
+  directories `crates/kestrike-tools/tests/host_stop/`, `host_stop_checks/`,
+  `host_stop_controller/` and `host_stop_support/` runs them at any tip; at a
+  tip that lacks the cases the filter matches no case, and the weakened-test
+  scan reports the removal. A change to a path under
+  `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`, to
+  `verification/readiness/gamedays.json` or to a file that declares one of the
+  package's list bounds (`crates/kestrike/src/failover/zone_loop/directory.rs`,
+  `crates/kestrike/src/failover/standbys.rs`) runs them at a tip that holds
+  `crates/kestrike-tools/tests/host_stop_controller/mod.rs`, so a branch cut
+  before the cases runs nothing for this row.
 
-The five checks above that start as `python3 -I` take their imports from the
+The four checks above that start as `python3 -I` take their imports from the
 interpreter's installation, so a file beside the program at the pushed tip and
 the `PYTHON*` variables have no effect on them. Each check starts with the
 push's environment, the tool's three streams and the worktree as its working

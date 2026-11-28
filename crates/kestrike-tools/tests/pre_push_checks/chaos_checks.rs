@@ -1,7 +1,7 @@
 //! The hook's cases of the chaos checks and the two self-tests, started through the tool: which tip runs
-//! the contract check, the receipt replay, the judges' test and the game-day and host stop self-tests, that
-//! each failure fails the push, and that the five checks that start as `python3 -I` pass `-I`, which the
-//! stand-in records apart.
+//! the contract check, the receipt replay, the judges' test, the game-day self-test and the host stop
+//! controller's cases, that each failure fails the push, and that the four checks that start as
+//! `python3 -I` pass `-I`, which the stand-in records apart.
 
 use std::fs;
 
@@ -145,12 +145,18 @@ fn a_game_day_input_push_runs_the_isolated_self_test_and_its_failure_blocks() {
     );
 }
 
-/// A push that changes no input of the host stop self-test asks Git nothing about it, though the trace
-/// records the tool's other lookups.
+/// The module of the host stop controller's cases, whose presence at a tip says the tip holds them.
+const HOST_STOP_CASES: &str = "crates/kestrike-tools/tests/host_stop_controller/mod.rs";
+
+/// The line the stand-in `cargo` logs for the host stop controller's row.
+const HOST_STOP_RUN: &str = "cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::";
+
+/// A push that changes no input of the host stop controller's cases asks Git nothing about them, though the
+/// trace records the tool's other lookups.
 #[test]
 fn an_unrelated_push_asks_git_nothing_about_the_host_stop_self_test() {
     let mut fx = Fixture::new();
-    let held = fx.commit(&[("scripts/test-host-stop-controller.py", STUB)]);
+    let held = fx.commit(&[(HOST_STOP_CASES, "")]);
     let head = fx.commit(&[("docs/notes.md", "n\n")]);
     let trace = fx.temp.join("trace.log");
     fx.set("GIT_TRACE", trace.clone());
@@ -166,46 +172,67 @@ fn an_unrelated_push_asks_git_nothing_about_the_host_stop_self_test() {
         "the trace records the tool's other lookups"
     );
     assert!(
-        !lookups
-            .iter()
-            .any(|line| line.contains("test-host-stop-controller.py")),
+        !lookups.iter().any(|line| line.contains(HOST_STOP_CASES)),
         "{lookups:?}"
     );
-    assert!(
-        !fx.ran()
-            .iter()
-            .any(|line| line == "test-host-stop-controller.py")
-    );
+    assert!(!fx.ran().iter().any(|line| line.starts_with("cargo")));
 }
 
-/// The host stop self-test runs for a file it reads only at a tip that holds it, with a base or with none,
-/// and its failure fails the push.
+/// The host stop controller's cases run for a fixture they read only at a tip that holds them, with a base
+/// or with none, in the launcher's target directory under the checkout's top, and their failure fails the
+/// push. A tip that holds the Python self-test alone runs nothing for the row; a change to the Rust module
+/// runs the row at a tip that lacks the cases, where its filter matches no case, and the weakened-test
+/// scan blocks the removal.
 #[test]
 fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
     let fx = Fixture::new();
-    let name = "test-host-stop-controller.py";
-    let head = fx.commit(&[("scripts/fis-profiles.json", "{}\n")]);
+    let fixture = "scripts/host-stop-fixtures/operator.json";
+    let target = super::push::top()
+        .join("target/tools")
+        .to_string_lossy()
+        .into_owned();
+    let head = fx.commit(&[(fixture, "{}\n")]);
     assert_eq!(fx.push(&[(&head, &fx.base)]).code, Some(0));
-    assert!(!fx.ran().iter().any(|line| line == name));
-    let held = fx.commit(&[("scripts/test-host-stop-controller.py", STUB)]);
+    assert!(!fx.ran().iter().any(|line| line.starts_with("cargo")));
+    let python = fx.commit(&[("scripts/test-host-stop-controller.py", STUB)]);
+    let head = fx.commit(&[(fixture, "{\"y\": 1}\n")]);
+    assert_eq!(fx.push(&[(&head, &python)]).code, Some(0));
+    assert_eq!(fx.ran(), Vec::<String>::new());
+    let held = fx.commit(&[(HOST_STOP_CASES, "")]);
     fx.clear();
-    let head = fx.commit(&[("scripts/fis-profiles.json", "{\"x\": 1}\n")]);
+    let head = fx.commit(&[(fixture, "{\"x\": 1}\n")]);
     assert_eq!(fx.push(&[(&head, &held)]).code, Some(0));
-    assert_eq!(fx.ran(), [name]);
-    assert_eq!(fx.isolated(), [name]);
+    assert_eq!(fx.ran(), [HOST_STOP_RUN]);
+    assert_eq!(fx.targets(), [target.as_str()]);
     fx.clear();
-    let run = fx.push_with(&[(&head, &held)], &[("test_host_stop_controller", 1)]);
+    let run = fx.push_with(&[(&head, &held)], &[("cargo", 1)]);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert!(
-        run.stderr
-            .contains("failed: python3 -I scripts/test-host-stop-controller.py"),
+        run.stderr.contains(&format!("failed: {HOST_STOP_RUN}")),
         "{}",
         run.stderr
     );
+    fx.git(&["rm", "-q", "--", HOST_STOP_CASES]);
+    let lacking = fx.commit(&[("crates/kestrike-tools/src/host_stop/launch.rs", "l\n")]);
+    fx.clear();
+    let run = fx.push(&[(&lacking, &head)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("blocks case-removed:crates/kestrike-tools/tests/host_stop_controller"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains(&format!("failed: {HOST_STOP_RUN}")));
+    assert_eq!(fx.ran(), [HOST_STOP_RUN]);
     fx.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
     fx.clear();
     assert_eq!(fx.push(&[(&head, ZERO)]).code, Some(0));
-    assert!(fx.ran().iter().any(|line| line == name), "{:?}", fx.ran());
+    assert!(
+        fx.ran().iter().any(|line| line == HOST_STOP_RUN),
+        "{:?}",
+        fx.ran()
+    );
 }
 
 /// A failed contract check and a failed judges' test each fail the push, each started as `python3 -I`.

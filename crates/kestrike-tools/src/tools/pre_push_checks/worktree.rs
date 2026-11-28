@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use crate::environ::Environ;
 use crate::git::{self, GitError};
-use crate::hook::{Check, argument, short};
+use crate::hook::{Check, TOOLS_TARGET, argument, short};
 use crate::text::{Text, strip_str};
 
 use super::cancel::{self, Unwaited};
@@ -77,6 +77,7 @@ enum Ended {
 /// `git worktree add` fails, or if Git fails to start for `git worktree remove`.
 pub(super) fn run_checks(
     environ: &Environ,
+    top: &Path,
     tip: &Text,
     checks: &[Check],
 ) -> Result<Vec<String>, Exit> {
@@ -87,7 +88,7 @@ pub(super) fn run_checks(
             return Err(fail(&format!("{NAME}: {error}"), 1));
         }
     };
-    let ran = checks_in(environ, &tree, tip, checks);
+    let ran = checks_in(environ, top, &tree, tip, checks);
     let removed = remove(environ, &tree);
     let cleared = match fs::remove_dir_all(&tree) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -123,9 +124,11 @@ pub(super) fn run_checks(
     Ok(failures)
 }
 
-/// `checks_in` adds the worktree at `tree` and runs the checks there.
+/// `checks_in` adds the worktree at `tree` and runs the checks there. A row with `tools_target` runs
+/// with `CARGO_TARGET_DIR` set to [`TOOLS_TARGET`] under `top`.
 fn checks_in(
     environ: &Environ,
+    top: &Path,
     tree: &Path,
     tip: &Text,
     checks: &[Check],
@@ -135,13 +138,18 @@ fn checks_in(
     let mut failures = Vec::new();
     for check in checks {
         cancel::check().map_err(Ended::Cancelled)?;
-        let argv = check.row().argv;
+        let row = check.row();
+        let argv = row.argv;
         let command = argv.join(" ");
         let said = say(&format!("pre-push: {}: {command}", short(tip)));
         cancel::check().map_err(Ended::Cancelled)?;
         said.map_err(Ended::Stream)?;
         let (program, args) = argv.split_first().expect("every check has a program");
-        let mut child = git::command(environ, program)
+        let mut started = git::command(environ, program);
+        if row.tools_target {
+            started.env("CARGO_TARGET_DIR", top.join(TOOLS_TARGET));
+        }
+        let mut child = started
             .args(args)
             .current_dir(tree)
             .process_group(0)

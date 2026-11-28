@@ -15,7 +15,7 @@ use super::reads::{
     sources,
 };
 use super::table::{
-    GAMEDAY_OWN, HOST_STOP_OWN, JUDGES_SOURCES, chaos_change, gameday_input, host_stop_input,
+    GAMEDAY_OWN, JUDGES_SOURCES, chaos_change, gameday_input, host_stop_input, host_stop_own,
 };
 use super::{Check, Failure, Held, Members, argument, checks_for, short};
 
@@ -313,7 +313,7 @@ fn based_checks(
         gameday: !changed(&GAMEDAY_OWN)
             && any(gameday_input)
             && holds_check(reads, local, Check::Gameday)?,
-        host_stop: !changed(&HOST_STOP_OWN)
+        host_stop: !any(host_stop_own)
             && any(host_stop_input)
             && holds_check(reads, local, Check::HostStop)?,
     };

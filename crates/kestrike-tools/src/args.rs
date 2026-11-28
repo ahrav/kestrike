@@ -189,7 +189,7 @@ impl<'t> Reader<'t> {
         }
     }
 
-    fn refuse(&self, message: String) -> Parsed {
+    fn refuse<T>(&self, message: String) -> Parsed<T> {
         Parsed::Refused {
             code: 2,
             text: format!("{}\n{}: error: {message}\n", self.usage, self.tool),
@@ -204,6 +204,17 @@ impl<'t> Reader<'t> {
     /// `Parsed::Help` immediately upon accepting help. Missing required options take precedence over
     /// leftover arguments.
     pub fn parse(&self, args: &[OsString]) -> Parsed {
+        match self.parse_known(args) {
+            Parsed::Run((values, extras)) if extras.is_empty() => Parsed::Run(values),
+            Parsed::Run((_, extras)) => self.refuse(unrecognized(&extras)),
+            Parsed::Help(text) => Parsed::Help(text),
+            Parsed::Refused { code, text } => Parsed::Refused { code, text },
+        }
+    }
+
+    /// `parse_known` reads `args` as [`Reader::parse`] does and returns the leftover arguments, in
+    /// command-line order, beside the values in place of refusing them.
+    pub fn parse_known(&self, args: &[OsString]) -> Parsed<(Values, Vec<OsString>)> {
         let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
         let mut kinds = Vec::with_capacity(args.len());
         let mut ended = false;
@@ -283,12 +294,12 @@ impl<'t> Reader<'t> {
                 missing.join(", ")
             ));
         }
-        if !extras.is_empty() {
-            let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
-            return self.refuse(format!("unrecognized arguments: {}", shown.join(" ")));
-        }
         let names = self.options.iter().map(|option| option.names);
-        Parsed::Run(Values(names.zip(values).collect()))
+        let extras = extras
+            .iter()
+            .map(|arg| OsStr::from_bytes(arg).to_owned())
+            .collect();
+        Parsed::Run((Values(names.zip(values).collect()), extras))
     }
 
     fn strings(&self) -> impl Iterator<Item = (usize, &'static [u8])> + '_ {
@@ -404,6 +415,13 @@ fn looks_negative(arg: &[u8]) -> bool {
             digits(&number[..point]) && number.len() > point + 1 && digits(&number[point + 1..])
         }
     }
+}
+
+/// The message of a refusal of the leftover arguments `extras`: `unrecognized arguments: ` and each
+/// argument, joined by a space.
+pub fn unrecognized(extras: &[OsString]) -> String {
+    let shown: Vec<String> = extras.iter().map(|arg| shown(arg.as_bytes())).collect();
+    format!("unrecognized arguments: {}", shown.join(" "))
 }
 
 fn shown(arg: &[u8]) -> String {

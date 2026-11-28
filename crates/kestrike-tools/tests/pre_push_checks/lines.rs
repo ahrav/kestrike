@@ -486,8 +486,9 @@ fn the_origin_main_probe_and_the_merge_base_read_the_name_differently() {
     nested.in_child(&test, &[("CASE", "nested"), ("HEAD", &head)]);
 }
 
-/// The presence of a self-test is read only where an input of it changed and none of its own scripts
-/// did: an unrelated edit at a tip that holds both self-tests asks Git for the replay and for neither.
+/// The presence of a self-test or of the host stop controller's cases is read only where an input of it
+/// changed and none of its own files did: an unrelated edit at a tip that holds both asks Git for the
+/// replay and for neither.
 #[test]
 fn an_unrelated_edit_reads_no_self_test_presence() {
     if let Some(row) = child() {
@@ -498,7 +499,10 @@ fn an_unrelated_edit_reads_no_self_test_presence() {
     }
     let (mut repository, _) = fixture("presence-reads");
     let base = repository.commit(&[
-        ("scripts/test-host-stop-controller.py", STUB),
+        (
+            "crates/kestrike-tools/tests/host_stop_controller/mod.rs",
+            "",
+        ),
         ("scripts/test-gameday-judge.py", STUB),
     ]);
     let head = repository.commit(&[("crates/plain.rs", "edited\n")]);
@@ -528,7 +532,7 @@ fn an_unrelated_edit_reads_no_self_test_presence() {
     assert!(
         !lookups
             .iter()
-            .any(|line| line.contains("test-host-stop-controller.py")
+            .any(|line| line.contains("tests/host_stop_controller/mod.rs")
                 || line.contains("test-gameday-judge.py")),
         "{traced}"
     );

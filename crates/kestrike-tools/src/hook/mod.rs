@@ -21,7 +21,7 @@ pub use guard::{Record, account_number, account_numbers, record_values};
 pub use members::Members;
 pub use plan::{Plan, Skipped};
 pub use reads::{destination_refs, ignored_tests};
-pub use table::{Check, Held, ORDER, Row, checks_for};
+pub use table::{Check, Held, ORDER, Row, TOOLS_TARGET, checks_for};
 
 use failure::shown;
 pub(crate) use failure::{argument, short};

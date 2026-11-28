@@ -19,6 +19,10 @@
 //! `# release` hangs, then exits 0 once `STUB_LOG.release` stands or 60 seconds pass; one that holds
 //! `# locked` makes the directory `locked` in its working directory, holding the empty file `kept`, with
 //! mode 0500.
+//!
+//! A stand-in `cargo`, first on `PATH` beside it, appends `cargo ARGUMENT...` to the file `STUB_LOG`
+//! names and the value of `CARGO_TARGET_DIR` to `STUB_LOG.target`, and exits with the value of
+//! `STUB_CARGO`, or 0.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
@@ -85,6 +89,14 @@ fi
 var=$(printf '%s' "${name%.py}" | tr 'abcdefghijklmnopqrstuvwxyz-' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ_')
 eval "code=\${STUB_$var:-0}"
 exit "$code"
+"#;
+
+const CARGO: &str = r#"#!/bin/sh
+line=cargo
+for arg; do line="$line $arg"; done
+printf '%s\n' "$line" >> "$STUB_LOG"
+printf '%s\n' "${CARGO_TARGET_DIR-unset}" >> "$STUB_LOG.target"
+exit "${STUB_CARGO:-0}"
 "#;
 
 /// `fresh` makes a new directory of mode 0700 under `parent`, named `prefix` and eight random letters,
@@ -181,6 +193,7 @@ impl Fixture {
                 .expect("the directory is made");
         }
         executable(&bin.join("python3"), PYTHON);
+        executable(&bin.join("cargo"), CARGO);
         let log = temp.join("stub.log");
         let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
             .chain(
@@ -308,7 +321,8 @@ impl Fixture {
         self.env.retain(|(key, _)| key != name);
     }
 
-    /// `clear` removes the log, its `-I` record, the stand-ins' process id files and the `git` wrapper's log.
+    /// `clear` removes the log, its `-I` record, the stand-ins' process id files, the target directories the
+    /// stand-in `cargo` logged and the `git` wrapper's log.
     pub fn clear(&self) {
         for suffix in [
             "",
@@ -320,6 +334,7 @@ impl Fixture {
             ".env",
             ".where",
             ".release",
+            ".target",
         ] {
             let _ = fs::remove_file(self.logged(suffix));
         }
@@ -335,6 +350,11 @@ impl Fixture {
     /// `ran` lists the log's lines, none when it was never written.
     pub fn ran(&self) -> Vec<String> {
         self.lines("")
+    }
+
+    /// `targets` lists the target directories the stand-in `cargo` was given, one for each of its runs.
+    pub fn targets(&self) -> Vec<String> {
+        self.lines(".target")
     }
 
     /// `isolated` lists the lines of the runs whose first argument was `-I`.
