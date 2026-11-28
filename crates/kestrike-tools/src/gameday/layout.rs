@@ -23,8 +23,12 @@ pub const VERSION_FIELDS: [(&str, Schema); 5] = [
     ("attempts", s(Scalar::Attempts)),
 ];
 
+/// The schema of one shard's version: its owner, its standby or null, its generation, its volume and its
+/// attempts.
 pub const VERSION: Schema = Schema::Object(&VERSION_FIELDS);
 
+/// The schema of a stop request: the instance, the time and the identity that asked. The stop mark is one
+/// request, and the stopped mark holds one as its `request`.
 pub const REQUEST: Schema = Schema::Object(&[
     ("instance", s(Scalar::Name)),
     ("time", s(Scalar::Time)),
@@ -77,6 +81,14 @@ pub(super) const PACKAGE_SCHEMA: Schema = Schema::Object(&[
 
 /// Each file of the layout but `package.json` and `records/<shard>.jsonl`, with its schema and whether
 /// it is optional.
+///
+/// A `.json` file's schema applies to the one value [`parsed`](super::parsed) returns. A `.jsonl` file's
+/// schema applies to each line of the list it returns, checked under `<rel> line <n>` from 1. The names
+/// are those [`check_package`](super::check_package) returns, with two more kinds the caller adds for the
+/// files that read them: `observed`, the files the package requires to be observed, which
+/// `coverage.json` keys, and `sealed`, which `injection/collected.json` keys: the `observed` files,
+/// `coverage.json`, and each `injection/` file of the layout but `injection/collected.json`, an optional
+/// mark named whether or not it stands.
 pub static LAYOUT: [(&str, Schema, bool); 13] = [
     (
         "injection/roles.json",
@@ -233,7 +245,7 @@ pub static LAYOUT: [(&str, Schema, bool); 13] = [
     ),
 ];
 
-/// The schema of the layout's file `rel` and whether the file is optional.
+/// The schema of the layout's file `rel` and whether the file is optional, read as [`LAYOUT`] states.
 pub fn layout(rel: &str) -> Option<(&'static Schema, bool)> {
     LAYOUT
         .iter()

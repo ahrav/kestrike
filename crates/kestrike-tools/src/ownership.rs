@@ -186,7 +186,7 @@ impl From<PathError> for PrivateError {
 }
 
 /// `ignored` holds for the `stat` errors that make Python's `Path.exists` and `Path.is_dir` false.
-fn ignored(error: &io::Error) -> bool {
+pub(crate) fn ignored(error: &io::Error) -> bool {
     matches!(
         error.raw_os_error(),
         Some(libc::ENOENT | libc::ENOTDIR | libc::EBADF | libc::ELOOP)

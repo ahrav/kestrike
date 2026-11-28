@@ -8,7 +8,7 @@ use crate::gameday::layout::{WINDOW, layout};
 use crate::gameday::test_support::value;
 use crate::text::Text;
 
-/// The names the rows are read against: `NAMES` of the recording.
+/// The names the rows are read against, the same the recording read them against.
 fn names() -> Names {
     let mut names = Names::new();
     for (kind, members) in [
@@ -120,6 +120,15 @@ fn each_scalar_passes_and_fails_at_its_bounds() {
         (r#"conform(9007199254740992, 'positive')"#, r#"9007199254740992"#, Schema::scalar(Scalar::Positive), Ok(r#"None"#)),
         (r#"conform(9007199254740993, 'nonnegative')"#, r#"9007199254740993"#, Schema::scalar(Scalar::Nonnegative), Err(r#"f is no nonnegative of the layout: 9007199254740993"#)),
         (r#"conform(0, 'epoch')"#, r#"0"#, Schema::scalar(Scalar::Epoch), Ok(r#"None"#)),
+        (r#"conform("a" * 250, 'file-name')"#, r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#, Schema::scalar(Scalar::FileName), Ok(r#"None"#)),
+        (r#"conform(18446744073709551616, 'time')"#, r#"18446744073709551616"#, Schema::scalar(Scalar::Time), Err(r#"f is no time of the layout: 18446744073709551616"#)),
+        (r#"conform(-18446744073709551616, 'time')"#, r#"-18446744073709551616"#, Schema::scalar(Scalar::Time), Err(r#"f is no time of the layout: -18446744073709551616"#)),
+        (r#"conform(18446744073709551616, 'count')"#, r#"18446744073709551616"#, Schema::scalar(Scalar::Count), Err(r#"f is no count of the layout: 18446744073709551616"#)),
+        (r#"conform("été", 'name')"#, r#""été""#, Schema::scalar(Scalar::Name), Ok(r#"None"#)),
+        (r#"conform("1900-02-29", 'date')"#, r#""1900-02-29""#, Schema::scalar(Scalar::Date), Err(r#"f is no date of the layout: '1900-02-29'"#)),
+        (r#"conform("2000-02-29", 'date')"#, r#""2000-02-29""#, Schema::scalar(Scalar::Date), Ok(r#"None"#)),
+        (r#"conform("2024-01-00", 'date')"#, r#""2024-01-00""#, Schema::scalar(Scalar::Date), Err(r#"f is no date of the layout: '2024-01-00'"#)),
+        (r#"conform("2024-01-32", 'date')"#, r#""2024-01-32""#, Schema::scalar(Scalar::Date), Err(r#"f is no date of the layout: '2024-01-32'"#)),
     ];
     for (expression, text, schema, expected) in rows {
         let found = conform(&value(text), schema, &Text::from("f"), &names)
@@ -161,6 +170,7 @@ fn each_schema_kind_refuses_with_its_sentence_and_key_path() {
     (r#"conform({}, gj.LAYOUT['coverage.json'][0])"#, r#"{}"#, *layout("coverage.json").expect("a file of the layout").0, Err(r#"f names [], not exactly the observeds ['a.jsonl']"#)),
     (r#"conform({"a.jsonl": {"from": 0, "to": 1, "lines": 2.0}}, gj.LAYOUT['coverage.json'][0])"#, r#"{"a.jsonl": {"from": 0, "to": 1, "lines": 2.0}}"#, *layout("coverage.json").expect("a file of the layout").0, Err(r#"f a.jsonl lines is no count of the layout: 2.0"#)),
         (r#"conform({"end": "y", "start": "x"}, gj.WINDOW)"#, r#"{"end": "y", "start": "x"}"#, WINDOW, Err(r#"f start is no time of the layout: 'x'"#)),
+        (r#"conform({"b.jsonl": {"from": 0, "to": 1, "lines": 2}}, gj.LAYOUT['coverage.json'][0])"#, r#"{"b.jsonl": {"from": 0, "to": 1, "lines": 2}}"#, *layout("coverage.json").expect("a file of the layout").0, Err(r#"f names ['b.jsonl'], not exactly the observeds ['a.jsonl']"#)),
         (r#"conform({"event": "CreateVolume"}, gj.LAYOUT['provider.jsonl'][0])"#, r#"{"event": "CreateVolume"}"#, *layout("provider.jsonl").expect("a file of the layout").0, Err(r#"f holds the keys ['event'], not ['event', 'time', 'volume']"#)),
     ];
     for (expression, text, schema, expected) in rows {
@@ -182,5 +192,101 @@ fn a_member_check_of_a_non_string_reads_no_names() {
     assert_eq!(
         found.map_err(|r| r.to_string()),
         Err("f is no host of the layout: 1".to_owned())
+    );
+}
+
+/// A schema in a notation both sides write: an object as `{key: schema, ...}` in its order, a list as
+/// `[item]`, a one-of as `(object, ...)`, members sorted as `<a|b>`, a map as `Each(kind, value, exact)`,
+/// and a scalar by its name with `?` when null passes.
+fn rendered(schema: &Schema) -> String {
+    let object = |fields: &[(&str, Schema)]| {
+        let shown: Vec<String> = fields
+            .iter()
+            .map(|(key, field)| format!("{key}: {}", rendered(field)))
+            .collect();
+        format!("{{{}}}", shown.join(", "))
+    };
+    match *schema {
+        Schema::Scalar(scalar, nullable) => {
+            format!("{}{}", scalar.name(), if nullable { "?" } else { "" })
+        }
+        Schema::Object(fields) => object(fields),
+        Schema::OneOf(options) => {
+            let shown: Vec<String> = options.iter().map(|fields| object(fields)).collect();
+            format!("({})", shown.join(", "))
+        }
+        Schema::List(item) => format!("[{}]", rendered(item)),
+        Schema::Member(members) => {
+            let mut members = members.to_vec();
+            members.sort_unstable();
+            format!("<{}>", members.join("|"))
+        }
+        Schema::Each(each) => format!(
+            "Each({}, {}, {})",
+            each.keys,
+            rendered(each.value),
+            each.exact
+        ),
+    }
+}
+
+/// Each schema written in the notation of [`rendered`], as the judge's tables at the base give it under
+/// Python 3.9.25 with the same notation.
+#[test]
+fn every_schema_is_the_judges_table() {
+    #[rustfmt::skip]
+    let rows: &[(&str, Schema, &str)] = &[
+        ("WINDOW", WINDOW, r#"{start: time, end: time}"#),
+        ("VERSION", super::super::VERSION, r#"{owner: host, standby: host?, generation: generation, volume: name, attempts: attempts}"#),
+        ("REQUEST", super::super::REQUEST, r#"{instance: name, time: time, identity: name}"#),
+        ("PACKAGE_SCHEMA", crate::gameday::layout::PACKAGE_SCHEMA, r#"{id: <GD-2>, kind: <simulation|staging>, revision: commit, date: date, clock: name, target: {host: host, instance: name}, hosts: [name], shards: [file-name], witness: [{key: name, shard: shard, sha256: digest}], baseline: {start: time, end: time}, run: {start: time, end: time}, interval: positive, reconciler_principal: name, working_budgets: Each(budget, positive, false), outside: Each(observation, name, false), clock_error_seconds: nonnegative}"#),
+        ("injection/roles.json", *layout("injection/roles.json").expect("a file of the layout").0, r#"{package_sha256: digest, time: time, shards: Each(shard, {owner: host, standby: host?, generation: generation, volume: name, attempts: attempts}, true), standbys: Each(host, {instance: name, instance_state: name, host_report: name}, false)}"#),
+        ("injection/stop.json", *layout("injection/stop.json").expect("a file of the layout").0, r#"{instance: name, time: time, identity: name}"#),
+        ("injection/stopped.json", *layout("injection/stopped.json").expect("a file of the layout").0, r#"{instance: name, state: name, time: time, request: {instance: name, time: time, identity: name}}"#),
+        ("injection/abort.json", *layout("injection/abort.json").expect("a file of the layout").0, r#"{cause: <deadline|exception|guardrail|reach|signal|stop-not-shown>, guardrail: guardrail?, time: time, detail: name?}"#),
+        ("injection/restoration.json", *layout("injection/restoration.json").expect("a file of the layout").0, r#"{instance: name, state: name, time: time, reviewed_sha256: digest?}"#),
+        ("injection/collected.json", *layout("injection/collected.json").expect("a file of the layout").0, r#"{time: time, files: Each(sealed, digest, false)}"#),
+        ("records/receipts.jsonl", *layout("records/receipts.jsonl").expect("a file of the layout").0, r#"{time: time, shard: shard, principal: name}"#),
+        ("activations.jsonl", *layout("activations.jsonl").expect("a file of the layout").0, r#"{host: host, activations: [{shard: shard, generation: generation, attempt: epoch, time: time}]}"#),
+        ("witness.jsonl", *layout("witness.jsonl").expect("a file of the layout").0, r#"{key: key, host: host, time: time, outcome: <error|hit|miss>, sha256: digest?}"#),
+        ("origin.jsonl", *layout("origin.jsonl").expect("a file of the layout").0, r#"{time: time, key: name}"#),
+        ("provider.jsonl", *layout("provider.jsonl").expect("a file of the layout").0, r#"({event: <volume>, volume: name, time: time}, {event: <CreateVolume>, principal: name, time: time})"#),
+        ("blockers.jsonl", *layout("blockers.jsonl").expect("a file of the layout").0, r#"{shard: shard, time: time, name: name}"#),
+        ("coverage.json", *layout("coverage.json").expect("a file of the layout").0, r#"Each(observed, {from: time, to: time, lines: count}, true)"#),
+    ];
+    for (name, schema, judged) in rows {
+        assert_eq!(rendered(schema), *judged, "{name}");
+    }
+}
+
+/// A schema that repeats a key matches no object: an object of as many keys that holds the repeated key
+/// once and another key is refused, directly and as the first arm of a one-of whose later arm the object
+/// would match.
+#[test]
+fn a_schema_that_repeats_a_key_matches_no_object() {
+    const REPEATED: &[(&str, Schema)] = &[
+        ("a", Schema::scalar(Scalar::Time)),
+        ("a", Schema::scalar(Scalar::Time)),
+    ];
+    const CHECKED: &[(&str, Schema)] = &[
+        ("a", Schema::scalar(Scalar::Time)),
+        ("b", Schema::scalar(Scalar::Time)),
+    ];
+    let names = names();
+    let object = value(r#"{"a": 1, "b": "x"}"#);
+    assert_eq!(
+        conform(&object, &Schema::Object(REPEATED), &Text::from("f"), &names)
+            .map_err(|r| r.to_string()),
+        Err("f holds the keys ['a', 'b'], not ['a', 'a']".to_owned())
+    );
+    assert_eq!(
+        conform(
+            &object,
+            &Schema::OneOf(&[REPEATED, CHECKED]),
+            &Text::from("f"),
+            &names
+        )
+        .map_err(|r| r.to_string()),
+        Err("f b is no time of the layout: 'x'".to_owned())
     );
 }

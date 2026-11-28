@@ -7,6 +7,12 @@
 //! outside a UTF-8 sequence becomes the surrogate U+DC80 to U+DCFF, as Python's `surrogateescape` decodes
 //! it, and [`Text::to_os`] turns that surrogate back into the byte.
 //!
+//! A code point's encoding begins with a leading byte, which never occurs as a continuation byte, so a
+//! match of one text's bytes inside another's starts and ends at code points.
+//!
+//! On Linux, [`text!`] builds a reason from literal words, texts, paths and counts, and each value's
+//! type writes itself through [`Piece`]; [`crate::json::Integer`] writes its digits.
+//!
 //! The whitespace rules are Python's: [`is_space`] holds for the characters `str.isspace()` takes, and
 //! [`Text::strip`], [`Text::split`] and [`Text::splitlines`] apply them as `str.strip()`, `str.split()` and
 //! `str.splitlines()` do with no argument.
@@ -56,6 +62,15 @@ const UNPRINTABLE: [(u32, u32); 27] = [
 /// U+001F.
 pub fn is_space(code: u32) -> bool {
     char::from_u32(code).is_some_and(|c| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
+
+/// `newlines` reads `\r\n` and `\r` as `\n`, as Python reads a file opened as text.
+pub fn newlines(text: String) -> String {
+    if text.contains('\r') {
+        text.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        text
+    }
 }
 
 /// `strip_str` trims leading and trailing whitespace, including U+001C through U+001F.
@@ -125,11 +140,10 @@ pub(crate) fn push_repr(code: u32, out: &mut String) {
     }
 }
 
-/// `escaped` keeps a field that holds embedded CR or LF characters on one output line.
 pub(crate) fn escaped(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for code in text.chars() {
-        if matches!(code, '\0'..='\x1f' | '\x7f'..='\u{9f}') {
+        if is_unprintable(u32::from(code)) {
             push_repr(u32::from(code), &mut out);
         } else {
             out.push(code);
@@ -322,6 +336,36 @@ impl Text {
         joined
     }
 
+    /// `starts_with` holds when the code points of `prefix` begin the text, as `str.startswith` holds.
+    pub fn starts_with(&self, prefix: &Self) -> bool {
+        self.0.starts_with(&prefix.0)
+    }
+
+    /// `ends_with` holds when the code points of `suffix` end the text, as `str.endswith` holds.
+    pub fn ends_with(&self, suffix: &Self) -> bool {
+        self.0.ends_with(&suffix.0)
+    }
+
+    /// `replace` writes `to` in place of each occurrence of `from`, a nonempty text, from the left without
+    /// overlaps, as `str.replace` does; an empty `from` leaves the text as it is.
+    pub fn replace(&self, from: &Self, to: &Self) -> Self {
+        if from.0.is_empty() {
+            return self.clone();
+        }
+        let mut replaced = Vec::with_capacity(self.0.len());
+        let mut rest = self.0.as_slice();
+        while let Some(at) = rest
+            .windows(from.0.len())
+            .position(|window| window == from.0)
+        {
+            replaced.extend_from_slice(&rest[..at]);
+            replaced.extend_from_slice(&to.0);
+            rest = &rest[at + from.0.len()..];
+        }
+        replaced.extend_from_slice(rest);
+        Self(replaced)
+    }
+
     /// `repr` writes the text between single quotes, or between double quotes when it holds `'` and no `"`;
     /// it writes a backslash, a tab, a line feed and a carriage return as their backslash escapes, and each
     /// code point that the Unicode 13.0 data marks nonprintable as `\xXX`, `\uXXXX` or `\UXXXXXXXX`. An
@@ -381,6 +425,89 @@ impl PartialEq<&str> for Text {
         self.0 == other.as_bytes()
     }
 }
+
+/// The reason builder `text!` and the values it writes, which the Linux tools use.
+#[cfg(target_os = "linux")]
+mod pieces {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    use super::Text;
+
+    /// A value `text!` writes into a [`Text`]: a string as its code points, a path or an operating-system
+    /// string as [`Text::from_os`] decodes it, and a number as its decimal digits.
+    pub(crate) trait Piece {
+        fn push_to(&self, text: &mut Text);
+    }
+
+    impl<T: Piece + ?Sized> Piece for &T {
+        fn push_to(&self, text: &mut Text) {
+            (**self).push_to(text);
+        }
+    }
+
+    impl Piece for str {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(self);
+        }
+    }
+
+    impl Piece for String {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(self);
+        }
+    }
+
+    impl Piece for Text {
+        fn push_to(&self, text: &mut Text) {
+            text.push_text(self);
+        }
+    }
+
+    impl Piece for OsStr {
+        fn push_to(&self, text: &mut Text) {
+            text.push_text(&Text::from_os(self));
+        }
+    }
+
+    impl Piece for Path {
+        fn push_to(&self, text: &mut Text) {
+            self.as_os_str().push_to(text);
+        }
+    }
+
+    impl Piece for PathBuf {
+        fn push_to(&self, text: &mut Text) {
+            self.as_os_str().push_to(text);
+        }
+    }
+
+    impl Piece for i32 {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(&self.to_string());
+        }
+    }
+
+    impl Piece for usize {
+        fn push_to(&self, text: &mut Text) {
+            text.push_str(&self.to_string());
+        }
+    }
+
+    /// `text!(a, b, ...)` is the [`Text`] of each [`Piece`] in order.
+    macro_rules! text {
+        ($($piece:expr),+ $(,)?) => {{
+            let mut text = $crate::text::Text::new();
+            $( $crate::text::Piece::push_to(&$piece, &mut text); )+
+            text
+        }};
+    }
+
+    pub(crate) use text;
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) use pieces::{Piece, text};
 
 #[cfg(test)]
 #[path = "text_tests.rs"]

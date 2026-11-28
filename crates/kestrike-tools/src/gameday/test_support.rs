@@ -62,3 +62,15 @@ pub(crate) fn patched(value: &Value, patches: &[(&str, Option<&str>)]) -> Value 
     }
     value
 }
+
+/// `f` run on a thread of its own, whose result must come within ten seconds.
+pub(crate) fn within_deadline<T: Send + 'static>(
+    row: &str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || send.send(f()));
+    receive
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap_or_else(|_| panic!("{row} returns within ten seconds"))
+}
