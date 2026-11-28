@@ -4,8 +4,8 @@
 //!
 //! The staging file is `.NAME.` and eight letters beside the target. The score's is created new with mode
 //! 0600 and then given mode 0666 less the umask the publishing thread reads; a file published with
-//! [`Creation::Mode`] is created new with that mode, which the kernel lessens by the umask, and reads no
-//! procfs. The rename replaces a link at the target's path, whose target stays. A write, close or rename
+//! [`Creation::Mode`] is created new with that mode, which the kernel lessens by the umask or, in a
+//! directory with a default ACL, sets from that ACL, and reads no procfs. The rename replaces a link at the target's path, whose target stays. A write, close or rename
 //! that fails leads to an attempt to remove the staging file. The write makes no sync.
 
 use std::fs::{self, File, OpenOptions};
@@ -74,7 +74,7 @@ fn umask() -> io::Result<u32> {
         .lines()
         .find_map(|line| line.strip_prefix("Umask:"))
         .and_then(|mask| u32::from_str_radix(mask.trim(), 8).ok())
-        .ok_or_else(|| io::Error::other("/proc/thread-self/status names no umask"))
+        .ok_or_else(|| io::Error::other("no Umask line"))
 }
 
 /// How a published file takes its permission bits.
@@ -82,13 +82,9 @@ fn umask() -> io::Result<u32> {
 pub enum Creation {
     /// Created with mode 0600 and then given mode 0666 less the publishing thread's umask.
     Private,
-    /// Created with this mode, which the kernel lessens by the umask at creation.
+    /// Created with this mode, which the kernel lessens by the umask at creation or, in a directory with
+    /// a default ACL, sets from that ACL, as for any file a process creates there.
     Mode(u32),
-}
-
-/// `staging` creates a new staging file beside `target` with the creation mode `mode`.
-fn staging(target: &Path, mode: u32) -> io::Result<(PathBuf, File)> {
-    staging_with(target, mode, random_letters)
 }
 
 /// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from
@@ -140,7 +136,7 @@ pub fn publish_with(target: &Path, written: &str, creation: Creation) -> Result<
         Creation::Private => 0o600,
         Creation::Mode(mode) => mode,
     };
-    let (staged, mut file) = staging(target, created).map_err(at_target)?;
+    let (staged, mut file) = staging_with(target, created, random_letters).map_err(at_target)?;
     let moded = match creation {
         Creation::Private => umask()
             .map_err(|error| PathError::new(Path::new(UMASK_STATUS), error))

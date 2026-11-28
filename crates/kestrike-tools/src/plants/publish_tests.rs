@@ -54,10 +54,11 @@ fn a_score_replaces_a_link_and_takes_its_mode() {
     assert_eq!(staged(&scratch.0), 0);
 }
 
-/// A file published with a creation mode is created with that mode less the umask, which the kernel
-/// applies, and replaces a link at its path while the link's target stays.
+/// A file published with a creation mode takes the permission bits of any file created there with that
+/// mode, as `elsewhere` is, whether the kernel applies the umask or the directory's default ACL, and
+/// replaces a link at its path while the link's target stays.
 #[test]
-fn a_file_published_with_a_creation_mode_takes_it_less_the_umask() {
+fn a_file_published_with_a_creation_mode_takes_the_bits_of_a_file_created_beside_it() {
     let scratch = Scratch::new("publish-mode");
     let (target, elsewhere) = (scratch.0.join("report.json"), scratch.0.join("elsewhere"));
     fs::write(&elsewhere, "kept\n").expect("written");
@@ -67,7 +68,8 @@ fn a_file_published_with_a_creation_mode_takes_it_less_the_umask() {
     assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "kept\n");
     let status = fs::symlink_metadata(&target).expect("stats");
     assert!(status.is_file());
-    assert_eq!(status.permissions().mode() & 0o777, 0o666 & !umask());
+    let control = fs::metadata(&elsewhere).expect("stats").permissions().mode() & 0o777;
+    assert_eq!(status.permissions().mode() & 0o777, control);
     let leftover = fs::read_dir(&scratch.0)
         .expect("lists")
         .filter(|entry| {
