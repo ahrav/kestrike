@@ -167,25 +167,26 @@ fn a_removal_removes_a_link_inside_the_tree_and_keeps_its_target() {
     );
 }
 
-/// Each `dd/` adds three bytes to the path; directory-relative calls let the test build past
-/// `PATH_MAX`.
+/// Each level adds a 200-byte name and a slash to the path, so some 22 levels pass `PATH_MAX` and the
+/// removal holds about 25 descriptors; directory-relative calls let the test build past `PATH_MAX`.
 #[test]
 fn a_removal_reaches_a_path_past_path_max() {
     let scratch = Scratch::new("remove-deep");
     let tree = scratch.0.join("tree");
     fs::create_dir(&tree).expect("made");
     let mut parent = fs::File::open(&tree).expect("opens");
-    let depth = usize::try_from(libc::PATH_MAX).expect("a bound") / 3 + 10;
+    let name = std::ffi::CString::new("d".repeat(200)).expect("a name");
+    let depth = usize::try_from(libc::PATH_MAX).expect("a bound") / 201 + 2;
     for _ in 0..depth {
-        // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
-        let made = unsafe { libc::mkdirat(parent.as_raw_fd(), c"dd".as_ptr(), 0o700) };
+        // SAFETY: `parent` is an open directory and `name` a NUL-terminated string.
+        let made = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
         assert_eq!(made, 0, "{}", std::io::Error::last_os_error());
-        // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
+        // SAFETY: `parent` is an open directory and `name` a NUL-terminated string.
         let next = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
-                c"dd".as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
             )
         };
         assert!(next >= 0, "{}", std::io::Error::last_os_error());
@@ -197,7 +198,7 @@ fn a_removal_reaches_a_path_past_path_max() {
         libc::openat(
             parent.as_raw_fd(),
             c"file".as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
             0o600,
         )
     };
