@@ -1084,7 +1084,8 @@ fn a_link_at_the_diff_s_path_fails_the_run_and_its_target_stays() {
     fs::write(&victim, "victim before").expect("the victim is written");
     fx.plan(&Plan::caught(&one_mutant("2:1: m")));
     let out = fx.start().env(fx.git_wrapper("plant-diff")).run();
-    let planted = fs::read_to_string(fx.state.join("planted")).expect("the stand-in planted a link");
+    let planted =
+        fs::read_to_string(fx.state.join("planted")).expect("the stand-in planted a link");
     assert_eq!(planted.lines().count(), 1, "{planted}");
     assert_eq!(out.code, 1, "{}", out.all());
     let report = fx.report(Some(&out));
@@ -1092,10 +1093,7 @@ fn a_link_at_the_diff_s_path_fails_the_run_and_its_target_stays() {
     let found = reason(&report).unwrap_or_default();
     assert!(found.contains("diff.patch"), "{found}");
     assert_eq!(get(&report, "diff_sha256"), &Value::Null);
-    assert_eq!(
-        fs::read_to_string(&victim).expect("UTF-8"),
-        "victim before"
-    );
+    assert_eq!(fs::read_to_string(&victim).expect("UTF-8"), "victim before");
     assert!(fx.calls().is_empty(), "no listing runs");
 }
 

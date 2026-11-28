@@ -13,8 +13,8 @@ fn the_descriptor_decides_what_an_open_entry_is() {
     fs::write(root.join("file"), "bytes").expect("the file is written");
     fs::create_dir(root.join("dir")).expect("the directory is made");
     let fifo = root.join("fifo");
-    let named = std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes())
-        .expect("no NUL");
+    let named =
+        std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes()).expect("no NUL");
     // SAFETY: `mkfifo` reads the NUL-terminated path, which outlives the call.
     assert_eq!(unsafe { libc::mkfifo(named.as_ptr(), 0o600) }, 0);
 
@@ -36,7 +36,11 @@ fn the_descriptor_decides_what_an_open_entry_is() {
         let _ = fs::OpenOptions::new().write(true).open(&fifo);
     }
     opener.join().expect("the opener ends");
-    assert_eq!(other, Ok(true), "a FIFO with no writer opens at once as Other");
+    assert_eq!(
+        other,
+        Ok(true),
+        "a FIFO with no writer opens at once as Other"
+    );
 
     let missing = root.join("missing");
     let error = opened(&missing).expect_err("a removed file is an error");

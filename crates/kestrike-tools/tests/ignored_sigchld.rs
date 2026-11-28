@@ -96,7 +96,10 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
         );
         std::fs::remove_file(&marker).expect("the marker is removed");
         let out = in_window(IGNORED, &stand_in, BINARY, &[top, tool]);
-        assert!(!marker.exists(), "{tool} starts no Git with SIGCHLD ignored");
+        assert!(
+            !marker.exists(),
+            "{tool} starts no Git with SIGCHLD ignored"
+        );
         assert_eq!(
             (
                 out.status.code(),

@@ -400,6 +400,8 @@ fn a_failed_read_of_the_state_kills_and_reaps_the_child_itself() {
     let error = stopped.expect_err("the child leads no group, so its state is refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(sent, [(pid, libc::SIGKILL)]);
-    let status = status.expect("the wait runs").expect("the stop reaped the child");
+    let status = status
+        .expect("the wait runs")
+        .expect("the stop reaped the child");
     assert_eq!(status.signal(), Some(libc::SIGKILL));
 }

@@ -16,8 +16,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::process::{
-    GroupStop, GroupStopped, Interrupted, Leader, POLL, child_defaults, handled_set, leader_left_within,
-    stop_group,
+    GroupStop, GroupStopped, Interrupted, Leader, POLL, child_defaults, handled_set,
+    leader_left_within, stop_group,
 };
 pub use crate::process::{INTERRUPT, Interrupt, SIGNALS, install_handlers};
 pub(super) use crate::process::{capture, exit_code};
@@ -54,14 +54,13 @@ pub fn ignore_signals() -> io::Result<()> {
 
 /// The stop of a supervised child's group: two graces of 10 s, a reap of up to 10 s and pauses of up to
 /// [`POLL`] between two reads of the leader's state.
-const STOP: GroupStop<'static> =
-    GroupStop::new(
-        Duration::from_secs(10),
-        None,
-        Some(Duration::from_secs(10)),
-        POLL,
-    )
-        .with_second_grace();
+const STOP: GroupStop<'static> = GroupStop::new(
+    Duration::from_secs(10),
+    None,
+    Some(Duration::from_secs(10)),
+    POLL,
+)
+.with_second_grace();
 
 /// `lead_new_session` makes the child started by `command` lead a new session, return each of [`SIGNALS`]
 /// that has a handler to its default action, unblock the three and receive SIGTERM when the starting thread
