@@ -8,6 +8,7 @@ pub mod classes;
 pub mod environ;
 pub mod fixtures;
 pub mod git;
+#[cfg(target_os = "linux")]
 pub mod host_stop;
 pub mod json;
 pub mod ownership;

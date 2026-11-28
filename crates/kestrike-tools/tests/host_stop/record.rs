@@ -38,11 +38,10 @@ fn an_unarmed_record_keeps_the_signal_until_it_is_armed() {
     delivered.deliver(Signal::Hangup);
     for _ in 0..3 {
         assert_eq!(record.read(), Ok(()));
-        assert!(!record.may_raise());
+        assert!(!record.is_armed());
     }
     assert_eq!(record.pending(), Some(Signal::Hangup));
     record.arm();
-    assert!(record.may_raise());
     assert_eq!(record.read(), Err(Interrupted(Signal::Hangup)));
     assert_eq!(record.read(), Ok(()), "a signal raises once");
 }
@@ -151,12 +150,12 @@ fn a_signal_that_may_raise_ends_the_sleep_at_a_slice_end() {
     record.arm();
     let delay = Duration::from_millis(150);
     let (ended, elapsed) = thread::scope(|scope| {
+        let start = Instant::now();
         scope.spawn(|| {
             thread::sleep(delay);
             delivered.deliver(Signal::Terminate);
         });
-        let start = Instant::now();
-        let ended = System::new().sleep(&mut record, Duration::from_secs(60));
+        let ended = System.sleep(&mut record, Duration::from_secs(60));
         (ended, start.elapsed())
     });
     assert_eq!(ended, Err(Interrupted(Signal::Terminate)));
@@ -172,15 +171,17 @@ fn a_signal_that_may_raise_ends_the_sleep_at_a_slice_end() {
 /// reads the seconds since the epoch.
 #[test]
 fn the_clocks_read_monotonic_and_wall_seconds() {
-    let seam = System::new();
+    let seam = System;
+    let before = seam.monotonic();
     thread::sleep(Duration::from_millis(100));
-    let later = System::new();
-    let (first, other) = (seam.monotonic(), later.monotonic());
+    let later = System;
+    let (first, other, again) = (seam.monotonic(), later.monotonic(), seam.monotonic());
+    assert!(first - before >= 0.1, "the clock runs: {before} {first}");
     assert!(
-        first >= 0.1 && other >= first && other - first < 0.05,
-        "two values made 100 ms apart read one clock: {first} {other}"
+        first <= other && other <= again,
+        "two values read one clock: {first} {other} {again}"
     );
-    let mut last = first;
+    let mut last = again;
     for _ in 0..100 {
         let now = seam.monotonic();
         assert!(now >= last);

@@ -131,7 +131,7 @@ fn step(args: &[&OsStr]) -> Text {
 }
 
 /// `code` is the exit code, or the negated number of the signal that ended the call.
-fn code(status: ExitStatus) -> i32 {
+pub(crate) fn code(status: ExitStatus) -> i32 {
     match (status.code(), status.signal()) {
         (Some(code), _) => code,
         (None, Some(signal)) => -signal,
@@ -140,7 +140,7 @@ fn code(status: ExitStatus) -> i32 {
 }
 
 /// `newlines` reads `\r\n` and `\r` as `\n`.
-fn newlines(text: String) -> String {
+pub(crate) fn newlines(text: String) -> String {
     if text.contains('\r') {
         text.replace("\r\n", "\n").replace('\r', "\n")
     } else {
