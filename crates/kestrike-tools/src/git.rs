@@ -123,7 +123,7 @@ pub fn command(environ: &Environ, program: impl AsRef<OsStr>) -> Command {
 }
 
 /// `git_command` prepares Git to start in `environ` with `GIT_NO_REPLACE_OBJECTS=1`.
-fn git_command(environ: &Environ) -> Command {
+pub(crate) fn git_command(environ: &Environ) -> Command {
     let mut git = command(environ, "git");
     git.env("GIT_NO_REPLACE_OBJECTS", "1");
     git
@@ -387,7 +387,7 @@ fn captured<S: AsRef<OsStr>>(command: &mut Command, args: &[S]) -> Result<Vec<u8
     }
 }
 
-fn failed<S: AsRef<OsStr>>(args: &[S], stderr: &[u8]) -> GitError {
+pub(crate) fn failed<S: AsRef<OsStr>>(args: &[S], stderr: &[u8]) -> GitError {
     GitError::Failed(format!(
         "{}: {}",
         label(args),

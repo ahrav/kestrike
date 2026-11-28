@@ -445,7 +445,7 @@ fn the_attributes_before_one_fn_share_its_search() {
 /// A plan's environment is the push's, and its `Debug` leaves the environment out.
 #[test]
 fn a_plan_reads_git_in_the_push_environment_and_debug_leaves_it_out() {
-    let plan = Plan::new(OsStr::new("")).expect("an empty destination reads no remote");
+    let plan = Plan::new(OsStr::new(""), || Ok(())).expect("an empty destination reads no remote");
     assert_eq!(plan.environ(), &push_environ());
     let path = std::env::var("PATH").unwrap_or_default();
     let shown = format!("{plan:?}");

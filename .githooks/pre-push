@@ -3,7 +3,7 @@ set -euo pipefail
 refs=$(mktemp "${TMPDIR:-/tmp}/kestrike-pre-push.XXXXXX")
 trap 'rm -f "$refs"' EXIT
 cat > "$refs"
-python3 -I "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/pre-push-checks.py" "${1-}" < "$refs"
+bash "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/tool.sh" pre-push-checks "${1-}" < "$refs"
 status=0
 hook_dir=$(git config --global --includes --path --get core.hooksPath) || status=$?
 if [ "$status" -eq 1 ]; then

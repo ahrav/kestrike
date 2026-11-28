@@ -19,6 +19,9 @@ pub enum Failure {
     /// A commit named in a batch read whose text is not UTF-8, as a ref line's field the caller decoded
     /// from bytes outside UTF-8 can be.
     Unencodable(Text),
+    /// The plan's probe reported a recorded signal once a Git read returned; the field is the push's exit
+    /// code, and `Display` writes `cancelled with exit <code>`.
+    Cancelled(u8),
 }
 
 impl From<GitError> for Failure {
@@ -36,6 +39,7 @@ impl fmt::Display for Failure {
             Self::Unencodable(commit) => {
                 write!(f, "the batch name of {} is not UTF-8", commit.repr())
             }
+            Self::Cancelled(code) => write!(f, "cancelled with exit {code}"),
         }
     }
 }
@@ -44,13 +48,13 @@ impl std::error::Error for Failure {}
 
 /// `argument` is `text` as a Git argument. The texts the plan passes to Git are read from bytes or from
 /// Git's UTF-8 output, so each encodes as bytes.
-pub(super) fn argument(text: &Text) -> OsString {
+pub(crate) fn argument(text: &Text) -> OsString {
     text.to_os()
         .expect("a text read from bytes encodes as those bytes")
 }
 
 /// `short` writes the first twelve code points of `commit`.
-pub(super) fn short(commit: &Text) -> String {
+pub(crate) fn short(commit: &Text) -> String {
     Text::from_code_points(commit.code_points().take(12))
         .expect("a prefix of a text holds its code points")
         .to_string()
