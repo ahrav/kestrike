@@ -5,9 +5,12 @@
 
 #![cfg(target_os = "linux")]
 
+mod abort_marks;
 mod abort_path;
 mod after_stop;
 mod before_stop;
+mod kept_defects;
+mod late_reads;
 mod marks;
 mod plane;
 mod refusals;
@@ -232,6 +235,12 @@ impl Case {
     /// Runs `run` over the plane and the clock with `evidence` as the evidence argument, and
     /// returns the exit code.
     pub(crate) fn run_with(&mut self, evidence: OsString) -> u8 {
+        let mut record = Record::new(self.delivered);
+        self.run_on(&mut record, evidence)
+    }
+
+    /// Runs `run` as [`Case::run_with`] does, over `record` in place of a fresh one.
+    pub(crate) fn run_on(&mut self, record: &mut Record<'static>, evidence: OsString) -> u8 {
         let deadline = object(self.operator.clone())
             .get("deadline_seconds")
             .and_then(kestrike_tools::host_stop::Number::of)
@@ -245,7 +254,7 @@ impl Case {
             package: self.package.clone(),
             evidence,
         };
-        self.in_context(|cx| entry(&command, cx))
+        self.in_context_on(record, |cx| entry(&command, cx))
     }
 
     /// Runs `body` on a context over this case's plane, file steps, record, environment and streams.
@@ -253,9 +262,18 @@ impl Case {
         &self,
         body: impl FnOnce(&mut Context<'_, Plane, Steps>) -> T,
     ) -> T {
+        let mut record = Record::new(self.delivered);
+        self.in_context_on(&mut record, body)
+    }
+
+    /// Runs `body` as [`Case::in_context`] does, over `record`.
+    pub(crate) fn in_context_on<T>(
+        &self,
+        record: &mut Record<'static>,
+        body: impl FnOnce(&mut Context<'_, Plane, Steps>) -> T,
+    ) -> T {
         let mut seam = Plane(Rc::clone(&self.plane));
         let files = self.steps();
-        let mut record = Record::new(self.delivered);
         let mut out = Hooked(
             self.output.clone(),
             self.stdout.clone(),
@@ -270,7 +288,7 @@ impl Case {
         let mut cx = Context {
             seam: &mut seam,
             files: &files,
-            record: &mut record,
+            record,
             env: &self.env,
             out: &mut out,
             err: &mut err,
@@ -337,13 +355,18 @@ impl Case {
         fs::read_dir(&root)
             .expect("injection/ lists")
             .map(|entry| {
-                let path = entry.expect("injection/ lists").path();
-                let stem = path
-                    .file_stem()
-                    .expect("a mark's name")
-                    .to_string_lossy()
-                    .into_owned();
-                let text = fs::read_to_string(&path).expect("a mark reads");
+                let entry = entry.expect("injection/ lists");
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .expect("a mark's name is UTF-8");
+                let stem = name
+                    .strip_suffix(".json")
+                    .unwrap_or_else(|| panic!("{name} is a mark's name"))
+                    .to_owned();
+                let kind = fs::symlink_metadata(entry.path()).expect("a mark stands");
+                assert!(kind.is_file(), "{name} is a regular file");
+                let text = fs::read_to_string(entry.path()).expect("a mark reads");
                 (stem, value(&text))
             })
             .collect()
@@ -445,11 +468,20 @@ impl Case {
         let stops = self.stops();
         assert!(stops.len() <= 1, "{ops:?}");
         self.assert_retries();
-        if !stops.is_empty() {
-            let log = self.log();
+        let log = self.log();
+        let after: Vec<&Logged> = log
+            .iter()
+            .filter(|logged| logged.marks.iter().any(|mark| mark == "abort"))
+            .collect();
+        if stops.is_empty() {
+            assert!(after.is_empty(), "{ops:?}");
+        } else {
             let last = log.last().expect("a call");
             assert_eq!(last.op, STATUS, "{ops:?}");
             assert!(last.marks.iter().any(|mark| mark == "abort"), "{last:?}");
+            assert_eq!(after.len(), 1, "one call after the abort mark: {ops:?}");
+            assert_eq!(after[0].args.last(), stops[0].args.last(), "{:?}", after[0]);
+            assert_eq!(after[0].args.len(), 3, "{:?}", after[0]);
         }
         found
     }
@@ -547,14 +579,21 @@ impl Case {
         &mut self,
         step: impl FnOnce(&mut Controller<'_, '_, Plane, Steps>) -> T,
     ) -> T {
+        self.owned(|mut controller| step(&mut controller))
+    }
+
+    /// Runs `step` on a controller as [`Case::controlled`] makes it, handing the controller over.
+    pub(crate) fn owned<T>(
+        &mut self,
+        step: impl FnOnce(Controller<'_, '_, Plane, Steps>) -> T,
+    ) -> T {
         let catalog = value(&fs::read_to_string(&self.catalog).expect("the catalog reads"));
         let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
         let operator =
             read_operator(&self.write_operator(), &gd2, FILE_LIMIT).expect("the operator file");
         self.in_context(|cx| {
             let mut written = Vec::new();
-            let mut controller = Controller::new(cx, &mut written, &operator, gd2);
-            step(&mut controller)
+            step(Controller::new(cx, &mut written, &operator, gd2))
         })
     }
 

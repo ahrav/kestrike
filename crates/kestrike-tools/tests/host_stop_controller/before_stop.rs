@@ -468,7 +468,7 @@ fn step_then(case: &mut Case, step: f64, delay: f64) {
     );
 }
 
-/// Advances the true time by `seconds` at the link of the stop mark.
+/// Applies `change` to the plane's state at the link of the stop mark.
 fn at_stop_link(case: &mut Case, change: fn(&mut State)) {
     case.plant(Box::new(move |state, step| {
         if links(step, "stop.json") {

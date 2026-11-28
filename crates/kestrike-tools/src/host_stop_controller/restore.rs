@@ -228,7 +228,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         floor: Number,
         stopped_at: Option<Number>,
     ) -> Result<(Option<Number>, Option<Text>), Halt> {
-        let record = self.record(instance, None)?;
+        let record = self.instance_record(instance, None)?;
         let launch = launch_time(record.launch()).map_err(Halt::Failed)?;
         if *record.state() != "running" {
             let mut shown = Text::from("the target's record reads ");

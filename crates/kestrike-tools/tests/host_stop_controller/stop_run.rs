@@ -7,6 +7,7 @@ use std::os::unix::fs::symlink;
 use std::rc::Rc;
 
 use kestrike_tools::host_stop::{Disk, Lock, SKEW_SECONDS, lock};
+use kestrike_tools::host_stop_controller::Fault;
 use kestrike_tools::json::{Object, Value};
 
 use super::plane::{ALARMS, Action, CALLER, RECORD, STATUS, STOP, string};
@@ -94,6 +95,7 @@ fn a_clean_run_sends_the_five_calls_in_order_writes_three_marks_and_exits_0() {
         }
     }
     assert_eq!(first, [CALLER, STATUS, ALARMS, STOP, RECORD]);
+    assert_eq!(ops.iter().filter(|op| *op == CALLER).count(), 1, "{ops:?}");
     let stops = case.stops();
     let asked: Vec<(Vec<String>, bool)> = stops.iter().map(|s| (s.args.clone(), s.retry)).collect();
     assert_eq!(
@@ -180,7 +182,7 @@ fn a_clean_run_sends_the_five_calls_in_order_writes_three_marks_and_exits_0() {
     assert!(!last.marks.iter().any(|m| m == "stopped"), "{last:?}");
 }
 
-fn mkfifo(path: &std::path::Path) {
+pub(crate) fn mkfifo(path: &std::path::Path) {
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL in the path");
     // SAFETY: `name` is a NUL-terminated path that outlives the call.
@@ -244,26 +246,28 @@ fn an_evidence_directory_that_does_not_hold_the_packages_bytes_is_refused_with_n
         ),
     ];
     for (name, change, reason) in rows {
-        let mut case = Case::new("copy");
-        let copied = case.evidence.join(COPY);
-        change(&copied, &case.package);
-        let bytes = |path: &std::path::Path| {
-            fs::symlink_metadata(path)
-                .is_ok_and(|meta| meta.is_file())
-                .then(|| fs::read(path).expect("the copy reads"))
-        };
-        let before = (listing(&case.evidence), bytes(&copied));
-        let code = case.run();
-        let output = case.output();
-        assert_eq!(code, 2, "{name}: {output}");
-        assert!(output.contains("refused: "), "{name}: {output}");
-        assert!(output.contains(reason), "{name}: {reason:?} in {output}");
-        assert_eq!(
-            case.ops(),
-            Vec::<String>::new(),
-            "{name}: no call beside a refused package"
-        );
-        assert_eq!((listing(&case.evidence), bytes(&copied)), before, "{name}");
+        crate::host_stop_support::bounded(name, move || {
+            let mut case = Case::new("copy");
+            let copied = case.evidence.join(COPY);
+            change(&copied, &case.package);
+            let bytes = |path: &std::path::Path| {
+                fs::symlink_metadata(path)
+                    .is_ok_and(|meta| meta.is_file())
+                    .then(|| fs::read(path).expect("the copy reads"))
+            };
+            let before = (listing(&case.evidence), bytes(&copied));
+            let code = case.run();
+            let output = case.output();
+            assert_eq!(code, 2, "{name}: {output}");
+            assert!(output.contains("refused: "), "{name}: {output}");
+            assert!(output.contains(reason), "{name}: {reason:?} in {output}");
+            assert_eq!(
+                case.ops(),
+                Vec::<String>::new(),
+                "{name}: no call beside a refused package"
+            );
+            assert_eq!((listing(&case.evidence), bytes(&copied)), before, "{name}");
+        });
     }
     let mut case = Case::new("copy-named");
     case.package = case.evidence.join(COPY);
@@ -460,6 +464,9 @@ fn a_stop_accepted_and_never_shown_stopped_aborts_with_no_stopped_mark() {
             plane.script(STOP, vec![Action::Delay(10.0)]);
         }),
         ("a record at second 60", |case| {
+            case.plane
+                .borrow_mut()
+                .script(STOP, vec![Action::Delay(12.0)]);
             record_rows(case, |row| {
                 row.insert(
                     "StateTransitionReason",
@@ -676,6 +683,23 @@ fn a_stopped_read_at_the_run_windows_end_shows_no_stop() {
 /// The time of the record read that showed the stop, from the log.
 fn record_time(log: &[super::plane::Logged]) -> Option<f64> {
     log.iter().find(|l| l.op == RECORD).and_then(|l| l.time)
+}
+
+#[test]
+fn an_alarm_read_that_starts_exactly_at_the_observations_end_ends_it() {
+    let mut case = Case::new("observation-equal");
+    case.plane.borrow_mut().call_seconds = 0.25;
+    let observe = operator_seconds(&case, "observe_seconds");
+    let code = case.run();
+    assert_eq!(code, 0, "{}", case.output());
+    let log = case.log();
+    let end = record_time(&log).expect("the record read") + observe;
+    let last = log.last().expect("a call");
+    assert_eq!(last.op, ALARMS);
+    assert_eq!(last.start, end, "{last:?}");
+    assert!(!last.marks.iter().any(|m| m == "stopped"), "{last:?}");
+    let before = &log[log.len() - 2];
+    assert!(before.start < end, "{before:?}");
 }
 
 /// An alarm read that starts before the observation's end and answers after it does not end the
@@ -917,4 +941,91 @@ fn an_environment_changed_after_the_caller_check_does_not_reach_the_stop() {
     );
     assert!(status.success(), "{shown}");
     assert!(shown.contains("1 passed"), "{shown}");
+}
+
+/// Each row's expected text is `f"{type(e).__name__}: {e}"` for `e = OSError(n, os.strerror(n))`
+/// under Python 3.9. The `unnumbered` case uses the same format for `e = OSError("a planted text")`.
+#[test]
+fn a_system_errors_text_names_the_class_python_gives_its_number() {
+    let rows = [
+        (
+            libc::EAGAIN,
+            "BlockingIOError: [Errno 11] Resource temporarily unavailable",
+        ),
+        (
+            libc::EINPROGRESS,
+            "BlockingIOError: [Errno 115] Operation now in progress",
+        ),
+        (
+            libc::ECHILD,
+            "ChildProcessError: [Errno 10] No child processes",
+        ),
+        (libc::EPIPE, "BrokenPipeError: [Errno 32] Broken pipe"),
+        (
+            libc::ECONNRESET,
+            "ConnectionResetError: [Errno 104] Connection reset by peer",
+        ),
+        (libc::EEXIST, "FileExistsError: [Errno 17] File exists"),
+        (
+            libc::ENOENT,
+            "FileNotFoundError: [Errno 2] No such file or directory",
+        ),
+        (libc::EISDIR, "IsADirectoryError: [Errno 21] Is a directory"),
+        (
+            libc::ENOTDIR,
+            "NotADirectoryError: [Errno 20] Not a directory",
+        ),
+        (
+            libc::EINTR,
+            "InterruptedError: [Errno 4] Interrupted system call",
+        ),
+        (
+            libc::EACCES,
+            "PermissionError: [Errno 13] Permission denied",
+        ),
+        (
+            libc::EPERM,
+            "PermissionError: [Errno 1] Operation not permitted",
+        ),
+        (libc::ESRCH, "ProcessLookupError: [Errno 3] No such process"),
+        (
+            libc::ETIMEDOUT,
+            "TimeoutError: [Errno 110] Connection timed out",
+        ),
+        (libc::EIO, "OSError: [Errno 5] Input/output error"),
+        (libc::ENOSPC, "OSError: [Errno 28] No space left on device"),
+    ];
+    for (code, expected) in rows {
+        let (_, text) = expected.split_once("] ").expect("a system error's text");
+        let text = text.to_owned();
+        let fault = Fault::Os {
+            code: Some(code),
+            text,
+        };
+        assert_eq!(fault.text().to_string(), expected, "{code}");
+    }
+    let unnumbered = Fault::Os {
+        code: None,
+        text: "a planted text".to_owned(),
+    };
+    assert_eq!(unnumbered.text().to_string(), "OSError: a planted text");
+}
+
+#[test]
+fn the_printed_start_bound_adds_the_packages_clock_error() {
+    let mut case = Case::new("clock-error");
+    case.repackage(|p| set(p, &["clock_error_seconds"], int(3)));
+    let code = case.run();
+    assert_eq!(code, 0, "{}", case.output());
+    let package_value = value(&String::from_utf8(package()).expect("the package is UTF-8"));
+    let run_end = seconds(member(member(&package_value, "run"), "end"));
+    let bound = format!(
+        "A start before {} may end the judge's observation",
+        run_end as i64 + 2 * SKEW_SECONDS + 1 + 3
+    );
+    assert!(
+        case.stdout().contains(&bound),
+        "{bound:?} in {}",
+        case.stdout()
+    );
 }

@@ -4,13 +4,14 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::process::Command;
 
-use super::{COPY, Case, listing, listing_top};
+use super::{COPY, Case, listing};
 use crate::host_stop_support::step_one::{Change, Evidence, ROWS, Reader};
 use crate::host_stop_support::{gd2_mut, json, met, package, past_limit};
 
 const CASE: &str =
     "host_stop_controller::step_one::each_refusal_of_step_1_sends_no_call_and_writes_nothing";
-/// The variable that names the evidence directory a re-started test executable runs `run` from.
+/// The variable that names the parent case's scratch directory, where a re-started test executable
+/// writes its `passed` marker.
 const FROM: &str = "HOST_STOP_CONTROLLER_FROM";
 
 /// Applies the row's change to `case`.
@@ -76,7 +77,7 @@ fn each_refusal_of_step_1_sends_no_call_and_writes_nothing() {
                 fs::create_dir(case.evidence.join("injection")).expect("injection is made");
                 assert_eq!(case.run(), 2, "{}", row.name);
                 assert_eq!(case.ops(), Vec::<String>::new(), "{}", row.name);
-                assert_eq!(listing_top(&case.evidence), ["injection", COPY]);
+                assert_eq!(listing(&case.evidence), ["injection", COPY]);
                 assert!(case.output().contains(row.reason), "{}", case.output());
             }
             Change::Evidence(Evidence::Missing) => {

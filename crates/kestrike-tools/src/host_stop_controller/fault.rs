@@ -1,7 +1,6 @@
 //! The ways a step of a command ends early, and the text of an unforeseen failure.
 
 use std::any::Any;
-use std::fmt;
 use std::io;
 use std::path::Path;
 
@@ -43,14 +42,13 @@ impl Aborted {
 /// An unforeseen failure of a step. [`Fault::text`] names its class: `Refusal` for a mark's value
 /// or bytes a check refused and for the lock's refusal, `Unwritten` for a mark's write that failed
 /// after its link, the class Python gives a system error's number, `RuntimeError` for a step asked
-/// for before the state it reads, `CallFailed` for a failed call, and `panic` for a panic.
+/// for before the state it reads, and `panic` for a panic.
 #[derive(Debug)]
 pub enum Fault {
     Refusal(Text),
     Unwritten(Text),
     Os { code: Option<i32>, text: String },
     Order(String),
-    Call(FailedCall),
     Panic(String),
 }
 
@@ -109,19 +107,9 @@ impl Fault {
                 text: message,
             } => text.push_str(&format!("OSError: {message}")),
             Self::Order(message) => text.push_str(&format!("RuntimeError: {message}")),
-            Self::Call(failed) => {
-                text.push_str("CallFailed: ");
-                text.push_text(&failed.sentence());
-            }
             Self::Panic(message) => text.push_str(&format!("panic: {message}")),
         }
         text
-    }
-}
-
-impl fmt::Display for Fault {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.text().fmt(f)
     }
 }
 

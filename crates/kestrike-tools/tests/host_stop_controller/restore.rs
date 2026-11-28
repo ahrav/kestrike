@@ -983,7 +983,7 @@ fn a_signal_during_restores_checks_ends_it_before_any_call() {
         } else {
             let mut lookups = 0;
             case.signal_at(Signal::Terminate, move |step| {
-                lookups += usize::from(matches!(step, Step::Lstat));
+                lookups += usize::from(matches!(step, Step::Lstat(_)));
                 lookups == 4
             });
         }
@@ -1163,7 +1163,7 @@ fn restore_refuses_a_mark_whose_lookup_fails() {
         let mut seen = 0;
         let mut failed = false;
         case.plant(Box::new(move |_, step| {
-            seen += usize::from(matches!(step, Step::Lstat));
+            seen += usize::from(matches!(step, Step::Lstat(_)));
             (!failed && seen == lookup).then(|| {
                 failed = true;
                 errno(libc::EIO)
