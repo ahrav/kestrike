@@ -863,3 +863,23 @@ fn a_panic_under_the_block_sets_the_mask_back() {
     assert_eq!(mask_holds(libc::SIGHUP), before);
     assert!(!before, "the test thread starts with SIGHUP unblocked");
 }
+
+/// A wait whose cutoff has passed reads the leader's state once and returns at once, whatever budget a
+/// fresh clock would grant, so a budget counted from an earlier reading adds no time back.
+#[test]
+fn a_wait_to_a_passed_cutoff_returns_at_once() {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .expect("the child starts");
+    let cutoff = Instant::now().checked_sub(Duration::from_secs(1));
+    let start = Instant::now();
+    let state = super::leader_left_by(child.id(), cutoff, PAUSE, &|| false);
+    let took = start.elapsed();
+    child.kill().expect("the child is killed");
+    child.wait().expect("the child is reaped");
+    assert_eq!(state.expect("the state reads"), super::Leader::Running);
+    assert!(took < Duration::from_secs(1), "{took:?}");
+}
