@@ -928,3 +928,62 @@ fn each_file_is_read_through_the_directory_that_listed_it() {
     );
     assert!(deep.join("injection/collected.json").as_os_str().len() > 4095);
 }
+
+/// Each copy keeps the held seal's digests, so `refusal` reports the name the seal leaves out or the
+/// sealed name that no file holds.
+#[test]
+fn a_seal_that_leaves_out_a_collected_file_or_names_a_missing_mark_is_refused() {
+    let rows: [(&[Op], &str); 3] = [
+        (
+            &[Op::Unseal("witness.jsonl")],
+            "injection/collected.json seals no witness.jsonl",
+        ),
+        (
+            &[Op::Unseal("coverage.json")],
+            "injection/collected.json seals no coverage.json",
+        ),
+        (
+            &[Op::Remove("injection/restoration.json")],
+            "injection/collected.json seals injection/restoration.json, which is missing",
+        ),
+    ];
+    for (ops, expected) in rows {
+        assert_eq!(refusal(ops, false), expected, "{ops:?}");
+    }
+}
+
+/// `reseal` updates each modified copy's digests so `refusal` reports the span of `origin.jsonl`, which
+/// holds 27 lines under a seal dated 430.
+#[test]
+fn a_coverage_span_that_runs_backwards_miscounts_or_passes_the_seals_time_is_refused() {
+    const SPAN: &str = "\"from\": 0,\n  \"to\": 400,\n  \"lines\": 27";
+    let span = |changed| Op::Replace("coverage.json", SPAN, changed);
+    let refused = [
+        (
+            span("\"from\": 0,\n  \"to\": 400,\n  \"lines\": 3"),
+            "coverage.json spans origin.jsonl backwards or counts 3 lines, not its 27",
+        ),
+        (
+            span("\"from\": 401,\n  \"to\": 400,\n  \"lines\": 27"),
+            "coverage.json spans origin.jsonl backwards or counts 27 lines, not its 27",
+        ),
+        (
+            span("\"from\": 0,\n  \"to\": 431,\n  \"lines\": 27"),
+            "coverage.json spans origin.jsonl to 431, after the seal's time 430",
+        ),
+    ];
+    for (op, expected) in refused {
+        assert_eq!(refusal(&[op], true), expected, "{op:?}");
+    }
+    let loaded = [
+        span("\"from\": 400,\n  \"to\": 400,\n  \"lines\": 27"),
+        span("\"from\": 0,\n  \"to\": 430,\n  \"lines\": 27"),
+    ];
+    for op in loaded {
+        let evidence = load(&[op], true);
+        assert!(
+            evidence.is_ok(),
+            "a span of one instant, and one to the seal's time, load: {op:?} {evidence:?}"
+        );
+    }
+}
