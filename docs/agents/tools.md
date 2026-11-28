@@ -30,10 +30,14 @@ first executable regular file named `rustup`, passing over a shell function of t
 `PATH` reads as `/bin:/usr/bin`, the C library's default. An empty `CARGO_HOME` stays empty, and an empty
 `RUSTUP_HOME` is unset for the launcher's own rustup and Cargo calls; rustup and Cargo read both forms as
 unset, and Cargo's rustc cache stays on. Before all of this, the launcher refuses where a variable it
-clears or sets below, or `RUSTUP_HOME` or `CARGO_HOME`, is readonly in its own shell, as a `BASH_ENV`
-file can make one: bash keeps a readonly variable's value when `unset`, `export` or an assignment of it
-fails. It reads each variable's attributes in bash, set or unset. The launcher needs bash 4.4 or later,
-for `mapfile -d`. On every call it:
+clears or sets below, or `RUSTUP_HOME` or `CARGO_HOME`, carries an attribute other than export in its own
+shell, as a `BASH_ENV` file can give it one: bash keeps a readonly variable's value when `unset`, `export`
+or an assignment of it fails, applies each of them to the target of a name reference, exports no array,
+and stores an assigned value changed under the integer and case attributes. It reads each variable's
+attributes in bash, set or unset, from the record that `declare -p` prints for the name; one subshell
+prints the records, and it is the one process the check starts. A shell function that a `BASH_ENV` file
+defines under the name of a builtin the launcher uses, `export` say, runs in place of that builtin, and
+the check sees no function. The launcher needs bash 4.4 or later, for `mapfile -d`. On every call it:
 
 1. Reads the stable toolchain that `.github/workflows/agent-checks.yml` pins as `STABLE`, and checks
    that `rustup toolchain list` names `<pin>-<host>` as the first word of a line. The launcher installs
@@ -100,7 +104,8 @@ its own for that; a tool's own ownership checks run after the build.
 
 | Exit | Cause | Output |
 | --- | --- | --- |
-| 127 | A variable the launcher clears or sets is readonly in its shell | `tool.sh: the variable <name> is readonly` on standard error |
+| 127 | A variable the launcher clears or sets carries an attribute other than export in its shell | `tool.sh: the variable <name> is a name reference`, `... is readonly`, `... is an indexed array`, `... is an associative array`, `... is an integer`, `... carries a case attribute` or, for any other attribute, `... carries the attribute <letters>`, on standard error. Where a variable carries several, the line names the first in this order |
+| 127 | The read of those variables' attributes is incomplete: the subshell gives no answer for a name, or an answer that is no `declare -p` record | `tool.sh: cannot read the attributes of the build's variables` |
 | 127 | The top level cannot be found | `tool.sh: cannot find the top level` |
 | 127 | The workflow path is absent, a directory, a FIFO, a device or another file that is not a regular file once links are followed | `tool.sh: <path> is not a regular file` |
 | 127 | The workflow is a regular file that cannot be opened, or a read of it fails | `tool.sh: cannot read <path>` |

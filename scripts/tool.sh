@@ -17,7 +17,6 @@ fail() {
 prepare() {
   local +x source directory top workflow line value at pin='' pins=0 rustup entry rest shown host='' hosts=0
   local +x installed toolchain found cargo rustc wrapper name log extra cache built
-  local +x -n ref
   local +x chunks=() fields=() lines=()
   source=${BASH_SOURCE[0]}
   [[ $source == */* ]] || source=./$source
@@ -30,16 +29,42 @@ prepare() {
   done
   [[ $source == */* ]] || source=./$source
 
-  # Each variable the preparation clears or sets must be writable. Bash preserves the caller's value when
-  # `unset`, `export` or a prefix assignment of a readonly variable fails, so that value can reach the
-  # build. A name reference reads the attributes of a declared variable that holds no value too.
-  set +u
-  for ref in RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
+  # Each variable the preparation clears or sets may carry the export attribute and no other. Bash
+  # preserves the caller's value when `unset`, `export` or a prefix assignment of a readonly variable
+  # fails, applies each of them to the target of a name reference, exports no array, and stores an
+  # assigned value changed under the integer and case attributes, so any of them changes what reaches the
+  # build. `declare -p` prints a name's own attributes for a name that holds a value, a declared name that
+  # holds none and a name reference alike, and fails for an undeclared name. One subshell writes, for
+  # each name, that record or the word `undeclared`, and then a NUL byte, which no value holds, so each
+  # chunk is that word or starts with `declare -<attributes> <name>`, where `-` stands for no attribute.
+  # A chunk count other than the count of names, or a chunk of another form, is a failed read.
+  set -- RUSTUP_HOME CARGO_HOME RUSTUP_TOOLCHAIN RUSTUP_AUTO_INSTALL RUSTFLAGS CARGO_ENCODED_RUSTFLAGS \
     RUSTDOCFLAGS CARGO_ENCODED_RUSTDOCFLAGS RUSTDOC RUSTC RUSTC_WRAPPER RUSTC_WORKSPACE_WRAPPER \
-    CARGO_BUILD_BUILD_DIR "${!CARGO_PROFILE_@}" "${!CARGO_BUILD_@}" "${!CARGO_TARGET_@}"; do
-    [[ ${!ref} == CARGO_BUILD_JOBS || ${ref@a} != *r* ]] || fail "the variable ${!ref} is readonly"
+    CARGO_BUILD_BUILD_DIR "${!CARGO_PROFILE_@}" "${!CARGO_BUILD_@}" "${!CARGO_TARGET_@}"
+  mapfile -d '' chunks < <(for name; do
+    declare -p "$name" || printf undeclared
+    printf '\0'
+  done 2>/dev/null) && ((${#chunks[@]} == $#)) || fail "cannot read the attributes of the build's variables"
+  at=0
+  for name; do
+    line=${chunks[at]%%[=$'\n']*}
+    at=$((at + 1))
+    [[ $line != undeclared && $name != CARGO_BUILD_JOBS ]] || continue
+    [[ $line == 'declare -'+([![:space:]])" $name" ]] ||
+      fail "cannot read the attributes of the build's variables"
+    line=${line#declare -}
+    line=${line%" $name"}
+    case $line in
+      - | x) ;;
+      *n*) fail "the variable $name is a name reference" ;;
+      *r*) fail "the variable $name is readonly" ;;
+      *a*) fail "the variable $name is an indexed array" ;;
+      *A*) fail "the variable $name is an associative array" ;;
+      *i*) fail "the variable $name is an integer" ;;
+      *[lcu]*) fail "the variable $name carries a case attribute" ;;
+      *) fail "the variable $name carries the attribute ${line//x/}" ;;
+    esac
   done
-  set -u
 
   # rustup and Cargo run in the top level. Before changing to it, the preparation resolves a relative
   # RUSTUP_HOME and CARGO_HOME, and finds `rustup` on PATH, in the caller's physical directory. The
