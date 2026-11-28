@@ -116,7 +116,7 @@ pub(super) fn git(git_env: &Environ, top: &OsStr, args: &[&OsStr]) -> Result<Vec
         .env_clear()
         .envs(git_env.iter().cloned());
     let output = match capture(&mut command, &INTERRUPT) {
-        Err(stop) => return Err(GitError::Interrupted(stop)),
+        Err(stop) => return Err(GitError::Interrupted(Stop::from(stop))),
         Ok(Err(error)) => return Err(GitError::Start(Fault::os(&error, Some(OsStr::new("git"))))),
         Ok(Ok(output)) => output,
     };

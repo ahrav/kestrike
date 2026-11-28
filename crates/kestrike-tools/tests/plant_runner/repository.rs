@@ -13,7 +13,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,6 +143,25 @@ pub fn chmod(path: &Path, mode: u32) {
         .unwrap_or_else(|error| panic!("chmod {}: {error}", path.display()));
 }
 
+/// `git_in` runs the host's Git with `args` in `dir`, with exactly the environment `env`, and returns
+/// its standard output; a Git that fails or prints no UTF-8 fails the case.
+pub fn git_in(dir: &Path, env: &[(OsString, OsString)], args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_clear()
+        .envs(env.iter().cloned())
+        .output()
+        .expect("git starts");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("Git's output is UTF-8")
+}
+
 /// `executable` writes `text` at `path` with mode 0755 through a child process, the one process that holds
 /// the file open for writing. `execve` refuses a file some process holds open for writing (`ETXTBSY`), and a
 /// child another test thread forks holds every descriptor of the test process until its own `execve`.
@@ -171,16 +190,16 @@ pub fn write(path: &Path, contents: impl AsRef<[u8]>) {
     fs::write(path, contents).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
-/// `claimed` makes a new directory `plants-PID-N` under `base`, mode 0700 whatever the umask, taking the
-/// next `N` while a name is taken, so the fixture never adopts or later removes a path it did not make.
-fn claimed(base: &Path) -> PathBuf {
+/// `claimed` makes a new directory `PREFIX-PID-N` under `base`, mode 0700 whatever the umask, taking
+/// the next `N` on each collision so the fixture uses and later removes only the directory it creates.
+pub fn claimed(base: &Path, prefix: &str) -> PathBuf {
     loop {
         let scratch = base.join(format!(
-            "plants-{}-{}",
+            "{prefix}-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        match DirBuilder::new().create(&scratch) {
+        match DirBuilder::new().mode(0o700).create(&scratch) {
             Ok(()) => {
                 chmod(&scratch, 0o700);
                 return scratch;
@@ -222,7 +241,7 @@ impl Repository {
             "the checks refuse a work directory under {shared:?}, which another user can write; \
              make those directories private or move CARGO_TARGET_TMPDIR under a private directory"
         );
-        let scratch = claimed(&base);
+        let scratch = claimed(&base, "plants");
         let (top, tmp, bin, home) = (
             scratch.join("checkout"),
             scratch.join("tmp"),
@@ -315,20 +334,7 @@ impl Repository {
 
     /// `hooked_git` runs the host's Git as [`Repository::git`] does with the repository's hooks on.
     pub fn hooked_git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.top)
-            .args(args)
-            .env_clear()
-            .envs(self.env.iter().cloned())
-            .output()
-            .expect("git starts");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("Git's output is UTF-8")
+        git_in(&self.top, &self.env, args)
     }
 
     /// `commit` commits every change of the checkout.

@@ -25,8 +25,15 @@
 //! bytes, its lines and the exit code. These functions read the three files a judgment reads
 //! (`suspects.jsonl`, `confirm.err` and a profile's manifest) and take every other input as a value;
 //! each child a judgment needs, it asks of its caller.
+//!
+//! [`Run`] runs the checked plants: the run's worktrees, the proof reruns in the proof's worktree with
+//! the head's staged helper as their judge, the planted commits, the archives, the sweeps and the
+//! children a judgment asks for. [`publish`] writes the score's bytes, and [`conclude`] writes them and
+//! prints the score's lines.
 
 mod campaign;
+mod child;
+mod ending;
 mod entry;
 pub(crate) mod files;
 pub mod git;
@@ -35,25 +42,38 @@ mod lock;
 mod options;
 mod output;
 mod prepare;
+mod proof;
+mod publish;
 mod record;
+mod removal;
 mod rerun;
+mod run;
 pub mod score;
 mod seed;
 mod status;
 mod stop;
 mod store;
 mod suspects;
+mod sweeps;
 pub(crate) mod values;
 mod verdict;
 mod work;
 
+pub use child::{Logged, logged};
+pub use ending::{Halt, Stopped};
 pub use entry::{Entry, Finished};
 pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
+pub(crate) use publish::UNANNOUNCED;
+pub use publish::{THREAD_STATUS, conclude, publish, umask};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
+pub(crate) use removal::remove;
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
+pub(crate) use run::said;
+pub(crate) use run::stands;
+pub use run::{Remained, Run};
 pub use seed::Manifest;
 pub use status::{Runs, profile_runs};
 pub use store::{SCORE, STORE};
