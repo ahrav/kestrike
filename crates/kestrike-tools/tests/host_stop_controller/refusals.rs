@@ -62,11 +62,10 @@ fn a_wrong_or_unknown_caller_sends_no_stop_and_writes_nothing() {
             "the caller is unknown: Arn is no str: None".to_owned(),
         ),
     ];
-    for (name, change, reason) in rows {
+    for (_, change, reason) in rows {
         let mut case = Case::new("caller");
         change(&mut case);
         case.assert_refused(&[CALLER], &reason);
-        assert!(case.output().contains(&reason), "{name}");
     }
 }
 
@@ -214,11 +213,10 @@ fn a_stale_malformed_or_inconsistent_snapshot_is_refused_after_the_caller() {
             "the target does not own",
         ),
     ];
-    for (name, file, change, reason) in changes {
+    for (_, file, change, reason) in changes {
         let mut case = Case::new("snapshot");
         case.snapshot(file, change);
         case.assert_refused(&[CALLER], reason);
-        assert!(case.output().contains(reason), "{name}");
     }
     let mut case = Case::new("snapshot-cut");
     case.repackage(|p| set(p, &["baseline", "start"], number("99")));

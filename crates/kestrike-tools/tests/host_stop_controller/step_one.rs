@@ -10,7 +10,8 @@ use crate::host_stop_support::{gd2_mut, json, met, package, past_limit};
 
 const CASE: &str =
     "host_stop_controller::step_one::each_refusal_of_step_1_sends_no_call_and_writes_nothing";
-/// The variable that names the evidence directory a re-started test executable runs `run` from.
+/// The variable that names the parent case's scratch directory, where a re-started test executable
+/// writes its `passed` marker.
 const FROM: &str = "HOST_STOP_CONTROLLER_FROM";
 
 /// Applies the row's change to `case`.
