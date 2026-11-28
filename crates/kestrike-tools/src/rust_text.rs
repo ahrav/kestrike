@@ -8,13 +8,17 @@ use regex::Regex;
 
 use crate::classes::{SPACE, WORD, compiled, is_digit, is_word};
 
-/// `EDGE` matches a Python `\W` separator beside `ignore` within the attribute; `]` ends the attribute.
-const EDGE: &str = r"[^\]\p{L}\p{N}_]";
-
 pub static IGNORE: LazyLock<Regex> = LazyLock::new(|| {
-    let after = format!(r"ignore(?:\]|{EDGE}[^\]]*\])");
+    // `edge` matches a Python `\W` separator beside `ignore` within the attribute, a character outside
+    // [`WORD`] and other than `]`, which ends the attribute.
+    let members = WORD
+        .strip_prefix('[')
+        .and_then(|class| class.strip_suffix(']'))
+        .expect("WORD is one bracketed class");
+    let edge = format!(r"[^\]{members}]");
+    let after = format!(r"ignore(?:\]|{edge}[^\]]*\])");
     compiled(&format!(
-        r"#\[{after}|#\[cfg_attr\((?:[^\]]*{EDGE})?{after}"
+        r"#\[{after}|#\[cfg_attr\((?:[^\]]*{edge})?{after}"
     ))
 });
 

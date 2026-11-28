@@ -12,7 +12,11 @@
 //! `STUB_LOG.leader`, and waits for the child; one that holds `# linger` starts the same child, writing
 //! `STUB_LOG.lingering`, and exits 0 at once. A script that holds `# env` writes its environment to
 //! `STUB_LOG.env`, its working directory and that directory's mode to `STUB_LOG.where`, the line
-//! `output of NAME` to standard output and `error output of NAME` to standard error.
+//! `output of NAME` to standard output and `error output of NAME` to standard error. A `# hang` script
+//! sends its own two output streams and its child's to `/dev/null` first. A script that holds
+//! `# unlink-git` removes the file `STUB_GIT_LINK` names before anything else; one that holds `# deaf`
+//! ignores SIGINT, SIGTERM, SIGHUP and SIGQUIT and then hangs as `# hang` does; one that holds
+//! `# release` hangs, then exits 0 once `STUB_LOG.release` stands or 60 seconds pass.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
