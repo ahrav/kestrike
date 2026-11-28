@@ -9,7 +9,9 @@ use regex::Regex;
 use crate::classes::compiled;
 use crate::text::Text;
 
-/// The exit code of a lane run that leaves the custody of a stopped process group held.
+/// The exit code of a lane run that leaves the host to its owner's containment: a process group's custody
+/// is held or unknown, custody markers stood on the host at the start, or another run held the host's
+/// reservation.
 pub const HELD: u8 = 4;
 
 /// The exit code of a lane run that a signal interrupted.
@@ -24,7 +26,8 @@ pub const CONTROLLER_SECONDS: f64 = 30.0;
 /// The longest the lane waits for every member of a stopped process group to report stopped, in seconds.
 pub const STOP_SECONDS: f64 = 10.0;
 
-/// The bound of each observer operation a case may wait on, in seconds.
+/// The seconds the lane's budgets give each observer operation a case may wait on, and the seconds the lane
+/// retries the observer log's lock before the operation fails.
 pub const OBSERVER_SECONDS: f64 = 5.0;
 
 /// The directory where a held group's marker outlives the job, so the next run on the host refuses to start
@@ -59,28 +62,16 @@ pub const CASE_KEYS: [&str; 8] = [
 /// The keys a role may hold.
 pub const ROLE_KEYS: [&str; 6] = ["cases", "after", "ready", "closing", "env", "kill"];
 
-/// The pattern a key of a role's `env` matches whole.
+/// The text of the pattern a key of a role's `env` matches whole; [`is_environment_name`] makes the whole
+/// match.
 pub const ENVIRONMENT_NAME: &str = "KESTRIKE_[A-Z0-9_]+";
 
-/// The pattern an episode name and a platform row's name match whole: one plain file name component.
+/// The text of the pattern an episode name and a platform row's name match whole, one plain file name
+/// component; [`is_episode_name`] makes the whole match.
 pub const EPISODE_NAME: &str = "[A-Za-z0-9][A-Za-z0-9._-]*";
 
 /// The pattern each PCI identity of an envelope's `devices` matches whole: the vendor and the device.
 const DEVICE_IDENTITY: &str = "0x[0-9a-f]{4}:0x[0-9a-f]{4}";
-
-/// The fields of a platform's envelope that a receipt's host facts must reproduce.
-pub const OBSERVED: [&str; 10] = [
-    "instance_type",
-    "cpu_features",
-    "cpu_family",
-    "kernel",
-    "firmware",
-    "vfio",
-    "numa_nodes",
-    "page_size",
-    "hugepage_size",
-    "devices",
-];
 
 /// The fields a platform's envelope may hold, [`OBSERVED`] first, in the order a refusal lists those it
 /// lacks.
@@ -106,6 +97,13 @@ pub const ENVELOPE_FIELDS: [&str; 20] = [
     "restoration_authority",
     "containment_authority",
 ];
+
+/// The fields of a platform's envelope that a receipt's host facts must reproduce: the first ten of
+/// [`ENVELOPE_FIELDS`].
+pub const OBSERVED: [&str; 10] = match ENVELOPE_FIELDS.first_chunk::<10>() {
+    Some(observed) => *observed,
+    None => panic!("the envelope holds ten fields or more"),
+};
 
 /// The values that stand for a host fact the lane cannot read.
 pub const UNREAD: [&str; 1] = ["unreadable"];
@@ -145,12 +143,12 @@ fn matches(pattern: &Regex, text: &Text) -> bool {
 }
 
 /// Whether `text` is a whole [`EPISODE_NAME`].
-pub(super) fn is_episode_name(text: &Text) -> bool {
+pub fn is_episode_name(text: &Text) -> bool {
     matches(&EPISODE, text)
 }
 
 /// Whether `text` is a whole [`ENVIRONMENT_NAME`].
-pub(super) fn is_environment_name(text: &Text) -> bool {
+pub fn is_environment_name(text: &Text) -> bool {
     matches(&ENVIRONMENT, text)
 }
 

@@ -8,7 +8,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::json::{Integer, Object, Value};
-use crate::python::repr;
+use crate::python::{self, repr};
 use crate::text::Text;
 
 /// The kind of `value`, with its article, as a fault's statement names it.
@@ -69,13 +69,18 @@ pub(super) enum Member {
     Other,
 }
 
+/// `keys` is `set(object)`: an object's keys.
+pub(super) fn keys(object: &Object) -> Vec<Member> {
+    object
+        .iter()
+        .map(|(key, _)| Member::Text(key.clone()))
+        .collect()
+}
+
 /// `members` is `set(value)`: an object's keys, an array's items and a string's code points.
 pub(super) fn members(value: &Value) -> Result<Vec<Member>, Fault> {
     match value {
-        Value::Object(object) => Ok(object
-            .iter()
-            .map(|(key, _)| Member::Text(key.clone()))
-            .collect()),
+        Value::Object(object) => Ok(keys(object)),
         Value::Array(items) => items
             .iter()
             .map(|item| match item {
@@ -125,11 +130,15 @@ pub(super) fn get<'a>(value: &'a Value, key: &str) -> Result<Option<&'a Value>, 
     object(value).map(|object| object.get(key))
 }
 
-/// `index_by` is `object[key]` for a key of any kind.
-pub(super) fn index_by<'a>(object: &'a Object, key: &Value) -> Result<&'a Value, Fault> {
+/// `index_by` is `object[key]` for a key of any kind; it gives the key's text beside the value.
+pub(super) fn index_by<'a>(
+    object: &'a Object,
+    key: &'a Value,
+) -> Result<(&'a Text, &'a Value), Fault> {
     match key {
         Value::String(text) => object
             .get_text(text)
+            .map(|value| (text, value))
             .ok_or_else(|| Fault::Absent(text.repr())),
         Value::Array(_) | Value::Object(_) => Err(Fault::Hashed(kind(key))),
         _ => Err(Fault::Absent(repr(key))),
@@ -149,13 +158,15 @@ pub(super) fn contains(value: &Value, item: &str) -> Result<bool, Fault> {
     }
 }
 
+/// Whether `item` stands inside `text`. A text's bytes are UTF-8 with a surrogate in its three-byte form, so
+/// a run of bytes equal to `item`'s starts and ends at code points.
 fn substring(text: &Text, item: &str) -> bool {
-    let hay: Vec<u32> = text.code_points().collect();
-    let needle: Vec<u32> = item.chars().map(u32::from).collect();
+    let needle = item.as_bytes();
     needle.is_empty()
-        || hay
+        || text
+            .as_bytes()
             .windows(needle.len())
-            .any(|window| window == needle.as_slice())
+            .any(|window| window == needle)
 }
 
 /// `items` is the iteration of `value`: an object's keys, an array's items and a string's code points.
@@ -175,12 +186,7 @@ pub(super) fn items(value: &Value) -> Result<Vec<Cow<'_, Value>>, Fault> {
 
 /// `count` is `len(value)`, which counts a string's code points.
 pub(super) fn count(value: &Value) -> Result<usize, Fault> {
-    match value {
-        Value::Object(object) => Ok(object.len()),
-        Value::Array(items) => Ok(items.len()),
-        Value::String(text) => Ok(text.len()),
-        _ => Err(Fault::Counted(kind(value))),
-    }
+    python::len(value).ok_or(Fault::Counted(kind(value)))
 }
 
 /// `is_integer` is `isinstance(value, int)`, which holds for a boolean.
@@ -188,40 +194,45 @@ pub(super) fn is_integer(value: &Value) -> bool {
     matches!(value, Value::Integer(_) | Value::Bool(_))
 }
 
-/// `is_real` holds for an integer or a float and not for a boolean.
-pub(super) fn is_real(value: &Value) -> bool {
-    matches!(value, Value::Integer(_) | Value::Float(_))
-}
-
-/// `finite` is `math.isfinite(value)` for a number. An integer converts to the nearest double, ties to
-/// even, and one whose value rounds past the largest finite double is a [`Fault::Overflow`].
-pub(super) fn finite(value: &Value) -> Result<bool, Fault> {
-    match value {
-        Value::Integer(integer) => integer
-            .to_string()
-            .parse::<f64>()
-            .ok()
-            .filter(|float| float.is_finite())
-            .map(|_| true)
-            .ok_or(Fault::Overflow),
-        Value::Float(float) => Ok(float.is_finite()),
-        Value::Bool(_) => Ok(true),
-        _ => Ok(false),
-    }
+/// `limit` is `isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)`
+/// followed by `value > 0` where `positive` holds and `value >= 0` otherwise. An integer converts to the
+/// nearest double, ties to even, for `math.isfinite`, and one whose value rounds past the largest finite
+/// double is a [`Fault::Overflow`].
+pub(super) fn limit(value: &Value, positive: bool) -> Result<bool, Fault> {
+    let order = match value {
+        Value::Integer(integer) => {
+            let float = integer.to_string().parse::<f64>().ok();
+            if !float.is_some_and(f64::is_finite) {
+                return Err(Fault::Overflow);
+            }
+            integer.cmp(&Integer::from(0_u64))
+        }
+        Value::Float(float) if float.is_finite() => match float.partial_cmp(&0.0) {
+            Some(order) => order,
+            None => return Ok(false),
+        },
+        _ => return Ok(false),
+    };
+    Ok(if positive {
+        order.is_gt()
+    } else {
+        order.is_ge()
+    })
 }
 
 /// The order of a number against `bound`, with a boolean as 0 or 1; none for another kind or for NaN.
-pub(super) fn compare(value: &Value, bound: u64) -> Option<std::cmp::Ordering> {
+/// Every `u32` is a double exactly, so a float compares with the bound itself.
+pub(super) fn compare(value: &Value, bound: u32) -> Option<std::cmp::Ordering> {
     match value {
-        Value::Integer(integer) => Some(integer.cmp(&Integer::from(bound))),
-        Value::Float(float) => float.partial_cmp(&(bound as f64)),
-        Value::Bool(flag) => Some(u64::from(*flag).cmp(&bound)),
+        Value::Integer(integer) => Some(integer.cmp(&Integer::from(u64::from(bound)))),
+        Value::Float(float) => float.partial_cmp(&f64::from(bound)),
+        Value::Bool(flag) => Some(u32::from(*flag).cmp(&bound)),
         _ => None,
     }
 }
 
 /// `equals` is `value == bound` for a value of any kind.
-pub(super) fn equals(value: &Value, bound: u64) -> bool {
+pub(super) fn equals(value: &Value, bound: u32) -> bool {
     compare(value, bound) == Some(std::cmp::Ordering::Equal)
 }
 

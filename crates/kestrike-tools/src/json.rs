@@ -672,12 +672,10 @@ impl<'a> Reader<'a> {
         }
         let text = std::str::from_utf8(&self.text[start..self.at]).expect("a number is ASCII");
         if self.at > integer {
+            let value = nearest_double(text);
             if self.mode == Mode::Strict {
-                let value = nearest_double(text);
                 double(text, value).map_err(StrictError::Number)?;
-                return Ok(Value::Float(value));
             }
-            let value = text.parse().expect("a JSON number parses as an f64");
             return Ok(Value::Float(value));
         }
         if integer - digits > MAX_INTEGER_DIGITS {

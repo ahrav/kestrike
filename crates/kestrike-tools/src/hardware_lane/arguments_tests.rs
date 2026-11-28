@@ -5,9 +5,10 @@ use std::io;
 use std::path::Path;
 
 use crate::hardware_lane::{
-    CONTROLLER_SECONDS, CUSTODY_DIR, ENVELOPE_FIELDS, ENVIRONMENT_NAME, EPISODE_NAME, Error, HELD,
-    IDENTITY_LINES, INTERRUPTED, MANIFEST, OBSERVED, OBSERVER_SECONDS, PLATFORM_NAMED_BY,
-    STOP_SECONDS, episode_name, finite_seconds, identity_lines, manifest_path, platform_refusal,
+    CHANNEL, CONTROLLER_SECONDS, CUSTODY_DIR, ENVELOPE_FIELDS, ENVIRONMENT_NAME, EPISODE_NAME,
+    Error, HELD, IDENTITY_LINES, INTERRUPTED, MANIFEST, OBSERVED, OBSERVER_SECONDS,
+    PLATFORM_NAMED_BY, STOP_SECONDS, episode_name, finite_seconds, identity_lines,
+    is_environment_name, is_episode_name, manifest_path, platform_refusal,
 };
 use crate::text::Text;
 
@@ -26,6 +27,8 @@ fn an_episode_name_passes_whole_or_is_refused_with_its_repr() {
         (".hidden", "'.hidden'"),
         ("name\n", r"'name\n'"),
         ("épisode", "'épisode'"),
+        ("a/b", "'a/b'"),
+        ("h\u{378}st", "'h\u{378}st'"),
     ] {
         let Err(Error::Refused(sentence)) = episode_name(&Text::from(name)) else {
             panic!("{name:?} is refused")
@@ -51,10 +54,12 @@ fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
         ("\u{a0}2", 2.0),
         ("\u{85}2", 2.0),
         ("\u{2028}2", 2.0),
+        (&format!("0.{}1e655360", "0".repeat(655_359)), 1.0),
     ] {
         let read = finite_seconds(&Text::from(seconds)).unwrap();
         assert_eq!(read.to_bits(), f64::to_bits(value), "{seconds:?}");
     }
+    let long = format!("0.{}1e655360", "0".repeat(65_535));
     for (seconds, shown) in [
         ("inf", "'inf'"),
         ("nan", "'nan'"),
@@ -62,6 +67,8 @@ fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
         ("+Infinity", "'+Infinity'"),
         ("-1", "'-1'"),
         ("1e400", "'1e400'"),
+        (" -1 ", "' -1 '"),
+        (&long, &format!("'{long}'")),
     ] {
         let Err(Error::Refused(sentence)) = finite_seconds(&Text::from(seconds)) else {
             panic!("{seconds:?} is refused")
@@ -127,6 +134,37 @@ fn the_constants_hold_the_lanes_values() {
         ]
     );
     assert_eq!(ENVELOPE_FIELDS[..OBSERVED.len()], OBSERVED);
+    assert_eq!(
+        ENVELOPE_FIELDS[OBSERVED.len()..],
+        [
+            "address_mode",
+            "volume",
+            "eni",
+            "limits",
+            "coherence",
+            "disposable_resources",
+            "reset_blast_radius",
+            "fis_blast_radius",
+            "restoration_authority",
+            "containment_authority",
+        ]
+    );
+    assert_eq!(
+        CHANNEL,
+        ["KESTRIKE_CONTROLLER_REQUESTS", "KESTRIKE_CONTROLLER_ACKS"]
+    );
+    for (name, episode, environment) in [
+        ("fis-1", true, false),
+        ("KESTRIKE_A1", true, true),
+        ("KESTRIKE_A-b", true, false),
+        ("a/b", false, false),
+        (".a", false, false),
+        ("KESTRIKE_A\n", false, false),
+    ] {
+        let name = Text::from(name);
+        assert_eq!(is_episode_name(&name), episode, "{name:?}");
+        assert_eq!(is_environment_name(&name), environment, "{name:?}");
+    }
     let lines: [(&str, &[&str]); 2] = [
         ("aarch64", &["CPU implementer", "CPU part"]),
         ("x86_64", &["vendor_id", "cpu family", "model"]),
@@ -138,9 +176,9 @@ fn the_constants_hold_the_lanes_values() {
 }
 
 /// A refusal writes its sentence, text that is no number writes its own statement, and a system error
-/// writes the system's text and is the error's source.
+/// writes the system's text and gives the system error's own source, none for an error number.
 #[test]
-fn an_error_writes_its_kind_and_a_system_error_is_its_source() {
+fn an_error_writes_its_kind_and_a_system_error_gives_its_own_source() {
     let refused = platform_refusal(None, "X");
     assert_eq!(
         refused.to_string(),
@@ -154,11 +192,6 @@ fn an_error_writes_its_kind_and_a_system_error_is_its_source() {
         io::Error::from_raw_os_error(2).to_string()
     );
     assert!(system.sentence().is_none());
-    let source = system.source().expect("a system error has its source");
-    assert_eq!(
-        source
-            .downcast_ref::<io::Error>()
-            .and_then(io::Error::raw_os_error),
-        Some(2)
-    );
+    assert!(system.source().is_none());
+    assert!(matches!(&system, Error::System(error) if error.raw_os_error() == Some(2)));
 }
