@@ -28,11 +28,12 @@
 //!
 //! [`Run`] runs the checked plants: the run's worktrees, the proof reruns in the proof's worktree with
 //! the head's staged helper as their judge, the planted commits, the archives, the sweeps and the
-//! children a judgment asks for, each child started by [`logged`] or by the Git call that reads the
-//! signal record; [`publish`] writes the score's bytes and [`announce`] prints its lines.
+//! children a judgment asks for. [`publish`] writes the score's bytes, and [`conclude`] writes them and
+//! prints the score's lines.
 
 mod campaign;
 mod child;
+mod ending;
 mod entry;
 pub(crate) mod files;
 pub mod git;
@@ -57,15 +58,17 @@ pub(crate) mod values;
 mod verdict;
 mod work;
 
-pub use child::{GitFailed, Halt, Logged, Step, logged};
+pub use child::{Logged, logged};
+pub use ending::{GitFailed, Halt, Step, Stopped};
 pub use entry::{Entry, Finished};
 pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
-pub use publish::{announce, conclude, publish};
+pub use publish::{UNANNOUNCED, conclude, publish};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
+pub(crate) use run::said;
 pub use run::{Remained, Run, remove};
 pub use seed::Manifest;
 pub use status::{Runs, profile_runs};

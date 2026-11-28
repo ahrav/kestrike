@@ -414,7 +414,7 @@ pub(crate) fn close(file: File) -> io::Result<()> {
 }
 
 /// `fits` refuses with `EFBIG` a write of `len` bytes at offset 0 that the soft `RLIMIT_FSIZE` forbids.
-fn fits(len: usize) -> io::Result<()> {
+pub(crate) fn fits(len: usize) -> io::Result<()> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
         rlim_max: 0,

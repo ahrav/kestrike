@@ -19,13 +19,12 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::environ::Environ;
 use crate::git::fed;
-use crate::process::{Interrupt, Interrupted, captured};
+use crate::process::{Interrupt, Interrupted, captured, exit_code};
 use crate::text::{Text, newlines};
 
 /// The options every call passes before `-C DIR`.
@@ -137,15 +136,6 @@ fn step(args: &[&OsStr]) -> Text {
         .map_or_else(Text::new, |first| Text::from_os(first))
 }
 
-/// `code` is the exit code, or the negated number of the signal that ended the call.
-fn code(status: ExitStatus) -> i32 {
-    match (status.code(), status.signal()) {
-        (Some(code), _) => code,
-        (None, Some(signal)) => -signal,
-        (None, None) => unreachable!("a waited child exited or a signal ended it"),
-    }
-}
-
 /// `text` runs `git FIXED -C dir ARGS` in `env` with the caller's standard input and returns its exit
 /// code and both streams as text.
 ///
@@ -173,7 +163,7 @@ fn decoded(step: Text, output: std::process::Output) -> Result<Done<String>, Cal
     };
     Ok(Done {
         step,
-        code: code(output.status),
+        code: exit_code(output.status),
         stdout,
         stderr,
     })
@@ -190,6 +180,7 @@ pub fn text_until(
     args: &[&OsStr],
     interrupt: &Interrupt,
 ) -> Result<Done<String>, CallError> {
+    interrupt.check().map_err(CallError::Interrupted)?;
     let child = command(env, dir, args)?
         .stdin(Stdio::inherit())
         .spawn()
@@ -225,7 +216,7 @@ pub fn bytes(
     };
     Ok(Done {
         step,
-        code: code(output.status),
+        code: exit_code(output.status),
         stdout: output.stdout,
         stderr: output.stderr,
     })

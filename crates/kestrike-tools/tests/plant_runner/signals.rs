@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use kestrike_tools::plants::{
-    Halt, Logged, Outcome, Run, Step, conclude, logged, prepare, publish, score,
+    Halt, Logged, Outcome, Run, Stopped, conclude, logged, prepare, publish, score,
 };
 use kestrike_tools::process::{INTERRUPT, Interrupt, install_handlers};
 
@@ -26,7 +26,9 @@ fn raise(signal: i32) {
 /// `start_window` starts this test executable again for the test `name` with its role set, in `cwd`
 /// with `env`, and fails the case unless that run passes; it returns the run's standard output.
 fn start_window(name: &str, cwd: &Path, env: &[(OsString, OsString)]) -> String {
-    let output = Command::new(std::env::current_exe().expect("the test executable is known"))
+    let mut command = Command::new(std::env::current_exe().expect("the test executable is known"));
+    super::fixture::defaults(&mut command);
+    let output = command
         .args(["--exact", name, "--nocapture", "--test-threads", "1"])
         .current_dir(cwd)
         .env_clear()
@@ -96,7 +98,7 @@ fn spawn_window() {
         work: &place,
     };
     match logged(&started, &INTERRUPT) {
-        Err(Step::Halt(halt)) => assert_eq!(halt, Halt::Interrupted(libc::SIGTERM)),
+        Err(Stopped::Halt(halt)) => assert_eq!(halt, Halt::Interrupted(libc::SIGTERM)),
         other => panic!("the start ends the run, not {other:?}"),
     }
     let terminated = std::fs::read_to_string(place.join("terminated")).expect("the child ended");

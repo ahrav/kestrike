@@ -9,14 +9,11 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::plants::{Halt, Inputs, Outcome, Run, conclude, prepare, publish, score};
+use crate::plants::{
+    Halt, Inputs, Outcome, Run, UNANNOUNCED, conclude, prepare, publish, said, score,
+};
 use crate::process::{INTERRUPT, install_handlers};
-use crate::text::{Text, text};
-
-fn say(out: &mut impl Write, line: &Text) {
-    let _ = writeln!(out, "{line}");
-    let _ = out.flush();
-}
+use crate::text::text;
 
 /// `run` runs the plants the checks select, from the invoking directory's checkout.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
@@ -25,23 +22,27 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let inputs = match prepare(args, env, std::env::current_dir()) {
         Outcome::Run(inputs) => inputs,
         Outcome::Help(text) => {
-            let _ = out.write_all(text.as_bytes());
-            return 0;
+            return match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+                Ok(()) => 0,
+                Err(_) => UNANNOUNCED,
+            };
         }
         Outcome::Usage { code, text } => {
             let _ = err.write_all(text.as_bytes());
             return code;
         }
         Outcome::Rejected(reason) => {
-            say(&mut err, &text!("plant-runner rejected: ", reason));
+            let _ = said(&mut err, &text!("plant-runner rejected: ", reason));
             return 2;
         }
         Outcome::Failed(reason) => {
-            say(&mut err, &text!("plant-runner: ", reason));
+            let _ = said(&mut err, &text!("plant-runner: ", reason));
             return 4;
         }
     };
-    say(&mut err, &text!("work: ", inputs.work()));
+    if said(&mut err, &text!("work: ", inputs.work())).is_err() {
+        return 4;
+    }
     match started(&inputs) {
         Ok(run) => finished(&inputs, run, &mut out, &mut err),
         Err(halt) => failed(&halt, &mut err),
@@ -50,7 +51,7 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
 
 fn failed(halt: &Halt, err: &mut impl Write) -> u8 {
     if let Halt::Failed(reason) = halt {
-        say(err, &text!("plant-runner: ", reason));
+        let _ = said(err, &text!("plant-runner: ", reason));
     }
     halt.code()
 }
@@ -64,9 +65,10 @@ fn started(inputs: &Inputs) -> Result<Run<'_>, Halt> {
 }
 
 /// `cleanup` removes the run's worktrees and the proof's target directory, naming on `err` each one that
-/// remains, and returns whether one does. It reads no signal record.
+/// remains, and returns whether a worktree remains.
 fn cleanup(inputs: &Inputs, run: &Run<'_>, err: &mut impl Write) -> Result<bool, Halt> {
     let remained = run.remove_trees()?;
+    let mut written = Ok(());
     for (tree, unlisted) in &remained {
         let line = match unlisted {
             None => text!(
@@ -82,16 +84,22 @@ fn cleanup(inputs: &Inputs, run: &Run<'_>, err: &mut impl Write) -> Result<bool,
                 "; remove it with `git worktree remove --force --force` if it does"
             ),
         };
-        say(err, &line);
+        written = written.and(said(err, &line));
     }
     let target = inputs.work().join("proof").join("target");
     crate::plants::remove(&target);
     if target.exists() {
-        say(
+        written = written.and(said(
             err,
             &text!("plant-runner left the proof's target directory ", target),
-        );
+        ));
     }
+    written.map_err(|error| {
+        Halt::Failed(text!(
+            "a cleanup line cannot be written: ",
+            crate::plants::files::strerror(&error)
+        ))
+    })?;
     Ok(!remained.is_empty())
 }
 

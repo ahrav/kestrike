@@ -14,7 +14,9 @@ rule for `expected` and the meaning of each cause. Plants stay patch files:
 the runner applies them only in its scratch worktrees.
 
 The run judges the invoking checkout's `HEAD`, and the plant store must match
-it: a plant file that differs from `HEAD` is rejected. In that checkout the
+it: a plant file that differs from `HEAD` is rejected. A store file staged as
+a rename to `score.json` passes that check, and the run writes its score over
+it. In that checkout the
 run writes `verification/plants/score.json` and leaves the index, the refs,
 the stash, the configuration and every other file as they were. Its Git
 commands read no replacement object (`refs/replace`). Its work lies
@@ -60,8 +62,8 @@ head under `<work>/plants/<id>/` with Git hooks disabled, it:
    directory remains after the phase, every plant that waits for its archive
    has no verdict;
 3. applies the patch to the index, commits it on the detached head with the
-   head's date and a fixed identity, so the planted commit depends on the head
-   and the patch alone, writes the checkout's `Cargo.lock`, read once at the
+   head's date, a fixed identity and the message `plant <id>`, so the planted
+   commit depends on the head, the patch and the plant's id alone, writes the checkout's `Cargo.lock`, read once at the
    start, into the tree, so every archive of the run resolves the same
    dependencies, and builds the archive with `campaign sim archive`, under
    `CARGO_PROFILE_DEV_OPT_LEVEL=3` and `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true`,
@@ -147,7 +149,9 @@ Exit 0: every plant is caught or missed and every miss has its cause. Exit 1:
 a miss has no `miss_cause`. Exit 3: no miss lacks its cause, and a plant has
 no verdict, is not live or has a patch that does not apply, so the score
 counts fewer plants than the run selected. Exit 4: the run could not write its score, left a
-worktree it could not remove or could not list, or failed outside a plant. Exit 2:
+worktree it could not remove or could not list, failed to write a line to standard
+error, or failed outside a plant. Exit 120: the run wrote its score and could not
+write the score's lines to standard output. Exit 2:
 rejected input, found before any worktree: a plant whose record or patch is
 missing, no regular file or malformed, whose record or patch passes 1 MiB or
 differs from the regular file `HEAD` holds, whose id is `score.json`, passes 245 bytes or is one `campaign` cannot take

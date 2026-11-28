@@ -807,3 +807,32 @@ fn a_score_that_cannot_be_written_exits_4_with_the_results() {
         .count();
     assert_eq!(staged, 0);
 }
+
+#[test]
+fn a_run_writes_its_progress_lines_to_standard_error() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 0, "{}", done.stderr);
+    assert_eq!(
+        done.stderr,
+        format!(
+            "work: {}\np-miss: proof {{'head': 0, 'plant': 1}}\np-miss: missed\n",
+            fx.work.display()
+        )
+    );
+}
+
+/// The shim fails the head's date read, which runs before any worktree.
+#[test]
+fn a_failure_outside_a_plant_exits_4_with_its_line() {
+    let mut fx = Fixture::new();
+    let (name, path) = fx.git_shim("--format=%cI", "echo 'fatal: no date' >&2; exit 128");
+    let done = fx.run(&["p-miss"], &[(name, &path)]);
+    assert_eq!(done.code, 4, "{}", done.stderr);
+    let last = done.stderr.lines().last().expect("a line");
+    assert!(last.starts_with("plant-runner: "), "{}", done.stderr);
+    assert!(last.contains("`git show` exited 128"), "{}", done.stderr);
+    assert!(fx.calls(&[]).is_empty());
+    assert!(!fx.score.exists());
+    assert!(!fx.work.join("plants").exists());
+}

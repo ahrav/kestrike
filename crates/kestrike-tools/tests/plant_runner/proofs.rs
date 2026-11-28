@@ -312,6 +312,18 @@ fn a_plant_that_patches_the_proof_helper_is_judged_by_the_head_s_helper() {
     );
     assert_eq!(fx.proof_modes(), ["base", "base"]);
     assert!(fx.calls(&["sim", "archive"]).is_empty());
+    let staged = fx
+        .work
+        .join("proof/scripts/reproduce-test.py")
+        .display()
+        .to_string();
+    let helpers =
+        std::fs::read_to_string(fx.scratch.join("helpers")).expect("the helpers are logged");
+    let wanted: Vec<String> = ["question", "rerun", "question", "rerun", "question"]
+        .iter()
+        .map(|role| format!("{role} {staged}"))
+        .collect();
+    assert_eq!(helpers.lines().collect::<Vec<_>>(), wanted);
 }
 
 /// A head without the selector leaves every plant no verdict before any rerun.
@@ -1003,4 +1015,160 @@ fn a_proof_worktree_that_cannot_be_added_gives_every_plant_its_first_cause() {
     assert!(fx.proof_log().is_empty());
     let kept = std::fs::read_to_string(fx.work.join("proof/git.err")).expect("the error is kept");
     assert!(kept.contains("fatal: no room"), "{kept}");
+}
+
+/// An untracked file that a planted rerun leaves in the proof's worktree stays through the reset, so a
+/// later plant whose patch adds that path fails its apply and gives its proof no verdict.
+#[test]
+fn an_untracked_file_a_rerun_leaves_stays_for_the_next_plant() {
+    let mut fx = Fixture::new();
+    let adding = "diff --git a/leftover b/leftover\nnew file mode 100644\n--- /dev/null\n+++ b/leftover\n\
+                  @@ -0,0 +1 @@\n+x\ndiff --git a/mode b/mode\n--- a/mode\n+++ b/mode\n@@ -1 +1 @@\n-base\n\
+                  +pass\n";
+    write_plant(
+        &fx.store,
+        "p-zadd",
+        ("pass", &["a"], CAUSE, "base"),
+        &[("files", "[\"leftover\", \"mode\"]")],
+        Some(adding),
+    );
+    fx.commit("a plant that adds a file");
+    let left = r#"["leftover", "left by a rerun\n"]"#;
+    let done = fx.run(
+        &["p-catch", "p-zadd"],
+        &[("STANDIN_REWRITE", left), ("STANDIN_REWRITE_IN", "catch")],
+    );
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-zadd",
+        "no verdict",
+        "`git apply` exited 1; its error is in plants/p-zadd/git.err",
+    );
+    let kept = std::fs::read_to_string(fx.work.join("plants/p-zadd/git.err")).expect("kept");
+    assert!(kept.contains("leftover"), "{kept}");
+    assert_eq!(fx.proof_modes(), ["base", "catch"]);
+}
+
+/// A planted rerun that commits in the proof's worktree moves its HEAD, and the reset after it keeps
+/// that commit, so `git apply` runs against the planted tree and exits 1 for `p-miss`.
+#[test]
+fn a_commit_a_rerun_makes_moves_the_tree_the_next_plant_applies_to() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-catch", "p-miss"], &[("STANDIN_COMMIT_IN", "catch")]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "`git apply` exited 1; its error is in plants/p-miss/git.err",
+    );
+    assert_eq!(fx.proof_modes(), ["base", "catch"]);
+}
+
+/// When the first head rerun rewrites `Cargo.lock` and emits invalid UTF-8, the second head rerun still
+/// starts, and its check of the lockfile ends the head's reruns for both plants.
+#[test]
+fn a_relocking_rerun_with_undecodable_output_lets_the_next_head_rerun_start() {
+    let mut fx = Fixture::new();
+    other_proof(&mut fx);
+    let done = fx.run(
+        &["p-miss", "p-otherproof"],
+        &[
+            ("STANDIN_RELOCK_HEAD", "1"),
+            ("STANDIN_BINARY_PROOFS", r#"["a::test"]"#),
+        ],
+    );
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    assert_eq!(
+        fx.proof_tests(|mode| mode == "base"),
+        ["a::test", "b::test"]
+    );
+    for name in ["p-miss", "p-otherproof"] {
+        fx.verdict(
+            name,
+            "no verdict",
+            "the rerun of the proof b::test left the proof's worktree without the run's Cargo.lock; its \
+             output is in proof/head-1.out",
+        );
+    }
+}
+
+fn steered(fx: &mut Fixture, line: &str) {
+    let helper = format!("{}{line}", super::fixture::HELPER);
+    std::fs::write(fx.repo.join("scripts/reproduce-test.py"), helper).expect("written");
+    fx.commit("a steered helper");
+}
+
+/// The staged helper's count determines whether the rerun contributes to `proof_exits`.
+#[test]
+fn the_staged_helper_s_answer_decides_a_rerun_that_its_prefix_would_refuse() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::COUNTS_EVERY);
+    let done = fx.run(&["p-swapfail"], &[]);
+    let (_, plants) = fx.results();
+    let entry = &plants["p-swapfail"];
+    assert_eq!(
+        shown(entry.get("proof_exits")),
+        r#"{"head":0,"plant":1}"#,
+        "{}",
+        done.stderr
+    );
+    assert_ne!(
+        text_of(entry.get("result").expect("a result")),
+        "no verdict"
+    );
+}
+
+/// The setup's question passes and the head rerun's question fails.
+#[test]
+fn a_rerun_s_question_that_fails_leaves_no_verdict_with_its_last_error_line() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::RAISES);
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "the head's verdict check failed on the rerun of the proof a::test: ValueError: no count",
+    );
+}
+
+/// The setup's question waits for its release; the signal reaches the run alone.
+#[test]
+fn a_signal_during_the_helper_s_question_acts_after_the_question() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::HOLDS);
+    let mut runner = fx.spawn(&["p-miss"], &[], false);
+    super::fixture::wait_for(&fx.scratch.join("question-ready"), &mut runner.child);
+    runner.signal(libc::SIGTERM, false);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!fx.scratch.join("question-answered").exists());
+    std::fs::write(fx.scratch.join("question-release"), "").expect("written");
+    let (code, err) = runner.finish();
+    assert_eq!(code, 128 + libc::SIGTERM, "{err}");
+    assert!(fx.scratch.join("question-answered").exists());
+    assert!(fx.proof_log().is_empty());
+    assert!(!fx.score.exists());
+}
+
+/// The planted rerun rewrites the staged `plants/p-miss/plant.patch` in the work directory, and the
+/// planted commit holds the rewritten patch's change.
+#[test]
+fn the_staged_patch_is_applied_by_name_after_the_proof_reruns() {
+    let mut fx = Fixture::new();
+    let staged = fx.work.join("plants/p-miss/plant.patch");
+    let pair = format!(
+        "[{}, {}]",
+        super::fixture::json_text(&staged.display().to_string()),
+        super::fixture::json_text(&patch_of("catch", "base"))
+    );
+    let done = fx.run(&["p-miss"], &[("STANDIN_REWRITE", &pair)]);
+    let (_, plants) = fx.results();
+    let commit = text_of(plants["p-miss"].get("commit").expect("a commit"));
+    assert_eq!(
+        fx.git(&["show", &format!("{commit}:mode")]),
+        "catch\n",
+        "{}",
+        done.stderr
+    );
+    assert_eq!(fx.proof_modes(), ["base", "pass"]);
 }

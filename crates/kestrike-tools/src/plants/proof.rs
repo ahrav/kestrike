@@ -10,18 +10,19 @@
 //! later plant reports that cause.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{DirBuilder, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-use super::child::{Answer, Halt, Logged, PYTHON, Step, ask, logged};
+use super::child::{Logged, PYTHON, counts, logged, verdict_texts};
+use super::ending::{Halt, Step, Stopped};
 use super::entry::Entry;
 use super::git::{CallError, Done};
 use super::record::Plant;
 use super::rerun::{HelperVerdict, Rerun, judge_rerun};
 use super::run::Run;
 use super::verdict::{Kind, NoVerdict};
-use crate::ownership::make_private;
 use crate::text::{Text, text};
 
 /// The arguments of every proof rerun before `--test`.
@@ -41,10 +42,18 @@ fn os(text: &Text) -> OsString {
         .expect("a checked record's text names no lone surrogate")
 }
 
-/// `copy` copies the file at `from`, its links followed, to the new file `to`.
-fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+/// `copy` follows symbolic links when checking `from` for a named pipe, and refuses one before any
+/// open, so a pipe with no writer cannot hold the run.
+fn copy(from: &Path, to: &Path) -> io::Result<()> {
+    if fs::metadata(from).is_ok_and(|status| status.file_type().is_fifo()) {
+        return Err(io::Error::other(format!(
+            "`{}` is a named pipe",
+            from.display()
+        )));
+    }
     let mut bytes = Vec::new();
     File::open(from)?.read_to_end(&mut bytes)?;
+    crate::fixtures::fits(bytes.len())?;
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -70,13 +79,16 @@ impl Run<'_> {
         entry: &mut Entry,
     ) -> Result<Option<PathBuf>, Step> {
         let place = self.place(plant.id());
-        let tree = self.tree(&place)?;
+        let tree = self.tree(&place, NoVerdict::failed)?;
         let patch = place.join("plant.patch");
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&patch)
-            .and_then(|mut staged| staged.write_all(plant.patch()))
+            .and_then(|mut staged| {
+                crate::fixtures::fits(plant.patch().len())?;
+                staged.write_all(plant.patch())
+            })
             .map_err(|error| NoVerdict::unreadable(&patch, &error, self.work()))?;
         let args = [
             OsStr::new("apply"),
@@ -104,13 +116,9 @@ impl Run<'_> {
     /// the run after it.
     fn setup(&mut self) -> Result<PathBuf, Step> {
         let place = self.proof_place();
-        make_private(&place).map_err(|error| {
-            NoVerdict::plain(text!(
-                "the proof's worktree cannot be prepared: ",
-                error.to_string()
-            ))
+        let tree = self.tree(&place, |why| {
+            NoVerdict::plain(text!("the proof's worktree cannot be prepared: ", why))
         })?;
-        let tree = self.tree(&place)?;
         self.write_lock(&tree, "the proof's worktree")?;
         let scripts = place.join("scripts");
         DirBuilder::new().create(&scripts).map_err(|error| {
@@ -130,11 +138,10 @@ impl Run<'_> {
             })?;
         }
         self.interrupt.check()?;
-        let answer = ask(self.inputs.env(), &self.helper(), None);
+        let answer = verdict_texts(self.inputs.env(), &self.helper());
         self.interrupt.check()?;
         match answer {
-            Ok(Answer::Results(results)) => self.results = Some(results),
-            Ok(Answer::Counted(_)) => unreachable!("the first question asks for the verdict texts"),
+            Ok(results) => self.results = Some(results),
             Err(why) => {
                 return Err(Step::NoVerdict(NoVerdict::plain(text!(
                     "the head's scripts/",
@@ -178,11 +185,11 @@ impl Run<'_> {
         for (number, proof) in proofs.iter().enumerate() {
             match self.proof(&tree, proof, &format!("head-{number}")) {
                 Ok(code) => self.on_head.push((proof.clone(), Ok(code))),
-                Err(Step::NoVerdict(ending)) if ending.kind() == Kind::Relocked => {
+                Err(Stopped::NoVerdict(ending)) if ending.kind() == Kind::Relocked => {
                     self.proof_failure = Some(ending);
                     return Ok(());
                 }
-                Err(Step::NoVerdict(ending)) if ending.kind() == Kind::Unbuilt => {
+                Err(Stopped::NoVerdict(ending)) if ending.kind() == Kind::Unbuilt => {
                     let shared = NoVerdict::plain(text!(
                         "the head's library tests do not build, so no proof reruns on the head: ",
                         ending.reason()
@@ -192,9 +199,8 @@ impl Run<'_> {
                     }
                     return Ok(());
                 }
-                Err(Step::NoVerdict(ending)) => self.on_head.push((proof.clone(), Err(ending))),
-                Err(Step::Halt(halt)) => return Err(halt),
-                Err(Step::Git(_)) => unreachable!("a proof rerun runs no Git step"),
+                Err(Stopped::NoVerdict(ending)) => self.on_head.push((proof.clone(), Err(ending))),
+                Err(Stopped::Halt(halt)) => return Err(halt),
             }
         }
         Ok(())
@@ -204,7 +210,7 @@ impl Run<'_> {
     /// its exit, 0 or 1, once the tree holds the run's `Cargo.lock` and the staged helper counts the
     /// rerun's last line beside that exit. A signal recorded during the helper's question ends the run
     /// after it.
-    fn proof(&self, tree: &Path, proof: &Text, label: &str) -> Result<u8, Step> {
+    fn proof(&self, tree: &Path, proof: &Text, label: &str) -> Result<u8, Stopped> {
         let place = self.proof_place();
         let (log, kept) = (place.join(label), place.join("artifacts").join(label));
         let mut argv = vec![OsString::from(PYTHON), self.helper().into_os_string()];
@@ -226,6 +232,7 @@ impl Run<'_> {
             work: self.work(),
         };
         let (code, out) = logged(&started, self.interrupt)?;
+        self.interrupt.check()?;
         let rerun = Rerun {
             proof,
             log: self.in_work(&log),
@@ -240,10 +247,9 @@ impl Run<'_> {
             .expect("a rerun follows the helper's setup");
         let judged = judge_rerun(&rerun, |code, line| {
             let expected = results[usize::from(code == 1)].clone();
-            match ask(self.inputs.env(), &self.helper(), Some((code, line))) {
-                Ok(Answer::Counted(true)) => Ok(HelperVerdict::Counted),
-                Ok(Answer::Counted(false)) => Ok(HelperVerdict::Uncounted { expected }),
-                Ok(Answer::Results(_)) => unreachable!("a rerun's question asks for a count"),
+            match counts(self.inputs.env(), &self.helper(), code, line) {
+                Ok(true) => Ok(HelperVerdict::Counted),
+                Ok(false) => Ok(HelperVerdict::Uncounted { expected }),
                 Err(why) => Err(text!(
                     "the head's verdict check failed on the rerun of the proof ",
                     proof,
@@ -308,7 +314,7 @@ impl Run<'_> {
             plant.proof(),
             &text!("plant-", plant.id()).to_string(),
         );
-        if let Err(Step::Halt(halt)) = planted {
+        if let Err(Stopped::Halt(halt)) = planted {
             return Err(halt.into());
         }
         if let Err(error) = self.reset(&tree) {
@@ -316,11 +322,11 @@ impl Run<'_> {
         }
         match planted {
             Ok(code) => Ok((head, code)),
-            Err(Step::NoVerdict(ending)) if ending.kind() == Kind::Relocked => {
+            Err(Stopped::NoVerdict(ending)) if ending.kind() == Kind::Relocked => {
                 self.proof_failure = Some(ending.clone());
                 Err(ending.into())
             }
-            Err(ending) => Err(ending),
+            Err(ending) => Err(ending.into()),
         }
     }
 }

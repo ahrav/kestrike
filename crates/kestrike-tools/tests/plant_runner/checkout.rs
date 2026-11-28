@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use super::fixture::{APART, Fixture, PLANTS, extras, mode_bits, shown, text_of, umask, wait_for};
+use super::fixture::{APART, Fixture, PLANTS, extras, mode_bits, shown, text_of, wait_for};
 
 /// A run of every plant but those that need a signal leaves the checkout as it was but for the score.
 #[test]
@@ -48,8 +48,24 @@ fn a_staging_file_or_link_beside_the_score_stays_as_it_was() {
     std::fs::write(&target, "a target\n").expect("written");
     let link = fx.store.join(".score.json.link");
     std::os::unix::fs::symlink(&target, &link).expect("linked");
-    let done = fx.run(&["p-miss"], &[]);
-    assert_eq!(done.code, 0, "{}", done.stderr);
+    let args = fx.args(&["p-miss"], &[], None);
+    let env = fx.environment(&[]);
+    let output = std::process::Command::new("sh")
+        .args(["-c", "umask 027; exec \"$@\"", "sh", super::fixture::BINARY])
+        .arg(&fx.repo)
+        .arg("plant-runner")
+        .args(&args)
+        .current_dir(&fx.repo)
+        .env_clear()
+        .envs(env)
+        .output()
+        .expect("the tool starts");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         std::fs::read_to_string(&sentinel).expect("reads"),
         "a sentinel\n"
@@ -71,7 +87,7 @@ fn a_staging_file_or_link_beside_the_score_stays_as_it_was() {
             .file_type()
             .is_symlink()
     );
-    assert_eq!(mode_bits(&fx.score), 0o666 & !umask());
+    assert_eq!(mode_bits(&fx.score), 0o640);
 }
 
 /// A score that is a link is replaced, and its target stays.
@@ -164,6 +180,17 @@ fn a_worktree_the_run_cannot_remove_exits_4_and_names_it() {
         done.stderr
     );
     assert!(!fx.score.exists());
+}
+
+/// The runner invokes `campaign sim archive` even when every `git worktree list` call fails, then exits
+/// 4.
+#[test]
+fn a_failed_listing_after_the_proof_s_release_lets_the_archive_build() {
+    let mut fx = Fixture::new();
+    let (name, path) = fx.git_shim("list", "echo 'a refused listing' >&2; exit 1");
+    let done = fx.run(&["p-miss"], &[(name, &path)]);
+    assert_eq!(done.code, 4, "{}", done.stderr);
+    assert_eq!(fx.calls(&["sim", "archive"]).len(), 1, "{}", done.stderr);
 }
 
 /// A worktree listing that fails exits 4 and names the worktree.
@@ -447,4 +474,118 @@ fn a_signal_during_a_git_step_kills_git_and_ends_the_run() {
         assert!(!fx.score.exists(), "{word}");
         assert_eq!(fx.state(), before, "{word}");
     }
+}
+
+/// A proof rerun that leaves a dangling link at the proof's target gives the plant no verdict. Cleanup
+/// leaves the `proof/target` symlink in place.
+#[test]
+fn a_dangling_link_at_the_proof_s_target_is_named_by_no_cleanup_line() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-miss"], &[("STANDIN_LINK_TARGET_IN", "pass")]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict("p-miss", "no verdict", "the proof's proof/target remained");
+    assert!(
+        !done.stderr.contains("left the proof's target directory"),
+        "{}",
+        done.stderr
+    );
+    let target = fx.work.join("proof/target");
+    assert!(
+        target
+            .symlink_metadata()
+            .expect("the link stands")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// When the HEAD commit subject contains invalid UTF-8, the runner reports `no verdict` for `p-miss`
+/// with the reason `the run failed: `.
+#[test]
+fn a_head_subject_that_is_no_utf_8_gives_every_plant_no_verdict() {
+    let mut fx = Fixture::new();
+    fx.stock(&["p-miss"]);
+    let tree = fx.git(&["rev-parse", "HEAD^{tree}"]).trim().to_owned();
+    let mut raw = format!(
+        "tree {tree}\nparent {}\nauthor fixture <fixture@invalid> 1700000000 +0000\ncommitter fixture \
+         <fixture@invalid> 1700000000 +0000\n\nplant ",
+        fx.head
+    )
+    .into_bytes();
+    raw.extend_from_slice(b"\xe9\n");
+    let mut writer = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&fx.repo)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .env_clear()
+        .envs(fx.env.iter().cloned())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("git starts");
+    std::io::Write::write_all(&mut writer.stdin.take().expect("piped"), &raw).expect("written");
+    let output = writer.wait_with_output().expect("git ends");
+    assert!(output.status.success());
+    let commit = String::from_utf8(output.stdout)
+        .expect("an id")
+        .trim()
+        .to_owned();
+    fx.git(&["reset", "--quiet", "--soft", &commit]);
+    fx.head = commit;
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict("p-miss", "no verdict", "the run failed: ");
+    assert!(fx.proof_log().is_empty());
+    assert!(fx.calls(&[]).is_empty());
+}
+
+/// Bash measures `ulimit -f` in 1024-byte blocks. Subtracting one byte keeps the soft `RLIMIT_FSIZE`
+/// below the score length even at an exact block boundary.
+#[test]
+fn a_score_past_the_file_size_limit_exits_4_and_keeps_the_earlier_score() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 0, "{}", done.stderr);
+    let size = std::fs::metadata(&fx.score)
+        .expect("the score stands")
+        .len();
+    let blocks = (size - 1) / 1024;
+    assert!(blocks >= 1, "a score of {size} bytes");
+    std::fs::write(&fx.score, "earlier\n").expect("written");
+    let args = fx.args(&["p-miss"], &[], Some(&fx.scratch.join("again")));
+    let env = fx.environment(&[]);
+    let output = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!("ulimit -S -f {blocks}; exec \"$@\""),
+            "bash",
+            super::fixture::BINARY,
+        ])
+        .arg(&fx.repo)
+        .arg("plant-runner")
+        .args(&args)
+        .current_dir(&fx.repo)
+        .env_clear()
+        .envs(env)
+        .output()
+        .expect("the tool starts");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(4), "{err}");
+    assert!(err.contains("plant-runner wrote no score: "), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(&fx.score).expect("reads"),
+        "earlier\n"
+    );
+    let staged = std::fs::read_dir(&fx.store)
+        .expect("lists")
+        .filter(|entry| {
+            entry.as_ref().is_ok_and(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".score.json.")
+            })
+        })
+        .count();
+    assert_eq!(staged, 0);
 }

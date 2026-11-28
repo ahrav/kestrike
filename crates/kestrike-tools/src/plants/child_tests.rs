@@ -4,9 +4,10 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use super::{Answer, Halt, Logged, Step, ask, logged};
+use super::{Halt, Logged, Stopped, counts, logged, verdict_texts};
 use crate::paths::tests::Scratch;
 use crate::process::Interrupt;
+use crate::text::Text;
 
 fn sh(script: &str) -> Vec<OsString> {
     ["sh", "-c", script].map(OsString::from).to_vec()
@@ -55,7 +56,7 @@ fn a_child_without_text_or_without_a_new_log_leaves_no_verdict() {
     let scratch = Scratch::new("logged-ends");
     let (log, env) = (scratch.0.join("sweep"), host_env());
     let argv = sh("printf '\\377'");
-    let Err(Step::NoVerdict(ending)) =
+    let Err(Stopped::NoVerdict(ending)) =
         logged(&started(&log, &argv, &env, &scratch.0), &Interrupt::new())
     else {
         panic!("output that is no UTF-8 leaves no verdict");
@@ -71,7 +72,7 @@ fn a_child_without_text_or_without_a_new_log_leaves_no_verdict() {
     );
     let marker = scratch.0.join("ran");
     let argv = sh(&format!("touch '{}'", marker.display()));
-    let Err(Step::NoVerdict(ending)) =
+    let Err(Stopped::NoVerdict(ending)) =
         logged(&started(&log, &argv, &env, &scratch.0), &Interrupt::new())
     else {
         panic!("a log that exists leaves no verdict");
@@ -92,7 +93,8 @@ fn a_recorded_signal_starts_no_child() {
     let argv = sh(&format!("touch '{}'", marker.display()));
     let interrupt = Interrupt::new();
     interrupt.record(libc::SIGHUP);
-    let Err(Step::Halt(halt)) = logged(&started(&log, &argv, &env, &scratch.0), &interrupt) else {
+    let Err(Stopped::Halt(halt)) = logged(&started(&log, &argv, &env, &scratch.0), &interrupt)
+    else {
         panic!("a recorded signal ends the run");
     };
     assert_eq!(
@@ -131,16 +133,13 @@ esac
     );
     let env = vec![(OsString::from("PATH"), scratch.0.clone().into_os_string())];
     let helper = scratch.0.join("reproduce-test.py");
-    let results = ask(&env, &helper, None).expect("an answer");
-    assert_eq!(results, Answer::Results(["held".into(), "failed".into()]));
+    let results = verdict_texts(&env, &helper).expect("an answer");
+    assert_eq!(results, [Text::from("held"), Text::from("failed")]);
     let yes = crate::text::Text::from("yes");
-    assert_eq!(
-        ask(&env, &helper, Some((0, &yes))),
-        Ok(Answer::Counted(true))
-    );
+    assert_eq!(counts(&env, &helper, 0, &yes), Ok(true));
     let no = crate::text::Text::from("no");
     assert_eq!(
-        ask(&env, &helper, Some((1, &no)))
+        counts(&env, &helper, 1, &no)
             .expect_err("no answer")
             .to_string(),
         "TypeError: no"

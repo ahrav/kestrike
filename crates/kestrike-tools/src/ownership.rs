@@ -397,6 +397,10 @@ impl PathError {
     pub fn error(&self) -> &io::Error {
         &self.error
     }
+
+    pub(crate) fn into_error(self) -> io::Error {
+        self.error
+    }
 }
 
 impl fmt::Display for PathError {

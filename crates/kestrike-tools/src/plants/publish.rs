@@ -5,7 +5,6 @@
 //! 0666 less the umask; the rename replaces a link at the score's path, whose target stays. A write that
 //! fails removes the staging file. The write makes no sync.
 
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -18,11 +17,8 @@ use super::run::Run;
 use super::score;
 use crate::json::{Object, Value};
 use crate::ownership::PathError;
-use crate::temp_dir::random_letters;
+use crate::temp_dir::{TempDirError, fresh, random_letters};
 use crate::text::Text;
-
-/// The most staging names a write draws while each one is taken.
-const ATTEMPTS: usize = 10_000;
 
 impl Run<'_> {
     /// `settings` are the run's settings in the score: the workers, the floor, the seconds and rounds of
@@ -66,15 +62,13 @@ impl Run<'_> {
     }
 }
 
-/// `umask` reads the process's umask, setting it back at once.
-fn umask() -> u32 {
-    // SAFETY: `umask` takes and returns a mode and cannot fail; the second call restores the first's
-    // value.
-    unsafe {
-        let mask = libc::umask(0);
-        libc::umask(mask);
-        mask
-    }
+fn umask() -> io::Result<u32> {
+    let status = fs::read_to_string("/proc/self/status")?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .and_then(|mask| u32::from_str_radix(mask.trim(), 8).ok())
+        .ok_or_else(|| io::Error::other("/proc/self/status names no umask"))
 }
 
 /// `staging` creates a new staging file beside `target`.
@@ -86,33 +80,26 @@ fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
 /// `letters`; a name that is taken is left as it is and another is drawn.
 fn staging_with(
     target: &Path,
-    mut letters: impl FnMut(&mut [u8]) -> io::Result<()>,
+    letters: impl FnMut(&mut [u8]) -> io::Result<()>,
 ) -> io::Result<(PathBuf, File)> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let mut prefix = b".".to_vec();
     prefix.extend_from_slice(target.file_name().unwrap_or_default().as_bytes());
     prefix.push(b'.');
-    for _ in 0..ATTEMPTS {
-        let mut drawn = [0u8; 8];
-        letters(&mut drawn)?;
-        let mut name = prefix.clone();
-        name.extend_from_slice(&drawn);
-        let path = parent.join(OsStr::from_bytes(&name));
-        match OpenOptions::new()
+    let create = |path: &Path| {
+        OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+            .open(path)
+    };
+    fresh(&prefix, parent, letters, create).map_err(|error| match error {
+        TempDirError::Random(error) => error,
+        TempDirError::Create(error) => error.into_error(),
+        TempDirError::Exhausted => {
+            io::Error::new(io::ErrorKind::AlreadyExists, "no usable staging name found")
         }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "no usable staging name found",
-    ))
+    })
 }
 
 /// `publish` replaces `target` with `written` through a staging file it creates beside it.
@@ -123,8 +110,9 @@ fn staging_with(
 /// path.
 pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
     let (staged, mut file) = staging(target).map_err(|error| PathError::new(target, error))?;
-    let written = file
-        .set_permissions(fs::Permissions::from_mode(0o666 & !umask()))
+    let written = crate::fixtures::fits(written.len())
+        .and_then(|()| umask())
+        .and_then(|mask| file.set_permissions(fs::Permissions::from_mode(0o666 & !mask)))
         .and_then(|()| file.write_all(written.as_bytes()));
     let closed = crate::fixtures::close(file);
     let done = written
@@ -160,14 +148,17 @@ pub fn conclude<E: std::fmt::Display>(
     announce(head, entries, out)
 }
 
-/// `announce` prints the score's lines on `out`, the sentence and `ID: RESULT (REASON)` a plant, and
-/// returns the run's exit: the run's last step, after the score's write, which reads no signal record.
-pub fn announce(head: &str, entries: &[Finished], out: &mut impl Write) -> u8 {
-    for line in score::lines(head, entries) {
-        let _ = writeln!(out, "{line}");
+pub const UNANNOUNCED: u8 = 120;
+
+fn announce(head: &str, entries: &[Finished], out: &mut impl Write) -> u8 {
+    let printed = score::lines(head, entries)
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush());
+    match printed {
+        Ok(()) => score::exit_code(entries),
+        Err(_) => UNANNOUNCED,
     }
-    let _ = out.flush();
-    score::exit_code(entries)
 }
 
 #[cfg(test)]

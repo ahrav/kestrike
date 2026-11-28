@@ -1,109 +1,30 @@
 //! The children a plant run starts beside Git: a command with its output in two new log files, and the
-//! question to the head's staged helper; and the endings of a step and of a run.
+//! question to the head's staged helper.
 //!
-//! A child is started by name, found through the `PATH` of the environment it is given, with that
-//! environment as its whole environment, standard input inherited and each handled signal back at its
-//! default action. The run reads the signal record before it starts a logged command and while it waits
-//! for one; a signal recorded during the start is acted on once the child's handle is held. The question
-//! to the helper runs whole, and the run reads the record after it. A child that runs
-//! when a signal is recorded gets SIGTERM, by its handle and alone, and the run waits for it with no
-//! limit before it ends.
+//! The run resolves each child's name through the supplied `PATH`, passes the supplied environment
+//! unchanged, and restores the default action for each handled signal in the child. A logged command
+//! inherits standard input. The run reads the signal record before it starts a logged command and while
+//! it waits for one. If the signal record changes during startup, the run acts on the signal once it
+//! holds the child's handle. The run waits for the helper to finish before reading the signal record.
+//! When the signal record changes while a logged command is running, the run uses the child's handle to
+//! send SIGTERM to that child alone and waits indefinitely for the child to exit.
 
-use std::ffi::OsString;
-use std::fs::OpenOptions;
-use std::io::{self, Read, Seek};
+use std::ffi::{CStr, OsString};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Seek, Write};
+use std::os::fd::FromRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use super::ending::{Halt, Stopped};
 use super::files::strerror;
-use super::git::CallError;
 use super::verdict::NoVerdict;
 use crate::environ::Environ;
-use crate::process::{Interrupt, Interrupted, SIGNALS, exit_code, exited_within};
+use crate::json::Value;
+use crate::process::{Interrupt, child_defaults, exit_code, exited_within, handled_set};
 use crate::text::{Text, newlines, text};
-
-/// Why a run ends before its score: a recorded signal, or a failure outside a plant, exit 4.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Halt {
-    Interrupted(i32),
-    Failed(Text),
-}
-
-impl Halt {
-    /// `code` is the tool's exit: 128 plus the signal, or 4 for a failure or a signal number whose exit
-    /// is no byte.
-    pub fn code(&self) -> u8 {
-        match self {
-            Self::Interrupted(signal) => signal
-                .checked_add(128)
-                .and_then(|code| u8::try_from(code).ok())
-                .unwrap_or(4),
-            Self::Failed(_) => 4,
-        }
-    }
-}
-
-impl From<Interrupted> for Halt {
-    fn from(Interrupted(signal): Interrupted) -> Self {
-        Self::Interrupted(signal)
-    }
-}
-
-/// A checked Git step that exited nonzero: its subcommand, its exit code and its error output.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitFailed {
-    pub step: Text,
-    pub code: i32,
-    pub stderr: Text,
-}
-
-impl GitFailed {
-    /// `shown` is `` `git STEP` exited CODE ``.
-    pub(crate) fn shown(&self) -> Text {
-        text!("`git ", self.step, "` exited ", self.code)
-    }
-}
-
-/// How one plant's step ended without its value: the plant's no verdict, a checked Git step that
-/// failed, or the end of the run.
-#[derive(Debug)]
-pub enum Step {
-    NoVerdict(NoVerdict),
-    Git(GitFailed),
-    Halt(Halt),
-}
-
-impl From<NoVerdict> for Step {
-    fn from(ending: NoVerdict) -> Self {
-        Self::NoVerdict(ending)
-    }
-}
-
-impl From<Halt> for Step {
-    fn from(halt: Halt) -> Self {
-        Self::Halt(halt)
-    }
-}
-
-impl From<Interrupted> for Step {
-    fn from(interrupted: Interrupted) -> Self {
-        Self::Halt(interrupted.into())
-    }
-}
-
-/// A Git call that started and printed no UTF-8 text, or that could not start or be waited for, is the
-/// plant's no verdict, `the run failed: ` and the call's text.
-impl From<CallError> for Step {
-    fn from(error: CallError) -> Self {
-        match error {
-            CallError::Failed { step, code, stderr } => Self::Git(GitFailed { step, code, stderr }),
-            CallError::Interrupted(interrupted) => interrupted.into(),
-            other => Self::NoVerdict(NoVerdict::failed(other.to_string())),
-        }
-    }
-}
 
 /// The program the run starts for the head's helper and for the question to it.
 pub(crate) const PYTHON: &str = "python3";
@@ -111,48 +32,36 @@ pub(crate) const PYTHON: &str = "python3";
 /// The question to the staged helper, given its path and, for a rerun, the exit and the last line on
 /// standard input. It loads the helper as a module, checks that its `reported` is callable, and prints
 /// as JSON the texts of the verdicts of exits 0 and 1, or whether `reported` counts the exit beside the
-/// line. What the helper prints while it loads or answers goes to standard error, so standard output
-/// holds the answer alone.
-const QUESTION: &str = "import contextlib, importlib.util, json, sys
-with contextlib.redirect_stdout(sys.stderr):
-    spec = importlib.util.spec_from_file_location('staged_reproduce_test', sys.argv[1])
-    if spec is None or spec.loader is None:
-        raise ImportError(sys.argv[1] + ' has no loader')
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    if not callable(module.reported):
-        raise TypeError('its `reported` is not callable')
-    if len(sys.argv) == 2:
-        answer = [str(module.RESULTS[code]) for code in (0, 1)]
-    else:
-        answer = bool(module.reported(int(sys.argv[2]), sys.stdin.buffer.read().decode()))
-print(json.dumps(answer))
+/// line. The helper's writes to descriptor 1 go to standard error, leaving standard output for the JSON
+/// answer alone.
+const QUESTION: &str = "import importlib.util, json, os, sys
+answer_out = os.dup(1)
+os.dup2(2, 1)
+spec = importlib.util.spec_from_file_location('staged_reproduce_test', sys.argv[1])
+if spec is None or spec.loader is None:
+    raise ImportError(sys.argv[1] + ' has no loader')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+if not callable(module.reported):
+    raise TypeError('its `reported` is not callable')
+if len(sys.argv) == 2:
+    answer = [str(module.RESULTS[code]) for code in (0, 1)]
+else:
+    answer = bool(module.reported(int(sys.argv[2]), sys.stdin.buffer.read().decode()))
+os.write(answer_out, (json.dumps(answer) + '\\n').encode())
 ";
 
-/// `defaults` makes the child of `command` set each handled signal that has a handler back to its
-/// default action before it runs the program, and with `session` lead a session of its own.
+/// When `session` is true, the child starts the program as a new session leader.
 fn defaults(command: &mut Command, session: bool) {
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid` and `sigaction`,
-    // which are async-signal-safe; it writes only `current`, a local all-zero `sigaction` (a valid value)
-    // that each `sigaction` call overwrites.
+    let handled = handled_set();
+    // SAFETY: `pre_exec` runs the hook in the forked child, so every call in the hook, including the
+    // error path, must be async-signal-safe. The closure owns its initialized `handled` set.
     unsafe {
         command.pre_exec(move || {
             if session && libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            for signal in SIGNALS {
-                let mut current: libc::sigaction = std::mem::zeroed();
-                if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if current.sa_sigaction != libc::SIG_IGN && current.sa_sigaction != libc::SIG_DFL {
-                    current.sa_sigaction = libc::SIG_DFL;
-                    if libc::sigaction(signal, &current, std::ptr::null_mut()) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-            }
-            Ok(())
+            child_defaults(&handled)
         });
     }
 }
@@ -195,8 +104,8 @@ fn suffixed(log: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn did_not_run(what: &str, error: &io::Error) -> Step {
-    Step::NoVerdict(NoVerdict::plain(text!(
+fn did_not_run(what: &str, error: &io::Error) -> Stopped {
+    Stopped::NoVerdict(NoVerdict::plain(text!(
         "`",
         what,
         "` did not run: ",
@@ -204,18 +113,23 @@ fn did_not_run(what: &str, error: &io::Error) -> Step {
     )))
 }
 
-/// `logged` runs the command with its standard output in `LOG.out` and its error output in `LOG.err`,
-/// each created new, and returns its exit, or the negated number of the signal that ended it, and its
-/// standard output as UTF-8 text with `\r\n` and `\r` read as `\n`.
+/// `logged` runs the command with its standard output in `LOG.out` and its error output in `LOG.err`.
+/// It creates each log exclusively and returns the child's exit code or the negated terminating signal
+/// number, with the child's standard output as UTF-8 text, `\r\n` and `\r` read as `\n`.
 ///
 /// # Errors
 ///
-/// A log that cannot be created, a child that cannot start or be waited for, or an output that is no
-/// UTF-8 text is the plant's no verdict; a wait that fails leaves the child as it stands, since its state
-/// is unknown. A signal recorded before the start ends the run with no child started, and one recorded
-/// while the child runs ends the run once the child has ended after SIGTERM.
-pub fn logged(started: &Logged<'_>, interrupt: &Interrupt) -> Result<(i32, String), Step> {
+/// `logged` returns `Stopped::NoVerdict` for an empty `argv` before it creates either log, and when log
+/// creation, child startup, waiting for the child, or UTF-8 decoding of standard output fails. A wait
+/// that fails leaves the child as it stands, since its state is unknown. `logged` checks for a recorded
+/// signal before spawning the child and returns early if it finds one. If the wait detects a signal,
+/// `logged` sends SIGTERM and waits for the child to exit.
+pub fn logged(started: &Logged<'_>, interrupt: &Interrupt) -> Result<(i32, String), Stopped> {
     let what = started.what;
+    let Some((program, args)) = started.argv.split_first() else {
+        let error = io::Error::new(io::ErrorKind::InvalidInput, "the command names no program");
+        return Err(did_not_run(what, &error));
+    };
     let create = |suffix| {
         OpenOptions::new()
             .read(true)
@@ -225,10 +139,6 @@ pub fn logged(started: &Logged<'_>, interrupt: &Interrupt) -> Result<(i32, Strin
     };
     let mut out = create(".out").map_err(|error| did_not_run(what, &error))?;
     let err = create(".err").map_err(|error| did_not_run(what, &error))?;
-    let (program, args) = started
-        .argv
-        .split_first()
-        .expect("a logged command names its program");
     let mut command = Command::new(program);
     command
         .args(args)
@@ -264,7 +174,7 @@ pub fn logged(started: &Logged<'_>, interrupt: &Interrupt) -> Result<(i32, Strin
                 .log
                 .strip_prefix(started.work)
                 .unwrap_or(started.log);
-            Err(Step::NoVerdict(NoVerdict::plain(text!(
+            Err(Stopped::NoVerdict(NoVerdict::plain(text!(
                 "`",
                 what,
                 "` exited ",
@@ -279,67 +189,109 @@ pub fn logged(started: &Logged<'_>, interrupt: &Interrupt) -> Result<(i32, Strin
     }
 }
 
-/// What the staged helper answers: the texts of its verdicts of exits 0 and 1, or whether it counts a
-/// rerun's exit beside its last line.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Answer {
-    Results([Text; 2]),
-    Counted(bool),
+fn memory_file(name: &CStr) -> io::Result<File> {
+    // SAFETY: `name` is a NUL-terminated string that outlives the call.
+    let descriptor = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    if descriptor < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `descriptor` is a new open descriptor that this call alone owns.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
-/// `ask` starts `python3 -B -c QUESTION HELPER [EXIT]` in `env`, writes `line` to its standard input
-/// for a rerun's question, and reads its answer. A signal recorded while it runs acts after it.
+/// The question's three streams are in-memory files, so the wait ends at the child's exit even while a
+/// descendant holds a stream open.
 ///
 /// # Errors
 ///
-/// The tool's words for an answer that did not come: the last line of the child's error output, its
-/// exit, or the start that failed.
-pub(crate) fn ask(
+/// Setup, spawn, wait and output-read errors carry the prefix `` `python3` did not run: ``. When the
+/// child gives no accepted answer, `asked` returns the last line of stripped stderr, or the message
+/// `` `python3` exited {exit} with no answer `` if stripped stderr is empty.
+fn asked<T>(
     env: &Environ,
     helper: &Path,
-    rerun: Option<(i32, &Text)>,
-) -> Result<Answer, Text> {
+    code: Option<i32>,
+    input: &[u8],
+    shape: impl FnOnce(Value) -> Option<T>,
+) -> Result<T, Text> {
+    let failed = |error: io::Error| text!("`python3` did not run: ", strerror(&error));
+    let mut stdin = memory_file(c"question-in").map_err(failed)?;
+    stdin
+        .write_all(input)
+        .and_then(|()| stdin.rewind())
+        .map_err(failed)?;
+    let mut stdout = memory_file(c"question-out").map_err(failed)?;
+    let mut stderr = memory_file(c"question-err").map_err(failed)?;
     let mut command = Command::new(PYTHON);
     command
         .args(["-B", "-c", QUESTION])
         .arg(helper)
         .env_clear()
         .envs(env.iter().cloned())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some((code, _)) = rerun {
+        .stdin(stdin)
+        .stdout(stdout.try_clone().map_err(failed)?)
+        .stderr(stderr.try_clone().map_err(failed)?);
+    if let Some(code) = code {
         command.arg(code.to_string());
     }
     defaults(&mut command, false);
-    let child = command
+    let status = command
         .spawn()
-        .map_err(|error| text!("`python3` did not run: ", strerror(&error)))?;
-    let line = rerun.map_or(&[][..], |(_, line)| line.as_bytes());
-    let output = crate::git::fed(child, line)
-        .map_err(|error| text!("`python3` did not run: ", strerror(&error)))?;
-    let code = exit_code(output.status);
-    let printed = String::from_utf8_lossy(&output.stdout);
-    let answer = match crate::json::parse_unique(printed.trim()) {
-        Ok(crate::json::Value::Array(items)) if rerun.is_none() && code == 0 => match &items[..] {
-            [
-                crate::json::Value::String(zero),
-                crate::json::Value::String(one),
-            ] => Some(Answer::Results([zero.clone(), one.clone()])),
-            _ => None,
-        },
-        Ok(crate::json::Value::Bool(counted)) if rerun.is_some() && code == 0 => {
-            Some(Answer::Counted(counted))
-        }
+        .and_then(|mut child| child.wait())
+        .map_err(failed)?;
+    let read = |file: &mut File| {
+        let mut bytes = Vec::new();
+        file.rewind()
+            .and_then(|()| file.read_to_end(&mut bytes))
+            .map(|_| bytes)
+    };
+    let printed = read(&mut stdout).map_err(failed)?;
+    let errors = read(&mut stderr).map_err(failed)?;
+    let exit = exit_code(status);
+    let answer = match crate::json::parse_unique(String::from_utf8_lossy(&printed).trim()) {
+        Ok(value) if exit == 0 => shape(value),
         _ => None,
     };
     answer.ok_or_else(|| {
-        let errors = Text::from(String::from_utf8_lossy(&output.stderr).into_owned());
+        let errors = Text::from(String::from_utf8_lossy(&errors).into_owned());
         match errors.strip().splitlines().last() {
             Some(last) => last.clone(),
-            None => text!("`python3` exited ", code, " with no answer"),
+            None => text!("`python3` exited ", exit, " with no answer"),
         }
     })
+}
+
+/// `verdict_texts` returns the helper's verdict texts in exit-code order: 0, then 1.
+///
+/// # Errors
+///
+/// As [`asked`].
+pub(crate) fn verdict_texts(env: &Environ, helper: &Path) -> Result<[Text; 2], Text> {
+    asked(env, helper, None, &[], |value| match value {
+        Value::Array(items) => match <[Value; 2]>::try_from(items) {
+            Ok([Value::String(zero), Value::String(one)]) => Some([zero, one]),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// `counts` returns the Boolean answer for exit `code` and last line `line`.
+///
+/// # Errors
+///
+/// As [`asked`].
+pub(crate) fn counts(env: &Environ, helper: &Path, code: i32, line: &Text) -> Result<bool, Text> {
+    asked(
+        env,
+        helper,
+        Some(code),
+        line.as_bytes(),
+        |value| match value {
+            Value::Bool(counted) => Some(counted),
+            _ => None,
+        },
+    )
 }
 
 #[cfg(test)]
