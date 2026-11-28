@@ -15,6 +15,8 @@ pub mod git;
 pub mod hook;
 #[cfg(target_os = "linux")]
 pub mod host_stop;
+#[cfg(target_os = "linux")]
+pub mod host_stop_controller;
 pub mod json;
 pub mod orderings;
 pub mod ownership;
