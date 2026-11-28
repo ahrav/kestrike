@@ -1771,8 +1771,8 @@ pull request that cites a mutation report, follow
   agreement. A decided row records the revision of the run that set it.
 - A pull request that claims a bug fix under
   [Prove a bug](simulation.md#prove-a-bug) cites the receipt of its regression
-  test from `scripts/red-green.py`: the path of its `receipt.json` and its
-  result line, `red-green: ID failed on BASE with "TEXT" and passed on HEAD`.
+  test from `bash scripts/tool.sh red-green`: the path of its `receipt.json`
+  and its result line, `red-green: ID failed on BASE with "TEXT" and passed on HEAD`.
   The command runs the test through `scripts/reproduce-test.py` on the base
   with the test files carried from the head, then on the head; run it with the
   toolchain and environment that the reproduction bullet above lists for the

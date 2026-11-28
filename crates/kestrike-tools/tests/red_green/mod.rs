@@ -1,7 +1,7 @@
-//! The cases of a red-green run that send it no signal. A case builds a [`support::Fixture`], a
-//! repository with a base and a head, and runs the tool through the real runner `scripts/reproduce-test.py`
-//! with the stand-ins of [`standins`]; the run is this test executable started again in a role, so the
-//! handlers it installs and the facts a case sets stand in a process of the case's own.
+//! A case builds a [`support::Fixture`], a repository with a base and a head, and runs the tool through
+//! the real runner `scripts/reproduce-test.py` with the stand-ins of [`standins`]. A case that sets the
+//! run's [`Facts`](kestrike_tools::red_green::run::Facts) relaunches this test executable in a role;
+//! the other cases of [`signals`] start the built binary.
 #![cfg(target_os = "linux")]
 
 mod directories;
@@ -10,6 +10,7 @@ mod lock;
 mod proven;
 mod reds;
 mod rejected;
+mod signals;
 mod standins;
 mod support;
 mod trees;

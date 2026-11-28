@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use kestrike_tools::json::{self, Value};
 use kestrike_tools::process::INTERRUPT;
-use kestrike_tools::red_green::run::{Facts, run_with, spawn};
-use kestrike_tools::temp_dir::make_temp_dir;
+use kestrike_tools::red_green::run::{Facts, run_with};
+use kestrike_tools::temp_dir::{TempDirError, make_temp_dir};
 
 use super::standins;
 
@@ -43,6 +43,19 @@ pub const UID: &str = "RED_GREEN_UID";
 pub const RUN_NAME: &str = "RED_GREEN_RUN_NAME";
 /// A file to which the role appends, a line each, the parent of each temporary directory it makes.
 pub const MADE: &str = "RED_GREEN_MADE";
+/// How the role's maker of the temporary directory acts: `fail` fails with the text
+/// `no temporary directory`, and `signal` makes the directory, appends its path to the file [`MADE`]
+/// names and records SIGTERM.
+pub const MAKE_TEMP: &str = "RED_GREEN_MAKE_TEMP";
+/// How the role starts a runner: `signal` starts it, appends its process ID to the file [`SPAWNED`]
+/// names and records SIGINT and then SIGTERM; `fail` records SIGTERM and fails with the text
+/// `spawn failed`; `error` fails with that text alone.
+pub const SPAWN: &str = "RED_GREEN_SPAWN";
+/// The file to which the role's `signal` start appends the runner's process ID.
+pub const SPAWNED: &str = "RED_GREEN_SPAWNED";
+
+/// The built binary that `scripts/tool.sh` starts.
+pub const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -55,7 +68,8 @@ pub fn root() -> PathBuf {
 }
 
 /// The role runs the tool in a process of its own: the file [`ARGS`] names holds the top and the tool's
-/// arguments, each ended by a NUL, and the variables [`UID`], [`RUN_NAME`] and [`MADE`] set its facts. The wrapper hands the
+/// arguments, each ended by a NUL, and the variables [`UID`], [`RUN_NAME`], [`MADE`], [`MAKE_TEMP`] and
+/// [`SPAWN`] set its facts. The wrapper hands the
 /// caller's standard output over as descriptor 3 while libtest's own lines go to `/dev/null`.
 #[test]
 fn role() {
@@ -75,19 +89,52 @@ fn role() {
         |uid| uid.parse().expect("the user ID is decimal"),
     );
     let made = std::env::var_os(MADE);
+    let make_temp = std::env::var(MAKE_TEMP).unwrap_or_default();
     let maker = |prefix: &str, parent: &Path| {
         if let Some(log) = &made {
             let mut line = parent.as_os_str().as_bytes().to_vec();
             line.push(b'\n');
             append(Path::new(log), &line);
         }
-        make_temp_dir(prefix, parent)
+        if make_temp == "fail" {
+            return Err(TempDirError::Random(std::io::Error::other(
+                "no temporary directory",
+            )));
+        }
+        let directory = make_temp_dir(prefix, parent)?;
+        if make_temp == "signal" {
+            if let Some(log) = &made {
+                let mut line = directory.as_os_str().as_bytes().to_vec();
+                line.push(b'\n');
+                append(Path::new(log), &line);
+            }
+            INTERRUPT.record(libc::SIGTERM);
+        }
+        Ok(directory)
+    };
+    let spawn_mode = std::env::var(SPAWN).unwrap_or_default();
+    let spawner = |command: &mut Command| match spawn_mode.as_str() {
+        "signal" => {
+            let child = command.spawn()?;
+            if let Some(log) = std::env::var_os(SPAWNED) {
+                append(Path::new(&log), format!("{}\n", child.id()).as_bytes());
+            }
+            INTERRUPT.record(libc::SIGINT);
+            INTERRUPT.record(libc::SIGTERM);
+            Ok(child)
+        }
+        "fail" => {
+            INTERRUPT.record(libc::SIGTERM);
+            Err(std::io::Error::other("spawn failed"))
+        }
+        "error" => Err(std::io::Error::other("spawn failed")),
+        _ => command.spawn(),
     };
     let facts = Facts {
         uid,
         run_name: std::env::var_os(RUN_NAME),
         make_temp: &maker,
-        spawn: &spawn,
+        spawn: &spawner,
         interrupt: &INTERRUPT,
     };
     // SAFETY: the wrapper opens descriptor 3 as the caller's standard output, and nothing else in this
@@ -505,32 +552,47 @@ impl Fixture {
         command
     }
 
-    /// `red_green` runs `call` to its end with `call.input` on its standard input.
+    /// `start_tool` prepares the run of `call` as `scripts/tool.sh` starts the tool: the built binary
+    /// with the checkout's top, the name `red-green` and the arguments, in `call.cwd` or the repository,
+    /// with `call.env` or the fixture's environment.
+    pub fn start_tool(&self, call: &Call) -> Command {
+        let mut command = Command::new(BINARY);
+        command
+            .arg(call.top.clone().unwrap_or_else(root))
+            .arg("red-green")
+            .args(self.command(call))
+            .current_dir(call.cwd.as_deref().unwrap_or(&self.repo))
+            .env_clear()
+            .envs(call.env.as_ref().unwrap_or(&self.env).iter().cloned());
+        command
+    }
+
+    /// `red_green` runs `call` in the role to its end with `call.input` on its standard input.
     pub fn red_green(&self, call: &Call) -> Done {
-        let mut child = self
-            .start(call)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the role starts");
-        let mut stdin = child.stdin.take().expect("the input is piped");
-        stdin
-            .write_all(&call.input)
-            .expect("the input reaches the run");
-        drop(stdin);
-        let output = child.wait_with_output().expect("the run ends");
-        use std::os::unix::process::ExitStatusExt;
-        let code = output
-            .status
-            .code()
-            .or_else(|| output.status.signal().map(|signal| -signal))
-            .expect("an exited run has a code or a signal");
-        Done {
-            code,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
+        finish(self.start(call), &call.input)
+    }
+
+    /// `tool` runs `call` through the built binary to its end with `call.input` on its standard input.
+    pub fn tool(&self, call: &Call) -> Done {
+        finish(self.start_tool(call), &call.input)
+    }
+
+    /// `spawn_tool` starts `call` through the built binary with an empty standard input and both
+    /// output streams read by threads of their own.
+    pub fn spawn_tool(&self, call: &Call) -> Running {
+        Running::start(self.start_tool(call))
+    }
+
+    /// `receipts` is each `receipt.json` in a run directory under the repository's `target/red-green/`.
+    pub fn receipts(&self) -> Vec<PathBuf> {
+        let parent = self.repo.join("target/red-green");
+        let Ok(entries) = fs::read_dir(&parent) else {
+            return Vec::new();
+        };
+        entries
+            .map(|entry| entry.expect("an entry lists").path().join("receipt.json"))
+            .filter(|path| fs::symlink_metadata(path).is_ok())
+            .collect()
     }
 
     /// `run` runs the fixture's own call with `edit` applied.
@@ -739,5 +801,182 @@ pub fn tree_keys(value: &Value) -> Vec<kestrike_tools::text::Text> {
             names
         }
         _ => panic!("{} is no object", json::text(value)),
+    }
+}
+
+/// `code_of` is the exit code of `status`, or the negated signal that ended it.
+fn code_of(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| -signal))
+        .expect("an exited run has a code or a signal")
+}
+
+/// `finish` runs `command` to its end with `input` on its standard input.
+fn finish(mut command: Command, input: &[u8]) -> Done {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the run starts");
+    let mut stdin = child.stdin.take().expect("the input is piped");
+    stdin.write_all(input).expect("the input reaches the run");
+    drop(stdin);
+    let output = child.wait_with_output().expect("the run ends");
+    Done {
+        code: code_of(output.status),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+/// A run in progress: the child, a thread that reads its standard output to its end, and one that
+/// hands over the first line of its standard error and then reads the rest. A run still going when
+/// the value drops is killed and reaped.
+pub struct Running {
+    child: Option<std::process::Child>,
+    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    first: std::sync::mpsc::Receiver<String>,
+}
+
+impl Running {
+    fn start(mut command: Command) -> Self {
+        use std::io::{BufRead, Read};
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the run starts");
+        let mut out = child.stdout.take().expect("the output is piped");
+        let err = child.stderr.take().expect("the errors are piped");
+        let stdout = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            out.read_to_end(&mut bytes).expect("the output reads");
+            bytes
+        });
+        let (send, first) = std::sync::mpsc::channel();
+        let stderr = std::thread::spawn(move || {
+            let mut reader = std::io::BufReader::new(err);
+            let mut bytes = Vec::new();
+            reader
+                .read_until(b'\n', &mut bytes)
+                .expect("the errors read");
+            let _ = send.send(String::from_utf8_lossy(&bytes).into_owned());
+            reader.read_to_end(&mut bytes).expect("the errors read");
+            bytes
+        });
+        Self {
+            child: Some(child),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+            first,
+        }
+    }
+
+    pub fn pid(&self) -> i32 {
+        let child = self.child.as_ref().expect("the run is held");
+        i32::try_from(child.id()).expect("a process ID fits i32")
+    }
+
+    /// `self` keeps the run unreaped, so its PID continues to identify the run.
+    pub fn signal(&self, signal: i32) {
+        assert!(kill(self.pid(), signal));
+    }
+
+    /// `first_stderr_line` is the first line of standard error, or `None` when none arrives within 30 s.
+    pub fn first_stderr_line(&self) -> Option<String> {
+        self.first.recv_timeout(Duration::from_secs(30)).ok()
+    }
+
+    /// `finish` waits up to 60 s for the run's exit and both streams' end; a run that outlasts the bound
+    /// is killed and fails the case.
+    pub fn finish(mut self) -> Done {
+        let mut child = self.child.take().expect("the run is held");
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the run's state reads") {
+                break status;
+            }
+            if start.elapsed() > Duration::from_secs(60) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the run outlived 60 s");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let stdout = self
+            .stdout
+            .take()
+            .expect("held")
+            .join()
+            .expect("the reader ends");
+        let stderr = self
+            .stderr
+            .take()
+            .expect("held")
+            .join()
+            .expect("the reader ends");
+        Done {
+            code: code_of(status),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// `state_of` is the state letter of the process `pid`, or `None` where it has no entry.
+pub fn state_of(pid: i32) -> Option<char> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.trim_start().chars().next()
+}
+
+/// `assert_alive` asserts that the process `pid` runs: it has an entry and is no zombie.
+pub fn assert_alive(pid: i32) {
+    let state = state_of(pid);
+    assert!(
+        state.is_some_and(|state| state != 'Z'),
+        "process {pid} runs: {state:?}"
+    );
+}
+
+/// `assert_ended` asserts at once, with no wait, that the process `pid` has ended: its entry is gone
+/// or it is a zombie.
+pub fn assert_ended(pid: i32) {
+    let state = state_of(pid);
+    assert!(
+        state.is_none_or(|state| state == 'Z'),
+        "process {pid} has ended: {state:?}"
+    );
+}
+
+pub fn kill(pid: i32, signal: i32) -> bool {
+    // SAFETY: `kill` imposes no caller-side memory safety preconditions.
+    unsafe { libc::kill(pid, signal) == 0 }
+}
+
+/// `wait_for` waits up to 30 s for `path` to exist and fails the case otherwise.
+pub fn wait_for(path: &Path) {
+    let start = Instant::now();
+    while fs::symlink_metadata(path).is_err() {
+        assert!(
+            start.elapsed() < Duration::from_secs(30),
+            "{} never appeared",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
 }

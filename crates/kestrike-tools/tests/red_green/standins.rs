@@ -116,9 +116,11 @@ print(json.dumps({"reason": "compiler-artifact", "target": target,
 
 /// The stub runner loads the real runner at `REAL` and, by the leg's `stub` mode, stops at once or runs
 /// the real runner and changes what it printed or left: no verdict, no announcement, no stderr file,
-/// or an announcement of the base leg's artifact.
+/// an announcement of the base leg's artifact, or, in the mode `fifo`, the artifact moved aside and a
+/// named pipe in its place that [`FEEDER`] fills once the runner has exited.
 const STUB_RUNNER: &str = r#"import importlib.util, json, os, subprocess, sys
 from pathlib import Path
+FEEDER = FEEDER_TEXT
 spec = importlib.util.spec_from_file_location("real_runner", REAL)
 real = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(real)
@@ -141,9 +143,45 @@ if __name__ == "__main__":
     if mode == "other-leg":
         [base] = own.parent.parent.glob("*-base")
         err += f"artifact: {base / 'artifact.json'}\n"
+    if mode == "fifo":
+        held = own.with_name("artifact.held")
+        own.rename(held)
+        os.mkfifo(own)
+        marker = Path(os.environ["FAKE_STATE"]) / f"{Path.cwd().name}-fed"
+        subprocess.Popen([sys.executable, "-c", FEEDER, str(own), str(held), str(os.getppid()), str(marker)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     sys.stdout.write(out)
     sys.stderr.write(err)
     sys.exit(done.returncode)
+"#;
+
+/// The feeder takes the named pipe, the artifact's bytes beside it, the tool's process ID and a marker
+/// path. Once the tool has opened the pipe to read the artifact, it sends the tool SIGTERM and creates
+/// `MARKER.sent`, then writes the bytes, closes the pipe and creates `MARKER.written`; a write the tool
+/// no longer reads fails and leaves no `MARKER.written`.
+const FEEDER: &str = r#"
+import errno, os, signal, sys, time
+fifo, held, tool, marker = sys.argv[1:]
+data = open(held, "rb").read()
+deadline = time.monotonic() + 60
+while True:
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        break
+    except OSError as error:
+        if error.errno != errno.ENXIO or time.monotonic() > deadline:
+            raise
+        time.sleep(0.01)
+os.kill(int(tool), signal.SIGTERM)
+open(marker + ".sent", "w").close()
+time.sleep(0.2)
+os.set_blocking(fd, True)
+view = memoryview(data)
+while view:
+    view = view[os.write(fd, view):]
+os.close(fd)
+open(marker + ".written", "w").close()
 "#;
 
 /// `executable` is the test executable's text, with the result lines and the expected text set in.
@@ -157,5 +195,7 @@ pub fn executable() -> String {
 
 /// `stub_runner` is the stub runner's text, loading the real runner at `real`.
 pub fn stub_runner(real: &std::path::Path) -> String {
-    STUB_RUNNER.replace("REAL", &format!("'{}'", real.display()))
+    STUB_RUNNER
+        .replace("FEEDER_TEXT", &format!("{FEEDER:?}"))
+        .replace("REAL", &format!("'{}'", real.display()))
 }

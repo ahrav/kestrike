@@ -67,7 +67,6 @@ jobs:
         run: |
           python3 scripts/test-select-tests.py
           python3 scripts/test-reproduce-test.py
-          python3 scripts/test-red-green.py
           python3 scripts/test-hardware-lane.py --ci
           python3 scripts/test-run-receipt-selftests.py
           python3 scripts/run-receipt-selftests.py

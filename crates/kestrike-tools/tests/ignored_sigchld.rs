@@ -1,6 +1,6 @@
-//! `mutants-diff` and `plant-runner`, the tools that call the library's SIGCHLD refusal, refuse a start
-//! with SIGCHLD ignored after their argument reading and before their first child: the kernel would reap
-//! each child as it ends and every wait would fail. Each tool runs in a window that
+//! `mutants-diff`, `plant-runner` and `red-green`, the tools that call the library's SIGCHLD refusal,
+//! refuse a start with SIGCHLD ignored after their argument reading and before their first child: the
+//! kernel would reap each child as it ends and every wait would fail. Each tool runs in a window that
 //! `env --ignore-signal=CHLD` starts, since a shell between the two can reset the disposition.
 #![cfg(target_os = "linux")]
 
@@ -18,7 +18,8 @@ const DEFAULT: &str = "--default-signal=CHLD";
 /// `in_window` runs `program` with `args` under `env` with `disposition` (`--ignore-signal=CHLD` or
 /// `--default-signal=CHLD`), with the variables of the test's environment that `mutants-diff` refuses
 /// before its first Git removed (those of Git, cargo-mutants and Cargo's profiles, and each that ends in
-/// `RUSTFLAGS`) and `first` put before the test's `PATH`.
+/// `RUSTFLAGS`), `first` put before the test's `PATH`, and `TMPDIR` set to `first`, a directory only this
+/// user controls, which `red-green` checks before its first Git.
 fn in_window(disposition: &str, first: &Path, program: &str, args: &[&str]) -> Output {
     let mut path = first.as_os_str().to_owned();
     if let Some(rest) = std::env::var_os("PATH") {
@@ -32,9 +33,13 @@ fn in_window(disposition: &str, first: &Path, program: &str, args: &[&str]) -> O
                 || name.starts_with(b"CARGO_MUTANTS_")
                 || name.starts_with(b"CARGO_PROFILE_")
                 || name.ends_with(b"RUSTFLAGS")
-                || name == b"PATH")
+                || name == b"PATH"
+                || name == b"TMPDIR")
         })
-        .chain([(OsString::from("PATH"), path)])
+        .chain([
+            (OsString::from("PATH"), path),
+            (OsString::from("TMPDIR"), first.as_os_str().to_owned()),
+        ])
         .collect();
     Command::new("env")
         .arg(disposition)
@@ -87,18 +92,42 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
     );
     let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let top = top.to_str().expect("the top level is UTF-8");
-    for (tool, code, line) in [
+    let red_green = [
+        "--package",
+        "kestrike",
+        "--target",
+        "lib",
+        "--test",
+        "a::b",
+        "--expect",
+        "text",
+        "--carry",
+        "a_tests.rs",
+    ];
+    for (tool, required, code, line) in [
         (
             "mutants-diff",
+            &[][..],
             2,
             "mutants rejected: SIGCHLD is ignored, so the child's exit cannot be read\n",
         ),
         (
             "plant-runner",
+            &[],
             4,
             "plant-runner: SIGCHLD is ignored, so the child's exit cannot be read\n",
         ),
+        (
+            "red-green",
+            &red_green,
+            2,
+            "red-green rejected: SIGCHLD is ignored, so the child's exit cannot be read\n",
+        ),
     ] {
+        let run: Vec<&str> = [top, tool]
+            .into_iter()
+            .chain(required.iter().copied())
+            .collect();
         let help = in_window(IGNORED, &stand_in, BINARY, &[top, tool, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{tool} --help");
         assert!(help.stderr.is_empty(), "{tool} --help");
@@ -107,13 +136,13 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
             "{tool} --help prints its usage"
         );
         let _ = std::fs::remove_file(&marker);
-        let control = in_window(DEFAULT, &stand_in, BINARY, &[top, tool]);
+        let control = in_window(DEFAULT, &stand_in, BINARY, &run);
         assert!(
             marker.exists(),
             "{tool} reaches the stand-in with SIGCHLD at its default: {control:?}"
         );
         std::fs::remove_file(&marker).expect("the marker is removed");
-        let out = in_window(IGNORED, &stand_in, BINARY, &[top, tool]);
+        let out = in_window(IGNORED, &stand_in, BINARY, &run);
         assert!(
             !marker.exists(),
             "{tool} starts no Git with SIGCHLD ignored"
