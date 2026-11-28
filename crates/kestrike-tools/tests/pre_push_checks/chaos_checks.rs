@@ -7,7 +7,7 @@ use std::fs;
 
 use super::push::{Fixture, STUB, ZERO};
 
-const CONTRACT_CHECK: &str = "validate_contract.py chaos/ledger.json --root . --project chaos/project.yaml --receipts chaos/receipts --check-claim chaos/READINESS.md";
+pub const CONTRACT_CHECK: &str = "validate_contract.py chaos/ledger.json --root . --project chaos/project.yaml --receipts chaos/receipts --check-claim chaos/READINESS.md";
 const CONTROLS: &str = "crates/campaign-supervisor/src/campaign/calibration/controls.rs";
 
 /// `contract` commits a chaos contract with the validator and the judges' test as stubs and returns the

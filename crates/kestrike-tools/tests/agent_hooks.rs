@@ -1,10 +1,12 @@
-//! Cases for the checkout's comment-marker scan, its commit hook and its ignore rules.
+//! Cases for the checkout's comment-marker scan, its commit hook, its ignore rules and its pre-push hook.
+//! A pre-push case runs a copy of `.githooks/pre-push` beside a stand-in `scripts/tool.sh` that writes its
+//! arguments to `tool.args` and its standard input to `tool.input` in the repository.
 
 use std::fmt;
 use std::fs::{self, DirBuilder};
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -256,4 +258,149 @@ fn pre_commit_runs_repository_check() {
     repo.stage("a.rs", &format!("// {MARKER}\n"));
     let done = run(repo.command("bash").arg(top().join(".githooks/pre-commit")));
     assert_eq!(done.code, Some(1), "{done}");
+}
+
+const DELETION: &str = "(delete) 0000000000000000000000000000000000000000 refs/heads/gone 1111111111111111111111111111111111111111\n";
+
+const TOOL: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname -- \"$0\")/../tool.args\"\ncat > \"$(dirname -- \"$0\")/../tool.input\"\n";
+
+impl Repo {
+    fn pre_push(&self) -> PathBuf {
+        let hooks = self.path.join(".githooks");
+        let scripts = self.path.join("scripts");
+        for dir in [&hooks, &scripts] {
+            fs::create_dir_all(dir).expect("the directory is made");
+        }
+        let hook = hooks.join("pre-push");
+        fs::copy(top().join(".githooks/pre-push"), &hook).expect("the hook is copied");
+        fs::write(scripts.join("tool.sh"), TOOL).expect("the launcher's stand-in is written");
+        hook
+    }
+
+    fn push(&self, args: &[&str], input: &str) -> Run {
+        let hook = self.pre_push();
+        let mut child = self
+            .command("bash")
+            .arg(&hook)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the hook starts");
+        child
+            .stdin
+            .take()
+            .expect("standard input is piped")
+            .write_all(input.as_bytes())
+            .expect("the ref lines are written");
+        let done = child.wait_with_output().expect("the hook's run is read");
+        Run {
+            code: done.status.code(),
+            stdout: String::from_utf8(done.stdout).expect("standard output is UTF-8"),
+            stderr: String::from_utf8(done.stderr).expect("standard error is UTF-8"),
+        }
+    }
+
+    fn launched(&self) -> (String, String) {
+        let read = |name: &str| {
+            fs::read_to_string(self.path.join(name))
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+        };
+        (read("tool.args"), read("tool.input"))
+    }
+}
+
+#[test]
+fn pre_push_preserves_global_guard_arguments_input_and_failure() {
+    let repo = Repo::new("pre-push-guard");
+    let hooks = repo.path.join("shared hooks");
+    fs::create_dir(&hooks).expect("the directory is made");
+    let guard = hooks.join("pre-push");
+    fs::write(&guard, "#!/bin/sh\nprintf \"%s\\n\" \"$@\"\ncat\nexit 37\n")
+        .expect("the guard is written");
+    fs::set_permissions(&guard, fs::Permissions::from_mode(0o755)).expect("the mode is set");
+    let config = repo.path.join("global-config");
+    let hooks_path = hooks.to_str().expect("the path is UTF-8");
+    for mode in ["direct", "include", "includeIf"] {
+        fs::write(&config, "").expect("the configuration is emptied");
+        if mode == "direct" {
+            repo.git(&["config", "--global", "core.hooksPath", hooks_path]);
+        } else {
+            let included = repo.path.join("included-config");
+            let included = included.to_str().expect("the path is UTF-8");
+            repo.git(&["config", "--file", included, "core.hooksPath", hooks_path]);
+            let key = if mode == "include" {
+                "include.path".to_owned()
+            } else {
+                format!("includeIf.gitdir:{}/.path", repo.path.display())
+            };
+            repo.git(&["config", "--global", &key, included]);
+        }
+        let done = repo.push(&["origin", "remote-url"], DELETION);
+        assert_eq!(done.code, Some(37), "{mode}: {done}");
+        assert_eq!(
+            done.stdout,
+            format!("origin\nremote-url\n{DELETION}"),
+            "{mode}: {done}"
+        );
+        assert_eq!(
+            repo.launched(),
+            ("pre-push-checks\norigin\n".to_owned(), DELETION.to_owned()),
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn pre_push_without_global_hook_path_passes() {
+    let repo = Repo::new("pre-push-none");
+    let done = repo.push(&[], "");
+    assert_eq!(done.code, Some(0), "{done}");
+    assert_eq!(
+        repo.launched(),
+        ("pre-push-checks\n\n".to_owned(), String::new())
+    );
+}
+
+#[test]
+fn pre_push_honors_explicitly_disabled_global_hooks() {
+    let repo = Repo::new("pre-push-disabled");
+    for value in ["/dev/null", ""] {
+        repo.git(&["config", "--global", "core.hooksPath", value]);
+        let done = repo.push(&[], "");
+        assert_eq!(done.code, Some(0), "{value:?}: {done}");
+    }
+}
+
+#[test]
+fn pre_push_missing_configured_guard_fails() {
+    let repo = Repo::new("pre-push-missing");
+    let missing = repo.path.join("missing");
+    repo.git(&[
+        "config",
+        "--global",
+        "core.hooksPath",
+        missing.to_str().expect("the path is UTF-8"),
+    ]);
+    let done = repo.push(&[], "");
+    assert_ne!(done.code, Some(0), "{done}");
+}
+
+#[test]
+fn pre_push_self_delegation_fails() {
+    let repo = Repo::new("pre-push-self");
+    let hooks = repo.path.join(".githooks");
+    repo.git(&[
+        "config",
+        "--global",
+        "core.hooksPath",
+        hooks.to_str().expect("the path is UTF-8"),
+    ]);
+    let done = repo.push(&[], "");
+    assert_eq!(done.code, Some(2), "{done}");
+    assert_eq!(
+        done.stderr,
+        "pre-push: global hook path points back to this hook\n"
+    );
 }

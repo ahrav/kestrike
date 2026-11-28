@@ -239,6 +239,21 @@ impl Fixture {
         self.git(&["rev-parse", "HEAD"])
     }
 
+    /// `link` commits a symlink at `name` pointing to `target`, replacing any tracked entry there, and
+    /// returns the commit ID.
+    pub fn link(&self, name: &str, target: &str) -> String {
+        let path = self.repo.join(name);
+        if path.symlink_metadata().is_ok() {
+            self.git(&["rm", "-rq", "--", name]);
+        }
+        fs::create_dir_all(path.parent().expect("a link has a parent"))
+            .expect("the parent is made");
+        std::os::unix::fs::symlink(target, &path).expect("the link is made");
+        self.git(&["add", "--", name]);
+        self.git(&["commit", "-q", "-m", "link"]);
+        self.git(&["rev-parse", "HEAD"])
+    }
+
     /// `set` gives the environment `name` with `value`.
     pub fn set(&mut self, name: &str, value: impl Into<OsString>) {
         self.env.retain(|(key, _)| key != name);
