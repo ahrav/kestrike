@@ -10,7 +10,8 @@ use crate::text::Text;
 /// The reason a push ends before its checks start.
 #[derive(Debug)]
 pub enum Failure {
-    /// A ref line without exactly four fields; `Display` writes `malformed ref line: ` and its `repr`.
+    /// A ref line without exactly four fields, or whose local or remote field is no full object id;
+    /// `Display` writes `malformed ref line: ` and its `repr`.
     Malformed(Text),
     /// A failed Git read; `Display` writes the read's own text.
     Git(GitError),

@@ -9,9 +9,14 @@
 //! removal reads the directory as no working tree and fails, and the tool names the worktree it could not
 //! remove.
 //!
-//! The tool assumes the invoking user controls the worktree's parent directory. Where another user can
-//! rename entries in that parent, as in one writable by others without the sticky bit, that user can swap
-//! the worktree's directory between the steps that name it.
+//! The parent is the run's scratch directory, and the hook's spool of the ref lines stands in it too. A
+//! parent whose mode gives its group or every user write access without the sticky bit lets such a user
+//! rename or remove any entry, so that user could swap the spool or the worktree's directory between the
+//! steps that name it. [`scratch`] refuses such a parent before the plan's first Git read, and
+//! [`make_tree`] reads the parent's status again before each directory it makes. A parent with the sticky
+//! bit passes, since only an entry's owner, the parent's owner and root can rename the entry there. The
+//! tool reads the parent's own mode alone: it trusts the parent's owner and whoever can write a directory
+//! above it.
 //!
 //! `git worktree add` and `git worktree remove` each lead a process group of their own, so a signal sent to
 //! the tool's process group reaches them only through the tool. A recorded cancellation signal causes the
@@ -28,7 +33,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -37,6 +42,7 @@ use std::thread;
 use crate::environ::Environ;
 use crate::git::{self, GitError};
 use crate::hook::{Check, argument, short};
+use crate::ownership::{SHARED, status};
 use crate::text::{Text, strip_str};
 
 use super::cancel::{self, Unwaited};
@@ -46,6 +52,10 @@ const PREFIX: &str = "kestrike-pre-push-";
 const LETTERS: &[u8; 37] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
 const NAME_LENGTH: usize = 8;
 const NAME_ATTEMPTS: usize = 10_000;
+
+/// The sticky bit of a directory's mode: only an entry's owner, the directory's owner and root can rename
+/// or remove the entry.
+const STICKY: u32 = 0o1000;
 
 #[cfg(test)]
 #[path = "worktree_tests.rs"]
@@ -77,7 +87,8 @@ enum Ended {
 ///
 /// The exit code where the push ends here: `128 + n` for a recorded signal, after a line that names the
 /// running check where it could not be stopped or reaped, 120 for a failed write to
-/// standard error, 2 for a `git worktree add` that exits nonzero or writes output that is not UTF-8, and 1
+/// standard error, 2 for a parent directory another user can write that has no sticky bit and for a
+/// `git worktree add` that exits nonzero or writes output that is not UTF-8, and 1
 /// where the directory cannot be made or removed, if starting or waiting for a check or for
 /// `git worktree add` fails, or if Git fails to start for `git worktree remove`.
 pub(super) fn run_checks(
@@ -89,7 +100,7 @@ pub(super) fn run_checks(
         Ok(tree) => tree,
         Err(error) => {
             cancel::check()?;
-            return Err(fail(&format!("{NAME}: {error}"), 1));
+            return Err(error.exit());
         }
     };
     let ran = checks_in(environ, &tree, tip, checks);
@@ -285,39 +296,98 @@ fn shown(path: &Path) -> Text {
     Text::from_os(path.as_os_str())
 }
 
+/// Why the run has no directory to make a worktree in.
+enum Unusable {
+    /// The scratch parent, a directory whose mode gives its group or every user write access without the
+    /// sticky bit: `pre-push: <sentence>` names it, and the exit is 2.
+    Shared(PathBuf),
+    /// A failed step of the tool's own; `pre-push-checks: <text>` is printed, and the exit is 1.
+    Fault(String),
+}
+
+impl Unusable {
+    /// `exit` prints the line of `self` and returns its exit code.
+    fn exit(&self) -> Exit {
+        match self {
+            Self::Shared(parent) => fail(
+                &format!(
+                    "pre-push: another user can write the scratch directory {}, which has no sticky bit; \
+                     set TMPDIR to a directory only you can write",
+                    shown(parent)
+                ),
+                2,
+            ),
+            Self::Fault(text) => fail(&format!("{NAME}: {text}"), 1),
+        }
+    }
+}
+
 /// `parent` is `TMPDIR` when it is set and not empty, else `/tmp`, made absolute against the working
-/// directory.
-fn parent() -> io::Result<PathBuf> {
+/// directory. A path that names no directory is returned as it is, and the `mkdir` under it reports the
+/// failure.
+///
+/// # Errors
+///
+/// [`Unusable::Shared`] for a directory with a group or other write bit and no sticky bit, and
+/// [`Unusable::Fault`] where the working directory cannot be read or the `stat` of the path fails with
+/// another error than an absent path's.
+fn parent() -> Result<PathBuf, Unusable> {
     let chosen = std::env::var_os("TMPDIR")
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| OsString::from("/tmp"));
-    std::path::absolute(chosen)
+    let parent = std::path::absolute(chosen).map_err(|error| Unusable::Fault(error.to_string()))?;
+    let found = status(&parent).map_err(|error| Unusable::Fault(error.to_string()))?;
+    if found.is_some_and(|found| {
+        found.is_dir() && found.mode() & SHARED != 0 && found.mode() & STICKY == 0
+    }) {
+        return Err(Unusable::Shared(parent));
+    }
+    Ok(parent)
+}
+
+/// `scratch` refuses the run where [`parent`] refuses the directory its worktrees go under, which is also
+/// the directory the hook spools the ref lines in, so a refused directory ends the push before a ref line
+/// is planned.
+///
+/// # Errors
+///
+/// The exit code: `128 + n` for a recorded signal, 2 for a parent another user can write that has no
+/// sticky bit, after the line that names it, and 1 where the parent cannot be read.
+pub(super) fn scratch() -> Result<(), Exit> {
+    match parent() {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            cancel::check()?;
+            Err(error.exit())
+        }
+    }
 }
 
 /// `make_tree` makes the worktree's directory.
 ///
 /// # Errors
 ///
-/// The working directory or the random bytes cannot be read, a `mkdir` fails with another error than a
-/// taken name, or every name drawn is taken; the text names the path where a `mkdir` failed.
-fn make_tree() -> Result<PathBuf, String> {
-    let parent = parent().map_err(|error| error.to_string())?;
-    let mut random =
-        File::open("/dev/urandom").map_err(|error| format!("/dev/urandom: {error}"))?;
+/// [`parent`] refuses the parent or cannot read it, the random bytes cannot be read, a `mkdir` fails with
+/// another error than a taken name, or every name drawn is taken; the text names the path where a `mkdir`
+/// failed.
+fn make_tree() -> Result<PathBuf, Unusable> {
+    let parent = parent()?;
+    let random = |error: io::Error| Unusable::Fault(format!("/dev/urandom: {error}"));
+    let mut source = File::open("/dev/urandom").map_err(random)?;
     for _ in 0..NAME_ATTEMPTS {
         let mut name = PREFIX.as_bytes().to_vec();
-        name.extend(letters(&mut random).map_err(|error| format!("/dev/urandom: {error}"))?);
+        name.extend(letters(&mut source).map_err(random)?);
         let path = parent.join(OsStr::from_bytes(&name));
         match DirBuilder::new().mode(0o700).create(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(format!("{}: {error}", shown(&path))),
+            Err(error) => return Err(Unusable::Fault(format!("{}: {error}", shown(&path)))),
         }
     }
-    Err(format!(
+    Err(Unusable::Fault(format!(
         "{}: no usable temporary directory name found",
         shown(&parent)
-    ))
+    )))
 }
 
 /// `letters` draws [`NAME_LENGTH`] letters of [`LETTERS`] uniformly from `random`, passing over each byte

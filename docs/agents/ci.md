@@ -1400,16 +1400,20 @@ input, then the user-wide hook. The tool `pre-push-checks` runs the checks
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
 commit pushed under a new name included. A failed check blocks the push. The
-tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
-as the pushing user's: where another user can rename entries in it, as in a
-directory writable by others without the sticky bit, that user can swap
-either between the steps that name it. The default `/tmp` is sticky. CI
+hook spools the ref lines in the same directory. Before it plans a ref line,
+the tool refuses with exit 2 a directory there whose mode gives its group or
+every user write access without the sticky bit, since such a user could swap
+the spool or a worktree between the steps that name it; it reads that
+directory's mode alone and trusts its owner and the directories above it.
+The default `/tmp` is sticky. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's and the host stop
 controller's self-tests run in the hook and by hand; no CI job runs them.
 
-Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`.
+Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`,
+each sha a full object id of 40 or 64 lowercase hexadecimal digits; the tool
+refuses a line with another field there as malformed, before any Git read.
 For each pushed tip the tool lists the files the push changes against the
 remote commit, or against the tip's merge base with `origin/main` for a new
 branch or a remote commit this clone lacks, and runs the checks those files
@@ -1557,7 +1561,8 @@ waiting for a check or for `git worktree add`, starting Git, or reading or
 writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
 the worktree; 2 is every other refusal before the checks, printed as
-`pre-push: ` and its text: a malformed ref line, a Git read that exits
+`pre-push: ` and its text: a scratch directory another user can write that
+has no sticky bit, a malformed ref line, a Git read that exits
 nonzero where the read is not a presence test (Git's own text), Git output
 that is not UTF-8, a tree entry or a raw diff record of a form Git's manual
 does not give, and a Git argument the standard library refuses (the tool's

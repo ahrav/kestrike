@@ -3,7 +3,9 @@
 //! The pre-push hook starts it as `pre-push-checks REMOTE` with Git's ref lines on standard input. It
 //! takes its first argument as the name of the remote the push goes to and ignores later ones. It reads
 //! standard input whole, decodes it as UTF-8 with each other byte kept as a surrogate, and splits it into
-//! lines. [`Plan`] decides each line's checks, scans and guarded records; the tool then runs the
+//! lines. Before the plan it refuses a scratch directory, `TMPDIR` or `/tmp`, that another user can write
+//! and that has no sticky bit. [`Plan`] decides each line's checks, scans and guarded records, and refuses
+//! a line whose local or remote field is no full object id; the tool then runs the
 //! weakened-test scan of each range through [`scan_range`], with standard error as its report stream, the
 //! chaos record guard, and each tip's checks in a worktree of the tip that the run adds and removes. Every
 //! failure is printed as `pre-push: failed: <failure>` at the end.
@@ -13,7 +15,8 @@
 //! for Git that cannot start for the worktree's removal by the line `pre-push: could not remove worktree
 //! <tree>: git: <error>`; a guarded chaos record that is missing or not JSON is a failure listed at the
 //! end with the failed checks. 2 is every other refusal before the checks, named by a `pre-push: ` line:
-//! a malformed ref line, a Git read that exits nonzero where the read is not a presence test, Git output
+//! a scratch directory another user can write that has no sticky bit, a malformed ref line, a Git read
+//! that exits nonzero where the read is not a presence test, Git output
 //! that is not UTF-8, a tree entry or a raw diff record of a form Git's manual does not give, a Git
 //! argument the standard library refuses, and a `git worktree add` that exits nonzero, which exits 1
 //! where Git cannot start for the removal; 2 is also signal handlers that cannot be installed, named by a
@@ -130,6 +133,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     }
     let lines = Text::from_os(OsStr::from_bytes(&input)).splitlines();
     drop(input);
+    worktree::scratch()?;
     let started = Plan::new(destination, cancel::check);
     cancel::check()?;
     let mut plan = started.map_err(|failure| refused(&failure))?;

@@ -11,7 +11,11 @@ use super::repository::{Repository, STUB, ZERO, child, id};
 /// Verus inventory that names `crates/v.rs`, a plain Rust file and the test inventory, with
 /// `origin/main` at that commit.
 pub fn fixture(name: &str) -> (Repository, String) {
-    let repository = Repository::new(name);
+    based(Repository::new(name))
+}
+
+/// `based` commits the self-test's base in `repository` and puts `origin/main` at it.
+fn based(repository: Repository) -> (Repository, String) {
     let base = repository.commit(&[
         ("scripts/test-select-tests.py", STUB),
         ("scripts/verify-receipts.py", STUB),
@@ -534,36 +538,109 @@ fn an_unrelated_edit_reads_no_self_test_presence() {
     );
 }
 
-/// A ref line's local field reaches Git as an argument of its own, so a field shaped as an option is read
-/// as one: `--output=<file>` over a known remote commit plans the line and leaves the file truncated by
-/// the history read, with no check.
+/// A ref line's local and remote fields are full object ids, 40 or 64 lowercase hexadecimal digits. A line
+/// with another field there ends as malformed before a Git read starts and leaves the plan as it stood:
+/// a field shaped as an option creates no file and truncates none, and an abbreviated id, a longer one, an
+/// id in capitals, a ref name and bytes outside UTF-8 are refused alike.
 #[test]
-fn a_local_field_shaped_as_an_option_reaches_git_as_one() {
+fn a_field_that_is_no_full_object_id_is_refused_before_any_git_read() {
+    use std::os::unix::ffi::OsStringExt;
     if let Some(row) = child() {
-        let local = format!("--output={}", row.get("VICTIM"));
-        let plan = planned(&[line(&local, &row.get("BASE"))]);
-        assert_eq!(checks(&plan), vec![]);
+        let base = row.get("BASE");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
+        let started = traced();
+        assert_eq!(started, 1, "the plan's start lists the remotes");
+        for field in [
+            "--output=../made",
+            "--output=../kept",
+            "-h",
+            &base[..39],
+            &format!("{base}0"),
+            &base.to_uppercase(),
+            &format!("{}g", &base[..39]),
+            &format!("{}A", "0".repeat(63)),
+            "HEAD",
+            "refs/heads/main",
+        ] {
+            for refused in [line(field, &base), line(&base, field)] {
+                let shown = refused.to_str().expect("the line is UTF-8").to_owned();
+                let error = plan
+                    .line(&refused, |_| panic!("{shown}: a refused line has no note"))
+                    .expect_err("the field is no object id");
+                assert!(matches!(error, Failure::Malformed(_)), "{shown}: {error:?}");
+                assert_eq!(error.to_string(), format!("malformed ref line: '{shown}'"));
+            }
+        }
+        let mut bytes = b"refs/heads/x ".to_vec();
+        bytes.extend([0xff; 40]);
+        bytes.extend(format!(" refs/heads/x {base}").bytes());
+        let error = plan
+            .line(&OsString::from_vec(bytes), |_| {
+                panic!("a refused line has no note")
+            })
+            .expect_err("the field is not UTF-8");
+        assert!(matches!(error, Failure::Malformed(_)), "{error:?}");
+        assert_eq!(traced(), started, "a refused line starts a Git read");
+        assert_eq!((checks(&plan), scans(&plan)), (vec![], vec![]));
+        assert_eq!(plan.guard().expect("the guard reads"), Vec::<String>::new());
         return;
     }
     let (repository, base) = fixture("option-field");
-    let victim = repository.top.join("../victim");
-    std::fs::File::create_new(&victim)
+    let (made, kept) = (
+        repository.top.join("../made"),
+        repository.top.join("../kept"),
+    );
+    std::fs::File::create_new(&kept)
         .and_then(|mut file| std::io::Write::write_all(&mut file, b"kept\n"))
         .expect("the file is made");
-    repository.in_child(
+    let trace = repository.top.join("../trace");
+    repository.in_child_with(
+        &repository.top,
         &id(
             module_path!(),
-            "a_local_field_shaped_as_an_option_reaches_git_as_one",
+            "a_field_that_is_no_full_object_id_is_refused_before_any_git_read",
         ),
-        &[
-            ("BASE", &base),
-            (
-                "VICTIM",
-                victim.to_str().expect("the scratch path is UTF-8"),
-            ),
-        ],
+        &[("BASE", &base)],
+        &[("GIT_TRACE", trace.as_os_str())],
     );
-    assert_eq!(std::fs::read(&victim).expect("the file reads"), b"");
+    assert!(!made.exists(), "a refused field creates a file");
+    assert_eq!(std::fs::read(&kept).expect("the file reads"), b"kept\n");
+}
+
+/// A line of full object ids is planned in a repository of either object format: 40 digits where the ids
+/// are SHA-1 and 64 where they are SHA-256, over a remote commit the clone holds and, as Git writes a new
+/// branch, over the null id of that length.
+#[test]
+fn a_line_of_full_object_ids_of_either_length_is_planned() {
+    let test = id(
+        module_path!(),
+        "a_line_of_full_object_ids_of_either_length_is_planned",
+    );
+    if let Some(row) = child() {
+        let (base, head) = (row.get("BASE"), row.get("HEAD"));
+        let digits: usize = row.get("DIGITS").parse().expect("the row passes a count");
+        assert_eq!((base.len(), head.len()), (digits, digits));
+        for remote in [base.clone(), "0".repeat(digits)] {
+            let plan = planned(&[line(&head, &remote)]);
+            assert_eq!(
+                (checks(&plan), scans(&plan)),
+                (
+                    vec![(head.clone(), vec![Check::Reconcile])],
+                    vec![(base.clone(), head.clone())]
+                ),
+                "{remote}"
+            );
+        }
+        return;
+    }
+    for (format, digits) in [("sha1", "40"), ("sha256", "64")] {
+        let (repository, base) = based(Repository::of(&format!("ids-{format}"), format));
+        let head = repository.commit(&[("crates/v.rs", "edited\n")]);
+        repository.in_child(
+            &test,
+            &[("BASE", &base), ("HEAD", &head), ("DIGITS", digits)],
+        );
+    }
 }
 
 /// The number of probe calls of the running plan, and the call that reports `Err`.
@@ -571,6 +648,8 @@ static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::n
 static FAILING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The number of Git commands the trace held when the failing call ran.
 static TRACED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The number of skipped-scan notes the running plan gave.
+static NOTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// `traced` counts the Git commands that `GIT_TRACE` has logged so far.
 fn traced() -> usize {
@@ -594,11 +673,12 @@ fn counting() -> Result<(), u8> {
 }
 
 /// `probed_plan` plans `lines` and then the guard with [`counting`], failing at call `failing`, and
-/// returns the first error, with no note given after the failing call.
+/// returns the first error, with no note given after the failing call. [`NOTES`] counts the notes given.
 fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
     use std::sync::atomic::Ordering;
     CALLS.store(0, Ordering::SeqCst);
     FAILING.store(failing, Ordering::SeqCst);
+    NOTES.store(0, Ordering::SeqCst);
     let mut plan = match Plan::new("origin".as_ref(), counting) {
         Ok(plan) => plan,
         Err(failure) => return Some(failure),
@@ -606,6 +686,7 @@ fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
     for line in lines {
         let mut late = false;
         let planned = plan.line(line, |_| {
+            NOTES.fetch_add(1, Ordering::SeqCst);
             late = failing != 0 && CALLS.load(Ordering::SeqCst) >= failing;
         });
         assert!(!late, "the note is given after the failing call");
@@ -619,7 +700,10 @@ fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
 /// A probe that reports `Err` once any read of a plan returns ends the plan as [`Failure::Cancelled`]
 /// with its code and starts no later Git read, for a line with no comparison base, a line whose remote
 /// commit the clone lacks so the merge base is read, a changed Rust file whose ignore spans are read in a
-/// batch, and the guard's batch read of a pushed chaos record.
+/// batch, and the guard's batch read of a pushed chaos record. The plan with no failing call runs the
+/// probe once for each Git command the trace logged and once more for its skipped-scan note, so a Git
+/// read with no probe behind it leaves the probe's calls short of the trace, and the loop over the calls
+/// then reaches every read.
 #[test]
 fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read() {
     use std::sync::atomic::Ordering;
@@ -634,6 +718,22 @@ fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read()
         );
         let reads = CALLS.load(Ordering::SeqCst);
         assert!(reads > 8, "the plan reads {reads} times");
+        let batches =
+            std::fs::read_to_string(std::env::var_os("GIT_TRACE").expect("the row traces Git"))
+                .expect("the trace reads")
+                .lines()
+                .filter(|line| line.contains("trace: built-in: git cat-file --batch"))
+                .count();
+        assert_eq!(
+            batches, 2,
+            "the ignore spans and the guard each read a batch"
+        );
+        assert_eq!(NOTES.load(Ordering::SeqCst), 1, "the unbased line is noted");
+        assert_eq!(
+            reads,
+            traced() + 1,
+            "each Git command is followed by one probe call, and the note by one more"
+        );
         for failing in 1..=reads {
             let failure = probed_plan(&lines, failing);
             assert!(
@@ -651,7 +751,7 @@ fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read()
     let (repository, _) = fixture("probed");
     let head = repository.commit(&[
         ("crates/plain.rs", "#[test]\n#[ignore]\nfn t() {}\n"),
-        ("chaos/runs/r.json", "{\"run\": 1}"),
+        ("chaos/runs/r/run.json", "{\"run\": 1}"),
     ]);
     let unbased = repository.git(&[
         "commit-tree",

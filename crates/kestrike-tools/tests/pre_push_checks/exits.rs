@@ -1,11 +1,12 @@
 //! The hook's cases of where and how a check starts and of the tool's own failures, started through the
 //! tool: a check runs in a worktree of mode 0700 under `TMPDIR`, else `/tmp`, with the push's environment
-//! and the tool's standard output, and each failure of the tool's own steps exits with its code after the
-//! worktree is removed.
+//! and the tool's standard output, a `TMPDIR` another user can write that has no sticky bit is refused
+//! before the plan, and each failure of the tool's own steps exits with its code after the worktree is
+//! removed.
 
-use std::fs::{self, File};
+use std::fs::{self, DirBuilder, File};
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -526,6 +527,126 @@ fn a_tmpdir_that_names_a_missing_directory_exits_1() {
     assert!(!missing.exists());
 }
 
+/// The refusal of the scratch directory `parent`.
+fn shared_line(parent: &Path) -> String {
+    format!(
+        "pre-push: another user can write the scratch directory {}, which has no sticky bit; set TMPDIR \
+         to a directory only you can write\n",
+        parent.display()
+    )
+}
+
+/// A `TMPDIR` whose mode gives its group or every user write access without the sticky bit ends the push
+/// with exit 2 and the sentence that names it, whether or not the push plans a check: the tool starts no
+/// Git command, runs no check and makes nothing under it. The same modes with the sticky bit run the check
+/// in a worktree under it.
+#[test]
+fn a_scratch_parent_others_can_write_is_refused_unless_it_is_sticky() {
+    let mut fx = Fixture::new();
+    let head = reporting(&fx);
+    let parent = fx.temp.join("shared");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&parent)
+        .expect("the parent is made");
+    let list = |parent: &Path| -> Vec<_> {
+        fs::read_dir(parent)
+            .expect("the parent lists")
+            .map(|entry| entry.expect("the parent lists").path())
+            .collect()
+    };
+    fx.set("TMPDIR", parent.clone());
+    let trace = fx.temp.join("trace");
+    fx.set("GIT_TRACE", trace.clone());
+    for mode in [0o777, 0o770, 0o702] {
+        fs::set_permissions(&parent, fs::Permissions::from_mode(mode)).expect("the mode is set");
+        for pairs in [&[(head.as_str(), fx.base.as_str())][..], &[]] {
+            let run = fx.push(pairs);
+            assert_eq!(run.code, Some(2), "{mode:o}: {}", run.stderr);
+            assert_eq!(run.stderr, shared_line(&parent), "{mode:o}");
+            assert!(run.stdout.is_empty(), "{mode:o}: {}", run.stdout);
+            assert!(!trace.exists(), "{mode:o}: a Git command started");
+            assert!(fx.ran().is_empty(), "{mode:o}: {:?}", fx.ran());
+            assert!(list(&parent).is_empty(), "{mode:o}: {:?}", list(&parent));
+        }
+    }
+    fx.unset("GIT_TRACE");
+    assert_eq!(fx.worktrees(), 1);
+    for mode in [0o1777, 0o1770, 0o1702] {
+        fs::set_permissions(&parent, fs::Permissions::from_mode(mode)).expect("the mode is set");
+        fx.clear();
+        let run = fx.push(&[(&head, &fx.base)]);
+        assert_eq!(run.code, Some(0), "{mode:o}: {}", run.stderr);
+        let where_ = fs::read_to_string(fx.logged(".where")).expect("the check logs its directory");
+        in_worktree(&where_, &parent);
+        assert_eq!(fx.worktrees(), 1, "{mode:o}");
+        assert!(list(&parent).is_empty(), "{mode:o}: {:?}", list(&parent));
+    }
+}
+
+/// A `TMPDIR` that names a regular file is no directory to refuse, whatever its mode: the worktree's
+/// `mkdir` fails under it, and the tool prints the path and the error and exits 1.
+#[test]
+fn a_tmpdir_that_names_a_file_others_can_write_fails_the_mkdir() {
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let file = fx.temp.join("file");
+    File::create_new(&file).expect("the file is made");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).expect("the mode is set");
+    fx.set("TMPDIR", file.clone());
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the failure");
+    assert!(
+        tree_line(last, &file, ": Not a directory (os error 20)"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+}
+
+/// A `TMPDIR` whose status cannot be read, here one under a directory the user may not search, ends the
+/// push with exit 1 and the path's error before a ref line is planned, whether or not the push plans a
+/// check: the tool cannot tell who may write it.
+#[test]
+fn a_scratch_parent_whose_status_cannot_be_read_exits_1_before_the_plan() {
+    // SAFETY: `geteuid` takes no arguments and touches no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let closed = fx.temp.join("closed");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&closed)
+        .expect("the directory is made");
+    let parent = closed.join("tmp");
+    fx.set("TMPDIR", parent.clone());
+    let trace = fx.temp.join("trace");
+    fx.set("GIT_TRACE", trace.clone());
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).expect("the mode is set");
+    let runs = [&[(head.as_str(), fx.base.as_str())][..], &[]].map(|pairs| fx.push(pairs));
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
+    for run in runs {
+        assert_eq!(run.code, Some(1), "{}", run.stderr);
+        assert_eq!(
+            run.stderr,
+            format!(
+                "pre-push-checks: {}: Permission denied (os error 13)\n",
+                parent.display()
+            )
+        );
+        assert!(!trace.exists(), "a Git command started");
+    }
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+}
+
 /// A relative `TMPDIR` is made absolute against the tool's working directory, its `..` components kept:
 /// Git's `worktree add` gets the absolute path, and the check runs there.
 #[test]
@@ -533,7 +654,10 @@ fn a_relative_tmpdir_is_read_against_the_working_directory() {
     let mut fx = Fixture::new();
     let head = reporting(&fx);
     let parent = fx.temp.join("relative");
-    fs::create_dir(&parent).expect("the parent is made");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&parent)
+        .expect("the parent is made");
     let started = fx.repo.join("sub");
     fs::create_dir(&started).expect("the working directory is made");
     let started = fs::canonicalize(&started).expect("the working directory resolves");

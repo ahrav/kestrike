@@ -6,7 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 
 use crate::environ::Environ;
-use crate::git::push_environ;
+use crate::git::{is_object_id, push_environ};
 use crate::text::{Text, words};
 
 use super::guard::{pushed_records, read_accounts, record_pathspecs, tip_records};
@@ -145,8 +145,10 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// A line that is not blank and has other than four fields is [`Failure::Malformed`], a failed read is
-    /// its error, and a probe that reports `Err` once a read returns is [`Failure::Cancelled`].
+    /// A line that is not blank and has other than four fields, or whose local or remote field is no full
+    /// object id, is [`Failure::Malformed`] before any Git read starts, so a field reaches Git as a
+    /// revision alone; a failed read is its error, and a probe that reports `Err` once a read returns is
+    /// [`Failure::Cancelled`].
     pub fn line(&mut self, line: &OsStr, note: impl FnOnce(Skipped)) -> Result<(), Failure> {
         let text = Text::from_os(line);
         if text.strip().is_empty() {
@@ -154,6 +156,12 @@ impl Plan {
         }
         let [_, local, _, remote] =
             <[Text; 4]>::try_from(text.split()).map_err(|_| Failure::Malformed(text.clone()))?;
+        if ![&local, &remote]
+            .into_iter()
+            .all(|field| field.to_str().is_some_and(is_object_id))
+        {
+            return Err(Failure::Malformed(text));
+        }
         if local.to_str() == Some(ZERO) {
             return Ok(());
         }

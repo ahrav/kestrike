@@ -95,6 +95,45 @@ fn a_chaos_record_path_matches_whole_with_line_feeds_inside() {
     }
 }
 
+/// Every tracked file named `run.json` under the two run directories matches the record pattern, so the
+/// guard reads each run record the checkout holds; a record at a path outside the pattern, as one
+/// directly under a run directory or one level deeper, fails here.
+#[test]
+fn every_tracked_run_record_matches_the_record_pattern() {
+    let top = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["ls-files", "-z", "--", "chaos/runs", "chaos/tests/runs"])
+        .current_dir(&top);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(name);
+        }
+    }
+    let listed = command.output().expect("git starts");
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed = String::from_utf8(listed.stdout).expect("the tracked paths are UTF-8");
+    let records: Vec<&str> = listed
+        .split('\0')
+        .filter(|path| path.rsplit('/').next() == Some("run.json"))
+        .collect();
+    for under in ["chaos/runs/", "chaos/tests/runs/"] {
+        assert!(
+            records.iter().any(|path| path.starts_with(under)),
+            "no tracked run record under {under}"
+        );
+    }
+    let unread: Vec<&&str> = records
+        .iter()
+        .filter(|path| !CHAOS_RECORD.is_match(path))
+        .collect();
+    assert!(unread.is_empty(), "{unread:?}");
+}
+
 /// A failure names a printable path as it is and quotes any other; the values are the interpreter's.
 #[test]
 fn a_record_path_with_a_control_character_is_quoted() {
