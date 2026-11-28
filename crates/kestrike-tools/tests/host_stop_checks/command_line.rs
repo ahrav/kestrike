@@ -105,7 +105,7 @@ fn called(
         cut,
         env,
     };
-    reply(&mut System::new(), &mut record, &call)
+    reply(&mut System, &mut record, &call)
 }
 
 /// `ready` starts the new stand-in until its start no longer fails with `ETXTBSY`, which a fork of
@@ -353,7 +353,7 @@ fn a_signal_during_a_call_is_passed_on_and_each_reply_makes_one_call() {
     let mut record = Record::new(&delivered);
     record.arm();
     delivered.deliver(Signal::Terminate);
-    let got = reply(&mut System::new(), &mut record, &call);
+    let got = reply(&mut System, &mut record, &call);
     assert_eq!(
         got,
         Err(CallError::Interrupted(Interrupted(Signal::Terminate)))
