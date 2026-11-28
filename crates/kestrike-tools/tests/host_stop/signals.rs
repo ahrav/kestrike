@@ -229,6 +229,12 @@ const CHILD_CASE: &str =
 #[test]
 fn an_ignored_sigchld_refuses_the_call_before_any_child_starts() {
     if let (Some(_), Some(_)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        let status = fs::read_to_string("/proc/self/status").expect("the status reads");
+        assert_ne!(
+            mask(&status, "SigIgn:") & (1 << (libc::SIGCHLD - 1)),
+            0,
+            "the window starts with SIGCHLD ignored"
+        );
         let place = std::path::PathBuf::from(std::env::var_os(PLACE).expect("the place is given"));
         let bin = place.join("bin");
         fs::create_dir(&bin).expect("the directory is made");
@@ -263,8 +269,14 @@ fn an_ignored_sigchld_refuses_the_call_before_any_child_starts() {
         return;
     }
     let scratch = super::Scratch::new("signals-chld");
-    let output = start_window(CHILD_CASE, "chld", &scratch.0, "trap '' CHLD;")
-        .output()
-        .expect("the window starts");
+    let output = start_window_with(
+        CHILD_CASE,
+        "chld",
+        &scratch.0,
+        "",
+        &["--ignore-signal=CHLD"],
+    )
+    .output()
+    .expect("the window starts");
     passed("chld", &output);
 }

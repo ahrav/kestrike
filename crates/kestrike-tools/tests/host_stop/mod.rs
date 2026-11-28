@@ -274,12 +274,16 @@ impl Files for Observed {
 }
 
 /// `start_window` starts this test executable again for the test `name` alone, with `window` in
-/// [`ROLE`] and `place` in [`PLACE`], under `/bin/sh` running `prefix` before it replaces itself with
-/// the executable. The environment is the variables the window reads and nothing else.
+/// [`ROLE`] and `place` in [`PLACE`]. A `prefix` runs under `/bin/sh`, which then replaces itself with
+/// the executable; with an empty `prefix`, `env` starts the executable itself. The environment is the
+/// variables the window reads and nothing else.
 fn start_window(name: &str, window: &str, place: &Path, prefix: &str) -> Command {
     start_window_with(name, window, place, prefix, &[])
 }
 
+/// `start_window_with` also gives `env` the options `signals`. A disposition `env` sets reaches the
+/// window when `prefix` is empty: a shell between the two can replace it, as dash catches SIGCHLD
+/// whatever it inherits, and a caught signal has its default action after the `exec`.
 fn start_window_with(
     name: &str,
     window: &str,
@@ -288,11 +292,13 @@ fn start_window_with(
     signals: &[&str],
 ) -> Command {
     let mut command = Command::new("/usr/bin/env");
+    command.arg("--default-signal=INT,TERM,HUP").args(signals);
+    if !prefix.is_empty() {
+        command
+            .args(["/bin/sh", "-c"])
+            .arg(format!("{prefix} exec \"$0\" \"$@\""));
+    }
     command
-        .arg("--default-signal=INT,TERM,HUP")
-        .args(signals)
-        .args(["/bin/sh", "-c"])
-        .arg(format!("{prefix} exec \"$0\" \"$@\""))
         .arg(std::env::current_exe().expect("the test executable is known"))
         .args(["--exact", name, "--nocapture", "--test-threads", "1"])
         .env_clear()
