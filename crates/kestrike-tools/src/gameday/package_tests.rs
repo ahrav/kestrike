@@ -1,17 +1,20 @@
-//! Each row's expected result is the judge's own function's at the base under Python 3.9.25, as the
-//! expression beside it gives it.
+//! Each row's expected result is the judge's at the base under Python 3.9.25 for the same call: the
+//! function the test calls, on the held package with the row's changes applied, read against a tree that
+//! holds the row's two declaring files, or the checkout's own tree where the row plants none.
 
 use std::fs;
 
 use super::{FleetBounds, check_package};
 use crate::gameday::constants::FILE_LIMIT;
 use crate::gameday::schema::{Names, sorted};
-use crate::gameday::test_support::{held, object, patched, tree, value};
+use crate::gameday::test_support::{held, object, patched, tree, value, within_deadline};
 use crate::json::Value;
 use crate::paths::tests::Scratch;
 
 const HOSTS: &str = "crates/kestrike/src/failover/zone_loop/directory.rs";
 const SLOTS: &str = "crates/kestrike/src/failover/standbys.rs";
+/// The held package's names, as the rows write them.
+const HELD: &str = "host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']";
 
 /// The names in the order the rows write them.
 fn shown(names: &Names) -> String {
@@ -56,20 +59,20 @@ fn check_package_passes_the_held_package_and_refuses_each_changed_copy() {
     let package = held("package.json");
     #[rustfmt::skip]
     let rows: &[Row] = &[
-    (r#"held"#, &[], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
-    (r#"note absent"#, &[(r#"note"#, None)], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"held"#, &[], None, Ok(HELD)),
+    (r#"note absent"#, &[(r#"note"#, None)], None, Ok(HELD)),
     (r#"hosts past MAX_HOSTS"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 3;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"package.json hosts holds 4 entries, more than the 3 that MAX_HOSTS of crates/kestrike/src/failover/zone_loop/directory.rs declares"#)),
-    (r#"hosts at MAX_HOSTS"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"hosts at MAX_HOSTS"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Ok(HELD)),
     (r#"shards past MAX_SLOTS"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4096;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4;\x0a"))), Err(r#"package.json shards holds 5 entries, more than the 4 that MAX_SLOTS of crates/kestrike/src/failover/standbys.rs declares"#)),
     (r#"witness past MAX_SLOTS"#, &[(r#"witness"#, Some(r#"[1, 2, 3, 4, 5, 6]"#))], Some((Some(b"pub const MAX_HOSTS: usize = 4096;\x0a"), Some(b"pub const MAX_SLOTS: usize = 5;\x0a"))), Err(r#"package.json witness holds 6 entries, more than the 5 that MAX_SLOTS of crates/kestrike/src/failover/standbys.rs declares"#)),
     (r#"bound past the hosts that are no list"#, &[(r#"hosts"#, Some(r#""h1""#))], Some((Some(b"pub const MAX_HOSTS: usize = 0;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"package.json hosts is no list"#)),
     (r#"bound file absent"#, &[], Some((None, Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs cannot be read: No such file or directory"#)),
-    (r#"bound with CRLF"#, &[], Some((Some(b"// x\x0d\x0apub const MAX_HOSTS: usize = 4;\x0d\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"bound with CRLF"#, &[], Some((Some(b"// x\x0d\x0apub const MAX_HOSTS: usize = 4;\x0d\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Ok(HELD)),
     (r#"bound with a lone CR"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4;\x0d"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs declares MAX_HOSTS 0 times as `pub const MAX_HOSTS: usize = N;`, not once"#)),
     (r#"bound declared twice"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4;\x0apub const MAX_HOSTS: usize = 5;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs declares MAX_HOSTS 2 times as `pub const MAX_HOSTS: usize = N;`, not once"#)),
     (r#"bound declared nowhere"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4 ;\x0aconst MAX_HOSTS: usize = 4;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs declares MAX_HOSTS 0 times as `pub const MAX_HOSTS: usize = N;`, not once"#)),
     (r#"bound past 64 bits"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 18446744073709551616;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs declares MAX_HOSTS as a value past a 64-bit usize"#)),
-    (r#"bound at 64 bits"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 18446744073709551615;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"bound at 64 bits"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 18446744073709551615;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Ok(HELD)),
     (r#"bound of 21 digits"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 000000000000000000004;\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs declares MAX_HOSTS as a value past a 64-bit usize"#)),
     (r#"bound not UTF-8"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4;\x0a\xff\x0a"), Some(b"pub const MAX_SLOTS: usize = 4096;\x0a"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs is not UTF-8: 'utf-8' codec can't decode byte 0xff in position 32: invalid start byte"#)),
     (r#"hosts no list"#, &[(r#"hosts"#, Some(r#""h1""#))], None, Err(r#"package.json hosts is no list"#)),
@@ -101,15 +104,15 @@ fn check_package_passes_the_held_package_and_refuses_each_changed_copy() {
     (r#"baseline before run"#, &[(r#"baseline/end"#, Some(r#"50"#))], None, Err(r#"the windows are empty, or the baseline window ends after the run window or before it starts"#)),
     (r#"run empty"#, &[(r#"run/start"#, Some(r#"100"#)), (r#"run/end"#, Some(r#"100"#)), (r#"baseline/end"#, Some(r#"100"#))], None, Err(r#"the windows are empty, or the baseline window ends after the run window or before it starts"#)),
     (r#"interval not whole"#, &[(r#"interval"#, Some(r#"7"#))], None, Err(r#"the run window is not a whole number of origin intervals, from 1 to 1000000"#)),
-    (r#"interval 0.1"#, &[(r#"interval"#, Some(r#"0.1"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
-    (r#"interval fractional windows"#, &[(r#"baseline/end"#, Some(r#"100.5"#)), (r#"run/start"#, Some(r#"100.5"#)), (r#"run/end"#, Some(r#"400.5"#)), (r#"interval"#, Some(r#"0.1"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"interval 0.1"#, &[(r#"interval"#, Some(r#"0.1"#))], None, Ok(HELD)),
+    (r#"interval fractional windows"#, &[(r#"baseline/end"#, Some(r#"100.5"#)), (r#"run/start"#, Some(r#"100.5"#)), (r#"run/end"#, Some(r#"400.5"#)), (r#"interval"#, Some(r#"0.1"#))], None, Ok(HELD)),
     (r#"intervals past the most"#, &[(r#"interval"#, Some(r#"0.0001"#))], None, Err(r#"the run window is not a whole number of origin intervals, from 1 to 1000000"#)),
-    (r#"intervals at the most"#, &[(r#"interval"#, Some(r#"0.0003"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"intervals at the most"#, &[(r#"interval"#, Some(r#"0.0003"#))], None, Ok(HELD)),
     (r#"interval past the run"#, &[(r#"interval"#, Some(r#"301"#))], None, Err(r#"the run window is not a whole number of origin intervals, from 1 to 1000000"#)),
     (r#"simulation clock error"#, &[(r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"1"#))], None, Err(r#"a simulation package names a clock error other than 0"#)),
-    (r#"simulation clock error -0.0"#, &[(r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"-0.0"#)), (r#"outside/origin"#, Some(r#""none""#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"simulation clock error -0.0"#, &[(r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"-0.0"#)), (r#"outside/origin"#, Some(r#""none""#))], None, Ok(HELD)),
     (r#"staging outside"#, &[(r#"outside/origin"#, Some(r#""none""#)), (r#"outside/provider"#, Some(r#""none""#))], None, Err(r#"a staging package names ['origin', 'provider'] as outside its world"#)),
-    (r#"staging clock error"#, &[(r#"clock_error_seconds"#, Some(r#"0.5"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+    (r#"staging clock error"#, &[(r#"clock_error_seconds"#, Some(r#"0.5"#))], None, Ok(HELD)),
         (r#"two defects: hosts empty, id"#, &[(r#"hosts"#, Some(r#"[]"#)), (r#"id"#, Some(r#""GD-3""#))], None, Err(r#"package.json hosts is empty or repeats a name"#)),
         (r#"two defects: id, note"#, &[(r#"id"#, Some(r#""GD-3""#)), (r#"note"#, Some(r#"1"#))], None, Err(r#"package.json id 'GD-3' is none of ['GD-2']"#)),
         (r#"two defects: note, witness key"#, &[(r#"note"#, Some(r#"1"#)), (r#"witness/1/key"#, Some(r#""img/k1""#))], None, Err(r#"package.json note is no name of the layout: 1"#)),
@@ -117,8 +120,17 @@ fn check_package_passes_the_held_package_and_refuses_each_changed_copy() {
         (r#"two defects: windows, interval"#, &[(r#"baseline/end"#, Some(r#"0"#)), (r#"interval"#, Some(r#"7"#))], None, Err(r#"the windows are empty, or the baseline window ends after the run window or before it starts"#)),
         (r#"two defects: interval, clock error"#, &[(r#"interval"#, Some(r#"7"#)), (r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"1"#))], None, Err(r#"the run window is not a whole number of origin intervals, from 1 to 1000000"#)),
         (r#"two defects: clock error, outside"#, &[(r#"kind"#, Some(r#""simulation""#)), (r#"clock_error_seconds"#, Some(r#"1"#)), (r#"outside/origin"#, Some(r#""x""#))], None, Err(r#"a simulation package names a clock error other than 0"#)),
-        (r#"one interval"#, &[(r#"interval"#, Some(r#"300"#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['s1', 's2', 's3', 's4', 's5']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
+        (r#"one interval"#, &[(r#"interval"#, Some(r#"300"#))], None, Ok(HELD)),
         (r#"both lists past their bounds"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 3;\n"), Some(b"pub const MAX_SLOTS: usize = 4;\n"))), Err(r#"package.json hosts holds 4 entries, more than the 3 that MAX_HOSTS of crates/kestrike/src/failover/zone_loop/directory.rs declares"#)),
+        (r#"baseline empty at the run's start"#, &[(r#"baseline/start"#, Some(r#"100"#))], None, Err(r#"the windows are empty, or the baseline window ends after the run window or before it starts"#)),
+        (r#"baseline ends with the run"#, &[(r#"baseline/end"#, Some(r#"400"#))], None, Ok(HELD)),
+        (r#"baseline ends inside the run"#, &[(r#"baseline/end"#, Some(r#"150"#))], None, Ok(HELD)),
+        (r#"bound copied in a block comment"#, &[], Some((Some(b"pub const MAX_HOSTS: usize = 4;\n/*\npub const MAX_HOSTS: usize = 9;\n*/\n"), Some(b"pub const MAX_SLOTS: usize = 4096;\n"))), Err(r#"crates/kestrike/src/failover/zone_loop/directory.rs declares MAX_HOSTS 2 times as `pub const MAX_HOSTS: usize = N;`, not once"#)),
+        (r#"hosts no list, its bound file absent"#, &[(r#"hosts"#, Some(r#""h1""#))], Some((None, Some(b"pub const MAX_SLOTS: usize = 4096;\n"))), Err(r#"package.json hosts is no list"#)),
+        (r#"two defects: a hosts entry, shards past MAX_SLOTS"#, &[(r#"hosts/1"#, Some(r#"" ""#))], Some((Some(b"pub const MAX_HOSTS: usize = 4096;\n"), Some(b"pub const MAX_SLOTS: usize = 4;\n"))), Err(r#"package.json shards holds 5 entries, more than the 4 that MAX_SLOTS of crates/kestrike/src/failover/standbys.rs declares"#)),
+        (r#"two defects: a shards entry, witness past MAX_SLOTS"#, &[(r#"shards/1"#, Some(r#"" ""#)), (r#"witness"#, Some(r#"[1, 2, 3, 4, 5, 6]"#))], Some((Some(b"pub const MAX_HOSTS: usize = 4096;\n"), Some(b"pub const MAX_SLOTS: usize = 5;\n"))), Err(r#"package.json witness holds 6 entries, more than the 5 that MAX_SLOTS of crates/kestrike/src/failover/standbys.rs declares"#)),
+        (r#"two working budgets off, in document order"#, &[(r#"working_budgets/re-enrollment-drain"#, Some(r#"-1"#)), (r#"working_budgets/origin-load"#, Some(r#"-1"#))], None, Err(r#"package.json working_budgets re-enrollment-drain is no positive of the layout: -1"#)),
+        (r#"a shard of 250 bytes"#, &[(r#"shards/4"#, Some(r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa""#))], None, Ok(r#"host=['h1', 'h2', 'h3', 'h4']; shard=['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 's1', 's2', 's3', 's4']; observation=['origin', 'provider', 're-enrollment']; budget=['origin-load', 're-enrollment-drain']; key=['img/k1', 'img/k2', 'img/k3']"#)),
     ];
     for &(label, patches, top, expected) in rows {
         let scratch = top.map(|(hosts, slots)| declaring(hosts, slots));
@@ -171,6 +183,30 @@ fn a_bound_read_is_held_and_a_refused_read_is_not() {
         bounds.fleet_bound("shards").is_err(),
         "the slots were never read"
     );
+    for (first, second) in [("shards", "witness"), ("witness", "shards")] {
+        let scratch = declaring(None, Some(b"pub const MAX_SLOTS: usize = 6;\n"));
+        let bounds = FleetBounds::new(&scratch.0, FILE_LIMIT).expect("the top holds no NUL");
+        assert_eq!(bounds.fleet_bound(first), Ok(6), "{first} reads MAX_SLOTS");
+        fs::remove_file(scratch.0.join(SLOTS)).expect("removed");
+        assert_eq!(
+            bounds.fleet_bound(second),
+            Ok(6),
+            "{second} takes the read of MAX_SLOTS that {first} made"
+        );
+    }
+}
+
+/// The value of the one line `pub const <name>: usize = <digits>;` of the tree's file `rel`, read apart
+/// from the bounds the rows test.
+fn declared(rel: &str, name: &str) -> u64 {
+    let text = fs::read_to_string(tree().join(rel)).expect("the declaring file reads");
+    let head = format!("pub const {name}: usize = ");
+    let found: Vec<u64> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix(&head)?.strip_suffix(';')?.parse().ok())
+        .collect();
+    assert_eq!(found.len(), 1, "{rel} declares {name} once");
+    found[0]
 }
 
 #[test]
@@ -194,7 +230,7 @@ fn lists_past_the_fleets_declared_bounds_are_refused_before_any_set_is_built() {
         let bound = bounds
             .fleet_bound(field)
             .expect("the tree declares the bound");
-        assert_eq!(bound, 4096, "{rel} declares {name} once");
+        assert_eq!(bound, declared(rel, name), "{field} takes {name} of {rel}");
         let mut p = held("package.json");
         let entry = |at: u64| match field {
             "witness" => value(&format!(
@@ -213,7 +249,8 @@ fn lists_past_the_fleets_declared_bounds_are_refused_before_any_set_is_built() {
             "{field} at its bound"
         );
         let past = format!(
-            "package.json {field} holds 4097 entries, more than the 4096 that {name} of {rel} declares"
+            "package.json {field} holds {} entries, more than the {bound} that {name} of {rel} declares",
+            bound + 1
         );
         for last in [entry(bound), value("[[]]")] {
             let mut q = p.clone();
@@ -374,9 +411,12 @@ fn a_fleet_bound_is_read_from_its_own_declaration_or_refused() {
             }
             _ => {}
         }
-        let bounds = FleetBounds::new(&scratch.0, FILE_LIMIT).expect("the top holds no NUL");
-        let found = check_package(object(&held("package.json")), &bounds)
-            .map_err(|refusal| refusal.to_string());
+        let top = scratch.0.clone();
+        let found = within_deadline(&format!("the read of a declaring {kind}"), move || {
+            let bounds = FleetBounds::new(&top, FILE_LIMIT).expect("the top holds no NUL");
+            check_package(object(&held("package.json")), &bounds)
+                .map_err(|refusal| refusal.to_string())
+        });
         assert_eq!(
             found.err(),
             Some(format!("{HOSTS} {words}")),

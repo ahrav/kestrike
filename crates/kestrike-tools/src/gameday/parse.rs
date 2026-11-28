@@ -34,10 +34,7 @@ pub fn parsed(data: &[u8], rel: &Text) -> Result<Value, Refusal> {
     need(text.is_empty() || text.ends_with('\n'), || {
         said!(rel, " ends in a line with no newline: it may be truncated")
     })?;
-    let mut lines = text.split('\n').collect::<Vec<_>>();
-    lines.pop();
-    lines
-        .into_iter()
+    text.split_terminator('\n')
         .enumerate()
         .map(|(at, line)| decode(line, &said!(rel, " line ", (at + 1).to_string())))
         .collect::<Result<Vec<_>, _>>()

@@ -1,6 +1,7 @@
 //! The record's value tests: `natural` holds for a JSON integer of at least its bound, and a boolean or a
 //! float is none; `count` holds for a positive integer; `text` holds for a string with a code point outside
-//! the whitespace `str.isspace` takes.
+//! the whitespace `str.isspace` takes. The status readers `unlisted_replay` and `held_suspects` on the
+//! statuses the judgment cannot reach.
 
 use crate::json::{Value, parse};
 use crate::plants::values::{count, natural, text};
@@ -48,5 +49,157 @@ fn text_is_a_string_with_a_code_point_outside_the_whitespace() {
     ];
     for &(json, holds) in rows {
         assert_eq!(text(&value(json)), holds, "text({json})");
+    }
+}
+
+/// `unlisted_replay` on a status and the lines of each profile and key: every reason it gives, in its
+/// order of checks, and `None` where the status accounts for every suspect of the profile. A truthy
+/// `profiles` of another shape and a sum by key of more digits than an integer holds are the run's
+/// failure, and a total of another number type than an integer reads as unequal to the sum by key.
+#[test]
+fn a_status_may_hide_a_differing_replay_for_each_of_its_reasons() {
+    use std::collections::BTreeMap;
+
+    use crate::plants::status::unlisted_replay;
+    use crate::text::Text;
+
+    let named = "`campaign sweep-status` names no profile smoke";
+    let no_keys = "`campaign sweep-status` gives smoke no count of its suspects by key";
+    const NINES: &str = "two keys of the most nines an integer holds";
+    type Lines = &'static [(&'static str, &'static str, usize)];
+    type Reason = Result<Option<&'static str>, &'static str>;
+    let rows: &[(&str, Lines, Reason)] = &[
+        (r#"{"profiles": {}}"#, &[], Ok(Some(named))),
+        (r#"{"profiles": null}"#, &[], Ok(Some(named))),
+        (r#"{"profiles": []}"#, &[], Ok(Some(named))),
+        (r#"{"profiles": {"smoke": [1]}}"#, &[], Ok(Some(named))),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 1}}}"#,
+            &[],
+            Ok(Some(no_keys)),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 1, "suspect_keys": []}}}"#,
+            &[],
+            Ok(Some(no_keys)),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 1, "suspect_keys": {"a": 1.0}}}}"#,
+            &[],
+            Ok(Some(no_keys)),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 1.0, "suspect_keys": {"a": 1}}}}"#,
+            &[],
+            Ok(Some(
+                "`campaign sweep-status` counts 1.0 suspects of smoke and 1 by key",
+            )),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": null, "suspect_keys": {}}}}"#,
+            &[],
+            Ok(Some(
+                "`campaign sweep-status` counts None suspects of smoke and 0 by key",
+            )),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 3, "suspect_keys": {"b": 1, "a": 2}}}}"#,
+            &[("smoke", "b", 2), ("smoke", "a", 3)],
+            Ok(Some(
+                "`suspects.jsonl` lists 3 suspects of smoke under `a` and `campaign sweep-status` counts 2",
+            )),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 3, "suspect_keys": {"b": 1, "a": 2}}}}"#,
+            &[("smoke", "a", 2), ("other-p", "z", 9)],
+            Ok(None),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 3, "suspect_keys": {"replay differs: z": 1, "other": 2}}}}"#,
+            &[("smoke", "other", 1)],
+            Ok(Some(
+                "`campaign sweep-status` counts 2 suspects of smoke under `other` and `suspects.jsonl` lists 1",
+            )),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 3, "suspect_keys": {"replay differs: z": 1, "other": 2}}}}"#,
+            &[("smoke", "other", 2), ("smoke", "replay differs: z", 1)],
+            Ok(None),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 1, "suspect_keys": {"replay differs": 1}}}}"#,
+            &[],
+            Ok(None),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 1, "suspect_keys": {"b": 1}}}}"#,
+            &[("smoke", "a", 1)],
+            Ok(Some(
+                "`suspects.jsonl` lists 1 suspects of smoke under `a` and `campaign sweep-status` counts 0",
+            )),
+        ),
+        (
+            r#"{"profiles": {"smoke": {"suspects": 3, "suspect_keys": {"a": 1, "other": 2}}}}"#,
+            &[("smoke", "a", 2)],
+            Ok(Some(
+                "`suspects.jsonl` lists 2 suspects of smoke under `a` and `campaign sweep-status` counts 1",
+            )),
+        ),
+        (
+            r#"{"profiles": [1]}"#,
+            &[],
+            Err("the run failed: `campaign sweep-status` profiles is no object"),
+        ),
+        (
+            NINES,
+            &[],
+            Err(
+                "the run failed: the sum of the suspects by key has more digits than an integer holds",
+            ),
+        ),
+    ];
+    for (status, shown, expected) in rows {
+        let status = if *status == NINES {
+            let nines = "9".repeat(crate::json::MAX_INTEGER_DIGITS);
+            format!(
+                r#"{{"profiles": {{"smoke": {{"suspects": 1, "suspect_keys": {{"a": {nines}, "b": {nines}}}}}}}}}"#
+            )
+        } else {
+            (*status).to_owned()
+        };
+        let Value::Object(status) = value(&status) else {
+            panic!("an object");
+        };
+        let shown: BTreeMap<(Text, Text), usize> = shown
+            .iter()
+            .map(|&(profile, key, lines)| ((Text::from(profile), Text::from(key)), lines))
+            .collect();
+        let got = unlisted_replay(&status, &Text::from("smoke"), &shown);
+        let got = got
+            .map(|reason| reason.map(|reason| reason.to_string()))
+            .map_err(|ending| ending.reason().to_string());
+        let expected = expected
+            .map(|reason| reason.map(str::to_owned))
+            .map_err(str::to_owned);
+        assert_eq!(got, expected, "{status:?} {shown:?}");
+    }
+}
+
+/// A status with no object of profiles names none, whatever stands in its place.
+#[test]
+fn a_status_without_profiles_names_none() {
+    use crate::plants::status::held_suspects;
+    use crate::plants::verdict::Kind;
+
+    for status in [r#"{}"#, r#"{"profiles": null}"#, r#"{"profiles": []}"#] {
+        let Value::Object(status) = value(status) else {
+            panic!("an object");
+        };
+        let refused = held_suspects(&status).expect_err("no profiles");
+        assert_eq!(refused.kind(), Kind::Plain);
+        assert_eq!(
+            refused.reason().to_string(),
+            "`campaign sweep-status` names no profiles"
+        );
     }
 }

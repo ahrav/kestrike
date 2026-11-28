@@ -19,9 +19,11 @@ use crate::decimal::Decimal;
 use crate::json::{Object, Value};
 use crate::text::Text;
 
-/// `FleetBounds` reads the list bounds of [`FLEET_BOUNDS`] from the tree at `top`, each at its first use,
-/// and holds each value read for the life of the value, so one command reads each declaration once. A
-/// refused read is not held: the next use reads the file again.
+/// `FleetBounds` reads the package's list bounds from the tree at `top`: `hosts` takes `MAX_HOSTS` of
+/// `crates/kestrike/src/failover/zone_loop/directory.rs`, and `shards` and `witness` both take `MAX_SLOTS`
+/// of `crates/kestrike/src/failover/standbys.rs`. It reads each declaration at its first use and holds each
+/// value read for the life of the value, so one command reads each declaration once and the two lists of
+/// `MAX_SLOTS` share one read. A refused read is not held: the next use reads the file again.
 #[derive(Debug)]
 pub struct FleetBounds {
     top: PathBuf,
@@ -30,8 +32,8 @@ pub struct FleetBounds {
 }
 
 impl FleetBounds {
-    /// `new` reads the declarations under `top` with the file size limit `limit`; it returns `None` when
-    /// `top` holds a NUL byte, which no system call takes.
+    /// `new` holds `top` and the file size limit `limit` for the reads of later uses and reads nothing
+    /// itself; it returns `None` when `top` holds a NUL byte, which no system call takes.
     pub fn new(top: &Path, limit: u64) -> Option<Self> {
         (!top.as_os_str().as_bytes().contains(&0)).then(|| Self {
             top: top.to_path_buf(),
@@ -77,6 +79,9 @@ impl FleetBounds {
             read_file(&self.top.join(rel), None, &what, self.limit, false).map_err(|error| {
                 match error {
                     ReadError::Refused(refusal) => refusal,
+                    ReadError::Closed(reason) => {
+                        Refusal::new(said!(rel, " cannot be read: ", reason))
+                    }
                     ReadError::Nul => {
                         unreachable!("the top and the relative path hold no NUL byte")
                     }
@@ -129,9 +134,11 @@ impl FleetBounds {
 /// A list of names.
 const NAMES: Schema = Schema::List(&Schema::scalar(Scalar::Name));
 
-/// `check_package` refuses a package object off its schema or its windows and returns the names its
-/// other files are read against: `host`, `shard`, `observation`, `budget` and `key`. A list longer than
-/// its bound is refused before any of its entries is checked.
+/// `check_package` refuses a package object off its schema or its windows and returns the package's names
+/// of the kinds `host`, `shard`, `observation`, `budget` and `key`. The files of the layout read these
+/// names, and `coverage.json` and `injection/collected.json` also read the kinds [`LAYOUT`](super::LAYOUT)
+/// states, which the caller adds. A list longer than its bound is refused before any of its entries is
+/// checked.
 ///
 /// # Errors
 ///

@@ -5,8 +5,8 @@ use std::fmt;
 
 use crate::text::Text;
 
-/// `Refusal` is evidence or a catalog the judge cannot read as the layout states: the judge exits 2 and
-/// writes no record of the run.
+/// `Refusal` is a failed check of evidence or of a catalog, holding the judge's sentence. The caller
+/// decides whether to go on, what to write and which exit status to return.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Refusal {
     message: Text,
@@ -44,42 +44,5 @@ pub fn need(condition: bool, message: impl FnOnce() -> Text) -> Result<(), Refus
     }
 }
 
-/// A part of a sentence: a string, or text that may hold a lone surrogate.
-pub(crate) trait Piece {
-    fn put(&self, out: &mut Text);
-}
-
-impl Piece for str {
-    fn put(&self, out: &mut Text) {
-        out.push_str(self);
-    }
-}
-
-impl Piece for String {
-    fn put(&self, out: &mut Text) {
-        out.push_str(self);
-    }
-}
-
-impl Piece for Text {
-    fn put(&self, out: &mut Text) {
-        out.push_text(self);
-    }
-}
-
-impl<T: Piece + ?Sized> Piece for &T {
-    fn put(&self, out: &mut Text) {
-        (**self).put(out);
-    }
-}
-
 /// `said!(a, b, ...)` is the [`Text`] of its pieces in order.
-macro_rules! said {
-    ($($piece:expr),+ $(,)?) => {{
-        let mut said = $crate::text::Text::new();
-        $($crate::gameday::refusal::Piece::put(&$piece, &mut said);)+
-        said
-    }};
-}
-
-pub(crate) use said;
+pub(crate) use crate::text::text as said;
