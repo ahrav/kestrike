@@ -9,13 +9,14 @@
 //! the run directory stands, a recorded signal ends the run at the next check with 128 plus its number
 //! and no output, and a Git child that runs then is killed. [`Facts`] holds what a caller may set in the
 //! place of the host's own: the user ID the ownership checks judge by, the run directory's name, the
-//! maker of the temporary directory and the signal record.
+//! maker of the temporary directory, the start of a runner and the signal record.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::legs::Run;
@@ -76,20 +77,34 @@ pub struct Facts<'a> {
     pub run_name: Option<OsString>,
     /// `make_temp(prefix, parent)` makes the run's temporary directory under `parent`.
     pub make_temp: &'a dyn Fn(&str, &Path) -> Result<PathBuf, TempDirError>,
+    /// `spawn(command)` starts a leg's runner from `command`, which holds its program, arguments,
+    /// directory, environment, streams and session.
+    pub spawn: &'a dyn Fn(&mut Command) -> io::Result<Child>,
     /// The record into which the handlers write the first of the handled signals.
     pub interrupt: &'static Interrupt,
 }
 
 impl Facts<'static> {
-    /// `host` is the real user ID, a name from the clock, [`temp_dir::make_temp_dir`] and [`INTERRUPT`].
+    /// `host` is the real user ID, a name from the clock, [`temp_dir::make_temp_dir`],
+    /// [`Command::spawn`] and [`INTERRUPT`].
     pub fn host() -> Self {
         Self {
             uid: ownership::real_uid(),
             run_name: None,
             make_temp: &temp_dir::make_temp_dir,
+            spawn: &spawn,
             interrupt: &INTERRUPT,
         }
     }
+}
+
+/// `spawn` starts `command` as [`Command::spawn`] does.
+///
+/// # Errors
+///
+/// [`Command::spawn`]'s.
+pub fn spawn(command: &mut Command) -> io::Result<Child> {
+    command.spawn()
 }
 
 /// How a step ends the run when it does not return.
@@ -469,8 +484,8 @@ impl Checks<'_> {
 }
 
 /// `short` is the first twelve characters of a commit ID.
-pub(super) fn short(id: &Text) -> &str {
-    super::short(id.to_str().unwrap_or_default())
+pub(super) fn short(id: &Text) -> String {
+    crate::hook::short(id)
 }
 
 /// `install` makes SIGINT, SIGTERM and SIGHUP record into `interrupt` whatever disposition the process

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use kestrike_tools::json::{self, Value};
 use kestrike_tools::process::INTERRUPT;
-use kestrike_tools::red_green::run::{Facts, run_with};
+use kestrike_tools::red_green::run::{Facts, run_with, spawn};
 use kestrike_tools::temp_dir::make_temp_dir;
 
 use super::standins;
@@ -87,6 +87,7 @@ fn role() {
         uid,
         run_name: std::env::var_os(RUN_NAME),
         make_temp: &maker,
+        spawn: &spawn,
         interrupt: &INTERRUPT,
     };
     // SAFETY: the wrapper opens descriptor 3 as the caller's standard output, and nothing else in this

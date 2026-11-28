@@ -322,7 +322,7 @@ impl<'a> Run<'a> {
         let started = Instant::now();
         self.check()?;
         self.holding = true;
-        let spawned = command.spawn();
+        let spawned = (self.facts.spawn)(&mut command);
         self.holding = false;
         let mut child = match spawned {
             Ok(child) => child,
