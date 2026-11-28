@@ -549,12 +549,14 @@ impl<'a> Reader<'a> {
             let value = self.value(depth)?;
             if self.mode == Mode::Keep {
                 object.insert(key, value);
-            } else {
-                // The parser defers the first duplicate-key error until the object closes.
-                if !keys.insert(key.clone()) && repeated.is_none() {
-                    repeated = Some(key.clone());
+            } else if repeated.is_none() {
+                // The parser defers the first duplicate-key error until the object closes, and the
+                // members after it are read and dropped.
+                if keys.insert(key.clone()) {
+                    object.0.push((key, value));
+                } else {
+                    repeated = Some(key);
                 }
-                object.0.push((key, value));
             }
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
