@@ -15,8 +15,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
-/// The wait for a captured child after SIGKILL.
-pub const GRACE: Duration = Duration::from_secs(10);
+/// The wait for a captured child after SIGKILL, and each of the two waits of `mutants-diff` for its
+/// group leader, after SIGTERM and after SIGKILL.
+pub(crate) const GRACE: Duration = Duration::from_secs(10);
 /// The longest pause between two checks of a child and of the record while a tool waits; the pause
 /// starts at [`FIRST_PAUSE`] and doubles up to this bound.
 const POLL: Duration = Duration::from_millis(20);
@@ -77,7 +78,7 @@ fn ignored(signal: i32) -> io::Result<bool> {
 }
 
 /// `handled_set` is the signal set that holds each of [`SIGNALS`].
-pub fn handled_set() -> libc::sigset_t {
+pub(crate) fn handled_set() -> libc::sigset_t {
     // SAFETY: `sigemptyset` initializes the set that `set` points to, and `sigaddset` adds a valid signal
     // number to that initialized set; neither can fail on these arguments.
     unsafe {
@@ -119,7 +120,7 @@ pub fn install_handlers() -> io::Result<()> {
 }
 
 /// `exit_code` is the child's exit status, or the negated number of the signal that ended it.
-pub fn exit_code(status: ExitStatus) -> i32 {
+pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     status
         .code()
         .or_else(|| status.signal().map(|signal| -signal))
@@ -132,7 +133,7 @@ pub fn exit_code(status: ExitStatus) -> i32 {
 /// # Errors
 ///
 /// The wait fails.
-pub fn exited_within(
+pub(crate) fn exited_within(
     child: &mut Child,
     limit: Duration,
     interrupt: Option<&Interrupt>,
@@ -177,7 +178,7 @@ fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
 ///
 /// The outer error is a recorded signal; the inner one a start, a reader thread, a read or a wait that
 /// fails.
-pub fn capture(
+pub(crate) fn capture(
     command: &mut Command,
     interrupt: &Interrupt,
 ) -> Result<io::Result<Output>, Interrupted> {
@@ -197,7 +198,7 @@ pub fn capture(
 /// # Errors
 ///
 /// The outer error is a recorded signal; the inner one a reader thread, a read or a wait that fails.
-pub fn captured(
+pub(crate) fn captured(
     mut child: Child,
     interrupt: &Interrupt,
 ) -> Result<io::Result<Output>, Interrupted> {

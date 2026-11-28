@@ -3,8 +3,9 @@
 //!
 //! A child is started by name, found through the `PATH` of the environment it is given, with that
 //! environment as its whole environment, standard input inherited and each handled signal back at its
-//! default action. The run reads the signal record before it starts a child and while it waits for one;
-//! a signal recorded during the start is acted on once the child's handle is held. A child that runs
+//! default action. The run reads the signal record before it starts a logged command and while it waits
+//! for one; a signal recorded during the start is acted on once the child's handle is held. The question
+//! to the helper runs whole, and the run reads the record after it. A child that runs
 //! when a signal is recorded gets SIGTERM, by its handle and alone, and the run waits for it with no
 //! limit before it ends.
 
@@ -31,12 +32,14 @@ pub enum Halt {
 }
 
 impl Halt {
-    /// `code` is the tool's exit: 128 plus the signal, or 4.
+    /// `code` is the tool's exit: 128 plus the signal, or 4 for a failure or a signal number whose exit
+    /// is no byte.
     pub fn code(&self) -> u8 {
         match self {
-            Self::Interrupted(signal) => {
-                u8::try_from(128 + signal).expect("a handled signal's exit fits a byte")
-            }
+            Self::Interrupted(signal) => signal
+                .checked_add(128)
+                .and_then(|code| u8::try_from(code).ok())
+                .unwrap_or(4),
             Self::Failed(_) => 4,
         }
     }
@@ -108,19 +111,22 @@ pub(crate) const PYTHON: &str = "python3";
 /// The question to the staged helper, given its path and, for a rerun, the exit and the last line on
 /// standard input. It loads the helper as a module, checks that its `reported` is callable, and prints
 /// as JSON the texts of the verdicts of exits 0 and 1, or whether `reported` counts the exit beside the
-/// line.
-const QUESTION: &str = "import importlib.util, json, sys
-spec = importlib.util.spec_from_file_location('staged_reproduce_test', sys.argv[1])
-if spec is None or spec.loader is None:
-    raise ImportError(sys.argv[1] + ' has no loader')
-module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
-if not callable(module.reported):
-    raise TypeError('its `reported` is not callable')
-if len(sys.argv) == 2:
-    print(json.dumps([str(module.RESULTS[code]) for code in (0, 1)]))
-else:
-    print(json.dumps(bool(module.reported(int(sys.argv[2]), sys.stdin.buffer.read().decode()))))
+/// line. What the helper prints while it loads or answers goes to standard error, so standard output
+/// holds the answer alone.
+const QUESTION: &str = "import contextlib, importlib.util, json, sys
+with contextlib.redirect_stdout(sys.stderr):
+    spec = importlib.util.spec_from_file_location('staged_reproduce_test', sys.argv[1])
+    if spec is None or spec.loader is None:
+        raise ImportError(sys.argv[1] + ' has no loader')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not callable(module.reported):
+        raise TypeError('its `reported` is not callable')
+    if len(sys.argv) == 2:
+        answer = [str(module.RESULTS[code]) for code in (0, 1)]
+    else:
+        answer = bool(module.reported(int(sys.argv[2]), sys.stdin.buffer.read().decode()))
+print(json.dumps(answer))
 ";
 
 /// `defaults` makes the child of `command` set each handled signal that has a handler back to its

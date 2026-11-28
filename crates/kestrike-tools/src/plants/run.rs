@@ -74,11 +74,15 @@ pub(super) fn exists(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok()
 }
 
-/// `listed` holds when a line of `git worktree list --porcelain` names `tree`.
+/// `listed` holds when a line of `git worktree list --porcelain`, split at each of Python's line
+/// breaks, names `tree`.
 fn listed(listing: &str, tree: &Path) -> bool {
     let mut wanted = b"worktree ".to_vec();
     wanted.extend_from_slice(tree.as_os_str().as_bytes());
-    listing.split('\n').any(|line| line.as_bytes() == wanted)
+    Text::from(listing)
+        .splitlines()
+        .iter()
+        .any(|line| line.to_os().is_some_and(|os| os.as_bytes() == wanted))
 }
 
 impl<'a> Run<'a> {
@@ -187,10 +191,11 @@ impl<'a> Run<'a> {
         Ok(tree)
     }
 
-    /// `listing` is the output of `git worktree list --porcelain` in the checkout, and its exit.
-    fn listing(&self, interrupted: bool) -> Result<(String, i32), Halt> {
+    /// `listing` is the output of `git worktree list --porcelain` in the checkout, and its exit; with
+    /// `whole` the listing runs whole and reads no signal record.
+    fn listing(&self, whole: bool) -> Result<(String, i32), Halt> {
         let args = ["worktree", "list", "--porcelain"].map(OsStr::new);
-        let listed = if interrupted {
+        let listed = if whole {
             git::text(self.inputs.env(), self.inputs.top(), &args)
         } else {
             self.git(self.inputs.top(), &args)

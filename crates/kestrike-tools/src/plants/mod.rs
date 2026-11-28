@@ -63,7 +63,7 @@ pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
-pub use publish::{announce, publish};
+pub use publish::{announce, conclude, publish};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
 pub use run::{Remained, Run, remove};

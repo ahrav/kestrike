@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crate::plants::{Halt, Inputs, Outcome, Run, announce, prepare, publish, score};
+use crate::plants::{Halt, Inputs, Outcome, Run, conclude, prepare, publish, score};
 use crate::process::{INTERRUPT, install_handlers};
 use crate::text::{Text, text};
 
@@ -42,7 +42,7 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
         }
     };
     say(&mut err, &text!("work: ", inputs.work()));
-    match started(&inputs, &mut err) {
+    match started(&inputs) {
         Ok(run) => finished(&inputs, run, &mut out, &mut err),
         Err(halt) => failed(&halt, &mut err),
     }
@@ -56,11 +56,10 @@ fn failed(halt: &Halt, err: &mut impl Write) -> u8 {
 }
 
 /// `started` reads the head's date and installs the handlers.
-fn started<'a>(inputs: &'a Inputs, err: &mut impl Write) -> Result<Run<'a>, Halt> {
+fn started(inputs: &Inputs) -> Result<Run<'_>, Halt> {
     let run = Run::new(inputs, &INTERRUPT)?;
     install_handlers()
         .map_err(|error| Halt::Failed(text!("the signal handlers: ", error.to_string())))?;
-    let _ = err.flush();
     Ok(run)
 }
 
@@ -103,11 +102,10 @@ fn finished(inputs: &Inputs, mut run: Run<'_>, out: &mut impl Write, err: &mut i
     if let Some(signal) = INTERRUPT.recorded() {
         return Halt::Interrupted(signal).code();
     }
-    let remained = match (stored, cleaned) {
+    let (entries, remained) = match (stored, cleaned) {
         (Err(halt), _) | (Ok(_), Err(halt)) => return failed(&halt, err),
         (Ok(entries), Ok(remained)) => (entries, remained),
     };
-    let (entries, remained) = remained;
     if remained {
         return 4;
     }
@@ -116,27 +114,13 @@ fn finished(inputs: &Inputs, mut run: Run<'_>, out: &mut impl Write, err: &mut i
     if let Some(signal) = INTERRUPT.recorded() {
         return Halt::Interrupted(signal).code();
     }
-    report(inputs, &entries, &bytes, out, err)
-}
-
-/// `report` writes the score's bytes and prints its lines: the run's last two steps, which read no
-/// signal record.
-fn report(
-    inputs: &Inputs,
-    entries: &[crate::plants::Finished],
-    bytes: &str,
-    out: &mut impl Write,
-    err: &mut impl Write,
-) -> u8 {
-    if let Err(error) = publish(&inputs.score(), bytes) {
-        say(
-            err,
-            &text!("plant-runner wrote no score: ", error.to_string()),
-        );
-        for entry in entries {
-            say(err, &score::result_line(entry));
-        }
-        return 4;
-    }
-    announce(inputs.head(), entries, out)
+    conclude(
+        inputs.head(),
+        &inputs.score(),
+        &entries,
+        &bytes,
+        publish,
+        out,
+        err,
+    )
 }

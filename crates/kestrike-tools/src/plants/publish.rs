@@ -79,15 +79,24 @@ fn umask() -> u32 {
 
 /// `staging` creates a new staging file beside `target`.
 fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
+    staging_with(target, random_letters)
+}
+
+/// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from
+/// `letters`; a name that is taken is left as it is and another is drawn.
+fn staging_with(
+    target: &Path,
+    mut letters: impl FnMut(&mut [u8]) -> io::Result<()>,
+) -> io::Result<(PathBuf, File)> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let mut prefix = b".".to_vec();
     prefix.extend_from_slice(target.file_name().unwrap_or_default().as_bytes());
     prefix.push(b'.');
     for _ in 0..ATTEMPTS {
-        let mut letters = [0u8; 8];
-        random_letters(&mut letters)?;
+        let mut drawn = [0u8; 8];
+        letters(&mut drawn)?;
         let mut name = prefix.clone();
-        name.extend_from_slice(&letters);
+        name.extend_from_slice(&drawn);
         let path = parent.join(OsStr::from_bytes(&name));
         match OpenOptions::new()
             .write(true)
@@ -110,18 +119,45 @@ fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
 ///
 /// # Errors
 ///
-/// The staging file cannot be created, given its mode, written or renamed; the text names the path.
+/// The staging file cannot be created, given its mode, written, closed or renamed; the text names the
+/// path.
 pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
     let (staged, mut file) = staging(target).map_err(|error| PathError::new(target, error))?;
-    let done = file
+    let written = file
         .set_permissions(fs::Permissions::from_mode(0o666 & !umask()))
-        .and_then(|()| file.write_all(written.as_bytes()))
+        .and_then(|()| file.write_all(written.as_bytes()));
+    let closed = crate::fixtures::close(file);
+    let done = written
+        .and(closed)
         .and_then(|()| fs::rename(&staged, target));
-    drop(file);
     done.map_err(|error| {
         let _ = fs::remove_file(&staged);
         PathError::new(target, error)
     })
+}
+
+/// `conclude` takes the run's last two steps, which read no signal record: `write` writes the score's
+/// `bytes` to `target`, and the score's lines go to `out`, with the run's exit returned. A failed write
+/// prints `plant-runner wrote no score: ` with its text, then each plant's result line, on `err`, and
+/// returns 4.
+pub fn conclude<E: std::fmt::Display>(
+    head: &str,
+    target: &Path,
+    entries: &[Finished],
+    bytes: &str,
+    write: impl FnOnce(&Path, &str) -> Result<(), E>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> u8 {
+    if let Err(error) = write(target, bytes) {
+        let _ = writeln!(err, "plant-runner wrote no score: {error}");
+        for entry in entries {
+            let _ = writeln!(err, "{}", score::result_line(entry));
+        }
+        let _ = err.flush();
+        return 4;
+    }
+    announce(head, entries, out)
 }
 
 /// `announce` prints the score's lines on `out`, the sentence and `ID: RESULT (REASON)` a plant, and

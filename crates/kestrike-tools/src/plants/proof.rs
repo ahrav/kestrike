@@ -21,6 +21,7 @@ use super::record::Plant;
 use super::rerun::{HelperVerdict, Rerun, judge_rerun};
 use super::run::Run;
 use super::verdict::{Kind, NoVerdict};
+use crate::ownership::make_private;
 use crate::text::{Text, text};
 
 /// The arguments of every proof rerun before `--test`.
@@ -103,6 +104,12 @@ impl Run<'_> {
     /// the run after it.
     fn setup(&mut self) -> Result<PathBuf, Step> {
         let place = self.proof_place();
+        make_private(&place).map_err(|error| {
+            NoVerdict::plain(text!(
+                "the proof's worktree cannot be prepared: ",
+                error.to_string()
+            ))
+        })?;
         let tree = self.tree(&place)?;
         self.write_lock(&tree, "the proof's worktree")?;
         let scripts = place.join("scripts");

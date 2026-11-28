@@ -4,7 +4,9 @@
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
-use super::publish;
+use std::io::Write;
+
+use super::{publish, staging_with};
 use crate::paths::tests::Scratch;
 use crate::plants::run::remove;
 
@@ -49,6 +51,39 @@ fn a_score_replaces_a_link_and_takes_its_mode() {
         & 0o777;
     assert_eq!(mode, 0o666 & !umask());
     assert_eq!(staged(&scratch.0), 0);
+}
+
+/// A staging name that is taken, by a regular file or by a link, is left as it is, and the next name
+/// drawn takes the staging file.
+#[test]
+fn a_taken_staging_name_is_left_as_it_is() {
+    let scratch = Scratch::new("publish-taken");
+    let target = scratch.0.join("score.json");
+    let elsewhere = scratch.0.join("elsewhere");
+    fs::write(&elsewhere, "outside\n").expect("written");
+    fs::write(scratch.0.join(".score.json.aaaaaaaa"), "taken\n").expect("written");
+    symlink(&elsewhere, scratch.0.join(".score.json.bbbbbbbb")).expect("linked");
+    let mut names = b"abc".iter().copied();
+    let (path, mut file) = staging_with(&target, |letters| {
+        letters.fill(names.next().expect("three names are drawn at most"));
+        Ok(())
+    })
+    .expect("a free name is found");
+    assert_eq!(path, scratch.0.join(".score.json.cccccccc"));
+    file.write_all(b"staged\n").expect("written");
+    assert_eq!(
+        fs::read_to_string(scratch.0.join(".score.json.aaaaaaaa")).expect("reads"),
+        "taken\n"
+    );
+    let link = scratch.0.join(".score.json.bbbbbbbb");
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("stats")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "outside\n");
+    assert_eq!(fs::read_to_string(&path).expect("reads"), "staged\n");
 }
 
 /// A directory at the score's path fails the write, which leaves the directory and no staging file.

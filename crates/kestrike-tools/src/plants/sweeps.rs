@@ -8,9 +8,9 @@
 //! that directory after the build; the removal runs whole.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::child::{Halt, Logged, Step, logged};
@@ -116,13 +116,27 @@ impl Run<'_> {
                 " keeps no regular Cargo.lock equal to the run's"
             ))
         };
-        let status = fs::symlink_metadata(&kept).map_err(|_| unequal())?;
-        if !status.is_file() {
+        let opened = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(&kept);
+        let mut file = match opened {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::ELOOP | libc::ENOENT | libc::ENOTDIR)
+                ) =>
+            {
+                return Err(unequal().into());
+            }
+            Err(error) => return Err(NoVerdict::unreadable(&kept, &error, self.work()).into()),
+        };
+        if !file.metadata().is_ok_and(|status| status.is_file()) {
             return Err(unequal().into());
         }
         let mut bytes = Vec::new();
-        fs::File::open(&kept)
-            .and_then(|mut file| file.read_to_end(&mut bytes))
+        file.read_to_end(&mut bytes)
             .map_err(|error| NoVerdict::unreadable(&kept, &error, self.work()))?;
         if bytes != self.inputs.lock() {
             return Err(unequal().into());
