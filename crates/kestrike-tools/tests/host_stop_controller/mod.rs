@@ -9,6 +9,7 @@ mod abort_marks;
 mod abort_path;
 mod after_stop;
 mod before_stop;
+mod kept_defects;
 mod late_reads;
 mod marks;
 mod plane;
