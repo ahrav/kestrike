@@ -249,7 +249,8 @@ fn an_entry_type_lookup_error_stops_the_walk() {
     );
 }
 
-/// Directories nested past the walk's depth stop it with an error.
+/// Directories nested past the walk's depth stop it with an error, and the walk reads a directory at
+/// that depth.
 #[test]
 fn a_walk_stops_past_its_depth() {
     let scratch = Scratch::new("genmc");
@@ -269,6 +270,16 @@ fn a_walk_stops_past_its_depth() {
     let shallow = Scratch::new("genmc");
     fs::create_dir_all(shallow.0.join("d/d/d")).expect("the directories are made");
     assert_eq!(walk(&shallow.0).expect("a shallow walk reads").len(), 3);
+    let full = Scratch::new("genmc");
+    let mut deepest = full.0.clone();
+    for _ in 0..super::WALK_DEPTH {
+        deepest.push("d");
+    }
+    fs::create_dir_all(&deepest).expect("the nested directories are made");
+    fs::write(deepest.join("leaf"), "").expect("the file is written");
+    let found = walk(&full.0).expect("a walk reads its deepest directory");
+    assert_eq!(found.len(), super::WALK_DEPTH + 1);
+    assert!(found.contains(&deepest.join("leaf")));
 }
 
 /// An include path that holds a NUL byte names no file, so the package's sources cannot be read.

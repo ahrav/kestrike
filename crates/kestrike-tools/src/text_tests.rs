@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use crate::python::say;
-use crate::text::{Text, is_space};
+use crate::text::{Text, escaped, is_space};
 
 fn text(codes: &[u32]) -> Text {
     Text::from_code_points(codes.iter().copied()).expect("each code point is at most U+10FFFF")
@@ -313,4 +313,19 @@ fn text_writes_a_path_as_its_decoded_text() {
         joined.push_str("/b");
         joined
     });
+}
+
+/// `escaped` writes each scalar value as `repr` writes it inside its quotes, apart from a backslash, which it
+/// keeps single, so a field of printable code points keeps its bytes.
+#[test]
+fn escaped_writes_each_scalar_value_as_repr_writes_it_inside_its_quotes() {
+    for code in (0..=0x10_ffff).filter_map(char::from_u32) {
+        let alone = code.to_string();
+        let quoted = Text::from(alone.as_str()).repr();
+        let inside = &quoted[1..quoted.len() - 1];
+        let expected = if code == '\\' { "\\" } else { inside };
+        assert_eq!(escaped(&alone), expected, "U+{:04X}", u32::from(code));
+    }
+    let printable = "a'b\"c\\'d";
+    assert_eq!(escaped(printable), printable);
 }

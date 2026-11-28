@@ -1457,9 +1457,35 @@ prints and a nonempty reason:
 Weakens-Test: CLASS:PATH: REASON
 ```
 
-The report and the hint write each control character of a key as `\r` or
-`\x7f`; the acknowledging line carries the character itself, as Git stores
-the path.
+The report, the hint and each refusal line write each code point of the table
+of unprintable code points that `Text::repr` in
+`crates/kestrike-tools/src/text.rs` uses, such as a control character, a
+bidirectional control, a line or paragraph separator or a byte order mark, as
+`repr` writes it (`\r`, `\x7f`, `\u202e`); a backslash and a quote stay. The
+acknowledging line carries the character itself, as Git stores the path. The
+argument parser's error, a usage line and an `error:` line, prints an
+unrecognized argument as it was given. The
+CI step runs the scanner through `scripts/ci-scan-weakened-tests.sh`, which
+stops the runner's workflow commands before the scan, with a token it draws at
+each run and keeps out of the scan's environment, writes the scan's two
+streams into standard output, and resumes the commands after the scan exits,
+with the scan's status. No line of the scan's output runs as a command in the
+`::name::` form or the `##[name]` form.
+
+On a range whose head holds a commit the base lacks, the scan refuses, exit 2:
+
+- a changed Rust path, a timeout file or the inventory whose entry at the
+  merge base or the head is no regular file;
+- such a path, or `crates/kestrike-tools/tests`, that has no entry at the
+  merge base or the head while a directory above it is a link or a submodule
+  there, since a checkout reads the path through that entry;
+- `crates/kestrike-tools/tests` that is itself a link or a submodule at either
+  commit.
+
+It checks the inventory, the timeout files and the test directory on each such
+range, whether or not the diff names them. A refusal exits before the
+acknowledgements are read, so no `Weakens-Test` line clears it. A range whose
+head holds no commit of its own exits 0 and reads no tree.
 
 The scanner reads its rule for a case from the Git trees of the merge base and
 the head, apart from the build's check of the directory that

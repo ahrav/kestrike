@@ -21,7 +21,7 @@ use crate::ownership::{ignored, status};
 use crate::paths::resolve;
 use crate::production_text::closing;
 use crate::rust_text::{Lexeme, lexemes};
-use crate::text::strip_str;
+use crate::text::{newlines, strip_str};
 
 /// A `#[path = "..."]` attribute at the start of a line, in the one spelling a case build's include scan
 /// reads; group 1 is the path.
@@ -114,9 +114,7 @@ fn body_after(text: &str, end: usize) -> Option<&str> {
 /// `read_text` returns the error of opening or reading the file, and an error of kind
 /// [`io::ErrorKind::InvalidData`] for bytes that are no UTF-8.
 pub fn read_text(path: &Path) -> io::Result<String> {
-    Ok(fs::read_to_string(path)?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n"))
+    fs::read_to_string(path).map(newlines)
 }
 
 /// The text of `path`, relative to the checkout's top `top`, as [`read_text`] reads it; empty and `.`
@@ -206,7 +204,7 @@ fn descends(kind: io::Result<fs::FileType>) -> io::Result<bool> {
 pub fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     if stat(root)?.is_some_and(|metadata| metadata.is_dir()) {
-        entries_under(root, &mut found, 1)?;
+        entries_under(root, &mut found, 0)?;
     }
     Ok(found)
 }
