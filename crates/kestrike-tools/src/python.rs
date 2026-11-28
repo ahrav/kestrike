@@ -297,6 +297,17 @@ fn digit_value(c: char) -> Option<u32> {
     Some(before % 10)
 }
 
+/// `text` with each non-ASCII decimal digit (category `Nd`) written as the ASCII digit of its value, the
+/// form in which Python's `int` reads a string's digits.
+pub fn ascii_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| match digit_value(c) {
+            Some(value) if !c.is_ascii() => char::from_digit(value, 10).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
 /// `decimal` applies Python's `int` to `digits`, a run of Unicode decimal digits (category `Nd`).
 ///
 /// # Errors

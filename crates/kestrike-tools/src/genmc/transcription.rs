@@ -1,5 +1,7 @@
-//! [`transcription_drift`] records drift when a named `before` or `after` anchor lacks a site entry on
-//! the referencing site's `side`.
+//! The transcription check holds each binding of the GenMC declaration to its production and kernel
+//! sources: each side's operation stands once in its scope with the bound operands and orderings and on
+//! the declared side of its anchors, and each constant of a declared strength is bound. The sources are
+//! read as text with comments removed and literals emptied; a call is found by its callee's spelling.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
@@ -7,11 +9,13 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::refusal::{Error, Refusal, listed, lookup, member, read_error, string, strings};
+use super::refusal::{
+    Error, Refusal, listed, lookup, member, openable, read_error, string, strings, texts,
+};
 use crate::classes::{WORD, compiled, is_word};
 use crate::genmc::{bodies, normalized, read_source};
-use crate::json::{Integer, Object, Text, Value};
-use crate::orderings::sources::joined;
+use crate::json::{Integer, Text, Value};
+use crate::paths::joined;
 use crate::python::{equal, repr, str_of, truthy};
 
 static ORDERING: LazyLock<Regex> =
@@ -22,27 +26,23 @@ static STRENGTH: LazyLock<Regex> = LazyLock::new(|| compiled(&format!(r"^S::({WO
 static CONSTANT: LazyLock<Regex> =
     LazyLock::new(|| compiled(&format!(r"const ({WORD}+):Ordering=Ordering::({WORD}+);")));
 
-const KINDS: [&str; 6] = ["load", "store", "rmw", "cas", "fence", "call"];
-
-fn kind_holds(kind: &str, method: &str) -> bool {
-    match kind {
-        "load" => method == "load",
-        "store" => method == "store",
-        "rmw" => method == "swap" || method.starts_with("fetch_"),
-        "cas" => matches!(
-            method,
-            "compare_exchange" | "compare_exchange_weak" | "fetch_update" | "try_update"
-        ),
-        "fence" => matches!(method, "fence" | "$fence" | "fence_release"),
-        _ => true,
-    }
-}
-
-fn texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
-    listed(value, what)?
-        .iter()
-        .map(|item| string(item, what).map(str::to_owned))
-        .collect()
+/// The method rule of each binding kind: whether the last segment of a site's callee is an operation of
+/// that kind. A kind outside this table is unknown.
+fn kind_rule(kind: &str) -> Option<fn(&str) -> bool> {
+    Some(match kind {
+        "load" => |method| method == "load",
+        "store" => |method| method == "store",
+        "rmw" => |method| method == "swap" || method.starts_with("fetch_"),
+        "cas" => |method| {
+            matches!(
+                method,
+                "compare_exchange" | "compare_exchange_weak" | "fetch_update" | "try_update"
+            )
+        },
+        "fence" => |method| matches!(method, "fence" | "$fence" | "fence_release"),
+        "call" => |_| true,
+        _ => return None,
+    })
 }
 
 fn present<'v>(value: &'v Value, key: &str) -> Result<Option<&'v Value>, Error> {
@@ -99,6 +99,7 @@ impl Sources<'_> {
         if let Some(text) = self.read.get(path) {
             return Ok(text.clone());
         }
+        openable(Path::new(path))?;
         let text = normalized(&read_source(self.root, path).map_err(read_error)?);
         self.read.insert(path.to_owned(), text.clone());
         Ok(text)
@@ -118,10 +119,10 @@ fn strengths(
         return Ok((found, drift));
     };
     for strength in listed(listed_strengths, "the declared strengths")? {
-        let file = member(&strength, "file")?;
+        let file = member(strength, "file")?;
         let path = package_path(package, string(file, "a strength's file")?);
         let source = sources.normalized(&path)?;
-        let implementation = member(&strength, "impl")?;
+        let implementation = member(strength, "impl")?;
         let header = normalized(string(implementation, "a strength's impl")?);
         let blocks = bodies(&source, &header);
         if blocks.len() != 1 {
@@ -149,22 +150,40 @@ struct Located {
     constants: BTreeSet<String>,
 }
 
+/// The byte offset of the `(` after each occurrence of `call` in `scope` that no word character, `.` or
+/// `$` precedes, with an optional `::<...>` holding no `>` between the callee and the `(`. A rejected
+/// occurrence moves the search one code point on, and an accepted one past its `(`.
 fn calls(scope: &str, call: &str) -> Vec<usize> {
-    let pattern = compiled(&format!(r"{}(?:::<[^>]*>)?\(", regex::escape(call)));
     let mut found = Vec::new();
     let mut at = 0;
-    while let Some(matched) = pattern.find_at(scope, at) {
-        let before = scope[..matched.start()].chars().next_back();
+    while let Some(start) = scope
+        .get(at..)
+        .and_then(|rest| rest.find(call))
+        .map(|offset| at + offset)
+    {
+        let before = scope[..start].chars().next_back();
+        let next = start + scope[start..].chars().next().map_or(1, char::len_utf8);
         if before.is_some_and(|c| is_word(c) || c == '.' || c == '$') {
-            at = matched.start()
-                + scope[matched.start()..]
-                    .chars()
-                    .next()
-                    .map_or(1, char::len_utf8);
+            at = next;
             continue;
         }
-        found.push(matched.end() - 1);
-        at = matched.end();
+        let rest = &scope[start + call.len()..];
+        let open = if rest.starts_with('(') {
+            Some(0)
+        } else {
+            rest.strip_prefix("::<")
+                .and_then(|generic| generic.find('>'))
+                .map(|close| close + 4)
+                .filter(|&open| rest[open..].starts_with('('))
+        };
+        match open {
+            Some(open) => {
+                let open = start + call.len() + open;
+                found.push(open);
+                at = open + 1;
+            }
+            None => at = next,
+        }
     }
     found
 }
@@ -173,6 +192,7 @@ fn locate(
     entry: &Value,
     side: &str,
     site: &Value,
+    file: &Value,
     sources: &mut Sources<'_>,
     strength: Option<&BTreeMap<String, String>>,
 ) -> Result<Result<Located, String>, Error> {
@@ -185,7 +205,6 @@ fn locate(
     } else {
         joined_headers.as_str()
     };
-    let file = member(site, "file")?;
     let mut scopes = vec![sources.normalized(string(file, "a site's file")?)?];
     for header in &headers {
         let header = normalized(header);
@@ -277,13 +296,14 @@ fn package_path(package: &str, file: &str) -> String {
     joined(if package.is_empty() { "." } else { package }, file)
 }
 
-type Sites = BTreeMap<(Text, &'static str), (Value, Located)>;
+/// Each located site by its binding's id and side: the site, the file its operation stands in (a kernel
+/// file joined to the package) and where it was found.
+type Sites<'d> = BTreeMap<(Text, &'static str), (&'d Value, Value, Located)>;
 
 fn anchor_drift(
     name: &Text,
     side: &str,
-    site: &Value,
-    found: &Located,
+    (site, file, found): (&Value, &Value, &Located),
     sites: &Sites,
     ids: &[Value],
     drift: &mut Vec<String>,
@@ -291,9 +311,9 @@ fn anchor_drift(
     for relation in ["before", "after"] {
         let anchors = match lookup(site, relation)? {
             Some(anchors) => listed(anchors, "a site's anchors")?,
-            None => Vec::new(),
+            None => &[],
         };
-        for anchor in &anchors {
+        for anchor in anchors {
             if matches!(anchor, Value::Array(_) | Value::Object(_)) {
                 return Err(Error::Type("an anchor is unhashable".into()));
             }
@@ -302,14 +322,14 @@ fn anchor_drift(
                     Value::String(anchor) => sites.get(&(anchor.clone(), side)),
                     _ => None,
                 };
-                let Some((other_site, other)) = other else {
+                let Some((other_site, other_file, other)) = other else {
                     drift.push(format!(
                         "{name}: the {side} anchor entry {} was not located",
                         str_of(anchor)
                     ));
                     continue;
                 };
-                let same = equal(member(other_site, "file")?, member(site, "file")?)
+                let same = equal(other_file, file)
                     && equal(member(other_site, "scope")?, member(site, "scope")?);
                 if !same {
                     drift.push(format!(
@@ -344,14 +364,22 @@ fn anchor_drift(
     Ok(())
 }
 
+/// The drift lines of `declared`'s bindings against the sources under `root`, in the order they are
+/// found. An empty list means every binding resolves.
+///
+/// # Errors
+///
+/// `transcription_drift` returns [`Error::Os`] or [`Error::Value`] for a source that does not read,
+/// [`Error::Key`] or [`Error::Type`] for a declaration without a member it reads, and [`Error::Index`]
+/// for a `matching` count that leaves no occurrence.
 pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>, Error> {
     let package = string(member(declared, "package")?, "the declared package")?;
     let bindings = match lookup(declared, "bindings")? {
         Some(bindings) => listed(bindings, "the declared bindings")?,
-        None => Vec::new(),
+        None => &[],
     };
     let mut ids = Vec::new();
-    for entry in &bindings {
+    for entry in bindings {
         let id = member(entry, "id")?;
         if matches!(id, Value::Array(_) | Value::Object(_)) {
             return Err(Error::Type("a binding's id is unhashable".into()));
@@ -368,12 +396,16 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
         .keys()
         .map(|path| (path.clone(), BTreeSet::new()))
         .collect();
-    for entry in &bindings {
+    for entry in bindings {
         let id = member(entry, "id")?;
         let kind_value = member(entry, "kind")?;
-        let kind = match kind_value {
-            Value::String(kind) if KINDS.iter().any(|known| *kind == *known) => kind.to_string(),
-            Value::Array(_) | Value::Object(_) => {
+        let known = match kind_value {
+            Value::String(kind) => kind.to_str().and_then(kind_rule),
+            _ => None,
+        };
+        let (kind, holds) = match (kind_value, known) {
+            (Value::String(kind), Some(holds)) => (kind.to_string(), holds),
+            (Value::Array(_) | Value::Object(_), _) => {
                 return Err(Error::Type("a binding's kind is unhashable".into()));
             }
             _ => {
@@ -394,30 +426,25 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
                 ));
                 continue;
             }
-            let site = if side == "kernel" {
-                let Value::Object(object) = site else {
-                    return Err(Error::Type("a kernel site is no object".into()));
-                };
-                let mut object: Object = object.clone();
-                let path = package_path(package, string(file, "a site's file")?);
-                object.insert("file", Value::String(path.into()));
-                Value::Object(object)
+            let file = if side == "kernel" {
+                Value::String(package_path(package, string(file, "a site's file")?).into())
             } else {
-                site.clone()
+                file.clone()
             };
-            let call_value = member(&site, "call")?;
+            let call_value = member(site, "call")?;
             let call = string(call_value, "a site's call")?;
             let method = call.rsplit('.').next().unwrap_or(call);
             let method = method.rsplit("::").next().unwrap_or(method);
-            if !kind_holds(&kind, method) {
+            if !holds(method) {
                 drift.push(format!("{}: the {side} {call} is no {kind}", str_of(id)));
                 continue;
             }
-            let path = str_of(member(&site, "file")?).to_string();
+            let path = str_of(&file).to_string();
             let located = match locate(
                 entry,
                 side,
-                &site,
+                site,
+                &file,
                 &mut sources,
                 declared_strengths.get(&path),
             )? {
@@ -427,11 +454,8 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
                     continue;
                 }
             };
-            if !located.constants.is_empty() {
-                bound
-                    .entry(path.clone())
-                    .or_default()
-                    .extend(located.constants.iter().cloned());
+            if let Some(names) = bound.get_mut(&path) {
+                names.extend(located.constants.iter().cloned());
             }
             let orderings = member(entry, "orderings")?;
             if !equal(&strings(&located.orderings), orderings) {
@@ -445,11 +469,11 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
             let Value::String(key) = id else {
                 return Err(Error::Type("a located binding's id is no string".into()));
             };
-            sites.insert((key.clone(), side), (site, located));
+            sites.insert((key.clone(), side), (site, file, located));
         }
     }
-    for ((name, side), (site, found)) in &sites {
-        anchor_drift(name, side, site, found, &sites, &ids, &mut drift)?;
+    for ((name, side), (site, file, found)) in &sites {
+        anchor_drift(name, side, (site, file, found), &sites, &ids, &mut drift)?;
     }
     for (path, names) in &bound {
         for constant in declared_strengths[path].keys() {
@@ -463,6 +487,11 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
     Ok(drift)
 }
 
+/// Refuses a declaration with any drift, as [`Refusal::drift`] of its lines.
+///
+/// # Errors
+///
+/// `check_transcription` returns that refusal and the errors of [`transcription_drift`].
 pub fn check_transcription(root: &Path, expected: &Value) -> Result<(), Error> {
     let drift = transcription_drift(expected, root)?;
     if drift.is_empty() {

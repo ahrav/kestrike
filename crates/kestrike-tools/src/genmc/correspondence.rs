@@ -1,5 +1,5 @@
-//! `check_correspondence` reads litmus declarations from `verification/rc11/expected.json` relative
-//! to `root`.
+//! The correspondence check holds each GenMC case to the RC11 litmus tests it names, read from
+//! `verification/rc11/expected.json` under the root.
 
 use std::path::Path;
 
@@ -9,6 +9,14 @@ use crate::python::{equal, repr, str_of};
 
 const LITMUS: &str = "verification/rc11/expected.json";
 
+/// Refuses a declaration whose cases disagree with their litmus tests: a positive case's tests must
+/// all be declared `Never` and any other case's all `Sometimes`. Cases are read in code point order.
+///
+/// # Errors
+///
+/// `check_correspondence` returns a tool failure for a case without a litmus list, with an undeclared
+/// test or with a test of the other outcome, the errors of [`read_json`], and [`Error::Key`] or
+/// [`Error::Type`] for a declaration or a litmus list without a member it reads.
 pub fn check_correspondence(root: &Path, expected: &Value) -> Result<(), Error> {
     let litmus = read_json(&root.join(LITMUS))?;
     let declared = member(&litmus, "tests")?;

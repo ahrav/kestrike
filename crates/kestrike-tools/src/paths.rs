@@ -6,6 +6,9 @@
 //! as written. When a link's target leads back to a link still being resolved, `resolve` keeps that link
 //! and everything after it unresolved, and the final path is normalized lexically. `resolve` refuses a
 //! final path whose own lookup fails with a loop error, and links that nest more than [`DEPTH`] deep.
+//!
+//! `joined`, `parent`, `name` and `pure` read a path's text alone, as a pure POSIX path: a root of
+//! `//` stays, empty and `.` components drop, and `..` stays.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -178,6 +181,62 @@ pub(crate) fn normalize(path: &[u8]) -> Vec<u8> {
         normalized.push(b'.');
     }
     normalized
+}
+
+/// The root of `path`: `//` when exactly two slashes lead it, `/` for one or three or more, else none.
+pub(crate) fn root(path: &str) -> &'static str {
+    if path.starts_with("//") && !path.starts_with("///") {
+        "//"
+    } else if path.starts_with('/') {
+        "/"
+    } else {
+        ""
+    }
+}
+
+/// The root of a repository path's text and its other components, with empty and `.` components
+/// dropped.
+pub(crate) fn parts(path: &str) -> (&str, Vec<&str>) {
+    let root = root(path);
+    let names = path
+        .split('/')
+        .filter(|name| !name.is_empty() && *name != ".")
+        .collect();
+    (root, names)
+}
+
+pub(crate) fn assembled(root: &str, names: &[&str]) -> String {
+    if names.is_empty() && root.is_empty() {
+        ".".to_owned()
+    } else {
+        format!("{root}{}", names.join("/"))
+    }
+}
+
+/// The text of `path` with empty and `.` components dropped, `..` kept.
+pub(crate) fn pure(path: &str) -> String {
+    let (root, names) = parts(path);
+    assembled(root, &names)
+}
+
+/// `name` joined to `base`; an absolute `name` replaces `base`.
+pub(crate) fn joined(base: &str, name: &str) -> String {
+    if name.starts_with('/') {
+        return pure(name);
+    }
+    let (root, mut names) = parts(base);
+    names.extend(parts(name).1);
+    assembled(root, &names)
+}
+
+pub(crate) fn parent(path: &str) -> String {
+    let (root, mut names) = parts(path);
+    names.pop();
+    assembled(root, &names)
+}
+
+pub(crate) fn name(path: &str) -> &str {
+    parts(path).1.last().copied().unwrap_or("")
 }
 
 #[cfg(test)]

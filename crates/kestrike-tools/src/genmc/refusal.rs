@@ -105,9 +105,13 @@ impl fmt::Display for Refusal {
     }
 }
 
-/// `Error::Refusal` displays the refusal's reason, and `Error::Key` displays the missing key as Python's
-/// `repr` writes it. Other variants display their error text. `Value` covers invalid UTF-8, invalid
-/// JSON and integers past the digit limit; `Runtime` covers JSON nesting past [`json::MAX_DEPTH`].
+/// The class of an error a rule raises. `Refusal` is the judge's own refusal and displays its reason.
+/// `Os` is a failed lookup, open or read. `Value` is bytes that are no UTF-8, JSON the reader refuses,
+/// an integer past the digit limit, a path that holds a NUL byte and an identity record of another
+/// shape. `Key` is a member a value lacks and displays the key as Python's `repr` writes it. `Type` is
+/// a value of another JSON type than a rule reads. `Runtime` is JSON nesting past
+/// [`json::MAX_DEPTH`] and a path lookup that meets a link loop or links nested past
+/// [`crate::paths::DEPTH`]. `Index` is a binding whose `matching` count leaves no occurrence to read.
 #[derive(Debug)]
 pub enum Error {
     Refusal(Refusal),
@@ -264,15 +268,42 @@ pub fn string<'v>(value: &'v Value, what: &str) -> Result<&'v str, Error> {
     }
 }
 
+/// A path that holds a NUL byte names no file, and a read of one is [`Error::Value`] with the text
+/// `embedded null byte`.
+///
+/// # Errors
+///
+/// `openable` returns that error for such a path.
+pub(crate) fn openable(path: &Path) -> Result<&Path, Error> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        Err(Error::Value("embedded null byte".to_owned()))
+    } else {
+        Ok(path)
+    }
+}
+
 pub(crate) fn tool_failure(reason: String) -> Error {
     Error::Refusal(Refusal::new(Code::ToolFailure, reason))
 }
 
-pub(crate) fn listed(value: &Value, what: &str) -> Result<Vec<Value>, Error> {
+pub(crate) fn listed<'v>(value: &'v Value, what: &str) -> Result<&'v [Value], Error> {
     match value {
-        Value::Array(items) => Ok(items.clone()),
+        Value::Array(items) => Ok(items),
         _ => Err(Error::Type(format!("{what} is no array"))),
     }
+}
+
+/// The strings of the array `value`, which `what` names in an error.
+///
+/// # Errors
+///
+/// `texts` returns [`Error::Type`] for a value that is no array and for an item that is no string or
+/// holds a lone surrogate.
+pub(crate) fn texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
+    listed(value, what)?
+        .iter()
+        .map(|item| string(item, what).map(str::to_owned))
+        .collect()
 }
 
 pub(crate) fn lines(text: &str) -> Vec<String> {

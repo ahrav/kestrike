@@ -1,14 +1,16 @@
-//! The case judge checks the graph and the `check!` lines in the declared kernel file.
+//! The case judge reads one GenMC run's text and exit against its case declaration: a positive case
+//! needs one clean verification with complete executions, a violation case one `ERROR` event at the
+//! line of a declared `check!` of its kernel file and the run's own error graph.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use super::refusal::{
-    Code, Error, Refusal, lines, listed, lookup, member, open_file, read_json, read_strict,
-    replaced, single, string, strings, tool_failure,
+    Code, Error, Refusal, lines, listed, lookup, member, open_file, openable, read_json,
+    read_strict, replaced, single, string, strings, tool_failure,
 };
 use crate::classes::{SPACE, compiled};
 use crate::json::{Integer, Text, Value};
@@ -65,25 +67,33 @@ fn tuple(items: &[&str]) -> String {
     format!("({})", items.join(", "))
 }
 
-fn name_of(path: &str) -> &str {
-    path.split('/')
-        .rfind(|part| !part.is_empty() && *part != ".")
-        .unwrap_or("")
-}
-
+/// The line of the `check!` invocation that carries `message` in the kernel file `declared` names. The
+/// package is read from the declaration file under `root`. Lines are numbered as `str.splitlines`
+/// splits them, and the message is found as the text `c"<message>"` anywhere on a line, a comment
+/// included; the invocation is the nearest line at or above it that holds `check!(`.
+///
+/// # Errors
+///
+/// `check_line` returns a tool failure when the message stands on other than one line or no line at or
+/// above it holds `check!(`, [`Error::Value`] for a kernel path that holds a NUL byte or bytes that are
+/// no UTF-8, and [`Error::Os`] for a failed read.
 pub fn check_line(root: &Path, declared: &Value, message: &Value) -> Result<usize, Error> {
     let expected = read_json(&root.join(EXPECTED))?;
     let package = string(member(&expected, "package")?, "the declared package")?;
     let file = member(declared, "file")?;
-    let path = root
+    let path: PathBuf = root
         .join(package)
-        .join(string(file, "the declared kernel file")?);
-    let source = lines(&read_strict(&path)?);
-    let needle = format!("c\"{}\"", str_of(message));
+        .join(string(file, "the declared kernel file")?)
+        .components()
+        .collect();
+    let source = lines(&read_strict(openable(&path)?)?);
+    let needle = str_of(message)
+        .to_str()
+        .map(|message| format!("c\"{message}\""));
     let lines: Vec<usize> = source
         .iter()
         .enumerate()
-        .filter(|(_, text)| text.contains(&needle))
+        .filter(|(_, text)| needle.as_ref().is_some_and(|needle| text.contains(needle)))
         .map(|(index, _)| index + 1)
         .collect();
     if lines.len() != 1 {
@@ -116,6 +126,13 @@ fn events(pattern: &Regex, text: &str, skipped: [&str; 2]) -> BTreeSet<(String, 
         .collect()
 }
 
+/// Checks that the graph file at `graph` is the run's own: it is a nonempty regular file, its one
+/// `ERROR` node is `event` at `at`, and its events are the events `text` prints after its violation
+/// line.
+///
+/// # Errors
+///
+/// `check_graph` returns a tool failure for a graph that differs, and [`Error::Os`] for a failed read.
 pub fn check_graph(
     name: &str,
     text: &str,
@@ -147,6 +164,8 @@ pub fn check_graph(
             at.1
         )));
     }
+    // The dumped graph draws a thread's end for some threads only and a blocked join never, so both
+    // event sets leave them out.
     let after = text
         .split_once("Error: Safety violation!")
         .map_or("", |(_, after)| after);
@@ -188,15 +207,27 @@ fn integer(digits: &str) -> Result<Integer, Error> {
     decimal(digits).map_err(Error::Value)
 }
 
-fn sorted_texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
+fn sorted_texts(value: &Value, what: &str) -> Result<Vec<Text>, Error> {
     let mut texts = Vec::new();
-    for item in &listed(value, what)? {
-        texts.push(string(item, what)?.to_owned());
+    for item in listed(value, what)? {
+        let Value::String(text) = item else {
+            return Err(Error::Type(format!("{what} is no string")));
+        };
+        texts.push(text.clone());
     }
     texts.sort();
     Ok(texts)
 }
 
+/// The result of one complete case run whose text, exit and graph match `declared`, a case's
+/// declaration. A declaration whose `expect` is `positive` is judged as positive and any other as a
+/// violation. `intrinsics` is the sorted list of the intrinsics the bitcode calls.
+///
+/// # Errors
+///
+/// `judge_case` returns a refusal for a run that does not match, and the errors of [`check_line`] and
+/// [`check_graph`]; [`Error::Key`] or [`Error::Type`] for a declaration without a member it reads, and
+/// [`Error::Value`] for a count or line of more than [`crate::json::MAX_INTEGER_DIGITS`] digits.
 pub fn judge_case(
     root: &Path,
     name: &str,
@@ -218,11 +249,17 @@ pub fn judge_case(
     }
     if let Some(wanted) = lookup(declared, "intrinsics")? {
         let wanted = sorted_texts(wanted, "the declared intrinsics")?;
-        if intrinsics != wanted.as_slice() {
+        let same = intrinsics.len() == wanted.len()
+            && intrinsics
+                .iter()
+                .zip(&wanted)
+                .all(|(called, wanted)| wanted.to_str() == Some(called.as_str()));
+        if !same {
+            let wanted = Value::Array(wanted.into_iter().map(Value::String).collect());
             return Err(tool_failure(format!(
                 "{name}'s bitcode calls {}, declared {}",
                 repr(&strings(intrinsics)),
-                repr(&strings(&wanted))
+                repr(&wanted)
             )));
         }
     }
@@ -322,10 +359,10 @@ pub fn judge_case(
     let checks = member(declared, "checks")?;
     let checks = listed(checks, "the declared checks")?;
     let mut wanted = Vec::new();
-    for message in &checks {
+    for message in checks {
         let kernel = string(member(declared, "file")?, "the declared kernel file")?;
         wanted.push((
-            name_of(kernel).to_owned(),
+            crate::paths::name(kernel).to_owned(),
             check_line(root, declared, message)?,
         ));
     }
