@@ -483,7 +483,7 @@ fn a_pending_signal_ends_the_run_before_any_call() {
     let mut case = Case::new("pending");
     case.delivered.deliver(Signal::Terminate);
     let (package, evidence) = (case.package.clone(), case.evidence.clone());
-    let ended = case.controlled(|controller| controller.run(&package, evidence.as_os_str()));
+    let ended = case.owned(|controller| controller.run(&package, evidence.as_os_str()));
     assert!(
         matches!(
             ended,

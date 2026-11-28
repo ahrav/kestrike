@@ -545,14 +545,21 @@ impl Case {
         &mut self,
         step: impl FnOnce(&mut Controller<'_, '_, Plane, Steps>) -> T,
     ) -> T {
+        self.owned(|mut controller| step(&mut controller))
+    }
+
+    /// Runs `step` on a controller as [`Case::controlled`] makes it, handing the controller over.
+    pub(crate) fn owned<T>(
+        &mut self,
+        step: impl FnOnce(Controller<'_, '_, Plane, Steps>) -> T,
+    ) -> T {
         let catalog = value(&fs::read_to_string(&self.catalog).expect("the catalog reads"));
         let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
         let operator =
             read_operator(&self.write_operator(), &gd2, FILE_LIMIT).expect("the operator file");
         self.in_context(|cx| {
             let mut written = Vec::new();
-            let mut controller = Controller::new(cx, &mut written, &operator, gd2);
-            step(&mut controller)
+            step(Controller::new(cx, &mut written, &operator, gd2))
         })
     }
 

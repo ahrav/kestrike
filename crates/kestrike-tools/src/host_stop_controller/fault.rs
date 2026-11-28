@@ -1,7 +1,6 @@
 //! The ways a step of a command ends early, and the text of an unforeseen failure.
 
 use std::any::Any;
-use std::fmt;
 use std::io;
 use std::path::Path;
 
@@ -43,14 +42,13 @@ impl Aborted {
 /// An unforeseen failure of a step. [`Fault::text`] names its class: `Refusal` for a mark's value
 /// or bytes a check refused and for the lock's refusal, `Unwritten` for a mark's write that failed
 /// after its link, the class Python gives a system error's number, `RuntimeError` for a step asked
-/// for before the state it reads, `CallFailed` for a failed call, and `panic` for a panic.
+/// for before the state it reads, and `panic` for a panic.
 #[derive(Debug)]
 pub enum Fault {
     Refusal(Text),
     Unwritten(Text),
     Os { code: Option<i32>, text: String },
     Order(String),
-    Call(FailedCall),
     Panic(String),
 }
 
@@ -64,7 +62,8 @@ impl Fault {
 
     /// The fault of a mark's write at `path`: a failed step is its system error, a write that took
     /// no byte is the system error `EIO` with the write's sentence, and a failure after the link is
-    /// the sentence of what stands.
+    /// the sentence of what stands. That sentence starts with the path, which keeps each byte with
+    /// no UTF-8 form as a lone surrogate, so the abort mark's check refuses the detail that holds it.
     pub(crate) fn unwritten(unwritten: &Unwritten, path: &Path) -> Self {
         match unwritten {
             Unwritten::Failed { error, .. } => Self::os(error),
@@ -72,7 +71,11 @@ impl Fault {
                 code: Some(libc::EIO),
                 text: unwritten.sentence(path),
             },
-            _ => Self::Unwritten(Text::from(unwritten.sentence(path))),
+            _ => {
+                let mut sentence = Text::from_os(path.as_os_str());
+                sentence.push_str(&unwritten.sentence(Path::new("")));
+                Self::Unwritten(sentence)
+            }
         }
     }
 
@@ -109,19 +112,9 @@ impl Fault {
                 text: message,
             } => text.push_str(&format!("OSError: {message}")),
             Self::Order(message) => text.push_str(&format!("RuntimeError: {message}")),
-            Self::Call(failed) => {
-                text.push_str("CallFailed: ");
-                text.push_text(&failed.sentence());
-            }
             Self::Panic(message) => text.push_str(&format!("panic: {message}")),
         }
         text
-    }
-}
-
-impl fmt::Display for Fault {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.text().fmt(f)
     }
 }
 

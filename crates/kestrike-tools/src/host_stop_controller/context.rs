@@ -1,4 +1,6 @@
-//! Each case supplies a command's clocks, calls, files, streams and environment through [`Context`].
+//! A command and the system it runs on: [`Command`], [`Context`], which the tool and each case fill
+//! with the clocks, calls, files, streams and environment, the writer of a line, and the forms a line
+//! shows: a path as `pathlib` writes it, a number as a float and a list of texts as `repr` does.
 
 use std::ffi::OsString;
 use std::io::Write;
@@ -78,10 +80,12 @@ pub(crate) fn pure(path: &[u8]) -> PathBuf {
     PathBuf::from(OsString::from_vec(pure))
 }
 
-/// `name` in `directory`, in [`pure`] form.
+/// `name` in `directory`, in [`pure`] form: a slash joins them unless `directory` ends in one.
 pub(crate) fn beside(directory: &Path, name: &str) -> PathBuf {
     let mut joined = directory.as_os_str().as_bytes().to_vec();
-    joined.push(b'/');
+    if !joined.ends_with(b"/") {
+        joined.push(b'/');
+    }
     joined.extend_from_slice(name.as_bytes());
     pure(&joined)
 }
@@ -104,3 +108,7 @@ pub(crate) fn list_repr<'a>(items: impl IntoIterator<Item = &'a Text>) -> String
     let shown: Vec<String> = items.into_iter().map(Text::repr).collect();
     format!("[{}]", shown.join(", "))
 }
+
+#[cfg(test)]
+#[path = "context_tests.rs"]
+mod tests;
