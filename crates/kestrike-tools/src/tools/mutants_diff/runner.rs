@@ -7,6 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -14,13 +15,16 @@ use std::process::{Command, Output, Stdio};
 use super::config::debug_assertions;
 use super::options::{Options, TOOL};
 use super::outcomes::{Judgment, Listed, Outcome, Outcomes, judge, read_listing, read_outcomes};
-use super::preflight::{CONFIG, GitError, Prepared, git, is_file, preflight};
-use super::process::{INTERRUPT, ignore_signals, install_handlers, supervise};
+use super::preflight::{CONFIG, GitError, Prepared, git, is_file, preflight, read_regular};
+use super::process::{INTERRUPT, file_size_default, ignore_signals, install_handlers, supervise};
 use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
+use crate::plants::{Creation, publish_with, remove};
+use crate::process::{ignore_file_size_signal, refuse_ignored_sigchld};
 use crate::python::{hexdigest, say};
+use crate::stream::emit;
 use crate::text::{Text, text};
 
 const PACKAGE: &str = "kestrike";
@@ -47,6 +51,8 @@ const DIFF: [&str; 17] = [
 /// The tool exits 4 on a failed baseline, else 3 when a mutant timed out, else 2 when one is missed, else 0.
 const TOOL_RESULTS: [i32; 3] = [0, 2, 3];
 const BASELINE_FAILED: i32 = 4;
+/// The exit code of a run whose write to standard output or standard error failed.
+const STREAM_FAILED: u8 = 120;
 
 /// Standard output and standard error of the run. A write that fails turns the exit code into 120.
 #[derive(Default)]
@@ -66,7 +72,7 @@ impl Streams {
     }
 
     fn code(&self, code: u8) -> u8 {
-        if self.failed { 120 } else { code }
+        if self.failed { STREAM_FAILED } else { code }
     }
 
     /// `refuse` prints a stop that ends the run without a report and returns its exit code.
@@ -196,8 +202,13 @@ impl Run {
         let patch = git(&prepared.git_env, prepared.top.as_os_str(), &args)
             .map_err(GitError::incomplete)?;
         let diff = self.dir().join("diff.patch");
-        fs::write(&diff, &patch).map_err(failed(&diff))?;
-        self.diff_sha256 = Some(hexdigest(&fs::read(&diff).map_err(failed(&diff))?));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&diff)
+            .map_err(failed(&diff))?;
+        file.write_all(&patch).map_err(failed(&diff))?;
+        self.diff_sha256 = Some(hexdigest(&patch));
         Ok(diff)
     }
 
@@ -231,15 +242,22 @@ impl Run {
         Ok(tree)
     }
 
-    /// `copy_lock` copies the invoking checkout's `Cargo.lock` into the worktree when the worktree holds no
-    /// entry at that path. Exclusive creation fails on any existing entry, a dangling link included, so the
-    /// copy never writes through a link.
+    /// `copy_lock` copies the invoking checkout's `Cargo.lock` into the worktree when it is a regular file
+    /// and the worktree holds no entry at that path, a dangling link included; a worktree with an entry
+    /// there leaves the source unread. The lock is opened once and its check and copy read that open,
+    /// ahead of the target's creation. Exclusive creation fails on an entry that appears after the first
+    /// look, so the copy never writes through a link.
     fn copy_lock(&self, tree: &Path) -> Result<(), Stop> {
-        let source = self.prepared.top.join("Cargo.lock");
-        if !is_file(&source).map_err(|fault| Stop::failed(&fault))? {
-            return Ok(());
-        }
         let target = tree.join("Cargo.lock");
+        match fs::symlink_metadata(&target) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(failed(&target)(error)),
+        }
+        let source = self.prepared.top.join("Cargo.lock");
+        let Some(bytes) = read_regular(&source).map_err(|fault| Stop::failed(&fault))? else {
+            return Ok(());
+        };
         let mut copy = match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -249,17 +267,15 @@ impl Run {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
             Err(error) => return Err(failed(&target)(error)),
         };
-        let bytes = fs::read(&source).map_err(failed(&source))?;
         copy.write_all(&bytes).map_err(failed(&target))
     }
 
     /// `read_config` records the digest and the debug-assertion entry of the worktree configuration.
     fn read_config(&mut self, tree: &Path) -> Result<(), Stop> {
         let config = tree.join(CONFIG);
-        if !is_file(&config).map_err(|fault| Stop::failed(&fault))? {
+        let Some(data) = read_regular(&config).map_err(|fault| Stop::failed(&fault))? else {
             return Ok(());
-        }
-        let data = fs::read(&config).map_err(failed(&config))?;
+        };
         self.config_sha256 = Some(hexdigest(&data));
         let read = debug_assertions(&String::from_utf8_lossy(&data)).map_err(|error| {
             Stop::incomplete(text!("the worktree configuration does not parse: ", error))
@@ -367,7 +383,15 @@ impl Run {
         argv.extend([diff.as_os_str(), OsStr::new("--output"), output.as_os_str()]);
         argv.extend(self.shard_args());
         argv.push(OsStr::new("--"));
-        argv.extend(prepared.tests.iter().map(OsString::as_os_str));
+        let tests: Vec<OsString> = prepared
+            .tests
+            .iter()
+            .map(|word| {
+                word.to_os()
+                    .expect("a word split from an argument encodes to its bytes")
+            })
+            .collect();
+        argv.extend(tests.iter().map(OsString::as_os_str));
         let (stdout, stderr) = (dir.join("tool.stdout"), dir.join("tool.stderr"));
         let env = &prepared.env;
         let exit = supervise(&INTERRUPT, &argv, &stdout, &stderr, Some(tree), env)?;
@@ -395,13 +419,15 @@ impl Run {
     ///
     /// A stopped `worktree add` leaves its `initializing` lock, which the second `--force` overrides. Git
     /// refuses a directory without a valid `.git` file and drops the registration once the directory is
-    /// gone, so a removal that failed is repeated after the directory's removal. The listing prints a
+    /// gone, so a removal that failed is repeated after the directory's removal, which goes past each
+    /// entry it cannot remove, leaves a link at the tree's path and walks at most 512 levels below the
+    /// tree, leaving a deeper directory with everything under it. The listing prints a
     /// path's bytes as they are, so the whole record is matched in the listing's bytes.
     fn remove_worktree(&self, tree: &Path) -> Result<Option<Text>, Stop> {
         let prepared = &self.prepared;
         let git = |args: &[&OsStr]| {
             let mut command = Command::new("git");
-            command
+            file_size_default(&mut command)
                 .arg("-C")
                 .arg(&prepared.top)
                 .args(args)
@@ -409,15 +435,13 @@ impl Run {
                 .envs(prepared.git_env.iter().cloned());
             command
         };
-        let mut remove: Vec<&OsStr> =
+        let mut unregister: Vec<&OsStr> =
             os_args(&["worktree", "remove", "--force", "--force"]).collect();
-        remove.push(tree.as_os_str());
-        let mut removed = output(&mut git(&remove))?;
-        if !fs::symlink_metadata(tree).is_ok_and(|status| status.is_symlink()) {
-            let _ = fs::remove_dir_all(tree);
-        }
+        unregister.push(tree.as_os_str());
+        let mut removed = output(&mut git(&unregister))?;
+        remove(tree);
         if !removed.status.success() {
-            removed = output(&mut git(&remove))?;
+            removed = output(&mut git(&unregister))?;
         }
         let listing: Vec<&OsStr> = os_args(&["worktree", "list", "--porcelain"]).collect();
         let listed = output(&mut git(&listing))?;
@@ -464,10 +488,7 @@ impl Run {
             Value::Object(numbers)
         });
         report.insert("shard", shard);
-        let tests = prepared
-            .tests
-            .iter()
-            .map(|word| Value::String(Text::from_os(word)));
+        let tests = prepared.tests.iter().cloned().map(Value::String);
         report.insert("tests", Value::Array(tests.collect()));
         report.insert("diff_sha256", string(self.diff_sha256.as_deref()));
         report.insert("config_sha256", string(self.config_sha256.as_deref()));
@@ -518,7 +539,7 @@ impl Run {
 
 impl Run {
     /// `write_report` writes `report.json` into the run directory, which it creates when execute made
-    /// none, and returns its path.
+    /// none, through a new file beside it that it renames over the report, and returns its path.
     fn write_report(&mut self, judgment: &Judgment) -> Result<PathBuf, Text> {
         let dir = match self.dir.clone() {
             Some(dir) => dir,
@@ -528,8 +549,11 @@ impl Run {
         let mut written = json::indented(&Value::Object(self.report(judgment)))
             .expect("every phase time of a report is finite");
         written.push('\n');
-        fs::write(&path, written)
-            .map_err(|error| Fault::os(&error, Some(path.as_os_str())).text().clone())?;
+        publish_with(&path, &written, Creation::Mode(0o666)).map_err(|error| {
+            Fault::os(error.error(), Some(error.path().as_os_str()))
+                .text()
+                .clone()
+        })?;
         Ok(path)
     }
 
@@ -610,21 +634,32 @@ impl Run {
     }
 }
 
-/// `run` is the tool's entry: it reads the command line, runs step 1, then the run with the handlers
-/// installed, the hand-off and the finish.
+/// `run` is the tool's entry: it ignores SIGXFSZ, so a write past the soft file size limit returns
+/// `EFBIG` to the write's caller, reads the command line, refuses a start with SIGCHLD ignored, runs step
+/// 1, then the run with the handlers installed, the hand-off and the finish.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
+    if let Err(error) = ignore_file_size_signal() {
+        let reason = text!("SIGXFSZ cannot be ignored: ", error.to_string());
+        return Streams::default().refuse(&Stop::fatal(reason));
+    }
     let options = match super::options::parse(args) {
         Parsed::Run(options) => options,
         Parsed::Help(help) => {
-            let mut out = io::stdout().lock();
-            let written = out.write_all(help.as_bytes()).and_then(|()| out.flush());
-            return if written.is_ok() { COMPLETE } else { 120 };
+            let Err(error) = emit(io::stdout().as_fd(), &help) else {
+                return COMPLETE;
+            };
+            let line = format!("{TOOL}: standard output: {error}\n");
+            let _ = emit(io::stderr().as_fd(), &line);
+            return STREAM_FAILED;
         }
         Parsed::Refused { code, text } => {
             let written = io::stderr().write_all(text.as_bytes());
-            return if written.is_ok() { code } else { 120 };
+            return if written.is_ok() { code } else { STREAM_FAILED };
         }
     };
+    if let Err(refusal) = refuse_ignored_sigchld() {
+        return Streams::default().refuse(&Stop::rejected(Text::from(refusal)));
+    }
     let prepared = match preflight(options) {
         Ok(prepared) => prepared,
         Err(stop) => return Streams::default().refuse(&stop),

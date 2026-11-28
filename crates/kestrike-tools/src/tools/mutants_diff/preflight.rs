@@ -8,14 +8,14 @@
 //! workflow file must be UTF-8. Both outputs and both files are read with `\r\n` and `\r` as `\n`.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::io::Read;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::config::{self, pins, stables};
 use super::options::Options;
-use super::process::{INTERRUPT, capture, exit_code};
+use super::process::{INTERRUPT, capture, exit_code, file_size_default};
 use super::stop::{Fault, Stop};
 pub(super) use crate::environ::Environ;
 use crate::environ::{get, set};
@@ -41,7 +41,7 @@ pub struct Prepared {
     pub(super) head: String,
     pub(super) version: Text,
     pub(super) machine: Text,
-    pub(super) tests: Vec<OsString>,
+    pub(super) tests: Vec<Text>,
     pub(super) artifacts: PathBuf,
     pub(super) git_env: Environ,
     pub(super) env: Environ,
@@ -109,7 +109,7 @@ impl GitError {
 /// `git` runs `git -C top ARGS` in `git_env` and returns its standard output.
 pub(super) fn git(git_env: &Environ, top: &OsStr, args: &[&OsStr]) -> Result<Vec<u8>, GitError> {
     let mut command = Command::new("git");
-    command
+    file_size_default(&mut command)
         .arg("-C")
         .arg(top)
         .args(args)
@@ -179,14 +179,30 @@ fn rejected_fault(fault: &Fault) -> Stop {
     Stop::rejected(fault.to_text())
 }
 
+/// `read_regular` opens `path` once and returns the bytes of the regular file it names, read through that
+/// open, or `None` when it names none; [`ownership::open_regular`] decides which errors read as no file.
+///
+/// # Errors
+///
+/// The open, its check or the read fails, as a fault that names the path.
+pub(super) fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, Fault> {
+    let fault = |error: &std::io::Error| Fault::os(error, Some(path.as_os_str()));
+    let opened = ownership::open_regular(path).map_err(|error| fault(error.error()))?;
+    let ownership::Opened::File(mut file) = opened else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| fault(&error))?;
+    Ok(Some(bytes))
+}
+
 /// `read_pins` returns the text of `path` when it is a file, with `\r\n` and `\r` read as `\n`, or an
 /// empty text when it is none.
 pub(super) fn read_pins(path: &Path) -> Result<String, Stop> {
-    if !is_file(path).map_err(|fault| rejected_fault(&fault))? {
+    let Some(bytes) = read_regular(path).map_err(|fault| rejected_fault(&fault))? else {
         return Ok(String::new());
-    }
-    let bytes = fs::read(path)
-        .map_err(|error| rejected_fault(&Fault::os(&error, Some(path.as_os_str()))))?;
+    };
     let text = String::from_utf8(bytes)
         .map_err(|error| rejected_fault(&Fault::library("Utf8Error", &error.utf8_error())))?;
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
@@ -194,7 +210,10 @@ pub(super) fn read_pins(path: &Path) -> Result<String, Stop> {
 
 fn text_command(program: &OsStr, args: &[&str], env: &Environ) -> Command {
     let mut command = Command::new(program);
-    command.args(args).env_clear().envs(env.iter().cloned());
+    file_size_default(&mut command)
+        .args(args)
+        .env_clear()
+        .envs(env.iter().cloned());
     command
 }
 
@@ -362,7 +381,7 @@ pub fn preflight(options: Options) -> Result<Prepared, Stop> {
     let tests = options
         .tests
         .clone()
-        .unwrap_or_else(|| DEFAULT_TESTS.map(OsString::from).to_vec());
+        .unwrap_or_else(|| DEFAULT_TESTS.map(Text::from).to_vec());
     Ok(Prepared {
         options,
         top,

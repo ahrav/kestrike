@@ -9,8 +9,11 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
+use kestrike_tools::gameday::ReadError;
 use kestrike_tools::host_stop::{Disk, Files, Links};
+use kestrike_tools::text::Text;
 
 use super::plane::{Shared, State};
 
@@ -24,6 +27,8 @@ pub(crate) enum Step<'p> {
     Fsync(i32),
     /// The sync of the directory at this path.
     FsyncDirectory(PathBuf),
+    /// A read of the file at this path, before its open.
+    Read(PathBuf),
     Link(&'p OsStr),
     Unlink(&'p OsStr),
     TryLock,
@@ -43,6 +48,8 @@ pub(crate) struct Steps {
     pub(crate) plants: Plants,
     pub(crate) cap: Rc<Cell<Option<usize>>>,
     pub(crate) stall: Rc<Cell<bool>>,
+    /// Set by a case that holds the lock on purpose, so a taken lock is refused at once.
+    pub(crate) contended: Rc<Cell<bool>>,
 }
 
 impl Steps {
@@ -57,9 +64,13 @@ impl Steps {
     }
 }
 
-/// The path an open descriptor names.
 fn named(file: &File) -> PathBuf {
-    fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).unwrap_or_default()
+    named_fd(file.as_raw_fd())
+}
+
+/// The path the descriptor `fd` of this process names, or an empty path once it is closed.
+pub(crate) fn named_fd(fd: i32) -> PathBuf {
+    fs::read_link(format!("/proc/self/fd/{fd}")).unwrap_or_default()
 }
 
 impl Files for Steps {
@@ -105,9 +116,24 @@ impl Files for Steps {
         Disk.unlink(directory, name)
     }
 
+    /// A lock that another process of the test run holds through a descriptor it inherited
+    /// between its fork and its exec is taken again for up to [`LOCK_WAIT`], unless the case
+    /// holds the lock on purpose.
     fn try_lock(&self, directory: &File) -> io::Result<()> {
         self.enter(&Step::TryLock)?;
-        Disk.try_lock(directory)
+        let until = Instant::now() + LOCK_WAIT;
+        loop {
+            match Disk.try_lock(directory) {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::EWOULDBLOCK)
+                        && !self.contended.get()
+                        && Instant::now() < until =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                other => return other,
+            }
+        }
     }
 
     fn lstat(&self, path: &Path) -> io::Result<fs::Metadata> {
@@ -128,7 +154,32 @@ impl Files for Steps {
         self.enter(&Step::Rmdir)?;
         Disk.rmdir(path)
     }
+
+    fn read_synced(
+        &self,
+        name: &Path,
+        directory: &File,
+        what: &Text,
+        limit: u64,
+    ) -> Result<Vec<u8>, ReadError> {
+        if let Err(error) = self.enter(&Step::Read(named(directory).join(name))) {
+            panic!("a plant failed the read of {}: {error}", name.display());
+        }
+        Reader(self).read_synced(name, directory, what, limit)
+    }
 }
+
+/// The seal's read over [`Files`]'s own reader, its sync passed through the case's file steps.
+struct Reader<'s>(&'s Steps);
+
+impl Files for Reader<'_> {
+    fn fsync(&self, file: &File) -> io::Result<()> {
+        self.0.fsync(file)
+    }
+}
+
+/// How long a lock that no case holds on purpose is taken again before its refusal stands.
+pub(crate) const LOCK_WAIT: Duration = Duration::from_secs(2);
 
 /// The system error `code`.
 pub(crate) fn errno(code: i32) -> io::Error {

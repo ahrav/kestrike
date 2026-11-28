@@ -21,11 +21,23 @@ pub enum Command {
         package: PathBuf,
         evidence: OsString,
     },
+    /// `restore --operator F --evidence DIR [--reviewed F]`.
+    Restore {
+        operator: PathBuf,
+        evidence: OsString,
+        reviewed: Option<PathBuf>,
+    },
+    /// `seal --operator F --evidence DIR`.
+    Seal {
+        operator: PathBuf,
+        evidence: OsString,
+    },
 }
 
 /// The system a command runs on. `env` is the environment read at the tool's start, under which
 /// every call runs; `catalog` names the game-day catalog; `top` is the tree whose Rust files bound
-/// the package's lists; `file_limit` bounds every file read and `mark_limit` every mark's bytes. The
+/// the package's lists; `file_limit` bounds every file read, and every mark's bytes are bounded by the
+/// lesser of `mark_limit` and `file_limit`, so a mark written is one its readers read. The
 /// record borrows a [`Delivered`](crate::host_stop::Delivered) that lives to the process's end, as
 /// the one the signal handlers store into does.
 pub struct Context<'a, S: Seam, F: Files> {
@@ -48,6 +60,11 @@ pub(crate) enum Stream {
 }
 
 impl<S: Seam, F: Files> Context<'_, S, F> {
+    /// The bound of a mark's bytes: the lesser of `mark_limit` and `file_limit`, since every reader
+    /// of a mark reads it under `file_limit`.
+    pub(crate) fn mark_bound(&self) -> u64 {
+        self.mark_limit.min(self.file_limit)
+    }
     /// Writes `line` and a newline in UTF-8, each lone surrogate as `\udXXX`, and flushes. A write
     /// or a flush that fails changes no outcome, so its error is dropped.
     pub(crate) fn say(&mut self, stream: Stream, line: &Text) {
