@@ -3876,3 +3876,30 @@ fn a_word_after_a_path_attribute_is_its_own_refusal() {
         ]
     );
 }
+
+/// A package name with no form as a path, a lone surrogate, names a package with no sources and no
+/// kernel texts: the check exits 1 and refuses each listed file as one the package does not include.
+#[test]
+fn a_package_name_with_no_path_form_reads_as_an_empty_package() {
+    let mut declared = value(&committed(super::GENMC));
+    object(&mut declared).insert("package", value(r#""\ud800""#));
+    let (report, code) = checked(vec![(super::GENMC, text(json::dump(&declared)))]);
+    assert_eq!(code, 1, "{report:?}");
+    assert_eq!(*member(&report, "sites"), value("0"));
+    let refused = messages_of(&report, "scope file");
+    for file in items(get(&catalog(), "files")) {
+        let Value::String(file) = file else {
+            panic!("a file is a string");
+        };
+        let message =
+            format!("{file} is listed and the kernel package includes no production file there");
+        assert!(refused.contains(&message), "{message} in {refused:?}");
+    }
+    assert!(
+        messages_of(&report, "reference")
+            .iter()
+            .any(|message| message
+                == "fill-observe: join-production has no kernel file of its family"),
+        "{report:?}"
+    );
+}

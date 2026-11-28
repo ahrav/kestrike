@@ -34,8 +34,8 @@ use regex::Regex;
 
 use super::sites::{self, Kind, Pin, Strength, body_open, line_of};
 use super::sources::{
-    PackageWalk, Reader, References, Scope, c_literals, diagnostics, include_defects,
-    module_source, path_attributes, references, scope_files, stem,
+    PackageWalk, Reader, References, c_literals, diagnostics, include_defects, module_source,
+    path_attributes, references, scope_files, stem,
 };
 use crate::classes::{bounded_iter, compiled, is_word};
 use crate::genmc::{self, normalized};
@@ -907,7 +907,8 @@ fn failed(prefix: &str, reason: &str) -> (Value, u8) {
 
 /// The catalog's files and rows, the references of the three declarations, and the kernel package's
 /// path under the checkout, `None` for a package name with no form as a path, which names no directory
-/// to walk.
+/// to walk: such a package holds no sources and no kernel texts, and the scope rule still reads the
+/// crate's path holders.
 struct Inputs {
     files: Vec<Text>,
     rows: Vec<Value>,
@@ -995,7 +996,7 @@ pub fn check(
     };
     let mut refusals = Refusals::default();
     let scope = match package {
-        None => Ok(Scope::default()),
+        None => scope_files(root, root, read, tree, &|_: &Path| Ok(Vec::new())),
         Some(package) => include_defects(&package, references.kernels()).and_then(|defects| {
             for defect in defects {
                 refusals.refuse(defect.name(), Text::from(defect.message()));
