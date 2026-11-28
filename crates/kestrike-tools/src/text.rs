@@ -336,6 +336,13 @@ impl Text {
         joined
     }
 
+    /// `is_printable` holds when [`Text::repr`] writes every code point of the text as it is, apart from the
+    /// backslash and the quote it escapes: no code point is one the Unicode 13.0 data marks nonprintable, and
+    /// an empty text is printable.
+    pub fn is_printable(&self) -> bool {
+        self.code_points().all(|code| !is_unprintable(code))
+    }
+
     /// `starts_with` holds when the code points of `prefix` begin the text, as `str.startswith` holds.
     pub fn starts_with(&self, prefix: &Self) -> bool {
         self.0.starts_with(&prefix.0)

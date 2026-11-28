@@ -31,6 +31,28 @@ impl From<Refusal> for ReadError {
     }
 }
 
+/// `dir` anchors relative names. An empty `name` refers to `dir` itself; an absolute `name` retains its
+/// own root.
+pub(super) fn in_dir(dir: BorrowedFd<'_>, name: &Path) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name)
+}
+
+/// When `dir` is present, it anchors each nonempty relative `path`. An absolute or empty `path` stands
+/// for itself.
+///
+/// # Errors
+///
+/// [`ReadError::Nul`] for a path with a NUL byte.
+pub(super) fn opened(path: &Path, dir: Option<BorrowedFd<'_>>) -> Result<PathBuf, ReadError> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(ReadError::Nul);
+    }
+    Ok(match dir {
+        Some(dir) if !path.as_os_str().is_empty() => in_dir(dir, path),
+        _ => path.to_path_buf(),
+    })
+}
+
 /// `read_file` returns the bytes of the regular file at `path`, at most `limit` of them. With `dir`, a
 /// relative `path` names an entry of that open directory, reached as `/proc/self/fd/<descriptor>/<path>`;
 /// an absolute `path` stands for itself, and an empty `path` names no file. The file opens with
@@ -55,15 +77,7 @@ pub fn read_file(
     limit: u64,
     sync: bool,
 ) -> Result<Vec<u8>, ReadError> {
-    if path.as_os_str().as_bytes().contains(&0) {
-        return Err(ReadError::Nul);
-    }
-    let at = match dir {
-        Some(dir) if !path.as_os_str().is_empty() => {
-            PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(path)
-        }
-        _ => path.to_path_buf(),
-    };
+    let at = opened(path, dir)?;
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
