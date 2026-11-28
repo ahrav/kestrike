@@ -3,9 +3,10 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,16 +14,16 @@ use kestrike_tools::host_stop::{
     AWS, Call, CallFailed, Delivered, Ended, Failure, Interrupted, Record, SLICE, Signal, launch,
 };
 
-use super::{MARKER_LIMIT, Scratch, gone, wait_for};
+use super::{Scratch, first_start, gone, starts};
 
 /// The stand-in `aws`: it writes its process id to `$HOST_STOP_PID`, then acts as `$HOST_STOP_MODE`
 /// names. It uses shell builtins and programs named by their absolute paths alone, since its `PATH`
 /// holds its own directory alone.
 pub(super) const STANDIN: &str = r#"#!/bin/sh
-echo $$ > "$HOST_STOP_PID"
+echo $$ >> "$HOST_STOP_PID"
 case "$HOST_STOP_MODE" in
   echo)
-    printf '%s|' "$*" "${AWS_MAX_ATTEMPTS-unset}" "${AWS_RETRY_MODE-unset}" "${AWS_PAGER-unset}" \
+    printf '%s|' "$(printf '[%s]' "$@")" "${AWS_MAX_ATTEMPTS-unset}" "${AWS_RETRY_MODE-unset}" "${AWS_PAGER-unset}" \
       "$AWS_CLI_AUTO_PROMPT" "$AWS_IGNORE_CONFIGURED_ENDPOINT_URLS" "${HOME-unset}" "$PATH" \
       "$(/usr/bin/readlink /proc/self/fd/0)"
     printf 'a\r\nb\rc\n' ;;
@@ -34,7 +35,7 @@ case "$HOST_STOP_MODE" in
     echo '{}'
     exit 254 ;;
   killed) printf 'dying\n' >&2; kill -KILL $$ ;;
-  hang) exec /bin/sleep 600 ;;
+  hang) trap '' TERM INT HUP; exec /bin/sleep 5 ;;
   gate) while [ ! -e "$HOST_STOP_PID.go" ]; do :; done; echo '{}' ;;
   invalid) printf '\377' ;;
   invalid-error) printf '\377' >&2; echo '{}' ;;
@@ -54,7 +55,7 @@ case "$HOST_STOP_MODE" in
     printf 'a\r\nEND\n' >&2
     exit 254 ;;
   group) read -r stat < /proc/$$/stat; set -- $stat; printf '%s' "$5" ;;
-  orphan) /bin/sleep 3 & echo '{}' ;;
+  orphan) /bin/sleep 4 & echo '{}' ;;
   status) exec /bin/cat /proc/self/status ;;
 esac
 "#;
@@ -70,10 +71,7 @@ impl Standin {
     pub(super) fn new(label: &str) -> Self {
         let scratch = Scratch::new(label);
         let bin = scratch.dir("bin");
-        let program = bin.join(AWS);
-        fs::write(&program, STANDIN).expect("the stand-in is written");
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).expect("the mode is set");
-        ready(&program);
+        executable(&bin.join(AWS), STANDIN);
         let pid = scratch.0.join("pid");
         Self { scratch, bin, pid }
     }
@@ -95,38 +93,28 @@ impl Standin {
         .collect()
     }
 
-    fn started(&self) -> Option<String> {
-        fs::read_to_string(&self.pid)
-            .ok()
-            .map(|pid| pid.trim().to_owned())
+    fn started(&self) -> Vec<u32> {
+        starts(&self.pid)
     }
 }
 
-/// `ready` runs the new stand-in until its start no longer fails with `ETXTBSY`: a process another test
-/// thread forks while the stand-in's file is open for writing holds that descriptor until its own
-/// `exec`, and the kernel refuses to run a file open for writing.
-fn ready(program: &Path) {
-    let start = Instant::now();
-    loop {
-        let started = Command::new(program)
-            .env_clear()
-            .env("HOST_STOP_MODE", "none")
-            .env("HOST_STOP_PID", "/dev/null")
-            .status();
-        match started {
-            Ok(status) => {
-                assert!(status.success(), "{status}");
-                return;
-            }
-            Err(error)
-                if error.raw_os_error() == Some(libc::ETXTBSY)
-                    && start.elapsed() < MARKER_LIMIT =>
-            {
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error) => panic!("{}: {error}", program.display()),
-        }
-    }
+/// The child opens `path` for writing so children forked by other test threads cannot inherit its
+/// writable descriptor, which would make `execve` of the stand-in fail with `ETXTBSY`.
+fn executable(path: &Path, text: &str) {
+    let mut writer = Command::new("/bin/sh")
+        .args(["-c", r#"/bin/cat > "$1" && /bin/chmod 700 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the writer starts");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's input is piped")
+        .write_all(text.as_bytes())
+        .expect("the text reaches the writer");
+    let status = writer.wait().expect("the writer ends");
+    assert!(status.success(), "{} is written: {status}", path.display());
 }
 
 const IDENTITY: [&str; 2] = ["sts", "get-caller-identity"];
@@ -167,7 +155,14 @@ fn the_child_runs_with_the_arguments_and_the_environment_given() {
     let env = standin.env("echo");
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
-    let argv = ["ec2", "stop-instances", "--instance-ids", "i-h1"];
+    let argv = [
+        "ec2",
+        "stop-instances",
+        "--instance-ids",
+        "i-h1",
+        "--note",
+        "a b",
+    ];
     let reply = launch(
         &mut record,
         &call(&argv, false, Duration::from_millis(7500), &env),
@@ -177,10 +172,12 @@ fn the_child_runs_with_the_arguments_and_the_environment_given() {
     assert_eq!(
         reply,
         format!(
-            "ec2 stop-instances --instance-ids i-h1 --no-paginate --output json --cli-read-timeout 8 \
-             --cli-connect-timeout 8|1|standard||off|true|unset|{bin}|/dev/null|a\nb\nc\n"
+            "[ec2][stop-instances][--instance-ids][i-h1][--note][a b][--no-paginate][--output][json]\
+             [--cli-read-timeout][8][--cli-connect-timeout][8]|1|standard||off|true|unset|{bin}|\
+             /dev/null|a\nb\nc\n"
         )
     );
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
     let read = launch(
         &mut record,
         &call(&IDENTITY, true, Duration::from_secs(5), &env),
@@ -189,26 +186,12 @@ fn the_child_runs_with_the_arguments_and_the_environment_given() {
     assert_eq!(
         read,
         format!(
-            "sts get-caller-identity --no-paginate --output json --cli-read-timeout 5 \
-             --cli-connect-timeout 5|unset|legacy||off|true|unset|{bin}|/dev/null|a\nb\nc\n"
+            "[sts][get-caller-identity][--no-paginate][--output][json][--cli-read-timeout][5]\
+             [--cli-connect-timeout][5]|unset|legacy||off|true|unset|{bin}|/dev/null|a\nb\nc\n"
         ),
         "a call with retries keeps the caller's retry mode"
     );
-    for (cut, seconds) in [
-        (Duration::from_millis(999), 1),
-        (Duration::from_millis(1001), 2),
-        (Duration::from_secs(2), 2),
-        (Duration::new(2, 1), 3),
-    ] {
-        let shown =
-            launch(&mut record, &call(&IDENTITY, true, cut, &env)).expect("the stand-in answers");
-        assert!(
-            shown.contains(&format!(
-                "--cli-read-timeout {seconds} --cli-connect-timeout {seconds}|"
-            )),
-            "{shown}"
-        );
-    }
+    assert_eq!(standin.started().len(), 2, "one call starts one child");
 }
 
 /// A child that exits other than 0 is a failed call that names the first two arguments, the exit code
@@ -235,15 +218,7 @@ fn a_child_that_exits_other_than_0_is_a_failed_call_with_its_code() {
         &call(&argv, true, Duration::from_secs(5), &env),
     ));
     assert_eq!(message, "ec2 describe-instances exited -9: dying");
-    let env = standin.env("invalid");
-    let message = failed(launch(
-        &mut record,
-        &call(&IDENTITY, true, Duration::from_secs(5), &env),
-    ));
-    assert!(
-        message.starts_with("sts get-caller-identity gave no answer: "),
-        "{message}"
-    );
+    assert_eq!(standin.started().len(), 2, "one call starts one child");
 }
 
 /// A child past its cut gets SIGKILL and is reaped before the call returns a failed call, within a
@@ -255,22 +230,24 @@ fn a_child_past_its_cut_is_killed_and_reaped() {
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
     let env = standin.env("hang");
-    let cut = Duration::from_millis(700);
+    let cut = Duration::from_millis(1100);
     let start = Instant::now();
     let message = failed(launch(&mut record, &call(&IDENTITY, true, cut, &env)));
     let elapsed = start.elapsed();
-    assert!(
-        message.starts_with("sts get-caller-identity gave no answer: "),
-        "{message}"
+    assert_eq!(
+        message,
+        "sts get-caller-identity gave no answer: timed out after 1.1s"
     );
     assert!(
-        elapsed >= cut && elapsed < cut + SLICE + Duration::from_secs(1),
+        elapsed >= cut && elapsed < Duration::from_secs(2),
         "{elapsed:?}"
     );
-    let pid = standin
-        .started()
-        .expect("the stand-in started within its cut");
-    assert!(gone(&pid), "the child {pid} is killed and reaped");
+    let pids = standin.started();
+    assert_eq!(pids.len(), 1, "one call starts one child");
+    assert!(
+        pids.iter().all(|&pid| gone(pid)),
+        "{pids:?} are killed and reaped"
+    );
 }
 
 /// The cut counts until both output pipes close: a child that exits while a process it started holds
@@ -281,17 +258,18 @@ fn a_child_whose_output_stays_open_is_cut() {
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
     let env = standin.env("orphan");
-    let cut = Duration::from_millis(600);
+    let cut = Duration::from_millis(1100);
     let start = Instant::now();
     let message = failed(launch(&mut record, &call(&IDENTITY, true, cut, &env)));
-    assert!(
-        message.starts_with("sts get-caller-identity gave no answer: "),
-        "{message}"
+    let elapsed = start.elapsed();
+    assert_eq!(
+        message,
+        "sts get-caller-identity gave no answer: timed out after 1.1s"
     );
-    assert!(start.elapsed() >= cut, "the call waits to its cut");
+    assert!(elapsed >= cut, "the call waits to its cut");
     assert!(
-        start.elapsed() < Duration::from_secs(3),
-        "the call ends at its cut, not at the output's close"
+        elapsed < Duration::from_secs(2),
+        "the call ends at its cut, not at the output's close: {elapsed:?}"
     );
 }
 
@@ -304,29 +282,28 @@ fn a_signal_that_may_raise_ends_the_wait() {
     let mut record = Record::new(&delivered);
     record.arm();
     let env = standin.env("hang");
-    let (ended, after) = thread::scope(|scope| {
+    let (ended, after, pid) = thread::scope(|scope| {
         let signaled = scope.spawn(|| {
-            wait_for(&standin.pid);
+            let pid = first_start(&standin.pid);
+            let at = Instant::now();
             delivered.deliver(Signal::Terminate);
-            Instant::now()
+            (at, pid)
         });
         let ended = launch(
             &mut record,
             &call(&IDENTITY, true, Duration::from_secs(60), &env),
         );
         let returned = Instant::now();
-        (
-            ended,
-            returned.saturating_duration_since(signaled.join().expect("the thread ends")),
-        )
+        let (at, pid) = signaled.join().expect("the thread ends");
+        (ended, returned - at, pid)
     });
     assert_eq!(
         ended,
         Err(Ended::Interrupted(Interrupted(Signal::Terminate)))
     );
     assert!(after < SLICE + Duration::from_secs(1), "{after:?}");
-    let pid = standin.started().expect("the stand-in started");
-    assert!(gone(&pid), "the child {pid} is killed and reaped");
+    assert!(gone(pid), "the child {pid} is killed and reaped");
+    assert_eq!(standin.started(), [pid], "one call starts one child");
     assert!(!record.is_armed());
     assert_eq!(record.pending(), None);
 }
@@ -346,6 +323,7 @@ fn a_signal_before_the_call_starts_no_process_and_an_unarmed_one_waits() {
     );
     assert!(reply.is_ok(), "{reply:?}");
     assert_eq!(record.pending(), Some(Signal::Hangup));
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
     fs::remove_file(&standin.pid).expect("the stand-in ran");
     record.arm();
     let ended = launch(
@@ -370,6 +348,8 @@ fn no_aws_on_the_path_starts_no_process() {
         .expect("the mode is set");
     let named = standin.scratch.dir("named");
     fs::create_dir(named.join(AWS)).expect("a directory named aws");
+    let linked = standin.scratch.dir("linked");
+    symlink(standin.bin.join(AWS), linked.join(AWS)).expect("the link is made");
     let joined = |dirs: &[&Path]| {
         OsString::from(
             dirs.iter()
@@ -378,49 +358,116 @@ fn no_aws_on_the_path_starts_no_process() {
                 .join(":"),
         )
     };
-    for path in [
-        Some(joined(&[&empty])),
-        Some(joined(&[&plain, &named])),
-        None,
-    ] {
+    let with_path = |paths: &[OsString]| {
         let mut env = standin.env("echo");
         env.retain(|(name, _)| name != "PATH");
-        env.extend(path.clone().map(|path| (OsString::from("PATH"), path)));
+        env.extend(
+            paths
+                .iter()
+                .map(|path| (OsString::from("PATH"), path.clone())),
+        );
+        env
+    };
+    for paths in [
+        vec![joined(&[&empty])],
+        vec![joined(&[&plain, &named])],
+        vec![],
+        vec![joined(&[&empty]), joined(&[&standin.bin])],
+    ] {
+        let env = with_path(&paths);
         let message = failed(launch(
             &mut record,
             &call(&IDENTITY, true, Duration::from_secs(5), &env),
         ));
-        assert!(
-            message.starts_with("sts get-caller-identity gave no answer: "),
-            "{path:?}: {message}"
+        assert_eq!(
+            message,
+            "sts get-caller-identity gave no answer: no directory of PATH holds an executable aws",
+            "{paths:?}"
         );
-        assert!(standin.started().is_none(), "{path:?}: no process started");
+        assert!(
+            standin.started().is_empty(),
+            "{paths:?}: no process started"
+        );
     }
+    for paths in [
+        vec![joined(&[&standin.bin]), joined(&[&empty])],
+        vec![joined(&[&empty, &plain, &named, &standin.bin])],
+        vec![joined(&[&linked])],
+    ] {
+        let env = with_path(&paths);
+        let reply = launch(
+            &mut record,
+            &call(&IDENTITY, true, Duration::from_secs(5), &env),
+        );
+        assert!(reply.is_ok(), "{paths:?}: {reply:?}");
+    }
+    assert_eq!(standin.started().len(), 3, "one call starts one child");
+}
+
+#[test]
+fn an_aws_the_kernel_refuses_is_a_failed_start() {
+    let standin = Standin::new("launch-exec");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    for (dir, text, reason) in [
+        (
+            "format",
+            "echo $$ >> \"$HOST_STOP_PID\"\n",
+            "Exec format error (os error 8)",
+        ),
+        (
+            "interpreter",
+            "#!/nonexistent/sh\necho $$ >> \"$HOST_STOP_PID\"\n",
+            "No such file or directory (os error 2)",
+        ),
+    ] {
+        let bin = standin.scratch.dir(dir);
+        executable(&bin.join(AWS), text);
+        let mut env = standin.env("echo");
+        env.retain(|(name, _)| name != "PATH");
+        env.push((OsString::from("PATH"), bin.into_os_string()));
+        let message = failed(launch(
+            &mut record,
+            &call(&IDENTITY, true, Duration::from_secs(5), &env),
+        ));
+        assert_eq!(
+            message,
+            format!("sts get-caller-identity gave no answer: {reason}"),
+            "{dir}"
+        );
+    }
+    assert!(standin.started().is_empty(), "no process started");
+}
+
+#[test]
+fn the_first_entry_of_a_name_counts_and_a_name_with_equals_is_refused() {
+    let standin = Standin::new("launch-names");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
     let mut env = standin.env("echo");
-    env.retain(|(name, _)| name != "PATH");
-    env.push((OsString::from("PATH"), joined(&[&empty])));
-    env.push((OsString::from("PATH"), joined(&[&standin.bin])));
+    env.push((OsString::from("HOME"), OsString::from("/first")));
+    env.push((OsString::from("HOME"), OsString::from("/second")));
+    env.push((OsString::from("HOST_STOP_MODE"), OsString::from("fail")));
     let reply = launch(
         &mut record,
         &call(&IDENTITY, true, Duration::from_secs(5), &env),
-    );
-    assert!(
-        reply.is_ok(),
-        "the last PATH of the environment is searched: {reply:?}"
-    );
+    )
+    .expect("the stand-in answers in the first mode given");
+    assert!(reply.contains("|/first|"), "{reply}");
     let mut env = standin.env("echo");
-    env.retain(|(name, _)| name != "PATH");
-    env.push((
-        OsString::from("PATH"),
-        joined(&[&empty, &plain, &named, &standin.bin]),
+    env.push((OsString::from("A=B"), OsString::from("c")));
+    let message = failed(launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(5), &env),
     ));
-    let reply = launch(
-        &mut record,
-        &call(&IDENTITY, true, Duration::from_secs(5), &env),
+    assert_eq!(
+        message,
+        "sts get-caller-identity gave no answer: illegal environment variable name"
     );
-    assert!(
-        reply.is_ok(),
-        "the first executable aws on the PATH runs: {reply:?}"
+    assert_eq!(
+        standin.started().len(),
+        1,
+        "the refused call starts nothing"
     );
 }
 
@@ -463,7 +510,7 @@ fn either_output_other_than_utf8_gives_no_answer_whatever_the_code() {
     let standin = Standin::new("launch-utf8");
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
-    for mode in ["invalid-error", "invalid-failed"] {
+    for mode in ["invalid", "invalid-error", "invalid-failed"] {
         let env = standin.env(mode);
         let message = failed(launch(
             &mut record,
@@ -552,7 +599,7 @@ fn a_signal_before_the_child_ends_raises_in_place_of_its_answer() {
     let env = standin.env("gate");
     let ended = thread::scope(|scope| {
         scope.spawn(|| {
-            wait_for(&standin.pid);
+            first_start(&standin.pid);
             delivered.deliver(Signal::Terminate);
             fs::write(standin.pid.with_extension("go"), b"").expect("the gate opens");
         });

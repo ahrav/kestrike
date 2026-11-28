@@ -13,25 +13,32 @@ pub struct Lock {
     _held: File,
 }
 
-/// Why [`lock`] holds no lock: the directory's open failed, or another holder has the lock.
+/// `Open` carries the directory-open error; `Taken` carries the nonblocking `flock` error, whose
+/// `EWOULDBLOCK` means another holder has the lock.
 #[derive(Debug)]
 pub enum LockError {
     Open(io::Error),
     Taken(io::Error),
 }
 
-/// Opens `directory` without following a link and takes its exclusive lock at once, so two runs,
-/// restores or seals of one evidence directory exclude each other. The lock adds no file.
+/// `lock` rejects a symlink at `directory` and attempts a nonblocking exclusive `flock` on the opened
+/// directory. Runs, restores and seals for the same evidence directory exclude each other by locking
+/// the directory itself. A `flock` that a signal interrupts runs again.
 ///
 /// # Errors
 ///
-/// [`LockError::Open`] when the open fails, [`LockError::Taken`] with the system's error when the lock
-/// is held elsewhere.
+/// [`LockError::Open`] when the open fails, [`LockError::Taken`] with the error of the `flock`,
+/// `EWOULDBLOCK` when the lock is held elsewhere.
 pub fn lock(files: &impl Files, directory: &Path) -> Result<Lock, LockError> {
     let held = files
         .open_directory(directory, Links::Refuse)
         .map_err(LockError::Open)?;
-    files.try_lock(&held).map_err(LockError::Taken)?;
+    loop {
+        match files.try_lock(&held) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            taken => break taken.map_err(LockError::Taken)?,
+        }
+    }
     Ok(Lock { _held: held })
 }
 

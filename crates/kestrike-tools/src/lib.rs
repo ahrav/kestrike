@@ -12,6 +12,7 @@ pub mod fixtures;
 pub mod gameday;
 pub mod genmc;
 pub mod git;
+#[cfg(target_os = "linux")]
 pub mod host_stop;
 pub mod json;
 pub mod orderings;
