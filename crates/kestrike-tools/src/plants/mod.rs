@@ -25,8 +25,12 @@
 //! bytes, its lines and the exit code. These functions read the three files a judgment reads
 //! (`suspects.jsonl`, `confirm.err` and a profile's manifest) and take every other input as a value;
 //! each child a judgment needs, it asks of its caller.
+//!
+//! [`Run`] holds a run's worktrees, the proof's state and the base archive, and starts each child by
+//! [`logged`] or by the Git call that reads the signal record.
 
 mod campaign;
+mod child;
 mod entry;
 mod files;
 pub mod git;
@@ -37,6 +41,7 @@ mod output;
 mod prepare;
 mod record;
 mod rerun;
+mod run;
 pub mod score;
 mod seed;
 mod status;
@@ -47,6 +52,7 @@ pub(crate) mod values;
 mod verdict;
 mod work;
 
+pub use child::{GitFailed, Halt, Logged, Step, logged};
 pub use entry::{Entry, Finished};
 pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
@@ -54,6 +60,7 @@ pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
+pub use run::{Remained, Run, remove};
 pub use seed::Manifest;
 pub use status::{Runs, profile_runs};
 pub use store::{SCORE, STORE};

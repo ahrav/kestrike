@@ -11,6 +11,9 @@
 //! directory. The child is given the first variable of each name, the one [`crate::environ::get`] reads,
 //! and a name holding `=` after its first byte stops the call before Git starts. Git inherits every
 //! descriptor of this process that is open without close-on-exec, beside the three streams.
+//!
+//! [`text_until`] is the text call that reads a signal record: a signal recorded before Git ends kills
+//! Git with SIGKILL, waits up to ten seconds for it and returns [`CallError::Interrupted`].
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -22,6 +25,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::environ::Environ;
 use crate::git::fed;
+use crate::process::{Interrupt, Interrupted, captured};
 use crate::text::{Text, newlines};
 
 /// The options every call passes before `-C DIR`.
@@ -60,6 +64,8 @@ pub enum CallError {
     NotUtf8 { step: Text },
     /// A checked call that exited with a code other than 0; `stderr` is its error output.
     Failed { step: Text, code: i32, stderr: Text },
+    /// A signal recorded before Git ended; Git was killed.
+    Interrupted(Interrupted),
 }
 
 impl fmt::Display for CallError {
@@ -69,6 +75,7 @@ impl fmt::Display for CallError {
             Self::Io { step, error } => write!(f, "`git {step}`: {error}"),
             Self::NotUtf8 { step } => write!(f, "`git {step}` wrote output that is no UTF-8"),
             Self::Failed { step, code, .. } => write!(f, "`git {step}` exited {code}"),
+            Self::Interrupted(Interrupted(signal)) => write!(f, "interrupted by signal {signal}"),
         }
     }
 }
@@ -155,6 +162,11 @@ pub fn text(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Done<String>, 
         Ok(output) => output,
         Err(error) => return Err(CallError::Io { step, error }),
     };
+    decoded(step, output)
+}
+
+/// `decoded` reads a finished text call's streams.
+fn decoded(step: Text, output: std::process::Output) -> Result<Done<String>, CallError> {
     let decode = |bytes: Vec<u8>| String::from_utf8(bytes).map(newlines);
     let (Ok(stdout), Ok(stderr)) = (decode(output.stdout), decode(output.stderr)) else {
         return Err(CallError::NotUtf8 { step });
@@ -165,6 +177,28 @@ pub fn text(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Done<String>, 
         stdout,
         stderr,
     })
+}
+
+/// `text_until` runs `git FIXED -C dir ARGS` as [`text`] does, reading `interrupt` while Git runs.
+///
+/// # Errors
+///
+/// As [`text`], and [`CallError::Interrupted`] for a signal recorded before Git ended.
+pub fn text_until(
+    env: &Environ,
+    dir: &Path,
+    args: &[&OsStr],
+    interrupt: &Interrupt,
+) -> Result<Done<String>, CallError> {
+    let child = command(env, dir, args)?
+        .stdin(Stdio::inherit())
+        .spawn()
+        .map_err(CallError::Start)?;
+    let step = step(args);
+    match captured(child, interrupt).map_err(CallError::Interrupted)? {
+        Ok(output) => decoded(step, output),
+        Err(error) => Err(CallError::Io { step, error }),
+    }
 }
 
 /// `bytes` runs `git FIXED -C dir ARGS` in `env`, writes `input` to its standard input and returns its
