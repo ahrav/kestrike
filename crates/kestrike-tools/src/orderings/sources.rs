@@ -41,9 +41,9 @@ use regex::Regex;
 
 use super::sites::{MACRO, call_end, line_of, opener};
 use crate::classes::{SPACE, WORD, bounded_iter, captures_bounded, compiled, is_word};
-use crate::genmc::{INCLUDED, is_file, no_nul, package_sources, read_text, under_target, walk};
+use crate::genmc::{INCLUDED, is_file, no_nul, read_text, under_target, walk};
 use crate::json::{Text, Value};
-use crate::paths::{normalize, resolve};
+use crate::paths::{joined, name, normalize, parent, parts, pure, resolve};
 use crate::production_text::blanked;
 use crate::rust_text::{Lexeme, back, blank, code, lexemes};
 use crate::text::is_space;
@@ -57,6 +57,10 @@ const SCOPE_FILE: &str = "scope file";
 /// A reader of repository paths: the text at a path relative to the checkout's top, or the error of
 /// reading it, [`io::ErrorKind::NotFound`] for a file that does not exist.
 pub type Reader<'r> = &'r dyn Fn(&str) -> io::Result<String>;
+
+/// A walk of the kernel package: the sources at a package's path, as
+/// [`package_sources`](crate::genmc::package_sources) lists them, or the error that stops the walk.
+pub type PackageWalk<'w> = &'w dyn Fn(&Path) -> io::Result<Vec<PathBuf>>;
 
 /// One refusal of the catalog's check, a `scope file` refusal with its sentence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,62 +84,6 @@ impl Refusal {
     }
 }
 
-/// The root of `path`: `//` when exactly two slashes lead it, `/` for one or three or more, else none.
-fn root(path: &str) -> &'static str {
-    if path.starts_with("//") && !path.starts_with("///") {
-        "//"
-    } else if path.starts_with('/') {
-        "/"
-    } else {
-        ""
-    }
-}
-
-/// The root of a repository path's text and its other components, with empty and `.` components
-/// dropped.
-fn parts(path: &str) -> (&str, Vec<&str>) {
-    let root = root(path);
-    let names = path
-        .split('/')
-        .filter(|name| !name.is_empty() && *name != ".")
-        .collect();
-    (root, names)
-}
-
-fn assembled(root: &str, names: &[&str]) -> String {
-    if names.is_empty() && root.is_empty() {
-        ".".to_owned()
-    } else {
-        format!("{root}{}", names.join("/"))
-    }
-}
-
-/// The text of `path` with empty and `.` components dropped, `..` kept.
-fn pure(path: &str) -> String {
-    let (root, names) = parts(path);
-    assembled(root, &names)
-}
-
-/// `name` joined to `base`; an absolute `name` replaces `base`.
-fn joined(base: &str, name: &str) -> String {
-    if name.starts_with('/') {
-        return pure(name);
-    }
-    let (root, mut names) = parts(base);
-    names.extend(parts(name).1);
-    assembled(root, &names)
-}
-
-fn parent(path: &str) -> String {
-    let (root, mut names) = parts(path);
-    names.pop();
-    assembled(root, &names)
-}
-
-fn name(path: &str) -> &str {
-    parts(path).1.last().copied().unwrap_or("")
-}
-
 /// The suffix of `path`'s name: from its last `.`, unless that `.` leads or ends the name.
 fn name_suffix(path: &str) -> &str {
     let name = name(path);
@@ -145,7 +93,7 @@ fn name_suffix(path: &str) -> &str {
     }
 }
 
-fn stem(path: &str) -> &str {
+pub(super) fn stem(path: &str) -> &str {
     let name = name(path);
     &name[..name.len() - name_suffix(path).len()]
 }
@@ -212,7 +160,7 @@ static INLINE: LazyLock<Regex> =
 static BARE: LazyLock<Regex> =
     LazyLock::new(|| compiled(&format!(r"mod{SPACE}+(?:r#)?({WORD}+){SPACE}*;")));
 
-static INCLUDE: LazyLock<Regex> = LazyLock::new(|| compiled("include"));
+pub(super) static INCLUDE: LazyLock<Regex> = LazyLock::new(|| compiled("include"));
 
 /// An assertion, a panic or an `expect` named at the end of a window before its bracket.
 static DIAGNOSTIC: LazyLock<Regex> = LazyLock::new(|| {
@@ -233,7 +181,7 @@ const WINDOW: usize = 40;
 /// last: `#[path` or `#![path` with no word character after `path`, or `#[cfg_attr(` with a `path` that
 /// no word character precedes, then white space and `=`, before the first `]`. A `cfg_attr` match ends
 /// at the `=` after the last such `path`.
-fn path_attributes(text: &str) -> Vec<(usize, usize)> {
+pub(super) fn path_attributes(text: &str) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
     let mut at = 0;
     while let Some(offset) = text[at..].find('#') {
@@ -284,12 +232,12 @@ fn cfg_path(text: &str, from: usize) -> Option<usize> {
         .last()
 }
 
-/// The offset of the first `mod` keyword of `text` that neither `#` nor a word character precedes and no
-/// word character follows.
-fn mod_keyword(text: &str) -> Option<usize> {
+/// The offsets of the `mod` keywords of `text` that neither `#` nor a word character precedes and no
+/// word character follows, in order.
+pub(super) fn mod_keywords(text: &str) -> impl Iterator<Item = usize> {
     text.match_indices("mod")
         .map(|(offset, _)| offset)
-        .find(|&offset| {
+        .filter(move |&offset| {
             let before = text[..offset].chars().next_back();
             let after = text[offset + 3..].chars().next();
             !before.is_some_and(|c| c == '#' || is_word(c)) && !after.is_some_and(is_word)
@@ -339,7 +287,7 @@ fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
         let whole = head.get_match();
         let end = call_end(&view, whole.end() - 1);
         let tokens = &view[whole.end()..end];
-        if mod_keyword(tokens).is_some() || !path_attributes(tokens).is_empty() {
+        if mod_keywords(tokens).next().is_some() || !path_attributes(tokens).is_empty() {
             found.refusals.push(Refusal::scope(format!(
                 "{module}:{}: a module declaration inside a macro's tokens, which the scope rule \
                  cannot read",
@@ -955,21 +903,22 @@ impl Classifier<'_> {
     }
 }
 
-/// The files outside the kernel package at `package` that it includes by `#[path]`, as [`package_sources`]
+/// The files outside the kernel package at `package` that it includes by `#[path]`, as `package_walk`
 /// lists them, classified by the declarations that load each one, relative to the checkout `root`.
 ///
-/// The package is walked on disk under `root`. The path holders are the crate sources under `tree`
-/// whose text holds a path attribute; each holder and each module file is read through `read`. A source
-/// of the package that resolves inside it is passed over, one outside `root` is refused, and each other
-/// is production, excluded, refused as declared only by a path attribute elsewhere, refused as declared
-/// by no module file. A module file of its directory that cannot be read is refused by name, and the
-/// file takes the standing its other declarations give it, in neither list when they give none. A crate
-/// source that cannot be read from `tree`, or a holder `read` fails on, holds no path attribute.
+/// `package_walk` lists the sources that the scope rule classifies. The path holders are the crate
+/// sources under `tree` whose text holds a path attribute; each holder and each module file is read
+/// through `read`. A source of the package that resolves inside it is passed over, one outside
+/// `root` is refused, and each other is production, excluded, refused as declared only by a path
+/// attribute elsewhere, refused as declared by no module file. A module file of its directory that
+/// cannot be read is refused by name, and the file takes the standing its other declarations give
+/// it, in neither list when they give none. A crate source that cannot be read from `tree`, or a
+/// holder `read` fails on, holds no path attribute.
 ///
 /// # Errors
 ///
-/// `scope_files` returns an error of [`package_sources`], of the walk of the crate's sources, of [`resolve`] for a
-/// source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
+/// `scope_files` returns an error of `package_walk`, of the walk of the crate's sources, of [`resolve`]
+/// for a source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
 /// UTF-8, and an error for an included file at the top of the checkout whose standing depends on a
 /// sibling named after the top's own empty name.
 pub fn scope_files(
@@ -977,6 +926,7 @@ pub fn scope_files(
     root: &Path,
     read: Reader<'_>,
     tree: &Path,
+    package_walk: PackageWalk<'_>,
 ) -> io::Result<Scope> {
     let mut classifier = Classifier {
         read,
@@ -995,7 +945,7 @@ pub fn scope_files(
             classifier.holders.push(holder);
         }
     }
-    for path in package_sources(package)? {
+    for path in package_walk(package)? {
         let resolved = resolve(&path)?;
         if resolved.starts_with(resolve(package)?) {
             continue;
@@ -1262,4 +1212,4 @@ pub fn references(
 
 #[cfg(test)]
 #[path = "sources_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -1,11 +1,12 @@
-//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`] and
-//! [`indented_in_order`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits, which adds, steps
-//! down by one and sums without passing that bound.
+//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`],
+//! [`indented_in_order`] and [`indented_by`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits,
+//! which adds, steps down by one and sums without passing that bound.
 //!
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
-//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
+//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead, and
+//! [`parse_members`] keeps every member of an object, a repeated key's included.
 //! The strict read also refuses the three constants and a fractional number whose decimal value is not
 //! the shortest form of a finite double, so each float it reads stands for the decimal the text spells.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
@@ -15,6 +16,7 @@
 //! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::decimal::{nearest_double, spells_shortest};
@@ -26,6 +28,9 @@ pub const MAX_DEPTH: usize = 1000;
 
 /// The most decimal digits an integer token of [`parse`] and an [`Integer`] hold.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
+
+/// The reason of the error for nesting past [`MAX_DEPTH`].
+pub const DEPTH_REASON: &str = "nesting deeper than the reader takes";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -152,7 +157,6 @@ fn subtract_digits(left: &str, right: &str) -> String {
     String::from_utf8(difference).expect("digits are ASCII")
 }
 
-#[cfg(target_os = "linux")]
 impl crate::text::Piece for Integer {
     fn push_to(&self, text: &mut Text) {
         text.push_str(&self.to_string());
@@ -299,24 +303,26 @@ pub fn parse(text: &str) -> Result<Value, Error> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
-            StrictError::Repeated(_) | StrictError::Number(_) => {
+            StrictError::Repeated(..) | StrictError::Number(_) => {
                 unreachable!("a read that keeps repeated keys and every number refuses neither")
             }
         })
 }
 
-/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`.
+/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`,
+/// with that object's keys in the order the text spells them, each repeat included, as runs of one key
+/// and the count of its spellings in a row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UniqueError {
     Syntax(Error),
-    Repeated(Text),
+    Repeated(Text, Vec<(Text, usize)>),
 }
 
 impl fmt::Display for UniqueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(name) => write!(f, "repeated member {name}"),
+            Self::Repeated(name, _) => write!(f, "repeated member {name}"),
         }
     }
 }
@@ -340,7 +346,7 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => UniqueError::Syntax(error),
-            StrictError::Repeated(name) => UniqueError::Repeated(name),
+            StrictError::Repeated(name, keys) => UniqueError::Repeated(name, keys),
             StrictError::Number(_) => unreachable!("a read that keeps every number refuses none"),
         })
 }
@@ -358,11 +364,12 @@ pub(crate) enum Unnumber {
 }
 
 /// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, or a
-/// number strict JSON refuses.
+/// number strict JSON refuses. A repeat of the unique read carries the repeating object's keys as
+/// [`UniqueError::Repeated`] holds them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StrictError {
     Syntax(Error),
-    Repeated(Text),
+    Repeated(Text, Vec<(Text, usize)>),
     Number(Unnumber),
 }
 
@@ -373,7 +380,7 @@ impl fmt::Display for StrictError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(_) => f.write_str("an object repeats a key"),
+            Self::Repeated(..) => f.write_str("an object repeats a key"),
             Self::Number(Unnumber::Constant(token)) => {
                 write!(f, "the constant {token} is no number")
             }
@@ -407,6 +414,32 @@ pub(crate) fn parse_strict(text: &str) -> Result<Value, StrictError> {
     Reader::new(text, Mode::Strict).document()
 }
 
+/// `parse_members` reads what [`parse`] reads and returns each object as an array of its keys and values in
+/// document order, `[key, value, key, value, ...]`, so each member of a repeated key stands in it. An
+/// object and an array of the same items read alike in the result.
+///
+/// # Errors
+///
+/// `parse_members` refuses what [`parse`] refuses.
+pub fn parse_members(text: &str) -> Result<Value, Error> {
+    Reader::new(text, Mode::Members)
+        .document()
+        .map_err(|error| match error {
+            StrictError::Syntax(error) => error,
+            StrictError::Repeated(..) | StrictError::Number(_) => {
+                unreachable!("a read that keeps every member and every number refuses neither")
+            }
+        })
+}
+
+/// Counts `key` in `runs`, runs of one key and the count of its spellings in a row.
+fn tally(runs: &mut Vec<(Text, usize)>, key: Text) {
+    match runs.last_mut() {
+        Some((last, count)) if *last == key => *count += 1,
+        _ => runs.push((key, 1)),
+    }
+}
+
 struct Reader<'a> {
     text: &'a [u8],
     at: usize,
@@ -422,6 +455,8 @@ enum Mode {
     Unique,
     /// A repeated key, and a number the strict read refuses.
     Strict,
+    /// Nothing more, and an object reads as the array of its keys and values, a repeated key's included.
+    Members,
 }
 
 impl<'a> Reader<'a> {
@@ -502,7 +537,7 @@ impl<'a> Reader<'a> {
 
     fn nest(&mut self, depth: usize) -> Result<(), StrictError> {
         if depth > MAX_DEPTH {
-            return Err(self.error("nesting deeper than the reader takes"));
+            return Err(self.error(DEPTH_REASON));
         }
         self.at += 1;
         self.space();
@@ -528,11 +563,14 @@ impl<'a> Reader<'a> {
     fn object(&mut self, depth: usize) -> Result<Value, StrictError> {
         self.nest(depth)?;
         let mut object = Object::new();
+        let mut members = Vec::new();
         if self.peek() == Some(b'}') {
             self.at += 1;
-            return Ok(Value::Object(object));
+            return Ok(self.closed(object, members));
         }
         let mut repeated = None;
+        let mut keys = HashSet::new();
+        let mut later = Vec::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -545,20 +583,45 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.mode != Mode::Keep
-                && repeated.is_none()
-                && object.iter().any(|(name, _)| *name == key)
-            {
-                repeated = Some(key.clone());
+            if self.mode == Mode::Members {
+                members.extend([Value::String(key), value]);
+            } else if self.mode == Mode::Keep {
+                object.insert(key, value);
+            } else if repeated.is_none() {
+                // The parser defers the first duplicate-key error until the object closes. The strict
+                // read drops the members after it; the unique read drops their values and tallies
+                // their keys for the refusal.
+                if keys.insert(key.clone()) {
+                    object.0.push((key, value));
+                } else {
+                    if self.mode == Mode::Unique {
+                        for (key, _) in object.0.drain(..) {
+                            tally(&mut later, key);
+                        }
+                        tally(&mut later, key.clone());
+                    }
+                    repeated = Some(key);
+                }
+            } else if self.mode == Mode::Unique {
+                tally(&mut later, key);
             }
-            object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
-                    return Err(StrictError::Repeated(name));
+                    return Err(StrictError::Repeated(name, later));
                 }
-                return Ok(Value::Object(object));
+                return Ok(self.closed(object, members));
             }
+        }
+    }
+
+    /// `closed` is the value of a read object: the array of its keys and values when the read keeps every
+    /// member, else the object.
+    fn closed(&self, object: Object, members: Vec<Value>) -> Value {
+        if self.mode == Mode::Members {
+            Value::Array(members)
+        } else {
+            Value::Object(object)
         }
     }
 
@@ -771,7 +834,32 @@ fn written(value: &Value, layout: Layout) -> String {
     out
 }
 
-/// A float [`indented`] refuses: `NaN`, `Infinity` or `-Infinity`.
+/// `indented_by` uses the layout of [`indented`] with `width` spaces per level, as Python's
+/// `json.dumps(value, indent=width, sort_keys=True)` writes it.
+///
+/// The indented layout starts each member and item on a line of its own with two spaces per level of
+/// depth, and a string writes each line break as an escape, so every line's leading spaces count its
+/// depth twice.
+///
+/// # Errors
+///
+/// `indented_by` refuses a non-finite float.
+pub fn indented_by(value: &Value, width: u8) -> Result<String, NonFinite> {
+    let two = indented(value)?;
+    let mut out = String::with_capacity(two.len());
+    for (at, line) in two.split('\n').enumerate() {
+        if at > 0 {
+            out.push('\n');
+        }
+        let body = line.trim_start_matches(' ');
+        let depth = (line.len() - body.len()) / 2;
+        out.push_str(&" ".repeat(depth * usize::from(width)));
+        out.push_str(body);
+    }
+    Ok(out)
+}
+
+/// A float [`indented`] and [`indented_by`] refuse: `NaN`, `Infinity` or `-Infinity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonFinite(f64);
 

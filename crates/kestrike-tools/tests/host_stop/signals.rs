@@ -1,0 +1,282 @@
+//! The installed handlers, in a process of their own: a real SIGTERM reaches the record, and a signal
+//! ignored at the start gets no handler and stays ignored, also for the `aws` child.
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use kestrike_tools::host_stop::{
+    Call, DELIVERED, Ended, Interrupted, Record, Signal, install, launch,
+};
+
+use super::launch::Standin;
+use super::{MARKER_LIMIT, PLACE, ROLE, passed, start_window, start_window_with};
+
+const CASE: &str =
+    "host_stop::signals::a_real_sigterm_reaches_the_record_and_an_ignored_hangup_stays_ignored";
+
+/// The mask of a `Sig...:` line of a `/proc/<pid>/status` text.
+fn mask(status: &str, field: &str) -> u64 {
+    let line = status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .unwrap_or_else(|| panic!("the status holds {field}"));
+    u64::from_str_radix(line.trim(), 16).expect("a hexadecimal mask")
+}
+
+#[test]
+fn the_signals_are_the_system_numbers_under_their_names() {
+    for (signal, number, name) in [
+        (Signal::Interrupt, libc::SIGINT, "SIGINT"),
+        (Signal::Terminate, libc::SIGTERM, "SIGTERM"),
+        (Signal::Hangup, libc::SIGHUP, "SIGHUP"),
+    ] {
+        assert_eq!((signal.number(), signal.name()), (number, name));
+        assert_eq!(
+            kestrike_tools::host_stop::Interrupted(signal).to_string(),
+            name
+        );
+    }
+    assert_eq!(
+        Signal::ALL,
+        [Signal::Interrupt, Signal::Terminate, Signal::Hangup]
+    );
+}
+
+fn bit(signal: Signal) -> u64 {
+    1 << (signal.number() - 1)
+}
+
+/// `signal_self` sends `signal` to this process through a `kill` the shell runs.
+fn signal_self(name: &str) {
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "kill -s \"$1\" \"$2\"",
+            "sh",
+            name,
+            &std::process::id().to_string(),
+        ])
+        .env_clear()
+        .status()
+        .expect("the shell starts");
+    assert!(status.success());
+}
+
+/// `installed` runs in a process started with SIGHUP ignored: it installs the handlers, checks the
+/// dispositions, sends itself SIGHUP and SIGTERM, and starts the stand-in to read the child's own.
+fn installed(place: &Path) {
+    let own = || fs::read_to_string("/proc/self/status").expect("the status reads");
+    assert_ne!(
+        mask(&own(), "SigIgn:") & bit(Signal::Hangup),
+        0,
+        "the window starts with SIGHUP ignored"
+    );
+    let thread = || fs::read_to_string("/proc/thread-self/status").expect("the status reads");
+    let blocked = mask(&thread(), "SigBlk:");
+    install(&DELIVERED).expect("the handlers install");
+    assert_eq!(
+        mask(&thread(), "SigBlk:"),
+        blocked,
+        "the registrations leave the thread's mask as they found it"
+    );
+    let status = own();
+    let (caught, ignored) = (mask(&status, "SigCgt:"), mask(&status, "SigIgn:"));
+    assert_ne!(caught & bit(Signal::Interrupt), 0);
+    assert_ne!(caught & bit(Signal::Terminate), 0);
+    assert_eq!(
+        caught & bit(Signal::Hangup),
+        0,
+        "an ignored signal gets no handler"
+    );
+    assert_ne!(ignored & bit(Signal::Hangup), 0, "and stays ignored");
+    signal_self("HUP");
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        DELIVERED.stored(),
+        None,
+        "an ignored SIGHUP reaches nothing"
+    );
+    signal_self("TERM");
+    let start = Instant::now();
+    while DELIVERED.stored().is_none() && start.elapsed() < MARKER_LIMIT {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        DELIVERED.stored(),
+        Some(Signal::Terminate),
+        "a real SIGTERM reaches the record"
+    );
+    let standin = Standin::new("signals-child");
+    let env = standin.env("status");
+    let mut record = Record::new(&DELIVERED);
+    let argv = ["sts", "get-caller-identity"];
+    let call = Call {
+        argv: &argv,
+        retry: true,
+        cut: Duration::from_secs(10),
+        env: &env,
+    };
+    let child =
+        launch(&mut record, &call).expect("an unarmed record leaves the call to its answer");
+    let ignored = mask(&child, "SigIgn:");
+    assert_ne!(
+        ignored & bit(Signal::Hangup),
+        0,
+        "the child keeps SIGHUP ignored"
+    );
+    assert_eq!(
+        ignored & (bit(Signal::Interrupt) | bit(Signal::Terminate)),
+        0
+    );
+    fs::write(place.join("done"), b"").expect("the window records its end");
+}
+
+/// In a process of its own started with SIGHUP ignored, the handlers catch SIGINT and SIGTERM and leave
+/// SIGHUP ignored; a SIGTERM the process sends itself stands in the record, and the `aws` child starts
+/// with SIGHUP ignored and SIGINT and SIGTERM not ignored.
+#[test]
+fn a_real_sigterm_reaches_the_record_and_an_ignored_hangup_stays_ignored() {
+    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        installed(Path::new(&place));
+        return;
+    }
+    let scratch = super::Scratch::new("signals");
+    let output = start_window(CASE, "install", &scratch.0, "trap '' HUP;")
+        .output()
+        .expect("the window starts");
+    passed("install", &output);
+    assert!(scratch.0.join("done").exists(), "the window ran its checks");
+}
+
+const EACH_CASE: &str =
+    "host_stop::signals::each_handled_signal_reaches_the_record_and_a_blocked_one_waits_for_it";
+
+fn stored_within(limit: Duration) -> Option<Signal> {
+    let start = Instant::now();
+    while DELIVERED.stored().is_none() && start.elapsed() < limit {
+        thread::sleep(Duration::from_millis(5));
+    }
+    DELIVERED.stored()
+}
+
+fn each(place: &Path) {
+    let own = || fs::read_to_string("/proc/self/status").expect("the status reads");
+    let thread = || fs::read_to_string("/proc/thread-self/status").expect("the status reads");
+    assert_ne!(
+        mask(&thread(), "SigBlk:") & bit(Signal::Terminate),
+        0,
+        "TERM starts blocked"
+    );
+    signal_self("TERM");
+    assert_ne!(
+        mask(&own(), "ShdPnd:") & bit(Signal::Terminate),
+        0,
+        "TERM waits"
+    );
+    assert_eq!(DELIVERED.stored(), None);
+    install(&DELIVERED).expect("the handlers install");
+    let caught = mask(&own(), "SigCgt:");
+    for signal in Signal::ALL {
+        assert_ne!(caught & bit(signal), 0, "{signal:?} has a handler");
+    }
+    assert_eq!(
+        mask(&thread(), "SigBlk:") & bit(Signal::Terminate),
+        0,
+        "the handler unblocks its signal once it stands"
+    );
+    let mut record = Record::new(&DELIVERED);
+    for (signal, name) in [
+        (Signal::Terminate, None),
+        (Signal::Interrupt, Some("INT")),
+        (Signal::Hangup, Some("HUP")),
+    ] {
+        if let Some(name) = name {
+            signal_self(name);
+        }
+        assert_eq!(
+            stored_within(MARKER_LIMIT),
+            Some(signal),
+            "{signal:?} reaches the record"
+        );
+        record.arm();
+        assert_eq!(record.read(), Err(Interrupted(signal)));
+    }
+    fs::write(place.join("done"), b"").expect("the window records its end");
+}
+
+#[test]
+fn each_handled_signal_reaches_the_record_and_a_blocked_one_waits_for_it() {
+    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        each(Path::new(&place));
+        return;
+    }
+    let scratch = super::Scratch::new("signals-each");
+    let output = start_window_with(EACH_CASE, "each", &scratch.0, "", &["--block-signal=TERM"])
+        .output()
+        .expect("the window starts");
+    passed("each", &output);
+    assert!(scratch.0.join("done").exists(), "the window ran its checks");
+}
+
+const CHILD_CASE: &str =
+    "host_stop::signals::an_ignored_sigchld_refuses_the_call_before_any_child_starts";
+
+/// In a process started with SIGCHLD ignored, where an exited child is reaped by the kernel and its
+/// status is lost, a call fails before any child starts and names the reason.
+#[test]
+fn an_ignored_sigchld_refuses_the_call_before_any_child_starts() {
+    if let (Some(_), Some(_)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        let status = fs::read_to_string("/proc/self/status").expect("the status reads");
+        assert_ne!(
+            mask(&status, "SigIgn:") & (1 << (libc::SIGCHLD - 1)),
+            0,
+            "the window starts with SIGCHLD ignored"
+        );
+        let place = std::path::PathBuf::from(std::env::var_os(PLACE).expect("the place is given"));
+        let bin = place.join("bin");
+        fs::create_dir(&bin).expect("the directory is made");
+        fs::write(bin.join("aws"), super::launch::STANDIN).expect("the stand-in is written");
+        fs::set_permissions(
+            bin.join("aws"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("the mode is set");
+        let pid = place.join("pid");
+        let env = vec![
+            ("PATH".into(), bin.into_os_string()),
+            ("HOST_STOP_MODE".into(), "echo".into()),
+            ("HOST_STOP_PID".into(), pid.clone().into_os_string()),
+        ];
+        let mut record = Record::new(&DELIVERED);
+        let argv = ["sts", "get-caller-identity"];
+        let call = Call {
+            argv: &argv,
+            retry: true,
+            cut: Duration::from_secs(10),
+            env: &env,
+        };
+        let Err(Ended::Failed(failed)) = launch(&mut record, &call) else {
+            panic!("an ignored SIGCHLD refuses the call")
+        };
+        assert_eq!(
+            failed.to_string(),
+            "sts get-caller-identity gave no answer: SIGCHLD is ignored, so the child's exit cannot be read"
+        );
+        assert!(!pid.exists(), "no child started");
+        return;
+    }
+    let scratch = super::Scratch::new("signals-chld");
+    let output = start_window_with(
+        CHILD_CASE,
+        "chld",
+        &scratch.0,
+        "",
+        &["--ignore-signal=CHLD"],
+    )
+    .output()
+    .expect("the window starts");
+    passed("chld", &output);
+}

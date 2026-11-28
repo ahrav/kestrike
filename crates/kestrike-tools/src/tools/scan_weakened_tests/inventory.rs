@@ -4,6 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::environ::Environ;
 use crate::git::blob_texts;
 use crate::json::{self, Value};
 use crate::text::Text;
@@ -244,12 +245,12 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
 }
 
 /// `held` indicates whether the inventory file exists at `rev`.
-pub fn inventory_text(rev: &str, held: bool) -> Result<String, Failure> {
+pub fn inventory_text(environ: &Environ, rev: &str, held: bool) -> Result<String, Failure> {
     if !held {
         return Ok(String::new());
     }
     let short = short(rev);
-    let text = blob_texts(&[format!("{rev}:{INVENTORY}")])?.remove(0);
+    let text = blob_texts(environ, &[format!("{rev}:{INVENTORY}")])?.remove(0);
     if text.is_empty() {
         return Err(Failure::Refused(format!(
             "{INVENTORY} at {short} is empty or unreadable"

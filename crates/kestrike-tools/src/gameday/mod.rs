@@ -8,22 +8,31 @@
 
 mod catalog;
 mod constants;
+mod evidence;
 mod exact;
 mod layout;
+mod listing;
+mod order;
 mod package;
 mod parse;
 mod reach;
 mod read;
 mod refusal;
 mod schema;
+mod seal;
 #[cfg(test)]
 mod test_support;
 
 pub use crate::decimal::Decimal;
 pub use catalog::gd2_entry;
 pub use constants::{CATALOG, FILE_LIMIT, TBD};
+pub use evidence::{
+    Evidence, admit, collected, layout_of, load_evidence, package_of, read_evidence,
+};
 pub use exact::{exact, shown};
 pub use layout::{LAYOUT, REQUEST, VERSION, VERSION_FIELDS, layout};
+pub use listing::{entries, open_dir};
+pub use order::{ends_observation, later, ordered};
 pub use package::{FleetBounds, check_package};
 pub use parse::{decode, parsed};
 pub use reach::roles_reach;
