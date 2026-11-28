@@ -69,7 +69,7 @@ pub const PLANTS: [(&str, Planted); 11] = [
 
 /// Plants for the cases of one test each, kept out of the default store: each is `p-<mode>`, sweeps `a`,
 /// has a cause and replaces the line `base`.
-pub const MODES: [&str; 91] = [
+pub const MODES: [&str; 94] = [
     "panic",
     "hangconfirm",
     "hangseed",
@@ -113,6 +113,8 @@ pub const MODES: [&str; 91] = [
     "linklock",
     "dirlock",
     "nolock",
+    "longlock",
+    "hiddenlock",
     "loneline",
     "cutline",
     "disorder",
@@ -129,6 +131,7 @@ pub const MODES: [&str; 91] = [
     "silentpass",
     "silentfail",
     "relock",
+    "growlock",
     "unlock",
     "pintarget",
     "watchproof",
@@ -164,13 +167,14 @@ pub const MODES: [&str; 91] = [
 ];
 
 /// Plants that need a signal or leave the proof's worktree or target unfit for every later plant.
-pub const APART: [&str; 8] = [
+pub const APART: [&str; 9] = [
     "p-hang",
     "p-hangconfirm",
     "p-hangseed",
     "p-hangbuild",
     "p-hangproof",
     "p-relock",
+    "p-growlock",
     "p-unlock",
     "p-pintarget",
 ];
@@ -377,20 +381,7 @@ impl Fixture {
 
     /// `git` runs Git in the repository with the fixture's environment and returns its output.
     pub fn git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(args)
-            .env_clear()
-            .envs(self.env.iter().cloned())
-            .output()
-            .expect("git starts");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("Git's output is UTF-8")
+        super::repository::git_in(&self.repo, &self.env, args)
     }
 
     /// `commit` commits every change and reads the new head.
@@ -573,6 +564,12 @@ impl Fixture {
         if let Ok(text) = fs::read_to_string(&failed) {
             panic!("a stand-in failed: {text}");
         }
+    }
+
+    /// `sentence` is the score's sentence.
+    pub fn sentence(&self) -> String {
+        let (written, _) = self.results();
+        text_of(written.get("sentence").expect("a sentence"))
     }
 
     /// `results` is the score and its plants by id.

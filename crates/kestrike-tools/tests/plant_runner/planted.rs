@@ -1,5 +1,6 @@
-//! The cases of the planted commit and of the run's Git steps: the commit depends on the head and the
-//! patch alone, takes the patch's bytes as they stand and signs nothing; a replacement object is not
+//! The cases of the planted commit and of the run's Git steps: the commit depends on the head, the
+//! applied patch and the plant's id, whatever the caller's date, identity and commit encoding, takes
+//! the head's committer date as both its dates, takes the patch's bytes as they stand and signs nothing; a replacement object is not
 //! read; and a Git step that fails names its command and keeps its error output in the work directory.
 
 use std::time::Duration;
@@ -41,6 +42,40 @@ fn the_planted_commit_depends_on_the_head_and_the_patch_alone() {
     let second = (field(&fx, "p-miss", "commit"), field(&fx, "p-miss", "tree"));
     assert_ne!(first.0, "null");
     assert_eq!(first, second);
+}
+
+/// The planted commit's author and committer dates are both the head's committer date, on a head whose
+/// author date differs from it.
+#[test]
+fn the_planted_commit_takes_the_head_s_committer_date_as_both_its_dates() {
+    let mut fx = Fixture::new();
+    fx.git(&[
+        "commit",
+        "--amend",
+        "--no-edit",
+        "--quiet",
+        "--no-verify",
+        "--date=2001-02-03T04:05:06+00:00",
+    ]);
+    fx.head = fx.git(&["rev-parse", "HEAD"]).trim().to_owned();
+    let dates = |fx: &Fixture, commit: &str| {
+        fx.git(&[
+            "show",
+            "--no-patch",
+            "--no-show-signature",
+            "--format=%aI %cI",
+            commit,
+        ])
+        .trim()
+        .to_owned()
+    };
+    let head = dates(&fx, "HEAD");
+    let (author, committer) = head.split_once(' ').expect("two dates");
+    assert_ne!(author, committer, "the head's two dates differ");
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 0, "{}", done.stderr);
+    let planted = dates(&fx, &field(&fx, "p-miss", "commit"));
+    assert_eq!(planted, format!("{committer} {committer}"));
 }
 
 /// A head with a signature and `log.showSignature` set give the planted commit the head's date: the
@@ -175,6 +210,39 @@ fn a_failed_git_step_names_its_command_and_keeps_its_message_in_the_work_directo
     let kept =
         std::fs::read_to_string(fx.work.join("plants/p-miss/git.err")).expect("the error is kept");
     assert!(kept.contains("a signer refused"), "{kept}");
+}
+
+/// A failed Git step's error is appended to `git.err` by its name, so a link a child left at that name
+/// takes the append, and the file it names holds the error while the link stays.
+#[test]
+fn a_link_at_a_plant_s_git_error_log_takes_the_kept_error() {
+    let mut fx = Fixture::new();
+    let (log, elsewhere) = (
+        fx.work.join("plants/p-miss/git.err"),
+        fx.scratch.join("elsewhere.err"),
+    );
+    let action = format!(
+        "ln -s '{}' '{}'; echo 'fatal: refused' >&2; exit 7",
+        elsewhere.display(),
+        log.display()
+    );
+    let (name, path) = fx.git_shim("commit", &action);
+    fx.run(&["p-miss"], &[(name, &path)]);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "`git commit` exited 7; its error is in plants/p-miss/git.err",
+    );
+    assert!(
+        std::fs::symlink_metadata(&log)
+            .expect("stats")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&elsewhere).expect("the error went through the link"),
+        "git commit exited 7:\nfatal: refused\n"
+    );
 }
 
 /// The shim's check exits with status 128 to simulate a damaged index.
