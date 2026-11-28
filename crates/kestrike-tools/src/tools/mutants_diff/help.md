@@ -76,8 +76,9 @@ not-run. The counts are recomputed from those outcomes, and listed equals
 caught plus missed plus timeout plus unviable plus not-run. A run with listed
 mutants is complete only when the tool exited 0, 2 or 3, the baseline passed
 and the set of judged mutants equals the listed set. A listing or outcome
-file that repeats a mutant, an outcome file with a phase time that is not a
-finite nonnegative number, a worktree configuration whose
+file that repeats a mutant, an outcome file whose `outcomes` is no array or
+that names a mutant by a value other than a string, an outcome file with a
+phase time that is not a finite nonnegative number, a worktree configuration whose
 `additional_cargo_args` the runner cannot read, and a worktree that remains
 after the removal make the run incomplete.
 
@@ -122,8 +123,14 @@ its terminal. The runner records the first handled signal and acts on it
 between steps and while it waits for a child; a signal that arrives while a
 process is being started is acted on once that process has started, and a
 later signal changes nothing. The runner then stops the supervised process
-group (the worktree add, the listing or the tool) with SIGTERM, then SIGKILL, removes the worktree, writes an incomplete
-report and exits 1. Each supervised process receives SIGTERM when the runner
+group (the worktree add, the listing or the tool), removes the worktree,
+writes an incomplete report and exits 1. A stop sends SIGTERM to the group,
+waits up to 10 s for the leader's exit, sends SIGKILL and waits up to 10 s
+again while the leader runs, and ends with SIGKILL to the group; a group
+whose leader exited by itself gets the first SIGTERM and the closing SIGKILL.
+The runner reads the leader's state from `/proc/<pid>/stat` and reaps the
+leader only after the group's last signal, so each signal reaches the group
+the leader still names. Each supervised process receives SIGTERM when the runner
 dies, so a runner stopped by SIGKILL also stops the tool; its worktree then
 stays in the run directory and registered until `git worktree remove --force
 --force` runs on that `worktree-*` path. Every other exit removes the
@@ -141,7 +148,8 @@ outcome file, a judged set that differs from the listed set, a worktree that
 remains, an unexpected runner error such as a run directory that refuses an
 output file, or an interruption. When the artifacts directory refuses the
 report, the runner prints that error in its place and exits 1. Exit 2 is
-rejected input and writes no report: malformed arguments; a set `GIT_DIR`,
+rejected input and writes no report: malformed arguments; a start with
+SIGCHLD ignored, under which no child's exit can be read; a set `GIT_DIR`,
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR` or
 `GIT_OBJECT_DIRECTORY`; an inherited variable that step 4 refuses; a
 directory outside a Git checkout; an unknown revision or no merge base with
