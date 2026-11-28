@@ -16,13 +16,13 @@ use super::config::debug_assertions;
 use super::options::{Options, TOOL};
 use super::outcomes::{Judgment, Listed, Outcome, Outcomes, judge, read_listing, read_outcomes};
 use super::preflight::{CONFIG, GitError, Prepared, git, is_file, preflight, read_regular};
-use super::process::{INTERRUPT, ignore_signals, install_handlers, supervise};
+use super::process::{INTERRUPT, file_size_default, ignore_signals, install_handlers, supervise};
 use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
 use crate::plants::{Creation, publish_with, remove};
-use crate::process::refuse_ignored_sigchld;
+use crate::process::{ignore_file_size_signal, refuse_ignored_sigchld};
 use crate::python::{hexdigest, say};
 use crate::stream::emit;
 use crate::text::{Text, text};
@@ -420,13 +420,14 @@ impl Run {
     /// A stopped `worktree add` leaves its `initializing` lock, which the second `--force` overrides. Git
     /// refuses a directory without a valid `.git` file and drops the registration once the directory is
     /// gone, so a removal that failed is repeated after the directory's removal, which goes past each
-    /// entry it cannot remove and leaves a link at the tree's path. The listing prints a
+    /// entry it cannot remove, leaves a link at the tree's path and walks at most 512 levels below the
+    /// tree, leaving a deeper directory with everything under it. The listing prints a
     /// path's bytes as they are, so the whole record is matched in the listing's bytes.
     fn remove_worktree(&self, tree: &Path) -> Result<Option<Text>, Stop> {
         let prepared = &self.prepared;
         let git = |args: &[&OsStr]| {
             let mut command = Command::new("git");
-            command
+            file_size_default(&mut command)
                 .arg("-C")
                 .arg(&prepared.top)
                 .args(args)
@@ -633,9 +634,14 @@ impl Run {
     }
 }
 
-/// `run` is the tool's entry: it reads the command line, refuses a start with SIGCHLD ignored, runs step
+/// `run` is the tool's entry: it ignores SIGXFSZ, so a write past the soft file size limit returns
+/// `EFBIG` to the write's caller, reads the command line, refuses a start with SIGCHLD ignored, runs step
 /// 1, then the run with the handlers installed, the hand-off and the finish.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
+    if let Err(error) = ignore_file_size_signal() {
+        let reason = text!("SIGXFSZ cannot be ignored: ", error.to_string());
+        return Streams::default().refuse(&Stop::fatal(reason));
+    }
     let options = match super::options::parse(args) {
         Parsed::Run(options) => options,
         Parsed::Help(help) => {

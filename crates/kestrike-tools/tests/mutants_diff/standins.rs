@@ -5,7 +5,8 @@
 //! `outcomes` and `at-hang`, with the suffix `-K-N` under `--shard K/N`. A call record is a sequence of fields,
 //! each ended by a NUL byte: `call`, the argument count, the arguments, the working directory, then for each
 //! name of [`RECORDED`] and for the `--in-diff` file's digest, the configuration's digest and the
-//! `Cargo.lock` text, `S` and the value when it is set and `U` when it is not.
+//! `Cargo.lock` text, `S` and the value when it is set and `U` when it is not. While `record_sigign` is in
+//! the state directory, each stand-in appends its `SigIgn:` line to `sigign` as it starts.
 
 /// The variables a call record holds, in its order.
 pub const RECORDED: [&str; 8] = [
@@ -25,6 +26,7 @@ pub const SLEEPER: &str = "600.125";
 pub const CARGO: &str = r#"#!/bin/sh
 state=$FAKE_STATE
 plan=$state/plan
+if [ -e "$state/record_sigign" ]; then grep '^SigIgn:' "/proc/$$/status" >> "$state/sigign"; fi
 sleeper=600.125
 publish() { printf '%s' "$2" > "$state/$1.tmp" && mv "$state/$1.tmp" "$state/$1"; }
 if [ "$#" -eq 1 ] && [ "$1" = -vV ]; then
@@ -131,6 +133,7 @@ out=$(value --output "$@")/mutants.out
 mkdir -p "$out"
 if [ -e "$plan/report_link" ]; then
   ln -s "$state/victim" "$(value --output "$@")/../report.json" || exit 97
+  printf '%s\n' "$(value --output "$@")/../report.json" >> "$state/report_linked"
 fi
 if [ -e "$plan/raw_outcomes" ]; then
   cp "$plan/raw_outcomes" "$out/outcomes.json"
@@ -153,6 +156,7 @@ pub const GIT: &str = r#"#!/bin/sh
 real=__REAL__
 state=$FAKE_STATE
 mode=${FAKE_GIT_MODE-}
+if [ -e "$state/record_sigign" ]; then grep '^SigIgn:' "/proc/$$/status" >> "$state/sigign"; fi
 has() {
   want=$1
   shift
