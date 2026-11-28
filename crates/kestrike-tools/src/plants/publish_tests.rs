@@ -220,7 +220,7 @@ fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
     let (target, elsewhere) = (scratch.0.join("f.rs"), scratch.0.join("elsewhere"));
     fs::write(&elsewhere, "kept\n").expect("written");
     symlink(&elsewhere, &target).expect("linked");
-    let later: i128 = 4_102_444_800_123_456_789;
+    let later: i128 = 1_900_000_000_123_456_789;
     let staging = Staging::new(Creation::Exact(0o4766))
         .suffix(".weaken")
         .modified(later);
@@ -259,4 +259,37 @@ fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
         Vec::<String>::new(),
         "no staging file of the write stays"
     );
+}
+
+/// A staging whose commit fails leaves the target as it stood and no staging file, and returns the
+/// commit's error; one whose commit passes publishes the bytes.
+#[test]
+fn a_failed_commit_leaves_the_target_and_no_staging_file() {
+    let scratch = Scratch::new("publish-commit");
+    let target = scratch.0.join("report.json");
+    fs::write(&target, "before\n").expect("written");
+    let refused = || Err(std::io::Error::other("signal 15"));
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .commit(&refused);
+    let error = publish_staged(&target, b"after\n", staging).expect_err("the commit refuses");
+    assert!(error.to_string().contains("signal 15"), "{error}");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "before\n");
+    let names: Vec<String> = fs::read_dir(&scratch.0)
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("lists")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, ["report.json"]);
+    let passed = || Ok(());
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .commit(&passed);
+    publish_staged(&target, b"after\n", staging).expect("the commit passes");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "after\n");
 }

@@ -105,11 +105,12 @@ pub enum Creation {
 
 /// How [`publish_staged`] stages a file: its [`Creation`], the suffix of the staging file's name and the
 /// modification time it gives the file, in nanoseconds since the epoch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub struct Staging<'a> {
     creation: Creation,
     suffix: &'a str,
     modified: Option<i128>,
+    commit: Option<&'a dyn Fn() -> io::Result<()>>,
 }
 
 impl<'a> Staging<'a> {
@@ -119,7 +120,16 @@ impl<'a> Staging<'a> {
             creation,
             suffix: "",
             modified: None,
+            commit: None,
         }
+    }
+
+    /// The staging whose rename waits for `commit`, called once the staging file is written and closed: an
+    /// error of `commit` removes the staging file and leaves the target as it stood.
+    #[must_use]
+    pub const fn commit(mut self, commit: &'a dyn Fn() -> io::Result<()>) -> Self {
+        self.commit = Some(commit);
+        self
     }
 
     /// The staging with `suffix` after the letters of the staging file's name; `suffix` holds no `/`.
@@ -254,6 +264,11 @@ pub fn publish_staged(
     let closed = crate::fixtures::close(file).map_err(at_target);
     let done = written
         .and(closed)
+        .and_then(|()| {
+            staging
+                .commit
+                .map_or(Ok(()), |commit| commit().map_err(at_target))
+        })
         .and_then(|()| fs::rename(&staged, target).map_err(at_target));
     done.inspect_err(|_| {
         let _ = fs::remove_file(&staged);
