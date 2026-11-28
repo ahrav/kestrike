@@ -18,10 +18,11 @@ fn running(pid: &str) -> bool {
     })
 }
 
-/// `gone` holds once `pid` stops running within five seconds.
+/// `gone` holds once `pid` stops running within 30 seconds; a process that SIGKILL reached while the host
+/// is loaded can take seconds to leave its last state.
 fn gone(pid: &str) -> bool {
     let start = Instant::now();
-    while running(pid) && start.elapsed() < Duration::from_secs(5) {
+    while running(pid) && start.elapsed() < Duration::from_secs(30) {
         std::thread::sleep(Duration::from_millis(10));
     }
     !running(pid)
@@ -404,7 +405,13 @@ fn a_further_signal_ends_the_grace_and_the_one_that_ended_the_wait_keeps_it() {
             assert!(matches!(ran, Err(Halt::Interrupted(_))), "{name}: {ran:?}");
             assert!(least <= took && took < most, "{name}: {took}");
         });
-        assert!(gone(&read(&scratch.0.join("worker"))), "{name}");
+        let worker = read(&scratch.0.join("worker"));
+        assert!(
+            gone(&worker),
+            "{name}: the worker {} stays: {:?}",
+            worker.trim(),
+            std::fs::read_to_string(format!("/proc/{}/status", worker.trim()))
+        );
         assert!(!interrupt.held(), "{name}");
     }
 }

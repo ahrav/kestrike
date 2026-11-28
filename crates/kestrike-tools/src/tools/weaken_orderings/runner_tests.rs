@@ -79,6 +79,7 @@ fn a_genmc_lane_past_its_deadline_gives_no_verdict_for_every_case() {
         rebuilt: None,
         declared,
         kernels,
+        reads: std::cell::RefCell::new(BTreeMap::new()),
     };
     let cases = [
         Text::from("join-production"),

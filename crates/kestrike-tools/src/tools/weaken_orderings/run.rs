@@ -4,13 +4,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
 use super::execute::{Launch, holding, seconds, with_defaults};
-use super::files::{fresh_write, regular_digest, save, sha256};
+use super::files::{fresh_write, regular_digest, save, save_unless, sha256};
 use super::halt::Halt;
 use super::pins::{lane_env, pin};
 use super::runner::{Runner, Runs, os_of, text_of};
@@ -19,7 +19,10 @@ use crate::json::{self, Integer, Object, Text, Value};
 use crate::orderings::check::{CATALOG, check, row_entries};
 use crate::orderings::sites::EXTERNAL;
 use crate::ownership::status;
-use crate::process::{INTERRUPT, blocked, capture, install_handlers, refuse_ignored_sigchld};
+use crate::plants::UNANNOUNCED;
+use crate::process::{
+    INTERRUPT, Interrupt, Interrupted, blocked, capture, install_handlers, refuse_ignored_sigchld,
+};
 use crate::production_text::blanked;
 use crate::python::{hexdigest, repr, returncode, str_of, truthy};
 use crate::text::text;
@@ -63,7 +66,8 @@ fn differs(top: &Path) -> Result<bool, Halt> {
 /// not empty, a checkout whose judging paths differ from `HEAD`, and a work directory that cannot hold
 /// the copy, in that order, and then makes `work/copy` and `work/evidence`.
 fn checked_work(top: &Path, work: &Path) -> Result<(), Halt> {
-    if work.starts_with(top) {
+    let resolved = crate::paths::resolve(top).map_err(Halt::failed)?;
+    if work.starts_with(&resolved) {
         return Err(Halt::stop(
             2,
             text!(
@@ -146,7 +150,15 @@ pub(super) fn run_command(
             let (report, code) = run(top, &work, &selected, &launch, err)?;
             INTERRUPT.check()?;
             let path = work.join("report.json");
-            save(&path, &report)?;
+            let signalled = || {
+                INTERRUPT
+                    .check()
+                    .map_err(|Interrupted(signal)| io::Error::other(format!("signal {signal}")))
+            };
+            if let Err(error) = save_unless(&path, &report, &signalled) {
+                INTERRUPT.check()?;
+                return Err(Halt::failed(error));
+            }
             Ok((path, report, code))
         });
     match ran {
@@ -159,9 +171,10 @@ pub(super) fn run_command(
             line.insert("report", Value::String(text_of(&path)));
             line.insert("mismatched", member("mismatched"));
             line.insert("no verdict", member("no verdict"));
-            let _ = writeln!(out, "{}", json::line(&Value::Object(line)));
-            let _ = out.flush();
-            code
+            match writeln!(out, "{}", json::line(&Value::Object(line))).and_then(|()| out.flush()) {
+                Ok(()) => code,
+                Err(_) => UNANNOUNCED,
+            }
         }
         Err(halt) => halt.end(err),
     }
@@ -388,10 +401,11 @@ impl Report {
     }
 }
 
-/// `captured_text` runs `command` and returns its exit code and its standard output as UTF-8.
-fn captured_text(command: &mut Command) -> Result<(i32, String), Halt> {
+/// `captured_text` runs `command`, killing it on a signal recorded in `interrupt`, and returns its exit
+/// code and its standard output as UTF-8.
+fn captured_text(command: &mut Command, interrupt: &Interrupt) -> Result<(i32, String), Halt> {
     with_defaults(command);
-    let output = capture(command, &INTERRUPT)??;
+    let output = capture(command, interrupt)??;
     let text = String::from_utf8(output.stdout).map_err(Halt::failed)?;
     Ok((returncode(output.status), text))
 }
@@ -552,7 +566,7 @@ fn run(
     err: &mut impl Write,
 ) -> Result<(Value, u8), Halt> {
     let started = Instant::now();
-    let environ: Vec<(OsString, OsString)> = std::env::vars_os().collect();
+    let environ = crate::environ::first_of_each(std::env::vars_os().collect());
     let mut runner = Runner::new(top, work, environ, launch)?;
     let _ = writeln!(
         err,
@@ -617,7 +631,7 @@ fn run(
         .current_dir(&runner.copy)
         .env_clear()
         .envs(lane_env(&runner.environ, work, &runner.pins));
-    let (code, listed) = captured_text(&mut tree)?;
+    let (code, listed) = captured_text(&mut tree, launch.interrupt)?;
     let words = Text::from(listed.as_str()).split();
     let resolved = match (code, words.get(1)) {
         (0, Some(version)) => version.clone(),
@@ -645,7 +659,7 @@ fn run(
     );
     let mut rustc = Command::new("rustc");
     rustc.args([stable.as_str(), "--version"]);
-    let (_, version) = captured_text(&mut rustc)?;
+    let (_, version) = captured_text(&mut rustc, launch.interrupt)?;
     pins.insert("rustc", Value::String(Text::from(version.as_str()).strip()));
     pins.insert("host", Value::String(machine()?));
     pins.insert("cpus", cpus());

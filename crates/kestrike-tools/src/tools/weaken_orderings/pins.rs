@@ -8,6 +8,7 @@ use regex::Regex;
 
 use super::halt::Halt;
 use crate::classes::{SPACE, compiled, is_word};
+use crate::environ::set;
 use crate::genmc::read_text;
 
 /// The pins a report records, in this order, when the workflow names them.
@@ -125,7 +126,7 @@ pub(super) fn shaping(name: &OsString) -> bool {
 
 /// `lane_env` is the loom lane's environment: `environ` without each name [`shaping`] holds, then the
 /// pins, [`TERM`], `RUSTFLAGS="--cfg loom"`, and `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` at
-/// `work/target-loom`; a later value of a name takes that name's first place.
+/// `work/target-loom`, each set as [`crate::environ::set`] sets it.
 pub(super) fn lane_env(
     environ: &[(OsString, OsString)],
     work: &Path,
@@ -137,29 +138,24 @@ pub(super) fn lane_env(
         .cloned()
         .collect();
     let target = work.join("target-loom").into_os_string();
-    let added = pins
-        .iter()
-        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
-        .chain(
-            TERM.iter()
-                .map(|(name, value)| (OsString::from(name), OsString::from(value))),
-        )
-        .chain([
-            (OsString::from("RUSTFLAGS"), OsString::from("--cfg loom")),
-            (OsString::from("CARGO_TARGET_DIR"), target.clone()),
-            (OsString::from("CARGO_BUILD_BUILD_DIR"), target),
-        ]);
-    for (name, value) in added {
+    overlay(&mut env, pins);
+    for (name, value) in [
+        ("RUSTFLAGS", OsString::from("--cfg loom")),
+        ("CARGO_TARGET_DIR", target.clone()),
+        ("CARGO_BUILD_BUILD_DIR", target),
+    ] {
         set(&mut env, name, value);
     }
     env
 }
 
-/// `set` gives `name` the value `value` at its first place in `env`, or at the end.
-pub(super) fn set(env: &mut Vec<(OsString, OsString)>, name: OsString, value: OsString) {
-    match env.iter_mut().find(|(held, _)| *held == name) {
-        Some(entry) => entry.1 = value,
-        None => env.push((name, value)),
+/// `overlay` sets the pins and [`TERM`] in `env`, each as [`crate::environ::set`] sets it.
+pub(super) fn overlay(env: &mut Vec<(OsString, OsString)>, pins: &Pins) {
+    for (name, value) in pins {
+        set(env, name, OsString::from(value));
+    }
+    for (name, value) in TERM {
+        set(env, name, OsString::from(value));
     }
 }
 

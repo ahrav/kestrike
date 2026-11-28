@@ -6,6 +6,7 @@
 //! then lasts until a further signal; after a deadline or the leader's exit the first signal ends the
 //! grace. The leader stays unreaped until the stop's last signal, and its exit code comes from that reap.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -18,8 +19,8 @@ use super::halt::Halt;
 use crate::json::Value;
 use crate::ownership::PathError;
 use crate::process::{
-    GroupStop, GroupStopped, Interrupt, Leader, child_defaults, exit_code, handled_set,
-    leader_left_within, stop_group,
+    GroupStop, GroupStopped, Interrupt, Leader, child_defaults, exit_code,
+    file_size_signal_default, handled_set, leader_left_by, stop_group,
 };
 use crate::python::round;
 
@@ -62,10 +63,13 @@ impl<'a> Launch<'a> {
 /// before it runs its program.
 pub(super) fn with_defaults(command: &mut Command) {
     let handled = handled_set();
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `sigaction` and
-    // `sigprocmask`, which are async-signal-safe, on its own copy of an initialized set.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `sigaction`, `sigprocmask`
+    // and `signal`, which are async-signal-safe, on its own copy of an initialized set.
     unsafe {
-        command.pre_exec(move || child_defaults(&handled));
+        command.pre_exec(move || {
+            child_defaults(&handled)?;
+            file_size_signal_default()
+        });
     }
 }
 
@@ -170,14 +174,14 @@ fn supervised(
         .spawn()
         .map_err(|error| Halt::failed(format!("{}: {error}", program.to_string_lossy())))?;
     (launch.started)(&child);
-    let recorded = || launch.interrupt.deliveries() > 0;
-    let left = leader_left_within(
-        child.id(),
-        deadline.saturating_sub(started.elapsed()),
-        POLL,
-        &recorded,
-    );
-    let spent = launch.interrupt.deliveries().min(1);
+    let ended_by_signal = Cell::new(false);
+    let recorded = || {
+        let seen = launch.interrupt.deliveries() > 0;
+        ended_by_signal.set(seen);
+        seen
+    };
+    let left = leader_left_by(child.id(), started.checked_add(deadline), POLL, &recorded);
+    let spent = usize::from(ended_by_signal.get());
     (launch.stopping)();
     let stopped = stop(&mut child, launch, spent);
     (launch.stopped)();

@@ -1,9 +1,11 @@
 //! One `run`'s copy of the checkout, its pins and the runs of its tests: each loom test and each GenMC
 //! lane call once per plant, judged for each entry that names it.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::Duration;
@@ -11,9 +13,11 @@ use std::time::Duration;
 use super::execute::{GENMC_DEADLINE, GENMC_SETUP, LOOM_DEADLINE, Launch, with_defaults};
 use super::files::sha256;
 use super::halt::Halt;
-use super::pins::{Pins, TERM, lane_env, pin, set, workflow_pins};
+use super::pins::{Pins, lane_env, overlay, pin, workflow_pins};
+use crate::environ::set;
 use crate::genmc::correspondence::check_correspondence;
 use crate::genmc::evidence::check_config;
+use crate::genmc::input::listed;
 use crate::genmc::refusal::Error;
 use crate::genmc::transcription::check_transcription;
 use crate::genmc::{is_file, read_source};
@@ -23,7 +27,7 @@ use crate::orderings::sources::{kernel_texts, loom_site};
 use crate::orderings::verdicts::{LOOM_REBUILT, case_exit, genmc_result, loom_result};
 use crate::ownership::PathError;
 use crate::process::{Interrupt, captured};
-use crate::python::{hexdigest, returncode};
+use crate::python::{hexdigest, returncode, str_of, truthy};
 use crate::shell::join;
 use crate::text::{newlines, text};
 
@@ -47,6 +51,9 @@ pub(super) struct Ran {
     evidence: PathBuf,
 }
 
+/// A read of [`Runner::read`] as kept: the text, or the error's kind and text.
+pub(super) type Read = Result<String, (io::ErrorKind, String)>;
+
 /// The runs of one plant, by lane and test.
 pub(super) type Runs = BTreeMap<(&'static str, Text), Ran>;
 
@@ -66,6 +73,9 @@ pub(super) struct Runner<'l> {
     rebuilt: Option<Text>,
     declared: Value,
     kernels: BTreeMap<String, String>,
+    /// Each file [`Runner::read`] has read, with its text or its error, so the copy's check, the selection
+    /// and every loom site's judgment read one text of a file: the one the check read before any plant.
+    pub(super) reads: RefCell<BTreeMap<String, Read>>,
 }
 
 /// `text_of` is `path` as Python's `str` of a path writes it.
@@ -202,16 +212,29 @@ impl<'l> Runner<'l> {
             rebuilt: None,
             declared: Value::Null,
             kernels: BTreeMap::new(),
+            reads: RefCell::new(BTreeMap::new()),
         })
     }
 
-    /// `read` is the text of `path` in the copy, with `\r\n` and a lone `\r` read as `\n`.
+    /// `read` is the text of `path` in the copy, with `\r\n` and a lone `\r` read as `\n`, as the first
+    /// read of `path` in this run found it.
     ///
     /// # Errors
     ///
-    /// The file cannot be read as UTF-8.
-    pub(super) fn read(&self, path: &str) -> std::io::Result<String> {
-        read_source(&self.copy, path)
+    /// The first read of `path` failed, as when the file cannot be read as UTF-8.
+    pub(super) fn read(&self, path: &str) -> io::Result<String> {
+        if let Some(read) = self.reads.borrow().get(path) {
+            return read
+                .clone()
+                .map_err(|(kind, text)| io::Error::new(kind, text));
+        }
+        let read = read_source(&self.copy, path);
+        let kept = match &read {
+            Ok(text) => Ok(text.clone()),
+            Err(error) => Err((error.kind(), error.to_string())),
+        };
+        self.reads.borrow_mut().insert(path.to_owned(), kept);
+        read
     }
 
     /// The kernel package's directory in the copy.
@@ -532,13 +555,22 @@ impl Runner<'_> {
         }
         if !fresh.is_empty() {
             let evidence = self.output(&label_of(row), "genmc");
-            let pr: Vec<&Value> = match json_path(&self.declared, &["profiles", "pr"]) {
-                Some(Value::Array(pr)) => pr.iter().collect(),
-                _ => return Err(Halt::failed("KeyError: 'profiles'")),
+            let pr = match json_path(&self.declared, &["profiles", "pr"]) {
+                Some(pr) => listed(pr, "the pr profile").map_err(Halt::failed)?,
+                None => return Err(Halt::failed("KeyError: 'profiles'")),
             };
+            if let Some(unhashable) = pr
+                .iter()
+                .find(|named| matches!(named, Value::Array(_) | Value::Object(_)))
+            {
+                return Err(Halt::failed(format!(
+                    "TypeError: unhashable type: '{}'",
+                    type_name(unhashable)
+                )));
+            }
             let held = fresh.iter().all(|case| {
                 pr.iter()
-                    .any(|named| **named == Value::String((*case).clone()))
+                    .any(|named| *named == Value::String((*case).clone()))
             });
             let profile = if held { "pr" } else { "scheduled" };
             let mut words: Vec<Text> = ["bash", "scripts/rust-lane.sh", "genmc", profile]
@@ -547,24 +579,13 @@ impl Runner<'_> {
             words.extend(fresh.iter().map(|case| (*case).clone()));
             let argv = words.iter().map(os_of).collect::<Result<Vec<_>, _>>()?;
             let mut env = self.environ.clone();
-            let added = self
-                .pins
-                .iter()
-                .map(|(name, value)| (name.as_str(), OsString::from(value)))
-                .chain(
-                    TERM.iter()
-                        .map(|(name, value)| (*name, OsString::from(value))),
-                )
-                .chain([
-                    ("EVIDENCE", evidence.clone().into_os_string()),
-                    (
-                        "GITHUB_STEP_SUMMARY",
-                        evidence.join("summary.md").into_os_string(),
-                    ),
-                ]);
-            for (name, value) in added {
-                set(&mut env, OsString::from(name), value);
-            }
+            overlay(&mut env, &self.pins);
+            set(&mut env, "EVIDENCE", evidence.clone().into_os_string());
+            set(
+                &mut env,
+                "GITHUB_STEP_SUMMARY",
+                evidence.join("summary.md").into_os_string(),
+            );
             fs::create_dir(&evidence)
                 .map_err(|error| Halt::failed(PathError::new(&evidence, error)))?;
             let count = u32::try_from(fresh.len()).unwrap_or(u32::MAX);
@@ -661,9 +682,18 @@ impl Runner<'_> {
         runs: &mut Runs,
         yielded: &mut dyn FnMut(Vec<Value>) -> Result<(), Halt>,
     ) -> Result<(), Halt> {
-        let failure = match entry.get("failure") {
-            Some(Value::String(failure)) => failure.to_string(),
-            _ => String::new(),
+        let raw = entry.get("failure").unwrap_or(&Value::Null);
+        let loom = entry.get("lane") == Some(&Value::String(Text::from("loom")));
+        let failure = match raw {
+            Value::String(failure) => failure.to_string(),
+            other if !truthy(other) => String::new(),
+            other if loom => {
+                return Err(Halt::failed(format!(
+                    "TypeError: 'in <string>' requires string as left operand, not {}",
+                    type_name(other)
+                )));
+            }
+            other => str_of(other).to_string(),
         };
         let tests: Vec<Text> = match entry.get("tests") {
             Some(Value::Array(tests)) => tests
@@ -675,7 +705,7 @@ impl Runner<'_> {
                 .collect(),
             _ => Vec::new(),
         };
-        if entry.get("lane") == Some(&Value::String(Text::from("loom"))) {
+        if loom {
             for test in &tests {
                 let result = self.loom(test, &failure, row, runs)?;
                 yielded(vec![result])?;
@@ -700,6 +730,19 @@ fn result_record(lane: &str, test: &Text, members: &Object, verdict: &str, reaso
     result.insert("result", Value::String(Text::from(verdict)));
     result.insert("reason", Value::String(Text::from(reason)));
     result
+}
+
+/// `type_name` is the name Python gives the type of the JSON value `value` reads as.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "dict",
+        Value::Array(_) => "list",
+        Value::String(_) => "str",
+        Value::Integer(_) => "int",
+        Value::Float(_) => "float",
+        Value::Bool(_) => "bool",
+        Value::Null => "NoneType",
+    }
 }
 
 /// `json_path` is the member that `keys` reach from `value` through objects.

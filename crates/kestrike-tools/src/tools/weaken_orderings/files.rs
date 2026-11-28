@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::json::{self, Value};
 use crate::ownership::PathError;
-use crate::plants::{Creation, Staging, publish_staged};
+use crate::plants::{Creation, Staging, THREAD_STATUS, publish_staged, umask};
 use crate::python::hexdigest;
 
 /// The suffix of each staging file's name.
@@ -77,15 +77,33 @@ pub(super) fn sha256(path: &Path) -> io::Result<String> {
 }
 
 /// `save` writes `data` to `path` as JSON indented by two spaces in document order with a final newline,
-/// as a new file renamed over `path`, with the mode a plain create gets under the umask.
+/// as a new file renamed over `path`, with mode 0666 less the thread's umask.
 ///
 /// # Errors
 ///
 /// The staged write fails.
 pub(super) fn save(path: &Path, data: &Value) -> io::Result<()> {
+    save_unless(path, data, &|| Ok(()))
+}
+
+/// `save_unless` is [`save`] whose rename waits for `commit`, called once the staging file is written and
+/// closed; an error of `commit` removes the staging file, leaves `path` as it stood and is returned.
+///
+/// # Errors
+///
+/// The thread's umask cannot be read, `commit` fails, or the staged write fails.
+pub(super) fn save_unless(
+    path: &Path,
+    data: &Value,
+    commit: &dyn Fn() -> io::Result<()>,
+) -> io::Result<()> {
     let mut written = json::indented_in_order(data);
     written.push('\n');
-    let staging = Staging::new(Creation::Mode(0o666)).suffix(SUFFIX);
+    let mask =
+        umask().map_err(|error| PathError::new(Path::new(THREAD_STATUS), error).into_error())?;
+    let staging = Staging::new(Creation::Masked(mask))
+        .suffix(SUFFIX)
+        .commit(commit);
     publish_staged(path, written.as_bytes(), staging).map_err(PathError::into_error)
 }
 

@@ -9,6 +9,8 @@ use crate::genmc::{package_sources, read_source};
 use crate::json::{self, Value};
 use crate::orderings::check::check;
 use crate::orderings::sites::EXTERNAL;
+use crate::plants::UNANNOUNCED;
+use crate::process::ignore_file_size_signal;
 
 const USAGE: &str = "usage: weaken-orderings [-h] {check,run} ...";
 const CHECK_USAGE: &str = "usage: weaken-orderings check [-h]";
@@ -38,14 +40,22 @@ const RUN: [Opt; 3] = [
 /// newline, on `out`, and returns the check's exit code.
 pub(super) fn checked(check: impl FnOnce() -> (Value, u8), out: &mut impl Write) -> u8 {
     let (report, code) = check();
-    let _ = writeln!(out, "{}", json::indented_in_order(&report));
-    let _ = out.flush();
-    code
+    match writeln!(out, "{}", json::indented_in_order(&report)).and_then(|()| out.flush()) {
+        Ok(()) => code,
+        Err(_) => UNANNOUNCED,
+    }
 }
 
 /// `run` reads the command word and its options from `args` and runs that command on the checkout
 /// `top`.
 pub fn run(top: &Path, args: &[OsString]) -> u8 {
+    if let Err(error) = ignore_file_size_signal() {
+        let _ = writeln!(
+            io::stderr(),
+            "weaken-orderings: SIGXFSZ cannot be ignored: {error}"
+        );
+        return 1;
+    }
     let help = format!("{USAGE}\n\n{}", include_str!("help.md"));
     let check_help = format!(
         "{CHECK_USAGE}\n\noptional arguments:\n  -h, --help  show this help message and exit\n"
@@ -78,11 +88,10 @@ pub fn run(top: &Path, args: &[OsString]) -> u8 {
     let commands = Commands::new(super::NAME, USAGE, &help, &words);
     let (mut out, mut err) = (io::stdout().lock(), io::stderr().lock());
     match commands.parse(args) {
-        Parsed::Help(text) => {
-            let _ = out.write_all(text.as_bytes());
-            let _ = out.flush();
-            0
-        }
+        Parsed::Help(text) => match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+            Ok(()) => 0,
+            Err(_) => UNANNOUNCED,
+        },
         Parsed::Refused { code, text } => {
             let _ = err.write_all(text.as_bytes());
             code
