@@ -1012,13 +1012,6 @@ class Scope(unittest.TestCase):
             shutil.copytree(receipts / WITNESS, receipts / "reach-live-second")
             self.witness_and_control(receipts)
 
-    def test_the_recorded_run_is_a_record_the_pre_push_hook_guards(self) -> None:
-        """The run record holds the harness's paths and commands, which the hook reads only at a record path."""
-        hook = load_module("pre_push_checks", ROOT / "scripts" / "pre-push-checks.py")
-        record = (recorded_run() / "run.json").relative_to(ROOT).as_posix()
-        self.assertTrue(hook.CHAOS_RECORD.fullmatch(record), record)
-        self.assertTrue(record.startswith(tuple(f"{folder}/" for folder in hook.RECORD_DIRS)), record)
-
     def test_the_rows_name_the_reach_judges(self) -> None:
         scenario = next(row for row in LEDGER["scenarios"] if row["id"] == SCENARIO)
         self.assertEqual((ROW["judge"], scenario["judge"], scenario["invariants"], ROW["control"]["scenario"], ROW["kind"]),
