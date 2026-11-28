@@ -33,7 +33,8 @@ fn words(argv: &[&str]) -> Vec<OsString> {
 }
 
 /// `group` is a command whose leader writes `leader` once its same-group worker, which ignores SIGTERM,
-/// has written its pid to `worker`.
+/// has written its pid to `worker`. Each of the two runs until a signal ends it or `marker` is gone, so a
+/// case's group ends with the case's scratch directory and the teardown signals no process.
 fn group(marker: &Path, leader_ignores_term: bool) -> Vec<OsString> {
     let trap = if leader_ignores_term {
         "trap '' TERM; "
@@ -45,27 +46,11 @@ fn group(marker: &Path, leader_ignores_term: bool) -> Vec<OsString> {
         "sh",
         "-c",
         &format!(
-            "{trap}sh -c 'trap \"\" TERM; echo $$ > {m}/worker; exec sleep 120' & \
-             while [ ! -s {m}/worker ]; do sleep 0.05; done; echo $$ > {m}/leader; exec sleep 120"
+            "{trap}sh -c 'trap \"\" TERM; echo $$ > {m}/worker; while [ -d {m} ]; do sleep 0.1; done' & \
+             while [ ! -s {m}/worker ]; do sleep 0.05; done; echo $$ > {m}/leader; \
+             while [ -d {m} ]; do sleep 0.1; done"
         ),
     ])
-}
-
-/// `Reaper` kills the group's worker and leader, where they still run, when the case ends.
-struct Reaper(PathBuf);
-
-impl Drop for Reaper {
-    fn drop(&mut self) {
-        for name in ["worker", "leader"] {
-            if let Ok(pid) = std::fs::read_to_string(self.0.join(name))
-                && running(&pid)
-                && let Ok(pid) = pid.trim().parse::<libc::pid_t>()
-            {
-                // SAFETY: `kill` takes two integers and touches no memory of the caller.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
-        }
-    }
 }
 
 fn read(path: &Path) -> String {
@@ -110,7 +95,6 @@ fn an_interrupted_command_leaves_no_process_behind() {
         });
     }
     let scratch = Scratch::new("weaken-execute");
-    let _reaper = Reaper(scratch.0.clone());
     let name = module_path!()
         .split_once("::")
         .map_or("", |(_, rest)| rest)
@@ -157,7 +141,6 @@ fn an_interrupted_command_leaves_no_process_behind() {
 #[test]
 fn a_deadline_ends_the_whole_process_group() {
     let scratch = Scratch::new("weaken-deadline");
-    let _reaper = Reaper(scratch.0.clone());
     let interrupt = Interrupt::new();
     let (code, seconds) = execute(
         &Launch::new(&interrupt),
@@ -202,7 +185,6 @@ fn leader(marker: &Path) -> Child {
 #[test]
 fn a_second_signal_during_the_grace_still_kills_the_group() {
     let scratch = Scratch::new("weaken-grace");
-    let _reaper = Reaper(scratch.0.clone());
     let mut child = leader(&scratch.0);
     let interrupt = Interrupt::new();
     let launch = Launch {
@@ -362,7 +344,6 @@ fn a_further_signal_ends_the_grace_and_the_one_that_ended_the_wait_keeps_it() {
     ];
     for (name, at_once, later, deadline, least, most) in rows {
         let scratch = Scratch::new("weaken-further");
-        let _reaper = Reaper(scratch.0.clone());
         let interrupt = Interrupt::new();
         let sent = std::cell::Cell::new(None);
         let leader_file = scratch.0.join("leader");
@@ -439,4 +420,94 @@ fn an_output_name_already_taken_is_refused_before_the_child_starts() {
     );
     assert_eq!(read(&outside), "kept");
     assert!(!scratch.0.join("ran").exists());
+}
+
+/// A test whose exit is first seen after its deadline counts as an exit, not a timeout: the poll reads the
+/// leader's state before the clock, as the script's loop polls the child before its clock. The child has
+/// exited before the wait starts, with a budget already spent.
+#[test]
+fn an_exit_first_seen_after_the_deadline_counts_as_an_exit() {
+    let scratch = Scratch::new("weaken-late-exit");
+    let interrupt = Interrupt::new();
+    let on_start = |child: &Child| {
+        let stat = format!("/proc/{}/stat", child.id());
+        let start = Instant::now();
+        while running(&child.id().to_string()) && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            std::fs::metadata(stat).is_ok(),
+            "the child is held unreaped"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let launch = Launch {
+        started: &on_start,
+        ..Launch::new(&interrupt)
+    };
+    let (code, _) = execute(
+        &launch,
+        &words(&["sh", "-c", "exit 3"]),
+        Path::new("."),
+        None,
+        Duration::from_millis(10),
+        &scratch.0.join("out"),
+    )
+    .expect("the run ends");
+    assert_eq!(code, Some(3));
+}
+
+/// A signal recorded once the deadline has passed, before the wait reads the record, finds the wait ended
+/// by the deadline: no delivery is spent, so that signal ends the stop's grace at once.
+#[test]
+fn a_signal_after_the_deadline_ends_the_grace() {
+    let scratch = Scratch::new("weaken-after-deadline");
+    let interrupt = Interrupt::new();
+    let leader_file = scratch.0.join("leader");
+    let on_start = |_: &Child| {
+        wait_for(&leader_file);
+        std::thread::sleep(Duration::from_millis(1500));
+        interrupt.record(libc::SIGHUP);
+    };
+    let launch = Launch {
+        grace: Duration::from_secs(30),
+        started: &on_start,
+        ..Launch::new(&interrupt)
+    };
+    let start = Instant::now();
+    let ran = execute(
+        &launch,
+        &group(&scratch.0, true),
+        Path::new("."),
+        None,
+        Duration::from_secs(1),
+        &scratch.0.join("out"),
+    );
+    assert!(
+        matches!(ran, Err(Halt::Interrupted(libc::SIGHUP))),
+        "{ran:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(15),
+        "the signal ended the 30 s grace: {:?}",
+        start.elapsed()
+    );
+    assert!(gone(&read(&scratch.0.join("worker"))));
+}
+
+/// A test whose leader ends by its own signal gives the negated signal number as its exit code.
+#[test]
+fn a_test_that_its_own_signal_ends_gives_the_negated_number() {
+    let scratch = Scratch::new("weaken-own-signal");
+    let interrupt = Interrupt::new();
+    let (code, _) = execute(
+        &Launch::new(&interrupt),
+        &words(&["sh", "-c", "kill -9 $$"]),
+        Path::new("."),
+        None,
+        Duration::from_secs(60),
+        &scratch.0.join("out"),
+    )
+    .expect("the run ends");
+    assert_eq!(code, Some(-libc::SIGKILL));
 }

@@ -447,3 +447,47 @@ fn a_planted_file_a_text_restore_cannot_reproduce_is_refused() {
     assert!(ran.report.is_none());
     assert_eq!(fixture.lines(".lane"), Vec::<String>::new());
 }
+
+/// A work directory inside the checkout is refused when the checkout is named through a link, as the
+/// script compared the two resolved paths.
+#[test]
+fn a_work_directory_inside_a_checkout_named_through_a_link_is_refused() {
+    let fixture = Fixture::new("refused-linked-top");
+    fixture.commit();
+    let alias = fixture.base.join("alias");
+    symlink(&fixture.repo, &alias).expect("linked");
+    let output = std::process::Command::new(super::BINARY)
+        .arg(&alias)
+        .args(["weaken-orderings", "run", "--work"])
+        .arg(fixture.repo.join("work"))
+        .current_dir(&fixture.base)
+        .output()
+        .expect("the binary starts");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("lies inside the checkout"), "{stderr}");
+    assert!(!fixture.repo.join("work").exists());
+}
+
+/// A `tar` that exits 1 without reading the archive ends the copy: `git archive` gets a broken pipe, and
+/// the run exits 1 with the pipeline's failure and starts no stand-in.
+#[test]
+fn a_tar_that_ends_early_fails_the_copy() {
+    let fixture = Fixture::new("refused-tar");
+    fixture.commit();
+    let tar = fixture.base.join("bin/tar");
+    super::fixture::replace_entry(&fixture.base, "bin/tar", b"#!/bin/sh\nexit 1\n");
+    std::fs::set_permissions(&tar, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("moded");
+    let started = std::time::Instant::now();
+    let ran = fixture.run_rows(&[RUN_FENCE]);
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+    assert_eq!(ran.code(), Some(1), "{}", ran.stderr);
+    assert!(
+        ran.stderr
+            .contains("Command 'git archive | tar -x' returned non-zero exit status"),
+        "{}",
+        ran.stderr
+    );
+    nothing_ran(&fixture, &ran);
+}

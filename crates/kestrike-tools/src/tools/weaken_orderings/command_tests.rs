@@ -179,7 +179,8 @@ const CLAUSES: [(&str, &[&str]); 11] = [
 ];
 
 /// The bodies of the check's cases, by test name, read from the case file as text: each `fn` that a
-/// `#[test]` line precedes, up to the next `#[test]`.
+/// `#[test]` line precedes, up to the brace that closes its first `{`, braces inside comments and string
+/// literals passed over.
 fn bodies(source: &str) -> BTreeMap<String, String> {
     let mut found = BTreeMap::new();
     for piece in source.split("#[test]").skip(1) {
@@ -190,7 +191,21 @@ fn bodies(source: &str) -> BTreeMap<String, String> {
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
-        found.insert(name, piece.to_owned());
+        let view = crate::rust_text::code(piece);
+        let mut depth = 0usize;
+        let mut end = piece.len();
+        for (at, byte) in view.bytes().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' if depth == 1 => {
+                    end = at + 1;
+                    break;
+                }
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        found.insert(name, piece[..end].to_owned());
     }
     found
 }
@@ -228,17 +243,18 @@ fn arguments(source: &str, open: usize) -> Vec<&str> {
     found
 }
 
-/// `plants` holds where `body` calls one of the check cases' refusing helpers with `refusal` as a later
-/// argument: `refused(` and `refused_at(`, which assert exit 1, no credit and the refusal; `sentence(`,
+/// `plants` holds where `body`'s code, its comments and string literals passed over, calls one of the
+/// check cases' refusing helpers with `refusal` as the argument that names the refusal: `refused(` and `refused_at(`, which assert exit 1, no credit and the refusal; `sentence(`,
 /// which asserts the refusal with its whole message, which the check gives only with exit 1 and no
 /// credit; `refused_in(`, which is `refused_at(` of `scope file`; or `messages_of(` in a body that also
 /// asserts exit 1 and no credit.
 fn plants(body: &str, refusal: &str) -> bool {
     let literal = format!("\"{refusal}\"");
+    let view = crate::rust_text::code(body);
     let calls = |helper: &str| {
-        body.match_indices(helper)
+        view.match_indices(helper)
             .filter(|(at, _)| {
-                body[..*at]
+                view[..*at]
                     .chars()
                     .next_back()
                     .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -246,20 +262,17 @@ fn plants(body: &str, refusal: &str) -> bool {
             .map(|(at, _)| at + helper.len() - 1)
             .collect::<Vec<_>>()
     };
-    let called = |helper: &str| {
-        calls(helper).into_iter().any(|open| {
-            arguments(body, open)
-                .iter()
-                .skip(1)
-                .any(|argument| *argument == literal)
-        })
+    let called = |helper: &str, name_at: usize| {
+        calls(helper)
+            .into_iter()
+            .any(|open| arguments(body, open).get(name_at) == Some(&literal.as_str()))
     };
-    let asserted = body.contains("assert_eq!(code, 1") && body.contains("Value::Bool(false)");
-    called("refused(")
-        || called("refused_at(")
-        || called("sentence(")
+    let asserted = view.contains("assert_eq!(code, 1") && view.contains("Value::Bool(false)");
+    called("refused(", 1)
+        || called("refused_at(", 2)
+        || called("sentence(", 1)
         || (refusal == "scope file" && !calls("refused_in(").is_empty())
-        || (asserted && called("messages_of("))
+        || (asserted && called("messages_of(", 1))
 }
 
 /// The help lists exactly the refusals the table names, and each named case of the check exists and
@@ -288,6 +301,15 @@ fn every_documented_refusal_names_the_tests_that_plant_it() {
     );
     assert!(plants("sentence(plants, \"row\", \"x\");", "row"));
     assert!(plants("refused_in(plants, \"x.rs\");", "scope file"));
+    assert!(
+        !plants("// refused(plants, \"row\", \"x\");", "row"),
+        "a call in a comment plants nothing"
+    );
+    assert!(
+        !plants("refused(plants, \"find\", \"row\");", "row"),
+        "a refusal's name in the message argument plants nothing"
+    );
+    assert!(plants("refused_at(root, plants, \"row\", \"x\");", "row"));
     assert!(
         !plants("not_refused_in(plants, \"x.rs\");", "scope file"),
         "a call of another helper whose name ends in refused_in plants nothing"

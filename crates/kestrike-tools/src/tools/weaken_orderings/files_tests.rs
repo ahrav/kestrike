@@ -88,3 +88,30 @@ fn a_digest_is_read_from_a_regular_file_and_no_link() {
     assert_eq!(regular_digest(&scratch.0), None);
     assert_eq!(regular_digest(&scratch.0.join("absent")), None);
 }
+
+/// A fresh write over a file with a time in the past takes the wall clock's time, read around the write.
+#[test]
+fn a_fresh_write_over_an_old_file_takes_the_wall_clock() {
+    let scratch = Scratch::new("weaken-fresh-clock");
+    let target = scratch.0.join("old.rs");
+    fs::write(&target, "a").expect("written");
+    let past = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    fs::File::options()
+        .write(true)
+        .open(&target)
+        .expect("opens")
+        .set_modified(past)
+        .expect("timed");
+    let before = SystemTime::now();
+    fresh_write(&target, "b", None).expect("written");
+    let after = SystemTime::now();
+    let written = fs::metadata(&target)
+        .expect("stats")
+        .modified()
+        .expect("a time");
+    let slack = std::time::Duration::from_millis(20);
+    assert!(
+        written + slack >= before && written <= after + slack,
+        "{written:?}"
+    );
+}

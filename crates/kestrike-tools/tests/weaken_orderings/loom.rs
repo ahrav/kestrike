@@ -10,7 +10,6 @@ use kestrike_tools::json::Value;
 use super::fixture::*;
 
 pub fn named_failure_kills(fixture: &Fixture) {
-    let (_, _) = run_site();
     let revision = fixture.commit();
     let before = status(&fixture.repo);
     let tests = run_tests();

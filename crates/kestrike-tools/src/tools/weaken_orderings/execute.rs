@@ -59,8 +59,9 @@ impl<'a> Launch<'a> {
     }
 }
 
-/// `with_defaults` makes the child return each handled signal to its default action and unblock it
-/// before it runs its program.
+/// `with_defaults` makes the child reset each handled signal it catches to its default action, keep one
+/// it inherited ignored as ignored, unblock the three and take SIGXFSZ at its default before it runs its
+/// program.
 pub(super) fn with_defaults(command: &mut Command) {
     let handled = handled_set();
     // SAFETY: the hook runs in the forked child before `exec` and calls only `sigaction`, `sigprocmask`
@@ -73,8 +74,8 @@ pub(super) fn with_defaults(command: &mut Command) {
     }
 }
 
-/// `lead_session` makes the child lead a new session, and so a process group of its own, with the
-/// handled signals at their default actions and unblocked.
+/// `lead_session` makes the child lead a new session, and so a process group of its own, with the signals
+/// as [`with_defaults`] leaves them.
 fn lead_session(command: &mut Command) {
     // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, which is
     // async-signal-safe.
@@ -117,9 +118,9 @@ pub(super) fn seconds(elapsed: Duration) -> f64 {
 
 /// `execute` runs `argv` in `cwd` with `env`, or this process's environment where it is `None`, its
 /// standard output and standard error written to `output`, a new file, and returns the leader's exit
-/// code, `None` when the deadline or a signal ended the wait first, with the seconds from before the
-/// output's creation to the end of the stop, rounded to a tenth. A child a signal ended gives the
-/// negated signal number.
+/// code, `None` when the deadline ended the wait first, with the seconds from before the output's creation
+/// to the end of the stop, rounded to a tenth. A child a signal ended gives the negated signal number; a
+/// handled signal recorded during the wait gives its interruption.
 ///
 /// # Errors
 ///

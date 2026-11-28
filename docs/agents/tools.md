@@ -202,13 +202,13 @@ edits each caller's command text. The same change removes each row of
 
 ## Rules held twice
 
-Each row names a Rust module and a Python file that stays in the tree. The two hold the same rules and no
+Each row names a Rust module and a Python file, or a lane script, that stays in the tree. The two hold the same rules and no
 check reads both files, so an editor of one reads the other. Where an edit changes a rule a row lists,
 change both files in one pull request and show that they agree on recorded inputs, or port the Python file
 and remove its rows. A Python file stays while it stands in the tree, and a port's own script is listed
 until the change that deletes it.
 
-| Rust module | Python file that stays | Rules held in both |
+| Rust module | Python file or lane script that stays | Rules held in both |
 | --- | --- | --- |
 | `crates/kestrike-tools/src/decimal.rs` | `scripts/gameday-judge.py` | The number rules of the strict JSON read and of a package's windows: `nearest_double` and `spells_shortest` in the Rust module hold the test of `double` in the Python file, a token's nearest double and whether the token has the decimal value of that double's shortest form, within the exponent range of Python's `decimal` module (`EMAX` and `ETINY` in the Rust module); `whole_quotient` holds the test of the interval count in `check_package`, a whole number from 1 to the bound its caller passes, `MAX_INTERVALS`. |
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/escrow_check.py` | The text of `case.qnt` for a case of the escrow model without mutations or extra text: `case::escrow` and `inputs`. |
@@ -233,7 +233,7 @@ until the change that deletes it.
 | `crates/kestrike-tools/src/host_stop/mark.rs` | `scripts/fis-controller.py` | The sync of a directory's entries: `sync_directory` in both. |
 | `crates/kestrike-tools/src/host_stop_controller/` | `scripts/host-stop-controller.py` | The command `run`: its seven steps and their order, the calls and their cuts, the clocks' bounds, the signal points, the abort path, the marks and their order, each line and its stream, and the exit codes. Under the same names in both: `run`, `inject`, `stop`, `await_stop`, `confirms`, `abort`, `aws`, `within_deadline`, `statuses`, `record`, `ready`, `alarms`, `require_caller`, `quiet`, `pause` and `mark` of `Controller`, and `Aborted`. Under other names: `main` without its argument reading is `entry`; `Controller.run` is `Controller::run` with `before_injection` and `before_roles`; `inject` is `inject` with `observed`; `record` is `instance_record`; the abort's mark writes are `abort_mark`; `say` is `Context::say`; `Refusal`, `Interrupted`, `CallFailed` and the other exceptions of a step are the variants of `Halt`; and `mutating` of `aws` is `Kind::Stop`. |
 | `crates/kestrike-tools/src/json.rs` | `scripts/gameday-judge.py` | The strict JSON read, which refuses a repeated key, a constant that is no number, and a number with a fraction or an exponent whose value is not the shortest form of a finite double: `parse_strict` in the Rust module, and `DECODER` with `distinct_keys`, `no_constant` and `double` in the Python file. |
-| `crates/kestrike-tools/src/orderings/verdicts.rs` | `scripts/test-rust-lane.py` | The Cargo status line of a GenMC case build that compiled the kernel package, `^\s*(?:Checking|Compiling) genmc-kernels v`: `GENMC_REBUILT` in the Rust module and `rebuilt` of `test_a_genmc_case_list_runs_only_its_cases_and_leaves_no_receipt` in the Python file. |
+| `crates/kestrike-tools/src/orderings/verdicts.rs` | `scripts/test-rust-lane.py` | The Cargo status line of a GenMC case build that compiled the kernel package, `^\s*(?:Checking\|Compiling) genmc-kernels v`: `GENMC_REBUILT` in the Rust module and `rebuilt` of `test_a_genmc_case_list_runs_only_its_cases_and_leaves_no_receipt` in the Python file. |
 | `crates/kestrike-tools/src/ownership.rs` | `scripts/red-green.py` | The directory checks `shared_directories`, `traversed`, `make_private` and `foreign_toolchain_paths`, with `TOOLCHAIN_FILES` and `SHARED`, under the same names in both. |
 | `crates/kestrike-tools/src/production_text.rs` | `scripts/classify-atomics.py` | The test-only reading of a Rust source: `closing`, `item_end`, `readings`, `macro_spans`, `own_comma`, `analyzed`, `spliced` and `blanked`, with the patterns `RUN`, `ITEM` and `PROVEN`, and `MACRO`, which the Rust module holds as `MACRO_DEFINITION` and `MACRO_BANG`. |
 | `crates/kestrike-tools/src/python.rs` | `scripts/red-green.py` | The line printer `say`: the characters it escapes and the one newline it ends a line with. |
@@ -247,8 +247,9 @@ until the change that deletes it.
 | `crates/kestrike-tools/src/tools/reclaim_fixtures.rs` | `quint/reclaim_check.py` | The four checked runs: the first four rows of `RECIPES` and `RUNS`. |
 | `crates/kestrike-tools/src/tools/register_fixtures.rs` | `quint/register_check.py` | The three checked runs: the first three rows of `RECIPES` and `RUNS`. |
 | `crates/kestrike-tools/src/tools/weaken_orderings/execute.rs` | `scripts/rust-lane.sh` | The GenMC lane's deadlines: `GENMC_DEADLINE`, the sum of a case's `deadline 5m` for its `cargo check` and `deadline 15m` for its checker, and `GENMC_SETUP`, the lane's `deadline 40m` for the checker's provisioning plus 5 minutes; and `STOP_GRACE`, 45 seconds, which outlasts the 30 seconds `stop_group` of the lane gives a stopped session. |
+| `crates/kestrike-tools/src/tools/weaken_orderings/run.rs` | `scripts/tool.sh` | The files the launcher builds the tool from, which a run's `HEAD` check holds against `HEAD`: `JUDGING` in the Rust module lists `crates/kestrike-tools`, the root `Cargo.toml`, `.cargo/config.toml`, `scripts/tool.sh` and `.github/workflows/agent-checks.yml`, whose `STABLE` pin the launcher reads, beside the two judge scripts. |
 
-The checked runs of the seven rows under `crates/kestrike-tools/src/tools/` are each compared with the
+The checked runs of the seven `*_fixtures.rs` rows under `crates/kestrike-tools/src/tools/` are each compared with the
 committed replay traces: `scripts/test-quint-check.py` compares each run of `RUNS` with its trace's recipe,
 and `crates/kestrike-tools/tests/fixture_writers.rs` compares each trace a tool writes with the committed
 one. Neither compares which recipes are the checked runs, so the count in a row and in the comment on

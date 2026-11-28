@@ -18,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 use kestrike_tools::genmc::case::check_line;
@@ -62,9 +62,15 @@ fn role() {
     std::panic::set_hook(Box::new(move |info| {
         append(&failed, &format!("{shown}: {info}\n"));
     }));
-    // SAFETY: the wrapper opens descriptor 3 as the caller's standard output, and nothing else in this
-    // process owns it.
-    let mut out = unsafe { File::from_raw_fd(3) };
+    // SAFETY: `fcntl` takes a descriptor and a command; a failure returns -1, which the stand-in refuses.
+    let duplicate = unsafe { libc::fcntl(3, libc::F_DUPFD_CLOEXEC, 4) };
+    assert!(
+        duplicate >= 0,
+        "descriptor 3 stands: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `duplicate` is a descriptor this process just made and no other value owns.
+    let mut out = unsafe { File::from_raw_fd(duplicate) };
     let code = match role.to_str() {
         Some("cargo") => cargo(&args, &plan, &mut out),
         Some("lane") => lane(&args, &plan),
@@ -226,6 +232,7 @@ fn cargo(args: &[String], plan: &Path, out: &mut File) -> i32 {
 
 static STOPPED: OnceLock<CString> = OnceLock::new();
 static TWICE: AtomicBool = AtomicBool::new(false);
+static PARENT: AtomicI32 = AtomicI32::new(0);
 
 extern "C" fn stopped(_: libc::c_int) {
     if let Some(path) = STOPPED.get() {
@@ -242,9 +249,12 @@ extern "C" fn stopped(_: libc::c_int) {
             }
         }
     }
-    if TWICE.load(Ordering::SeqCst) {
-        // SAFETY: `getppid` and `kill` take plain values and are async-signal-safe.
-        unsafe { libc::kill(libc::getppid(), libc::SIGHUP) };
+    // SAFETY: `getppid` takes no argument and is async-signal-safe.
+    let parent = unsafe { libc::getppid() };
+    if TWICE.load(Ordering::SeqCst) && parent == PARENT.load(Ordering::SeqCst) {
+        // SAFETY: `kill` takes plain values and is async-signal-safe; `parent` is the run that started this
+        // test, which still holds it unreaped.
+        unsafe { libc::kill(parent, libc::SIGHUP) };
     } else {
         // SAFETY: `_exit` ends the process without running any handler of this process.
         unsafe { libc::_exit(143) };
@@ -256,6 +266,7 @@ fn sleep_until_stopped(plan: &Path, twice: bool) {
     if twice {
         // SAFETY: `getppid` takes no argument and touches no memory of the caller.
         let parent = unsafe { libc::getppid() };
+        PARENT.store(parent, Ordering::SeqCst);
         write(&suffixed(plan, ".parent"), &parent.to_string());
     }
     let path = CString::new(suffixed(plan, ".stopped").as_os_str().as_bytes()).expect("no NUL");
@@ -340,6 +351,14 @@ fn loom_test(test: &str, plan: &Path, out: &mut File) -> i32 {
 }
 
 fn test_output(test: &str, mode: &str, plan: &Path, out: &mut File) -> i32 {
+    if mode == "big" {
+        let filler = vec![b'.'; 1 << 20];
+        for _ in 0..16 {
+            out.write_all(&filler).expect("written");
+        }
+        writeln!(out).expect("written");
+        return test_output(test, "pass", plan, out);
+    }
     let mut say = |line: &str| writeln!(out, "{line}").expect("written");
     if mode != "norebuild" {
         say("   Compiling kestrike v0.1.0 (copy)");
@@ -524,6 +543,9 @@ fn lane(args: &[String], plan: &Path) -> i32 {
         _ => panic!("the options are a list"),
     };
     for case in cases {
+        if case.contains('/') {
+            continue;
+        }
         let mode = plan_mode(plan, case, phase).unwrap_or_else(|| "positive".to_owned());
         if mode == "abort" {
             write(

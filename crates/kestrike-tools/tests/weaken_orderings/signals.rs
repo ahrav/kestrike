@@ -23,6 +23,10 @@ fn an_interrupted_run_restores_the_plant_and_keeps_the_finished_results() {
         let status = child.wait(Duration::from_secs(120));
         assert!(started.elapsed() < Duration::from_secs(50));
         assert!(ended_by(status, libc::SIGINT), "{status:?}");
+        assert_eq!(
+            fixture.halt_line(),
+            format!("weaken-orderings: signal {number}")
+        );
         assert!(
             fixture.exists(".stopped"),
             "the sleeping test received SIGTERM"
@@ -59,6 +63,7 @@ fn progress_records_each_finished_baseline_test_and_skipped_row() {
     child.signal(libc::SIGTERM);
     let status = child.wait(Duration::from_secs(120));
     assert!(ended_by(status, libc::SIGINT), "{status:?}");
+    assert_eq!(fixture.halt_line(), "weaken-orderings: signal 15");
     assert_eq!(string(get(&progress, "active")), "baseline");
     let baseline: Vec<String> = items(get(&progress, "baseline"))
         .iter()
@@ -134,6 +139,7 @@ fn a_second_signal_during_the_stop_of_a_planted_test_still_restores_the_plant() 
         started.elapsed()
     );
     assert!(ended_by(status, libc::SIGINT), "{status:?}");
+    assert_eq!(fixture.halt_line(), "weaken-orderings: signal 15");
     assert!(
         fixture.exists(".stopped"),
         "the sleeping test received SIGTERM"

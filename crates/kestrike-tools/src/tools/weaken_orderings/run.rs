@@ -13,7 +13,7 @@ use super::execute::{Launch, holding, seconds, with_defaults};
 use super::files::{fresh_write, regular_digest, save, save_unless, sha256};
 use super::halt::Halt;
 use super::pins::{lane_env, pin};
-use super::runner::{Runner, Runs, os_of, text_of};
+use super::runner::{Runner, Runs, json_path, os_of, text_of};
 use crate::genmc::package_sources;
 use crate::json::{self, Integer, Object, Text, Value};
 use crate::orderings::check::{CATALOG, check, row_entries};
@@ -59,6 +59,11 @@ fn differs(top: &Path) -> Result<bool, Halt> {
         .args(JUDGING);
     with_defaults(&mut git);
     let listed = capture(&mut git, &INTERRUPT)??;
+    if !listed.status.success() {
+        let mut err = std::io::stderr();
+        let _ = err.write_all(&listed.stderr);
+        let _ = err.flush();
+    }
     Ok(!listed.status.success() || !listed.stdout.is_empty())
 }
 
@@ -163,10 +168,7 @@ pub(super) fn run_command(
         });
     match ran {
         Ok((path, report, code)) => {
-            let member = |key: &str| match &report {
-                Value::Object(report) => report.get(key).cloned().unwrap_or(Value::Null),
-                _ => Value::Null,
-            };
+            let member = |key: &str| json_path(&report, &[key]).cloned().unwrap_or(Value::Null);
             let mut line = Object::new();
             line.insert("report", Value::String(text_of(&path)));
             line.insert("mismatched", member("mismatched"));
@@ -253,7 +255,6 @@ impl Scoped {
             }
         }
         drift.sort();
-        drift.dedup();
         Ok(drift)
     }
 
@@ -263,7 +264,8 @@ impl Scoped {
     ///
     /// # Errors
     ///
-    /// A refusal of exit 2 for a find that does not occur once; of exit 4 for a plant that changed, an
+    /// A refusal of exit 2 for a find that does not occur once; of exit 4 for a plant that changed, which a
+    /// plant that cannot be written reads as, an
     /// unweakened file that cannot be written back or a scoped file that then differs; otherwise
     /// `body`'s halt or a failed write of the plant.
     fn planted(&self, row: &Object, body: impl FnOnce() -> Result<(), Halt>) -> Result<(), Halt> {
@@ -429,7 +431,7 @@ fn machine() -> Result<Text, Halt> {
     )))
 }
 
-/// `cpus` is the count of processors online, `None` where the system names none.
+/// `cpus` is the count of processors online, JSON null where the system names none.
 fn cpus() -> Value {
     // SAFETY: `sysconf` takes a constant name and touches no memory of the caller.
     let online = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) };
@@ -439,7 +441,7 @@ fn cpus() -> Value {
         .map_or(Value::Null, |count| Value::Integer(Integer::from(count)))
 }
 
-/// The catalog's selected rows with each label, the scoped files and the tests of the baseline.
+/// The catalog's selected rows with each label, and the tests of the baseline.
 struct Selection {
     rows: Vec<Object>,
     labels: BTreeMap<Text, Text>,
@@ -584,10 +586,7 @@ fn run(
         &package_sources,
     );
     if code != 0 {
-        let member = |key: &str| match &checked {
-            Value::Object(checked) => checked.get(key).cloned().unwrap_or(Value::Null),
-            _ => Value::Null,
-        };
+        let member = |key: &str| json_path(&checked, &[key]).cloned().unwrap_or(Value::Null);
         let refusals = member("refusals");
         let shown = if truthy(&refusals) {
             refusals

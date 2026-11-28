@@ -7,6 +7,7 @@ mod check;
 mod drift;
 mod fixture;
 mod genmc;
+mod kept;
 mod loom;
 mod refusals;
 mod signals;

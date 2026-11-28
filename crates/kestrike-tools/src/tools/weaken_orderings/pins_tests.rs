@@ -84,3 +84,22 @@ fn the_loom_lane_clears_each_shaping_name() {
         assert_eq!(shaping(&OsString::from(name)), cleared, "{name:?}");
     }
 }
+
+/// The lane's environment holds one value of each name it sets, the run's own, whatever the inherited
+/// environment repeats.
+#[test]
+fn the_lane_environment_sets_each_name_once() {
+    let environ: Vec<(OsString, OsString)> =
+        [("STABLE", "0.0.1"), ("PATH", "/bin"), ("STABLE", "0.0.2")]
+            .iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect();
+    let pins = vec![("STABLE".to_owned(), "1.99.0".to_owned())];
+    let env = super::lane_env(&environ, std::path::Path::new("/w"), &pins);
+    let stable: Vec<&OsString> = env
+        .iter()
+        .filter(|(name, _)| name == "STABLE")
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(stable, [&OsString::from("1.99.0")]);
+}

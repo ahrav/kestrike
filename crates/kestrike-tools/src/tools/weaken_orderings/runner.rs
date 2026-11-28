@@ -191,6 +191,8 @@ impl<'l> Runner<'l> {
                 return Err(error.into());
             }
         };
+        // The command holds this process's copy of the pipe's read end; dropping it leaves `tar` the only
+        // reader, so `git archive` gets a broken pipe when `tar` ends early.
         drop(tar);
         let mut children = [archiving, extracting];
         let statuses = waited(&mut children, interrupt)?;
@@ -363,18 +365,7 @@ impl Runner<'_> {
             let read = fs::read_to_string(&config)
                 .map_err(|error| Halt::failed(PathError::new(&config, error)))?;
             let parsed = json::parse(&read).map_err(|error| shapes(&error))?;
-            let mut loom: Vec<Text> = match &parsed {
-                Value::Object(parsed) => match parsed.get("env") {
-                    Some(Value::Object(env)) => env
-                        .iter()
-                        .map(|(entry, _)| entry.clone())
-                        .filter(|entry| entry.starts_with(&Text::from("LOOM_")))
-                        .collect(),
-                    _ => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
-            loom.sort();
+            let loom = loom_entries(&parsed);
             if !loom.is_empty() {
                 let named: Vec<Text> = loom.iter().map(|entry| text!("env.", entry)).collect();
                 return Err(Halt::stop(
@@ -420,6 +411,21 @@ impl Runner<'_> {
             Err(error) => Err(Halt::failed(error)),
         }
     }
+}
+
+/// `loom_entries` is the sorted names of the `env` table of the merged Cargo configuration `parsed` that
+/// start `LOOM_`.
+pub(super) fn loom_entries(parsed: &Value) -> Vec<Text> {
+    let mut loom: Vec<Text> = match json_path(parsed, &["env"]) {
+        Some(Value::Object(env)) => env
+            .iter()
+            .map(|(entry, _)| entry.clone())
+            .filter(|entry| entry.starts_with(&Text::from("LOOM_")))
+            .collect(),
+        _ => Vec::new(),
+    };
+    loom.sort();
+    loom
 }
 
 /// `label_of` is the label of a run's outputs: the row's label under a plant, `baseline` on the
@@ -746,7 +752,7 @@ fn type_name(value: &Value) -> &'static str {
 }
 
 /// `json_path` is the member that `keys` reach from `value` through objects.
-fn json_path<'v>(value: &'v Value, keys: &[&str]) -> Option<&'v Value> {
+pub(super) fn json_path<'v>(value: &'v Value, keys: &[&str]) -> Option<&'v Value> {
     keys.iter().try_fold(value, |value, key| match value {
         Value::Object(object) => object.get(key),
         _ => None,

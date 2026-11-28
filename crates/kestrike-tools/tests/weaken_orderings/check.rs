@@ -61,7 +61,6 @@ fn the_command_prints_the_report_and_writes_nothing() {
 #[test]
 fn a_helper_that_cannot_load_or_a_usage_error_exits_2() {
     let scratch = Scratch::new("unreadable");
-    fs::create_dir(scratch.0.join("scripts")).expect("made");
     let run = tool(&scratch.0, &["check"], &scratch.0);
     assert_eq!(
         run.status.code(),
@@ -130,15 +129,13 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// A tree that holds the scripts and the declarations but no crate source exits 1 with a report that
+/// A tree that holds the declarations but no crate source exits 1 with a report that
 /// credits nothing and refuses each listed file as one the kernel package does not include.
 #[test]
 fn the_command_exits_1_and_prints_the_refusing_report() {
     let top = top();
     let scratch = Scratch::new("refusing");
-    for name in ["scripts", "verification"] {
-        copy_tree(&top.join(name), &scratch.0.join(name));
-    }
+    copy_tree(&top.join("verification"), &scratch.0.join("verification"));
     let run = tool(&scratch.0, &["check"], &scratch.0);
     assert_eq!(
         run.status.code(),
@@ -160,4 +157,38 @@ fn the_command_exits_1_and_prints_the_refusing_report() {
         panic!("the report lists its refusals");
     };
     assert!(refusals.contains(&expected), "{refusals:?}");
+}
+
+/// A report written past the soft file size limit fails with `EFBIG` and exits 120: the tool ignores
+/// SIGXFSZ, so the limit ends no process.
+#[test]
+fn a_report_past_the_file_size_limit_exits_120() {
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    let top = top();
+    let scratch = Scratch::new("check-fsize");
+    let sink = fs::File::create(scratch.0.join("out")).expect("made");
+    let mut command = Command::new(super::BINARY);
+    command
+        .arg(&top)
+        .args(["weaken-orderings", "check"])
+        .current_dir(&scratch.0)
+        .stdout(sink);
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `setrlimit`, which is
+    // async-signal-safe, on a local value.
+    unsafe {
+        command.pre_exec(|| {
+            let limit = libc::rlimit {
+                rlim_cur: 100,
+                rlim_max: libc::RLIM_INFINITY,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let status = command.status().expect("the binary starts");
+    assert_eq!(status.signal(), None, "{status:?}");
+    assert_eq!(status.code(), Some(120));
+    assert!(fs::metadata(scratch.0.join("out")).expect("stats").len() <= 100);
 }

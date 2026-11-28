@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::super::execute::{Launch, execute};
+use super::super::execute::{LOOM_DEADLINE, Launch, execute, seconds};
 use super::super::halt::Halt;
 use super::super::runner::Runner;
-use super::{Report, rows, selection};
+use super::{Report, plant_of, rows, selection};
 use crate::json::{self, Text, Value};
 use crate::paths::tests::Scratch;
 use crate::process::Interrupt;
@@ -51,6 +51,10 @@ fn between(
     deadline: Duration,
     output: &Path,
 ) -> Result<(Option<i32>, f64), Halt> {
+    assert_eq!(
+        deadline, LOOM_DEADLINE,
+        "a loom test runs under the loom deadline"
+    );
     let log = BETWEEN_LOG
         .lock()
         .expect("unpoisoned")
@@ -132,10 +136,15 @@ fn planted_run(
     work: &Path,
     interrupt: &Interrupt,
     fake: super::super::runner::Execute,
-) -> (Result<Vec<Text>, Halt>, PathBuf, Vec<u8>) {
+) -> (Result<Vec<Text>, Halt>, PathBuf, Vec<u8>, usize) {
     fs::create_dir(work.join("copy")).expect("made");
     fs::create_dir(work.join("evidence")).expect("made");
-    let launch = Launch::new(interrupt);
+    let starts = std::cell::Cell::new(0);
+    let counted = |_: &std::process::Child| starts.set(starts.get() + 1);
+    let launch = Launch {
+        started: &counted,
+        ..Launch::new(interrupt)
+    };
     let mut runner = Runner::new(&top(), work, Vec::new(), &launch).expect("the copy is made");
     runner.execute = fake;
     runner.prepare().expect("the declaration reads");
@@ -144,6 +153,11 @@ fn planted_run(
     let Some(Value::String(path)) = selection.rows[0].get("path") else {
         panic!("the row names its file");
     };
+    let needs = json::line(selection.rows[0].get("unrun").expect("the row is unrun"));
+    assert!(
+        needs.contains(&format!("[\"{FIRST}\", \"storage::fill_model::")),
+        "the committed row names two loom tests, {FIRST} first: {needs}"
+    );
     let planted = work.join("copy").join(path.to_string());
     let unweakened = fs::read(&planted).expect("reads");
     let mut report = Report {
@@ -163,7 +177,7 @@ fn planted_run(
         work,
         Instant::now(),
     );
-    (ran, planted, unweakened)
+    (ran, planted, unweakened, starts.get())
 }
 
 fn staged(directory: &Path) -> Vec<PathBuf> {
@@ -189,7 +203,8 @@ fn a_signal_between_a_rows_tests_starts_no_further_test_and_restores_the_plant()
     let scratch = Scratch::new("weaken-between");
     let log = scratch.0.join("log");
     *BETWEEN_LOG.lock().expect("unpoisoned") = Some(log.clone());
-    let (ran, planted, unweakened) = planted_run(&scratch.0, &BETWEEN, between);
+    let (ran, planted, unweakened, starts) = planted_run(&scratch.0, &BETWEEN, between);
+    assert_eq!(starts, 1, "one test of the row started");
     assert!(
         matches!(ran, Err(Halt::Interrupted(libc::SIGTERM))),
         "{ran:?}"
@@ -230,7 +245,8 @@ fn a_second_signal_as_the_restore_begins_still_restores_the_plant() {
     *RESTORE_DIR.lock().expect("unpoisoned") = Some(scratch.0.clone());
     let work = scratch.0.join("work");
     fs::create_dir(&work).expect("made");
-    let (ran, planted, unweakened) = planted_run(&work, &RESTORE, restore);
+    let (ran, planted, unweakened, starts) = planted_run(&work, &RESTORE, restore);
+    assert_eq!(starts, 2);
     assert!(
         matches!(ran, Err(Halt::Interrupted(libc::SIGTERM))),
         "{ran:?}"
@@ -246,4 +262,31 @@ fn a_second_signal_as_the_restore_begins_still_restores_the_plant() {
         staged(planted.parent().expect("a parent")),
         Vec::<PathBuf>::new()
     );
+}
+
+/// A plant replaces the one production occurrence of its find, whatever a test-only element before it
+/// holds: the blanked element's multibyte code points keep the offsets of the raw text, and the copy of
+/// the find inside the element stays; a find with no or two production occurrences is refused with its
+/// count.
+#[test]
+fn a_plant_maps_its_find_back_to_the_raw_text() {
+    let text = "#[cfg(test)]\nmod tests {\n    // é ü\n    fn t() { x.load(Acquire); }\n}\nfn a() { x.load(Acquire); }\n";
+    let planted = plant_of(text, "x.load(Acquire)", "x.load(Relaxed)").expect("one occurrence");
+    assert_eq!(
+        planted,
+        "#[cfg(test)]\nmod tests {\n    // é ü\n    fn t() { x.load(Acquire); }\n}\nfn a() { x.load(Relaxed); }\n"
+    );
+    assert_eq!(plant_of(text, "x.store(", "y"), Err(0));
+    let twice = format!("{text}fn b() {{ x.load(Acquire); }}\n");
+    assert_eq!(plant_of(&twice, "x.load(Acquire)", "y"), Err(2));
+}
+
+/// A run's seconds are its elapsed time rounded to a tenth as Python's `round` rounds a float: to the
+/// nearest tenth, with a tie that the float cannot hold exactly going the way its stored value lies.
+#[test]
+fn seconds_round_to_a_tenth_as_python_rounds() {
+    assert_eq!(seconds(Duration::from_millis(1240)), 1.2);
+    assert_eq!(seconds(Duration::from_millis(1260)), 1.3);
+    assert_eq!(seconds(Duration::from_millis(250)), 0.2);
+    assert_eq!(seconds(Duration::from_millis(350)), 0.3);
 }

@@ -64,8 +64,8 @@ impl From<io::Error> for Halt {
 /// `end_by_sigint` gives SIGINT its default action, unblocks it in the calling thread and sends it to
 /// this process, which then ends by that signal.
 fn end_by_sigint() {
-    // SAFETY: `signal`, `sigemptyset`, `sigaddset`, `pthread_sigmask` and `kill` take plain values and a
-    // local signal set that outlives the calls; `sigemptyset` initializes the set before it is read.
+    // SAFETY: `signal`, `sigemptyset`, `sigaddset`, `pthread_sigmask`, `getpid` and `kill` take plain
+    // values and a local signal set that outlives the calls; `sigemptyset` initializes the set before it is read.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         let mut set: libc::sigset_t = std::mem::zeroed();

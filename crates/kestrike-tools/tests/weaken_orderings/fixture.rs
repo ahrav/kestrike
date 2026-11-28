@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -298,7 +298,23 @@ impl Fixture {
         Self::within(scratch, base, alias)
     }
 
+    /// `prepared` is [`Fixture::new`] with `prepare` run on the clone before the fixture writes into it.
+    pub fn prepared(label: &str, prepare: impl FnOnce(&Path)) -> Self {
+        let scratch = Scratch::new(label);
+        let base = scratch.0.canonicalize().expect("the scratch resolves");
+        Self::within_prepared(scratch, base.clone(), base, prepare)
+    }
+
     fn within(scratch: Scratch, base: PathBuf, given: PathBuf) -> Self {
+        Self::within_prepared(scratch, base, given, |_| {})
+    }
+
+    fn within_prepared(
+        scratch: Scratch,
+        base: PathBuf,
+        given: PathBuf,
+        prepare: impl FnOnce(&Path),
+    ) -> Self {
         let top = top();
         let repo = base.join("repo");
         let cloned = Command::new("git")
@@ -308,6 +324,7 @@ impl Fixture {
             .status()
             .expect("git starts");
         assert!(cloned.success());
+        prepare(&repo);
         let changed = git(&top, &["diff", "--name-only", "-z", "HEAD"]);
         let untracked = git(&top, &["ls-files", "-z", "--others", "--exclude-standard"]);
         for name in changed.split('\0').chain(untracked.split('\0')) {
@@ -316,8 +333,7 @@ impl Fixture {
             }
             let (source, target) = (top.join(name), repo.join(name));
             if source.is_file() {
-                fs::create_dir_all(target.parent().expect("a parent")).expect("made");
-                fs::copy(&source, &target).expect("copied");
+                replace_entry(&repo, name, &fs::read(&source).expect("reads"));
             } else if target.exists() {
                 fs::remove_file(&target).expect("removed");
             }
@@ -330,12 +346,10 @@ impl Fixture {
             ("lane", wrapper("lane")),
         ];
         for (name, script) in stands {
-            fs::write(bin.join(name), script).expect("written");
-            fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755))
-                .expect("changed");
+            executable(&bin.join(name), &script);
         }
         let lane = format!("exec '{}' \"$@\"\n", bin.join("lane").display());
-        fs::write(repo.join("scripts/rust-lane.sh"), lane).expect("written");
+        replace_entry(&repo, "scripts/rust-lane.sh", lane.as_bytes());
         let plan = base.join("plan.json");
         fs::write(&plan, "{}").expect("written");
         let catalog = read_json(&repo.join(CATALOG));
@@ -357,7 +371,7 @@ impl Fixture {
             needing(&mut planted, id, needs);
         }
         change(&mut planted);
-        fs::write(self.repo.join(CATALOG), json::line(&planted)).expect("written");
+        replace_entry(&self.repo, CATALOG, json::line(&planted).as_bytes());
         git(&self.repo, &["add", "-A"]);
         git(
             &self.repo,
@@ -480,15 +494,22 @@ impl Fixture {
         }
     }
 
+    /// `start` starts the run with its standard error in `STUB_PLAN.stderr`.
     pub fn start(&self, rows: &[&str], work: &Path, plan: Value) -> Running {
-        let child = self
-            .command(rows, work, Some(&plan), &[])
+        let mut command = self.command(rows, work, Some(&plan), &[]);
+        let stderr = fs::File::create(suffixed(&self.plan, ".stderr")).expect("made");
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(stderr)
             .spawn()
             .expect("the binary starts");
         Running(child)
+    }
+
+    /// `halt_line` is the last line the started run wrote to standard error.
+    pub fn halt_line(&self) -> String {
+        self.lines(".stderr").last().cloned().unwrap_or_default()
     }
 
     pub fn wait_for(&self, suffix: &str) {
@@ -557,6 +578,61 @@ impl Fixture {
             );
         }
     }
+}
+
+/// `replace_entry` puts a new regular file holding `bytes` at `name` under `repo`: created exclusively
+/// beside the entry with the entry's permission bits, or 0644 where none stands, and renamed over it, so a
+/// link at `name` is replaced and its target keeps its bytes. A parent of `name` under `repo` that is a
+/// link fails the case; a missing one is made.
+pub fn replace_entry(repo: &Path, name: &str, bytes: &[u8]) {
+    let relative = Path::new(name);
+    let mut at = repo.to_owned();
+    if let Some(parent) = relative.parent() {
+        for part in parent.components() {
+            at.push(part);
+            match fs::symlink_metadata(&at) {
+                Ok(status) => assert!(status.is_dir(), "{} is no directory", at.display()),
+                Err(_) => fs::create_dir(&at).expect("made"),
+            }
+        }
+    }
+    let target = repo.join(relative);
+    let mode = fs::symlink_metadata(&target)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map_or(0o644, |status| status.permissions().mode() & 0o7777);
+    let leaf = relative.file_name().expect("a name").to_string_lossy();
+    let staged = at.join(format!(".{leaf}.fixture"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&staged)
+        .unwrap_or_else(|error| panic!("{}: {error}", staged.display()));
+    std::io::Write::write_all(&mut file, bytes).expect("written");
+    file.set_permissions(fs::Permissions::from_mode(mode))
+        .expect("moded");
+    drop(file);
+    fs::rename(&staged, &target).expect("renamed");
+}
+
+/// `executable` writes the stand-in at `path` through a child, the one process that holds the file open
+/// for writing, so no fork of this process holds a descriptor that would make its `execve` fail with
+/// `ETXTBSY`.
+fn executable(path: &Path, text: &str) {
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the stand-in's writer starts");
+    std::io::Write::write_all(
+        &mut writer.stdin.take().expect("the writer's input is a pipe"),
+        text.as_bytes(),
+    )
+    .expect("the stand-in's text reaches the writer");
+    let status = writer.wait().expect("the stand-in's writer is reaped");
+    assert!(status.success(), "the stand-in is written: {status}");
 }
 
 /// `staged` lists the files under `directory` whose name ends in `.weaken`.
