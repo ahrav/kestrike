@@ -486,8 +486,7 @@ impl Runner<'_> {
     /// # Errors
     ///
     /// The run of the test halts or its output cannot be read; after the run, a failure Python reads as
-    /// true that is no text, where the model source holds a message literal, fails with Python's type
-    /// error; or the judgment fails.
+    /// true that is no text, where the model source holds a message literal, fails; or the judgment fails.
     pub(super) fn loom(
         &mut self,
         test: &Text,
@@ -586,17 +585,17 @@ impl Runner<'_> {
 ///
 /// # Errors
 ///
-/// A failure that is no text, where `text` holds a message literal, fails with Python's type error.
+/// A failure that is no text, where `text` holds a message literal, fails with the tool's sentence
+/// that the failure is no text.
 fn site_of(path: &str, text: &str, failure: &Value) -> Result<Option<(String, usize)>, Halt> {
     let sites = diagnostic_sites(text);
     let failure = match failure {
         Value::String(failure) => failure.to_str(),
         _ if sites.is_empty() => return Ok(None),
-        other => {
-            return Err(Halt::failed(format!(
-                "TypeError: 'in <string>' requires string as left operand, not {}",
-                type_name(other)
-            )));
+        _ => {
+            return Err(Halt::failed(
+                "a loom entry's failure is no text, so no message literal of its model can hold it",
+            ));
         }
     };
     let lines: Vec<usize> = sites
@@ -790,7 +789,7 @@ fn result_record(lane: &str, test: &Text, members: &Object, verdict: &str, reaso
 ///
 /// # Errors
 ///
-/// Python's `KeyError` where `declared` holds no `profiles` object with a `pr` member, its `TypeError`
+/// Python's `KeyError` where `declared` holds no `profiles` object with a `pr` member; a failure
 /// where `pr` is a number, a boolean or null, or where it holds an array or an object.
 fn profile(declared: &Value, fresh: &[&Text]) -> Result<&'static str, Halt> {
     let pr = match json_path(declared, &["profiles"]) {
@@ -800,33 +799,19 @@ fn profile(declared: &Value, fresh: &[&Text]) -> Result<&'static str, Halt> {
             None => return Err(Halt::failed("KeyError: 'pr'")),
         },
     };
-    if let Some(unhashable) = pr
+    if pr
         .iter()
-        .find(|named| matches!(named, Value::Array(_) | Value::Object(_)))
+        .any(|named| matches!(named, Value::Array(_) | Value::Object(_)))
     {
-        return Err(Halt::failed(format!(
-            "TypeError: unhashable type: '{}'",
-            type_name(unhashable)
-        )));
+        return Err(Halt::failed(
+            "the pr profile holds an array or an object, and its members must be names of cases",
+        ));
     }
     let held = fresh.iter().all(|case| {
         pr.iter()
             .any(|named| *named == Value::String((*case).clone()))
     });
     Ok(if held { "pr" } else { "scheduled" })
-}
-
-/// `type_name` is the name Python gives the type of the JSON value `value` reads as.
-fn type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Object(_) => "dict",
-        Value::Array(_) => "list",
-        Value::String(_) => "str",
-        Value::Integer(_) => "int",
-        Value::Float(_) => "float",
-        Value::Bool(_) => "bool",
-        Value::Null => "NoneType",
-    }
 }
 
 /// `json_path` is the member that `keys` reach from `value` through objects.

@@ -433,9 +433,14 @@ fn a_plant_that_cannot_be_written_reads_as_a_changed_plant() {
     let status = std::process::Command::new(std::env::current_exe().expect("the test executable"))
         .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
         .env(FSIZE_ROLE, &scratch.0)
-        .status()
+        .output()
         .expect("the role runs");
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
 }
 
 /// A signal recorded before the report's last check leaves no `report.json` and no staging file and

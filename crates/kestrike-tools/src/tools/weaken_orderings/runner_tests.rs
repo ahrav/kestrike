@@ -305,7 +305,7 @@ const WITH_LITERAL: &str =
     "mod m {\n    fn t() {\n        assert!(held(), \"the record holds\");\n    }\n}\n";
 
 /// A loom failure that is no text but that Python reads as true runs its test first; the judgment then
-/// fails with Python's type error where the model source holds a message literal, and is made as for no
+/// fails with the tool's sentence where the model source holds a message literal, and is made as for no
 /// site where it holds none. A failure Python reads as false names no site and fails nothing.
 #[test]
 fn a_loom_failure_that_is_no_text_fails_after_its_run_where_its_model_holds_a_literal() {
@@ -325,7 +325,7 @@ fn a_loom_failure_that_is_no_text_fails_after_its_run_where_its_model_holds_a_li
     match ran {
         Err(Halt::Failed(message)) => assert_eq!(
             message,
-            "TypeError: 'in <string>' requires string as left operand, not int"
+            "a loom entry's failure is no text, so no message literal of its model can hold it"
         ),
         other => panic!("{other:?}"),
     }
@@ -460,7 +460,7 @@ fn a_signal_ended_loom_test_reports_its_negated_number() {
 
 /// The profile of a lane call: `pr` where the set Python builds of `profiles.pr` holds every fresh case,
 /// from an array, an object's keys or a string's code points, else `scheduled`; a missing member is
-/// Python's `KeyError`, and a scalar or a member that is an array or an object its `TypeError`.
+/// Python's `KeyError`, and a scalar or a member that is an array or an object a failure.
 #[test]
 fn the_profile_is_pr_where_its_set_holds_each_fresh_case() {
     let (join, j) = (Text::from("join-production"), Text::from("j"));
@@ -482,8 +482,8 @@ fn the_profile_is_pr_where_its_set_holds_each_fresh_case() {
         (r#"{"cases": {}}"#, &[&join], "KeyError: 'profiles'"),
         (r#"{"profiles": {}}"#, &[&join], "KeyError: 'pr'"),
         (r#"{"profiles": {"pr": 7}}"#, &[&join], "the pr profile is not iterable"),
-        (r#"{"profiles": {"pr": ["join-production", ["x"]]}}"#, &[&join], "TypeError: unhashable type: 'list'"),
-        (r#"{"profiles": {"pr": ["join-production", {"x": 1}]}}"#, &[&join], "TypeError: unhashable type: 'dict'"),
+        (r#"{"profiles": {"pr": ["join-production", ["x"]]}}"#, &[&join], "the pr profile holds an array or an object, and its members must be names of cases"),
+        (r#"{"profiles": {"pr": ["join-production", {"x": 1}]}}"#, &[&join], "the pr profile holds an array or an object, and its members must be names of cases"),
     ];
     for (declared, fresh, wanted) in rows {
         assert_eq!(chosen(declared, fresh), wanted, "{declared}");

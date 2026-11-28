@@ -572,7 +572,12 @@ fn a_child_takes_sigxfsz_at_its_default_action() {
     let status = Command::new(std::env::current_exe().expect("the test executable"))
         .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
         .env(FSIZE_ROLE, &scratch.0)
-        .status()
+        .output()
         .expect("the role runs");
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(
+        status.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
 }
