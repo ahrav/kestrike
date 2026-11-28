@@ -384,8 +384,9 @@ fn a_path_with_a_nul_byte_is_no_file_directory_or_link() {
 }
 
 /// `open_regular` opens a path once and reports what the opened entry is: the file of a regular file or
-/// of a link to one, read through that open; `Other` for a directory or a FIFO, whose open does not
-/// wait; `Absent` for a missing path or a dangling link.
+/// of a link to one, read through that open; `Other` for a directory, a FIFO, whose open does not wait, a
+/// socket and a directory of mode 0000, which cannot be opened; `Absent` for a missing path or a dangling
+/// link.
 #[test]
 fn open_regular_checks_the_opened_entry_and_reads_through_it() {
     use kestrike_tools::ownership::{Opened, open_regular};
@@ -413,7 +414,12 @@ fn open_regular_checks_the_opened_entry_and_reads_through_it() {
         file.read_to_string(&mut read).expect("the file reads");
         assert_eq!(read, "bytes", "{name}");
     }
-    for name in ["dir", "fifo"] {
+    let _socket =
+        std::os::unix::net::UnixListener::bind(root.join("socket")).expect("the socket binds");
+    fs::create_dir(root.join("closed")).expect("the directory is made");
+    fs::set_permissions(root.join("closed"), fs::Permissions::from_mode(0o000))
+        .expect("the mode is set");
+    for name in ["dir", "fifo", "socket", "closed"] {
         assert!(
             matches!(open_regular(&root.join(name)), Ok(Opened::Other)),
             "{name} is no regular file"

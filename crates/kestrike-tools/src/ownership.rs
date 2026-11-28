@@ -1,4 +1,5 @@
-//! The module flags path entries by ownership and write-permission bits.
+//! The module flags path entries by ownership and write-permission bits, and opens a regular file once
+//! for its check and its read.
 //!
 //! Ownership checks use the process's real user id, called this user below. A path's lineage is the path
 //! and then each lexical parent, as Python's `pathlib` gives them: repeated slashes and `.` components drop,
@@ -249,11 +250,14 @@ pub enum Opened {
 }
 
 /// `open_regular` opens `path` once for reading, following links, and checks the opened file, so a check
-/// and the read that follows it name the same file. The open does not wait on a FIFO.
+/// and the read that follows it name the same file. The open does not wait on a FIFO and takes no
+/// controlling terminal. An entry that cannot be opened, such as a socket or an unreadable directory, is
+/// [`Opened::Other`] when [`status`] names no regular file there.
 ///
 /// # Errors
 ///
-/// The open fails with an error outside [`ignored`], or the opened file's `fstat` fails.
+/// The open of a regular file fails with an error outside [`ignored`], [`status`] fails after a failed
+/// open, or the opened file's `fstat` fails.
 pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
     use std::os::unix::fs::OpenOptionsExt;
     if path.as_os_str().as_bytes().contains(&0) {
@@ -261,12 +265,17 @@ pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
     }
     let file = match fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
     {
         Ok(file) => file,
         Err(error) if ignored(&error) => return Ok(Opened::Absent),
-        Err(error) => return Err(PathError::new(path, error)),
+        Err(error) => {
+            return match status(path)? {
+                Some(found) if !found.is_file() => Ok(Opened::Other),
+                _ => Err(PathError::new(path, error)),
+            };
+        }
     };
     let status = file
         .metadata()

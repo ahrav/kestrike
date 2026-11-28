@@ -113,15 +113,15 @@ pub(crate) fn listing(path: &Path, profiles: &[Text], work: &Path) -> Result<Lis
     let unreadable = |error: &std::io::Error| NoVerdict::unreadable(path, error, work);
     let mut listing = Listing::default();
     let opened = open_regular(path).map_err(|error| unreadable(error.error()))?;
+    let not_regular = || NoVerdict::plain("the root's suspects.jsonl is no regular file");
     let file = match opened {
         Opened::File(file) => file,
-        Opened::Absent if !is_link(path).map_err(|error| unreadable(error.error()))? => {
+        Opened::Other => return Err(not_regular()),
+        Opened::Absent => {
+            if is_link(path).map_err(|error| unreadable(error.error()))? {
+                return Err(not_regular());
+            }
             return Ok(listing);
-        }
-        Opened::Absent | Opened::Other => {
-            return Err(NoVerdict::plain(
-                "the root's suspects.jsonl is no regular file",
-            ));
         }
     };
     let mut lines = BufReader::new(file);
