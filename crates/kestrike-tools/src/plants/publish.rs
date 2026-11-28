@@ -6,17 +6,17 @@
 //! the target. The score's is created new with mode 0600 and then given mode 0666 less the umask the
 //! caller read with [`umask`]; a file published with [`Creation::Mode`] is created new with that mode,
 //! which the kernel lessens by the umask or, in a directory with a default ACL, sets from that ACL; one
-//! published with [`Creation::Exact`] is created new with mode 0600 and then given that mode as it stands.
-//! A [`Staging`] with a modification time gives the written file that time, as its access time too,
-//! through its descriptor. The rename replaces a link at the target's path, whose target stays. A write,
+//! published with [`Creation::Exact`] is created new with mode 0600, written, and then given that mode as
+//! it stands, so the write leaves its set-id bits. A [`Staging`] with a modification time gives the written
+//! file that time, as its access time too, through its descriptor. The rename replaces a link at the target's path, whose target stays. A write,
 //! close or rename that fails leads to an attempt to remove the staging file. The write makes no sync.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use super::entry::Finished;
 use super::prepare::Inputs;
@@ -97,8 +97,8 @@ pub enum Creation {
     /// Created with this mode, which the kernel lessens by the umask at creation or, in a directory with
     /// a default ACL, sets from that ACL, as for any file a process creates there.
     Mode(u32),
-    /// Created with mode 0600 and then given this mode, the set-id and sticky bits included, whatever the
-    /// umask.
+    /// Created with mode 0600 and given this mode once the bytes are written, the set-id and sticky bits
+    /// included, whatever the umask.
     Exact(u32),
 }
 
@@ -196,23 +196,19 @@ pub fn publish_with(target: &Path, written: &str, creation: Creation) -> Result<
     publish_staged(target, written.as_bytes(), Staging::new(creation))
 }
 
-/// `times` gives the file open as `file` the access and modification time `nanoseconds` after the epoch.
+/// `times` gives the file open as `file` the access and modification time `nanoseconds` after the epoch,
+/// a time before it where negative.
 fn times(file: &File, nanoseconds: i128) -> io::Result<()> {
-    let seconds = libc::time_t::try_from(nanoseconds.div_euclid(1_000_000_000)).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "a time past the clock's range")
-    })?;
-    let rest = libc::c_long::try_from(nanoseconds.rem_euclid(1_000_000_000))
-        .expect("a remainder below a second fits c_long");
-    let stamp = libc::timespec {
-        tv_sec: seconds,
-        tv_nsec: rest,
-    };
-    let stamps = [stamp, stamp];
-    // SAFETY: `file` holds an open descriptor and `stamps` two initialized timespecs that outlive the call.
-    if unsafe { libc::futimens(file.as_raw_fd(), stamps.as_ptr()) } != 0 {
-        return Err(io::Error::last_os_error());
+    let past = || io::Error::new(io::ErrorKind::InvalidInput, "a time past the clock's range");
+    let span = u64::try_from(nanoseconds.unsigned_abs()).map_err(|_| past())?;
+    let span = std::time::Duration::from_nanos(span);
+    let at = if nanoseconds < 0 {
+        UNIX_EPOCH.checked_sub(span)
+    } else {
+        UNIX_EPOCH.checked_add(span)
     }
-    Ok(())
+    .ok_or_else(past)?;
+    file.set_times(FileTimes::new().set_accessed(at).set_modified(at))
 }
 
 /// `publish_staged` replaces `target` with `written` through a staging file it creates beside it, as
@@ -240,10 +236,13 @@ pub fn publish_staged(
             Creation::Masked(mask) => {
                 file.set_permissions(fs::Permissions::from_mode(0o666 & !mask))
             }
-            Creation::Exact(mode) => file.set_permissions(fs::Permissions::from_mode(mode)),
-            Creation::Mode(_) => Ok(()),
+            Creation::Exact(_) | Creation::Mode(_) => Ok(()),
         })
         .and_then(|()| file.write_all(written))
+        .and_then(|()| match staging.creation {
+            Creation::Exact(mode) => file.set_permissions(fs::Permissions::from_mode(mode)),
+            Creation::Masked(_) | Creation::Mode(_) => Ok(()),
+        })
         .and_then(|()| match staging.modified {
             Some(nanoseconds) => times(&file, nanoseconds),
             None => Ok(()),
