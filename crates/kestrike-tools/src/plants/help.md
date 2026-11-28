@@ -150,7 +150,7 @@ a miss has no `miss_cause`. Exit 3: no miss lacks its cause, and a plant has
 no verdict, is not live or has a patch that does not apply, so the score
 counts fewer plants than the run selected. Exit 4: the run could not write its score, left a
 worktree it could not remove or could not list, failed to write a line to standard
-error, or failed outside a plant. Exit 120: the run wrote its score and could not
+error, or failed outside a plant, SIGCHLD ignored at its start included. Exit 120: the run wrote its score and could not
 write the score's lines to standard output. Exit 2:
 rejected input, found before any worktree: a plant whose record or patch is
 missing, no regular file or malformed, whose record or patch passes 1 MiB or

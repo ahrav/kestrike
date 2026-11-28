@@ -2,7 +2,8 @@
 //! the plant store under `verification/plants/`, the checkout's `Cargo.lock`, the `campaign` binary and
 //! the work directory.
 //!
-//! [`prepare`] takes the arguments, the environment and the invoking directory as values and returns the
+//! [`prepare`] takes the arguments, the environment and the invoking directory as values, reads this
+//! process's SIGCHLD disposition before its first Git call, and returns the
 //! checked inputs, the help, the argument reader's refusal, the first refusal of the run's input in a
 //! fixed order, or a failure outside a plant: the checks are judged in turn and the first that fails is
 //! returned. It makes the work directory last,

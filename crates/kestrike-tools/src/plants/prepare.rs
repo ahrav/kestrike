@@ -2,7 +2,9 @@
 //! the checked inputs of a run, or the first refusal in the order below with its reason.
 //!
 //! The order: the command line; a set Git repository or index variable ([`REPOSITORY_VARIABLES`]); the
-//! invoking directory, which must lie in a Git checkout; the head commit; the plant store; the
+//! invoking directory, which must be readable; SIGCHLD's disposition in this process, where an ignored
+//! SIGCHLD is a failure outside a plant; the invoking directory again, which must lie in a Git checkout;
+//! the head commit; the plant store; the
 //! checkout's `Cargo.lock`; the `campaign` binary; and last the work directory, which is made, so a
 //! refusal leaves no work directory; only the missing ancestors of `--work`, made just before it, can
 //! stay. Every Git call runs in the given environment with `GIT_NO_REPLACE_OBJECTS=1`.
