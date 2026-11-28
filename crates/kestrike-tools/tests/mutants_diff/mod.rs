@@ -595,13 +595,14 @@ fn tree_entries(root: &std::path::Path) -> Vec<String> {
 }
 
 /// The removal of a worktree goes past each entry it cannot remove: with two directories of mode 0500
-/// that each hold a file, and entries that list before, between and after them, every other entry of
+/// that each hold a file, among twenty-four other entries and the worktree's own, every other entry of
 /// the worktree goes and the run is incomplete with the worktree that remains. Root removes the files
-/// of a directory of mode 0500, so the case does not apply to uid 0.
+/// of a directory of mode 0500, so the case does not apply to uid 0 and says so.
 #[test]
 fn the_removal_of_a_worktree_goes_past_each_entry_it_cannot_remove() {
     // SAFETY: `geteuid` takes no argument and cannot fail.
     if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: uid 0 removes the files of a directory of mode 0500");
         return;
     }
     let fx = Fixture::new("locked-dirs");
@@ -1081,27 +1082,6 @@ fn the_report_replaces_an_entry_at_its_path_and_writes_through_no_link() {
         "the report is a regular file"
     );
     assert!(complete(&fx.report(Some(&out))));
-}
-
-/// The fixture's scratch is a new directory of mode 0700 under a name no entry takes; a taken name and
-/// what it holds stay as they are.
-#[test]
-fn the_fixture_scratch_leaves_a_taken_name_as_it_is() {
-    use std::os::unix::fs::PermissionsExt;
-    let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mutants-diff");
-    fs::create_dir_all(&parent).expect("the scratch parent is made");
-    let stem = format!("taken-{}", std::process::id());
-    let taken = parent.join(format!("{stem}-0"));
-    let _ = fs::create_dir(&taken);
-    fs::write(taken.join("kept"), "kept").expect("the planted file is written");
-    let made = fixture::exclusive_dir(&parent, &stem);
-    let kept = fs::read_to_string(taken.join("kept"));
-    let mode = fs::metadata(&made).map(|status| status.permissions().mode() & 0o777);
-    let _ = fs::remove_dir_all(&taken);
-    let _ = fs::remove_dir(&made);
-    assert_ne!(made, taken);
-    assert_eq!(kept.expect("the planted file stays"), "kept");
-    assert_eq!(mode.expect("the directory stands"), 0o700);
 }
 
 #[test]

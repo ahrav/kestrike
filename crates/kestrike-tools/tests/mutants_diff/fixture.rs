@@ -9,10 +9,10 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -732,20 +732,6 @@ pub fn lib_rs() -> String {
     format!("{SOURCE}/lib.rs")
 }
 
-/// `exclusive_dir` makes the first of `STEM-0`, `STEM-1` and so on under `parent` that no entry takes, by
-/// an exclusive `mkdir` of mode 0700, and returns it; a taken name is left as it is.
-pub fn exclusive_dir(parent: &Path, stem: &str) -> PathBuf {
-    for at in 0usize.. {
-        let path = parent.join(format!("{stem}-{at}"));
-        match DirBuilder::new().mode(0o700).create(&path) {
-            Ok(()) => return path,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => panic!("{}: {error}", path.display()),
-        }
-    }
-    unreachable!("an unbounded range yields a name")
-}
-
 impl Fixture {
     /// `new` builds the fixture of the case `name`: a repository whose base adds `lib.rs` with `one` and
     /// whose head adds `two`, an untracked `Cargo.lock`, and the `cargo` stand-in.
@@ -754,7 +740,9 @@ impl Fixture {
         let count = COUNTER.fetch_add(1, Ordering::SeqCst);
         let parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mutants-diff");
         fs::create_dir_all(&parent).expect("the scratch parent is made");
-        let state = exclusive_dir(&parent, &format!("{name}-{}-{count}", std::process::id()));
+        let prefix = format!("{name}-{}-{count}-", std::process::id());
+        let state = kestrike_tools::temp_dir::make_temp_dir(&prefix, &parent)
+            .expect("the state directory is made");
         let cargo = state.join("cargo");
         fs::write(&cargo, CARGO).expect("the cargo stand-in is written");
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
