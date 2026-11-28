@@ -249,10 +249,12 @@ pub fn say(out: &mut impl Write, line: &Text) -> io::Result<()> {
 /// `hexdigest` writes the SHA-256 digest of `bytes` as 64 lowercase hexadecimal digits, as Python's
 /// `hashlib.sha256(bytes).hexdigest()` does.
 pub fn hexdigest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
+}
+
+/// `hex` writes each byte as two lowercase hexadecimal digits.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn returncode(status: ExitStatus) -> i32 {

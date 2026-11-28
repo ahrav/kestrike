@@ -89,6 +89,15 @@ fn absent(error: &io::Error) -> bool {
 ///
 /// A `stat` fails with an error other than `ENOENT` and `ENOTDIR`.
 pub fn shared_directories(path: &Path) -> Result<Vec<PathBuf>, PathError> {
+    shared_directories_for(path, real_uid())
+}
+
+/// `shared_directories_for` is [`shared_directories`] with `uid` in the place of this user.
+///
+/// # Errors
+///
+/// A `stat` fails with an error other than `ENOENT` and `ENOTDIR`.
+pub fn shared_directories_for(path: &Path, uid: u32) -> Result<Vec<PathBuf>, PathError> {
     let mut found = Vec::new();
     for directory in lineage(path) {
         let status = match fs::metadata(&directory) {
@@ -96,7 +105,7 @@ pub fn shared_directories(path: &Path) -> Result<Vec<PathBuf>, PathError> {
             Err(error) if absent(&error) => continue,
             Err(error) => return Err(PathError::new(&directory, error)),
         };
-        if ![real_uid(), 0].contains(&status.uid()) || status.mode() & SHARED != 0 {
+        if ![uid, 0].contains(&status.uid()) || status.mode() & SHARED != 0 {
             found.push(directory);
         }
     }
@@ -322,9 +331,24 @@ pub fn is_dir(path: &Path) -> Result<bool, PathError> {
 /// (except for `EEXIST` when `status` returns `Ok(Some(metadata))` and `metadata.is_dir()` is true), or
 /// when a member is shared.
 pub fn make_private(path: &Path) -> Result<(), PrivateError> {
+    make_private_with(path, real_uid(), &|step| Ok(status(step)?.is_some()))
+}
+
+/// `make_private_with` is [`make_private`] with `uid` in the place of this user and `exists` in the place
+/// of the `status` that finds the members to create: it creates each member for which `exists` returns
+/// `Ok(false)`. The check of a member that `mkdir` finds taken still reads its `status`.
+///
+/// # Errors
+///
+/// `exists` fails, or [`make_private`]'s errors.
+pub fn make_private_with(
+    path: &Path,
+    uid: u32,
+    exists: &dyn Fn(&Path) -> Result<bool, PathError>,
+) -> Result<(), PrivateError> {
     let mut missing = Vec::new();
     for step in lineage(path) {
-        if status(&step)?.is_none() {
+        if !exists(&step)? {
             missing.push(step);
         }
     }
@@ -339,7 +363,7 @@ pub fn make_private(path: &Path) -> Result<(), PrivateError> {
             Err(error) => return Err(PathError::new(directory, error).into()),
         }
     }
-    let shared = shared_directories(path)?;
+    let shared = shared_directories_for(path, uid)?;
     if shared.is_empty() {
         Ok(())
     } else {
@@ -358,7 +382,17 @@ pub fn make_private(path: &Path) -> Result<(), PrivateError> {
 ///
 /// [`shared_directories`] or [`traversed`] fails.
 pub fn foreign_toolchain_paths(root: &Path) -> Result<Vec<PathBuf>, PathError> {
-    let mut found = shared_directories(root)?;
+    foreign_toolchain_paths_for(root, real_uid())
+}
+
+/// `foreign_toolchain_paths_for` is [`foreign_toolchain_paths`] with `uid` in the place of the process's
+/// real uid.
+///
+/// # Errors
+///
+/// [`shared_directories`] or [`traversed`] fails.
+pub fn foreign_toolchain_paths_for(root: &Path, uid: u32) -> Result<Vec<PathBuf>, PathError> {
+    let mut found = shared_directories_for(root, uid)?;
     for directory in lineage(root) {
         for name in TOOLCHAIN_FILES {
             let entry = path_of(&join(directory.as_os_str().as_bytes(), name.as_bytes()));
@@ -369,11 +403,10 @@ pub fn foreign_toolchain_paths(root: &Path) -> Result<Vec<PathBuf>, PathError> {
                 found.push(entry);
                 continue;
             };
-            let me = real_uid();
-            if link.uid() != me
-                || target.uid() != me
+            if link.uid() != uid
+                || target.uid() != uid
                 || target.mode() & SHARED != 0
-                || passes_shared(&entry)?
+                || passes_shared(&entry, uid)?
             {
                 found.push(entry);
             }
@@ -382,9 +415,9 @@ pub fn foreign_toolchain_paths(root: &Path) -> Result<Vec<PathBuf>, PathError> {
     Ok(found)
 }
 
-fn passes_shared(entry: &Path) -> Result<bool, PathError> {
+fn passes_shared(entry: &Path, uid: u32) -> Result<bool, PathError> {
     for passed in traversed(entry)? {
-        let shared = shared_directories(&passed)?;
+        let shared = shared_directories_for(&passed, uid)?;
         if shared.first().map(|first| first.as_os_str()) == Some(passed.as_os_str()) {
             return Ok(true);
         }

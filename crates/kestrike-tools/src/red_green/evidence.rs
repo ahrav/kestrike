@@ -5,7 +5,8 @@
 //! [`runner::leg_directory`], optionally followed by `.` and one or more Unicode decimal digits, with the
 //! receipt directory's name as the run. An attempt output counts where `attempt-1.stdout` or
 //! `attempt-1.stderr` beside the artifact is a regular file once links are followed; the kind comes from
-//! the file opened for the read.
+//! the file opened for the read, so an output that is a link is read at its target. An announcement that
+//! holds a NUL names no artifact.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -13,12 +14,14 @@ use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::STREAMS;
 use super::runner;
 use crate::classes;
-use crate::ownership::PathError;
+use crate::ownership::{PathError, ignored};
 use crate::paths;
 use crate::text::{Text, text};
+
+/// The attempt output streams, in the order a leg's readings and its record list them.
+pub const STREAMS: [&str; 2] = ["stdout", "stderr"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Readings {
@@ -28,8 +31,10 @@ pub struct Readings {
 }
 
 impl Readings {
+    /// Whether `outputs` holds one reading of each of [`STREAMS`] and nothing else, in any order.
     pub fn complete(&self) -> bool {
-        self.outputs.len() == STREAMS.len()
+        let read = |stream: &str| self.outputs.iter().any(|(name, _)| *name == stream);
+        self.outputs.len() == STREAMS.len() && STREAMS.into_iter().all(read)
     }
 }
 
@@ -70,54 +75,46 @@ fn unreadable(path: &Path, error: io::Error) -> Evidence {
     Evidence::Unreadable(text!(PathError::new(path, error).to_string()))
 }
 
-enum Output {
-    Absent,
-    Read(Vec<u8>),
-}
-
-/// A failed open is a failed read only where the status of `path` shows a regular file or fails with an
-/// error other than `ENOENT`, `ENOTDIR`, `EBADF` and `ELOOP`.
-fn output(path: &Path) -> io::Result<Output> {
+/// `None` means `path` names no regular file once links are followed, or its status fails with `ENOENT`,
+/// `ENOTDIR`, `EBADF` or `ELOOP`. A failed open is a failed read only where the status of `path` shows a
+/// regular file or fails with another error.
+fn output(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let flags = libc::O_NONBLOCK | libc::O_NOCTTY;
     let mut file = match OpenOptions::new().read(true).custom_flags(flags).open(path) {
         Ok(file) => file,
         Err(error) => {
             return match fs::metadata(path) {
                 Ok(status) if status.is_file() => Err(error),
-                Ok(_) => Ok(Output::Absent),
-                Err(status) if ignored(&status) => Ok(Output::Absent),
+                Ok(_) => Ok(None),
+                Err(status) if ignored(&status) => Ok(None),
                 Err(status) => Err(status),
             };
         }
     };
     if !file.metadata()?.is_file() {
-        return Ok(Output::Absent);
+        return Ok(None);
     }
     let mut data = Vec::new();
     file.read_to_end(&mut data)?;
-    Ok(Output::Read(data))
-}
-
-fn ignored(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ENOENT | libc::ENOTDIR | libc::EBADF | libc::ELOOP)
-    )
+    Ok(Some(data))
 }
 
 /// The caller must pass the canonical path to the run's receipt directory as `receipt`, and trusts that
-/// directory and its entries.
+/// directory and its entries. `attempt` is the workflow run attempt of [`runner::leg_directory`]. The
+/// returned readings hold the whole artifact and each present attempt output in memory together.
 ///
 /// # Errors
 ///
-/// `evidence` propagates errors from `paths::realpath`.
+/// `evidence` propagates the errors of [`paths::realpath`]. A failed read of the artifact or of an
+/// attempt output is `Ok(Evidence::Unreadable)`.
 pub fn evidence(
     receipt: &Path,
     attempt: &Text,
     leg: &str,
     announced: Option<&Text>,
 ) -> io::Result<Evidence> {
-    let Some(announced) = announced.and_then(Text::to_os) else {
+    let named = announced.filter(|path| !path.as_bytes().contains(&0));
+    let Some(announced) = named.and_then(Text::to_os) else {
         return Ok(Evidence::Absent);
     };
     let artifact = paths::realpath(Path::new(&announced))?;
@@ -137,8 +134,8 @@ pub fn evidence(
     for stream in STREAMS {
         let path = artifact.with_file_name(format!("attempt-1.{stream}"));
         match output(&path) {
-            Ok(Output::Read(bytes)) => outputs.push((stream, bytes)),
-            Ok(Output::Absent) => {}
+            Ok(Some(bytes)) => outputs.push((stream, bytes)),
+            Ok(None) => {}
             Err(error) => return Ok(unreadable(&path, error)),
         }
     }

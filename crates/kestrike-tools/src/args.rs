@@ -63,7 +63,9 @@ pub struct Values(Vec<(&'static [&'static str], Vec<OsString>)>);
 impl Values {
     /// Returns the value the command line gave for the row that lists `name`, `None` when the command
     /// line left the option out; any of a row's names selects it. A required option's value is `Some`.
-    /// For a [`Kind::Repeated`] row it is the last value.
+    /// It is the last entry of [`Values::all`]: the last value for a [`Kind::Repeated`] or [`Kind::Many`]
+    /// row, whose every value `all` returns, and the empty value for a [`Kind::Flag`] row that appeared,
+    /// whose presence [`Values::flag`] tells.
     ///
     /// # Panics
     ///

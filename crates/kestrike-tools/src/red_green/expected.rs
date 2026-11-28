@@ -6,12 +6,17 @@
 //! [`classes::SPACE`]. A backtrace runs from a line that opens with `stack backtrace:` through each next
 //! line that opens with a space. Each framing and backtrace line becomes one NUL, which no argument holds,
 //! so a match of the expected text lies within one run of adjacent kept lines.
+//!
+//! Attempt output decodes as UTF-8 with each byte outside it kept as a lone surrogate, the decoding of
+//! option values and paths on a host whose filesystem encoding is UTF-8. The search holds the unframed
+//! copy of one stream in memory beside the stream's bytes.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use regex::bytes::Regex;
+use regex::bytes::{Regex, RegexBuilder};
 
+use super::options::Options;
 use crate::classes;
 use crate::text::Text;
 
@@ -37,7 +42,8 @@ fn literal(text: &[u8]) -> String {
 }
 
 /// Every shape runs with `.` as any byte of a [`Text`]'s encoding; `\d` and `\s` keep their Unicode
-/// classes.
+/// classes. The compiled program grows with the length of `test` and has no size limit, so a test ID of
+/// any length compiles.
 fn framing(test: &Text) -> Regex {
     let test = literal(test.as_bytes());
     let shapes: Vec<String> = FRAMING
@@ -49,7 +55,10 @@ fn framing(test: &Text) -> Regex {
             format!("(?:{})", shape.replace("TEST", &test))
         })
         .collect();
-    classes::compiled_bytes(&format!("(?s-u)^(?:{})$", shapes.join("|")))
+    RegexBuilder::new(&format!("(?s-u)^(?:{})$", shapes.join("|")))
+        .size_limit(usize::MAX)
+        .build()
+        .unwrap_or_else(|error| panic!("the framing shapes compile: {error}"))
 }
 
 fn unframed_by(framing: &Regex, output: &[u8]) -> Text {
@@ -74,16 +83,16 @@ pub fn unframed(output: &[u8], test: &Text) -> Text {
     unframed_by(&framing(test), output)
 }
 
-/// The streams whose unframed output holds `expect`, in the order of `outputs`.
-pub fn expect_streams<'a>(
+/// The streams whose output, unframed for `options.test`, holds `options.expect`, in the order of
+/// `outputs`.
+pub(super) fn expect_streams<'a>(
     outputs: &[(&'a str, Vec<u8>)],
-    expect: &Text,
-    test: &Text,
+    options: &Options,
 ) -> Vec<&'a str> {
-    let framing = framing(test);
+    let framing = framing(&options.test);
     outputs
         .iter()
-        .filter(|(_, data)| super::holds(unframed_by(&framing, data).as_bytes(), expect.as_bytes()))
+        .filter(|(_, data)| unframed_by(&framing, data).contains(&options.expect))
         .map(|(stream, _)| *stream)
         .collect()
 }

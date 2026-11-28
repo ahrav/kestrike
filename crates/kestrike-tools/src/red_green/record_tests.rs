@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use super::{Leg, Record, record};
 use crate::red_green::evidence::{Evidence, Readings};
 use crate::red_green::options::{DEFAULT_WATCHDOG, Options};
+use crate::red_green::reasons::tests::options;
 use crate::text::Text;
 
 const PROVEN: &str = r#"{
@@ -18,7 +19,7 @@ const PROVEN: &str = r#"{
       "path": "caf\u00e9.rs"
     }
   ],
-  "command": "bash scripts/tool.sh red-green --package=p --target=lib --test=storage::device::table_tests::a_poll_reports_each_completion_once '--expect=a poll counts that completion as delivered' --carry=t.rs --base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --head=cccccccccccccccccccccccccccccccccccccccc --watchdog=30.0 --artifacts=/r",
+  "command": "bash scripts/tool.sh red-green --package=p --target=lib --test=storage::device::table_tests::a_poll_reports_each_completion_once '--expect=a poll counts that completion as delivered' --carry=t.rs --base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --head=cccccccccccccccccccccccccccccccccccccccc --watchdog=30.0 --release --artifacts=/r",
   "expect": "a poll counts that completion as delivered",
   "head": "cccccccccccccccccccccccccccccccccccccccc",
   "legs": {
@@ -49,7 +50,7 @@ const PROVEN: &str = r#"{
     }
   },
   "package": "p",
-  "release": false,
+  "release": true,
   "result": "proven",
   "scripts": {
     "reproduce-test.py": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -247,23 +248,20 @@ fn leg(exit: i32, verdict: &str, seconds: f64, evidence: Evidence) -> Leg {
 }
 
 /// Seconds round to three places, half to even on the binary value: 0.0005 lies above the half and
-/// 2.0625 on it.
+/// 2.0625 on it. The proven run is a release run; each refused run is a debug run.
 #[test]
 fn record_writes_each_state_of_the_receipt() {
     let options = Options {
-        package: Text::from("p"),
-        target: Text::from("lib"),
-        test: Text::from(TEST),
-        expect: Text::from(EXPECT),
-        carry: vec![Text::from("t.rs")],
-        base: None,
-        head: Text::from("HEAD"),
         watchdog: 30.0,
         artifacts: Some(Text::from("r")),
-        cargo: Text::from("cargo"),
-        release: false,
+        ..options(TEST, EXPECT)
     };
     assert_ne!(options.watchdog, DEFAULT_WATCHDOG);
+    let released = Options {
+        release: true,
+        ..options.clone()
+    };
+    let released_command = Text::from(COMMAND.replace(" --artifacts", " --release --artifacts"));
     let (base, head, command) = (
         Text::from("b".repeat(40)),
         Text::from("c".repeat(40)),
@@ -350,8 +348,9 @@ fn record_writes_each_state_of_the_receipt() {
     ];
     for (name, legs, reason, expected) in rows {
         let reason = reason.map(Text::from);
+        let proven = reason.is_none();
         let written = record(&Record {
-            options: &options,
+            options: if proven { &released } else { &options },
             base: &base,
             head: &head,
             carried: &carried,
@@ -361,7 +360,7 @@ fn record_writes_each_state_of_the_receipt() {
                 .then_some(executable.as_str()),
             legs: &legs,
             reason: reason.as_ref(),
-            command: &command,
+            command: if proven { &released_command } else { &command },
         });
         assert_eq!(written.as_deref(), Ok(expected), "{name}");
     }
@@ -369,19 +368,7 @@ fn record_writes_each_state_of_the_receipt() {
 
 #[test]
 fn a_non_finite_seconds_is_refused() {
-    let options = Options {
-        package: Text::from("p"),
-        target: Text::from("lib"),
-        test: Text::from(TEST),
-        expect: Text::from(EXPECT),
-        carry: vec![],
-        base: None,
-        head: Text::from("HEAD"),
-        watchdog: DEFAULT_WATCHDOG,
-        artifacts: None,
-        cargo: Text::from("cargo"),
-        release: false,
-    };
+    let options = options(TEST, EXPECT);
     let empty = Text::new();
     let legs = [("base", leg(1, "", f64::NAN, Evidence::Absent))];
     let written = record(&Record {
