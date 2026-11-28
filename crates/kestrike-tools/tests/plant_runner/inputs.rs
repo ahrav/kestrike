@@ -523,6 +523,24 @@ fn a_failed_read_of_a_plant_counts_as_its_answer() {
     assert_eq!(inputs.plants().len(), 2);
 }
 
+/// The `git ls-tree` row of a plant file is read for its mode, type and object, and its path is taken to
+/// be the one asked for: a row of mode 100644, type blob and the file's own object under another path
+/// passes the plant.
+#[test]
+fn a_plant_file_row_under_another_path_passes() {
+    let repository = Repository::new();
+    let object = repository.git(&["rev-parse", "HEAD:verification/plants/alpha/plant.json"]);
+    let row = format!(
+        "100644 blob {}\\tverification/plants/other/plant.json\\000",
+        object.trim()
+    );
+    let call = standin(&repository, "verification/plants/alpha/plant.json", &row, 0);
+    let Outcome::Run(inputs) = repository.prepare(&call) else {
+        panic!("a row under another path passes the plant");
+    };
+    assert_eq!(inputs.plants().len(), 2);
+}
+
 /// Of two faults at once the earlier check names its own: the store before `Cargo.lock`, and
 /// `Cargo.lock` before the `campaign` binary.
 #[test]

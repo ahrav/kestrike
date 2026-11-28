@@ -22,8 +22,7 @@ use crate::environ::{get, set};
 use crate::git::REPOSITORY_VARIABLES;
 use crate::ownership::{self, foreign_toolchain_paths};
 use crate::paths;
-use crate::text::Text;
-use crate::text::text;
+use crate::text::{Text, text};
 
 pub(super) const CONFIG: &str = ".cargo/mutants.toml";
 const WORKFLOW: &str = ".github/workflows/agent-checks.yml";

@@ -26,13 +26,16 @@ Read the [review policy](../../REVIEW.md) before a code review.
 ## Enforcement
 
 `.github/workflows/agent-checks.yml` rejects comment-lint override markers,
-runs the hook and review-workflow contract tests, and checks that every link,
+runs the hook and review-workflow contract tests and the receipt replay
+self-test, and checks that every link,
 anchor, and backticked repository path in `REVIEW.md`, `AGENTS.md`, and
 `docs/agents/` resolves in a clean clone. Run the same checks locally:
 
 ```sh
 bash scripts/forbid-comment-markers.sh
 python3 scripts/test-agent-hooks.py
+python3 scripts/test-chaos-receipt-replay.py
+cargo test -p kestrike-tools --test tools agent_hooks::
 python3 scripts/test-review-workflow.py
 ```
 
