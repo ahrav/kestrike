@@ -1,10 +1,10 @@
 //! The window from the making of `injection/` to the roles mark: a failure there removes
 //! `injection/` again and is a refusal, and a roles mark that stands takes the abort path.
 
-use kestrike_tools::host_stop::{Disk, Signal, lock};
+use kestrike_tools::host_stop::Signal;
 
 use super::plane::{CALLER, STATUS};
-use super::steps::{Step, links, syncs};
+use super::steps::{Step, free_lock, links, syncs};
 use super::{COPY, Case, listing};
 
 const ENOSPC: i32 = libc::ENOSPC;
@@ -187,5 +187,5 @@ fn a_failure_inside_the_abort_path_exits_2_and_names_the_marks_that_stand() {
         "{output}"
     );
     assert_eq!(case.marks().keys().collect::<Vec<_>>(), ["roles"]);
-    drop(lock(&Disk, &case.evidence.join("injection")).expect("the run freed its lock"));
+    drop(free_lock(&case.evidence.join("injection")));
 }

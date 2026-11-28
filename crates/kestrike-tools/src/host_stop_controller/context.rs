@@ -59,6 +59,9 @@ pub(crate) enum Stream {
 }
 
 impl<S: Seam, F: Files> Context<'_, S, F> {
+    pub(crate) fn mark_bound(&self) -> u64 {
+        self.mark_limit.min(self.file_limit)
+    }
     /// Writes `line` and a newline in UTF-8, each lone surrogate as `\udXXX`, and flushes. A write
     /// or a flush that fails changes no outcome, so its error is dropped.
     pub(crate) fn say(&mut self, stream: Stream, line: &Text) {

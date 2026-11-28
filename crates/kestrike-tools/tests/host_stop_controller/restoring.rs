@@ -44,23 +44,18 @@ impl Case {
         copy_tree(from, &Path::new(&root).join(name), &[]);
     }
 
-    /// On exit 0, the restoration timestamp is at least [`Case::floor`] and at most the last
-    /// `STATUS` timestamp plus `plane.step`.
     pub(crate) fn restore(&mut self, reviewed: Option<&Path>) -> u8 {
         let evidence = self.evidence.clone();
+        let calls = self.log().len();
         let code = self.restore_at(&evidence, reviewed);
         if code == 0 {
             let restored = time(&self.marks()["restoration"]);
-            let plane = self.plane.borrow();
-            let ready = plane
-                .log
+            let ready = self.plane.borrow().log[calls..]
                 .iter()
                 .rev()
                 .find(|logged| logged.op == STATUS)
-                .and_then(|logged| logged.time)
-                .expect("a status read answered")
-                + plane.step;
-            drop(plane);
+                .and_then(|logged| logged.wall)
+                .expect("a status read answered");
             assert!(self.floor() <= restored, "{restored} {:?}", self.marks());
             assert!(restored <= ready, "{restored} after the ready read {ready}");
         }

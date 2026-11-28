@@ -161,6 +161,7 @@ pub(crate) struct Case {
     pub(crate) plants: Plants,
     pub(crate) cap: Rc<Cell<Option<usize>>>,
     pub(crate) stall: Rc<Cell<bool>>,
+    pub(crate) contended: Rc<Cell<bool>>,
     pub(crate) delivered: &'static Delivered,
     pub(crate) output: Output,
     pub(crate) stdout: Output,
@@ -208,6 +209,7 @@ impl Case {
             plants: Rc::new(RefCell::new(Vec::new())),
             cap: Rc::new(Cell::new(None)),
             stall: Rc::new(Cell::new(false)),
+            contended: Rc::new(Cell::new(false)),
             delivered: Box::leak(Box::new(Delivered::new())),
             output: Output::default(),
             stdout: Output::default(),
@@ -305,6 +307,7 @@ impl Case {
             plants: Rc::clone(&self.plants),
             cap: Rc::clone(&self.cap),
             stall: Rc::clone(&self.stall),
+            contended: Rc::clone(&self.contended),
         }
     }
 
@@ -655,6 +658,39 @@ impl Case {
     pub(crate) fn after_fault(&self) -> Vec<String> {
         self.plane.borrow().after_fault()
     }
+}
+
+/// In the process [`child`] starts for the case `name`, a run that SIGKILL ends inside an alarm read
+/// of the observation, which names its evidence directory in the file `evidence` of the child's
+/// scratch directory, made new. In the parent, the parent's scratch directory, which holds the
+/// child's, and the child's evidence directory, once SIGKILL ended the child.
+pub(crate) fn killed_run(name: &str, label: &str) -> (Scratch, PathBuf) {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(place) = std::env::var_os(CHILD) {
+        let mut case = Case::new(label);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(Path::new(&place).join("evidence"))
+            .and_then(|mut named| named.write_all(case.evidence.as_os_str().as_bytes()))
+            .expect("the child names its evidence directory");
+        case.faulted(
+            Action::Hook(Box::new(|_| {
+                // SAFETY: `kill` of this process with SIGKILL takes no pointer.
+                unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
+                unreachable!("SIGKILL ends the process")
+            })),
+            false,
+        );
+        let code = case.run();
+        panic!("the run ended with {code}, not by the kill");
+    }
+    let place = Scratch::new(&format!("{label}-child"));
+    let (status, shown) = child(name, &place.0, &[]);
+    assert_eq!(status.signal(), Some(libc::SIGKILL), "{shown}");
+    let named = fs::read(place.0.join("evidence")).expect("the child named it");
+    (place, PathBuf::from(OsString::from_vec(named)))
 }
 
 /// The variable that tells a test executable started again by [`child`] to run its case's body.

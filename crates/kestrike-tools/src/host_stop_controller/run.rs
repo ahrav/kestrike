@@ -197,7 +197,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// `ended`, or the signal a read of the record raises at the end of an armed span whose last
     /// read came before it: a refusal, a cause of the abort or the span's end then gives way to the
     /// signal, and a failure or a panic keeps its own end.
-    fn raised<T>(&mut self, ended: Result<T, Halt>) -> Result<T, Halt> {
+    pub(super) fn raised<T>(&mut self, ended: Result<T, Halt>) -> Result<T, Halt> {
         match ended {
             Ok(_) | Err(Halt::Refused { .. } | Halt::Aborted(_)) => {
                 self.cx.record.read()?;
@@ -329,7 +329,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         encoded(
             &roles,
             &Text::from("injection/roles.json"),
-            self.cx.mark_limit,
+            self.cx.mark_bound(),
         )?;
         self.within_deadline()?;
         Ok(roles)
