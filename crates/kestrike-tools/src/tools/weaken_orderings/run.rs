@@ -19,7 +19,7 @@ use crate::json::{self, Integer, Object, Text, Value};
 use crate::orderings::check::{CATALOG, check, row_entries};
 use crate::orderings::sites::EXTERNAL;
 use crate::ownership::status;
-use crate::process::{INTERRUPT, blocked, capture, install_handlers};
+use crate::process::{INTERRUPT, blocked, capture, install_handlers, refuse_ignored_sigchld};
 use crate::production_text::blanked;
 use crate::python::{hexdigest, repr, returncode, str_of, truthy};
 use crate::text::text;
@@ -136,8 +136,9 @@ pub(super) fn run_command(
     err: &mut impl Write,
 ) -> u8 {
     let launch = Launch::new(&INTERRUPT);
-    let ran = crate::paths::resolve(Path::new(work))
-        .map_err(Halt::failed)
+    let ran = refuse_ignored_sigchld()
+        .map_err(|refusal| Halt::stop(2, refusal))
+        .and_then(|()| crate::paths::resolve(Path::new(work)).map_err(Halt::failed))
         .and_then(|work| {
             checked_work(top, &work)?;
             install_handlers()?;

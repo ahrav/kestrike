@@ -240,6 +240,7 @@ mention and no `EXTERNAL` pin is refused.
 
 `run` is an operator command. It needs the workflow's `STABLE` toolchain
 and, for its Cargo configuration read, the `NIGHTLY` toolchain. It refuses
+a start with SIGCHLD ignored, whose children's exits it could not read, then
 a `DIR` inside the checkout, a `DIR` that cannot be listed (a regular file
 among them), is not empty or cannot hold the copy, and a checkout where
 `git status` names a path under `crates/kestrike-tools`, changed or
