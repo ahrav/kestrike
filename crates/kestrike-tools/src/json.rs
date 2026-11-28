@@ -15,6 +15,7 @@
 //! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::decimal::{nearest_double, spells_shortest};
@@ -533,6 +534,7 @@ impl<'a> Reader<'a> {
             return Ok(Value::Object(object));
         }
         let mut repeated = None;
+        let mut keys = HashSet::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -545,13 +547,15 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.mode != Mode::Keep
-                && repeated.is_none()
-                && object.iter().any(|(name, _)| *name == key)
-            {
-                repeated = Some(key.clone());
+            if self.mode == Mode::Keep {
+                object.insert(key, value);
+            } else {
+                // The parser defers the first duplicate-key error until the object closes.
+                if !keys.insert(key.clone()) && repeated.is_none() {
+                    repeated = Some(key.clone());
+                }
+                object.0.push((key, value));
             }
-            object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
