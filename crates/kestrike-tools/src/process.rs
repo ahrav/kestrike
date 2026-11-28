@@ -1,13 +1,13 @@
-//! Signals and child processes that two tools share: the record of the first handled signal and its
-//! handlers, the refusal of a run with SIGCHLD ignored, the reading of a child's exit, the wait for a
-//! child that sees a recorded signal, the captured child, and the stop of a process group that a child
-//! leads.
+//! Signals and child processes that two tools share: the record of the handled signals and its
+//! handlers, the hold and the block of those signals, the refusal of a run with SIGCHLD ignored, the
+//! reading of a child's exit, the wait for a child that sees a recorded signal, the captured child, and
+//! the stop of a process group that a child leads.
 //!
-//! The handlers of SIGINT, SIGTERM and SIGHUP record the first of them in [`INTERRUPT`]; a later signal
-//! changes nothing. A tool reads the record between its steps and while it waits for a child, so a signal
-//! that arrives while a child is being started is acted on once that child has started. A wait polls the
-//! child and the record at pauses that start at 0.5 ms and double up to a cap, 20 ms unless the caller
-//! names another, on the monotonic clock.
+//! The handlers of SIGINT, SIGTERM and SIGHUP record the first of them in [`INTERRUPT`] and count each
+//! delivery; a later signal leaves the first one as it is. A tool reads the record between its steps and
+//! while it waits for a child, so a signal that arrives while a child is being started is acted on once
+//! that child has started. A wait polls the child and the record at pauses that start at 0.5 ms and
+//! double up to a cap, 20 ms unless the caller names another, on the monotonic clock.
 //!
 //! A group's stop reads its leader's state from `/proc/<pid>/stat` and reaps the leader only after its
 //! last signal, so while the stop signals the group the leader's id names that group alone.
@@ -16,7 +16,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -28,9 +28,14 @@ pub(crate) const GRACE: Duration = Duration::from_secs(10);
 pub(crate) const POLL: Duration = Duration::from_millis(20);
 const FIRST_PAUSE: Duration = Duration::from_micros(500);
 
-/// The first handled signal, or 0 while none has arrived.
+/// The record of the handled signals: the first one, 0 while none has arrived, the count of deliveries,
+/// and the depth of the holds that stand.
 #[derive(Debug, Default)]
-pub struct Interrupt(AtomicI32);
+pub struct Interrupt {
+    first: AtomicI32,
+    deliveries: AtomicUsize,
+    holds: AtomicUsize,
+}
 
 /// The handlers [`install_handlers`] installs record into this value.
 pub static INTERRUPT: Interrupt = Interrupt::new();
@@ -41,19 +46,52 @@ pub struct Interrupted(pub i32);
 
 impl Interrupt {
     pub const fn new() -> Self {
-        Self(AtomicI32::new(0))
+        Self {
+            first: AtomicI32::new(0),
+            deliveries: AtomicUsize::new(0),
+            holds: AtomicUsize::new(0),
+        }
     }
 
-    /// `record` keeps `signal` unless a signal is already recorded. It makes no allocation and takes no
-    /// lock, so a signal handler may call it.
+    /// `record` keeps `signal` unless a signal is already recorded, and counts the delivery; the count
+    /// stops at `usize::MAX`. It makes no allocation and takes no lock, so a signal handler may call it.
     pub fn record(&self, signal: i32) {
         let _ = self
-            .0
+            .first
             .compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
+        let _ = self
+            .deliveries
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_add(1)
+            });
     }
 
+    /// The first recorded signal.
     pub fn recorded(&self) -> Option<i32> {
-        Some(self.0.load(Ordering::SeqCst)).filter(|&signal| signal != 0)
+        Some(self.first.load(Ordering::SeqCst)).filter(|&signal| signal != 0)
+    }
+
+    /// The count of the signals recorded so far, the first included.
+    pub fn deliveries(&self) -> usize {
+        self.deliveries.load(Ordering::SeqCst)
+    }
+
+    /// `hold` starts a hold of the recorded signals, which lasts until [`Hold::release`] or its drop. A
+    /// hold started while another stands nests in it: its release reports nothing, and the outermost
+    /// hold's release reports the first signal recorded before it. Within a hold the holder's own steps
+    /// decide where a recorded signal takes effect.
+    pub fn hold(&self) -> Hold<'_> {
+        let outer = self.holds.fetch_add(1, Ordering::SeqCst) == 0;
+        Hold {
+            interrupt: self,
+            outer,
+            standing: true,
+        }
+    }
+
+    /// Whether a hold stands.
+    pub fn held(&self) -> bool {
+        self.holds.load(Ordering::SeqCst) > 0
     }
 
     /// `check` is the interruption of a recorded signal.
@@ -65,6 +103,63 @@ impl Interrupt {
         self.recorded()
             .map_or(Ok(()), |signal| Err(Interrupted(signal)))
     }
+}
+
+/// A hold of an [`Interrupt`]'s signals; [`Interrupt::hold`] starts one.
+#[derive(Debug)]
+pub struct Hold<'a> {
+    interrupt: &'a Interrupt,
+    outer: bool,
+    standing: bool,
+}
+
+impl Hold<'_> {
+    /// `release` ends the hold.
+    ///
+    /// # Errors
+    ///
+    /// The outermost hold ends while a signal is recorded: the interruption of the first one.
+    pub fn release(mut self) -> Result<(), Interrupted> {
+        self.end();
+        if self.outer {
+            return self.interrupt.check();
+        }
+        Ok(())
+    }
+
+    fn end(&mut self) {
+        if std::mem::take(&mut self.standing) {
+            self.interrupt.holds.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for Hold<'_> {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// `blocked` runs `body` with each of [`SIGNALS`] blocked in the calling thread, and then sets the thread's
+/// signal mask back to the one it held before. A signal delivered to the thread meanwhile stays pending
+/// until the mask is set back, and its handler then runs.
+///
+/// # Errors
+///
+/// The mask cannot be changed, before `body` runs, or set back after it, when `body`'s value is dropped.
+pub fn blocked<T>(body: impl FnOnce() -> T) -> io::Result<T> {
+    let handled = handled_set();
+    // SAFETY: all-zero bytes are a valid `sigset_t`, which `pthread_sigmask` overwrites with the mask it
+    // held.
+    let mut previous: libc::sigset_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `handled` is an initialized set and `previous` a set the call writes; both outlive it.
+    let status = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &handled, &mut previous) };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status));
+    }
+    let value = body();
+    mask(libc::SIG_SETMASK, &previous)?;
+    Ok(value)
 }
 
 /// `ignored` holds when the signal's disposition is to ignore it.

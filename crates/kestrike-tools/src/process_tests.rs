@@ -405,3 +405,140 @@ fn a_failed_read_of_the_state_kills_and_reaps_the_child_itself() {
         .expect("the stop reaped the child");
     assert_eq!(status.signal(), Some(libc::SIGKILL));
 }
+
+/// `running` holds while `pid` names a live process that is no zombie.
+fn running(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z")
+    })
+}
+
+/// `worker_group` starts a group leader that writes `leader` once a worker of its group, which ignores
+/// SIGTERM, has written its pid to `worker`; the leader keeps SIGTERM's default action.
+fn worker_group(marker: &Path) -> (std::process::Child, String) {
+    let script = "sh -c 'trap \"\" TERM; echo $$ > \"$1/worker\"; exec sleep 120' sh \"$1\" & \
+                  while [ ! -s \"$1/worker\" ]; do sleep 0.05; done; echo $$ > \"$1/leader\"; exec sleep 120";
+    let child = {
+        use std::os::unix::process::CommandExt;
+        Command::new("sh")
+            .args(["-c", script, "sh"])
+            .arg(marker)
+            .process_group(0)
+            .spawn()
+            .expect("the leader starts")
+    };
+    let start = Instant::now();
+    while !marker.join("leader").exists() {
+        assert!(start.elapsed() < WAIT, "the group stands within {WAIT:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let worker = std::fs::read_to_string(marker.join("worker")).expect("the worker wrote its pid");
+    (child, worker)
+}
+
+/// A handled signal recorded as the stop begins, after a deadline (no delivery spent) or after the
+/// delivery that ended a wait, or recorded just before the stop's SIGKILL, leaves no member of the group
+/// running: the worker ignores SIGTERM, so only the SIGKILL ends it. The grace of the stop ends once the
+/// deliveries pass the spent ones, and the stop reaps the leader.
+#[test]
+fn a_signal_during_the_stop_still_ends_the_whole_group() {
+    for (at, spent) in [("stop", 0), ("stop", 1), ("kill", 0)] {
+        let scratch = crate::paths::tests::Scratch::new("stop-signal");
+        let (mut child, worker) = worker_group(&scratch.0);
+        let interrupt = Interrupt::new();
+        if spent == 1 {
+            interrupt.record(libc::SIGINT);
+        }
+        let ends = || interrupt.deliveries() > spent;
+        let mut fired = false;
+        let mut send = |group: libc::pid_t, signal: i32| {
+            let begins = at == "stop" && signal == libc::SIGTERM;
+            let kills = at == "kill" && signal == libc::SIGKILL;
+            if !fired && (begins || kills) {
+                fired = true;
+                interrupt.record(libc::SIGTERM);
+            }
+            super::signal_group(group, signal)
+        };
+        let stop = super::GroupStop::new(Duration::from_secs(45), Some(&ends), None, PAUSE);
+        let start = Instant::now();
+        let stopped = super::stop_with(&mut child, &stop, &mut send).expect("the stop runs");
+        assert!(fired, "{at}: the signal was delivered");
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "{at}: the stop took {:?}",
+            start.elapsed()
+        );
+        assert!(
+            matches!(stopped, super::GroupStopped::Reaped(_)),
+            "{at}: {stopped:?}"
+        );
+        let start = Instant::now();
+        while running(&worker) && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !running(&worker),
+            "{at}, {spent}: the worker {worker} is gone"
+        );
+    }
+}
+
+/// The record keeps the first signal and counts each delivery; a hold nests, only the outermost
+/// release reports a recorded signal, and a dropped hold ends as a released one does.
+#[test]
+fn a_hold_nests_and_its_outermost_release_reports_the_first_signal() {
+    let interrupt = Interrupt::new();
+    {
+        let quiet = interrupt.hold();
+        assert!(interrupt.held());
+        assert_eq!(quiet.release(), Ok(()));
+    }
+    assert!(!interrupt.held());
+    let outer = interrupt.hold();
+    let inner = interrupt.hold();
+    interrupt.record(libc::SIGTERM);
+    assert_eq!(inner.release(), Ok(()), "a nested release reports nothing");
+    assert!(interrupt.held());
+    interrupt.record(libc::SIGHUP);
+    assert_eq!(interrupt.deliveries(), 2);
+    assert_eq!(outer.release(), Err(Interrupted(libc::SIGTERM)));
+    assert!(!interrupt.held());
+    drop(interrupt.hold());
+    assert!(!interrupt.held(), "a dropped hold ends");
+}
+
+/// A signal delivered while the handled signals are blocked stays pending, so the handler records it
+/// only once the mask is set back, and the thread's mask is the one it held before.
+#[test]
+fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
+    let own = |set: &mut libc::sigset_t| {
+        // SAFETY: a null new set makes `pthread_sigmask` only write the current mask into `set`.
+        let status = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), set) };
+        assert_eq!(status, 0);
+    };
+    // SAFETY: all-zero bytes are a valid `sigset_t` that `own` overwrites.
+    let (mut before, mut inside, mut after): (libc::sigset_t, libc::sigset_t, libc::sigset_t) =
+        unsafe { (std::mem::zeroed(), std::mem::zeroed(), std::mem::zeroed()) };
+    own(&mut before);
+    let value = super::blocked(|| {
+        own(&mut inside);
+        7
+    })
+    .expect("the mask changes");
+    own(&mut after);
+    assert_eq!(value, 7);
+    for signal in super::SIGNALS {
+        // SAFETY: each set is initialized and `signal` is a valid number.
+        let (was, held, is) = unsafe {
+            (
+                libc::sigismember(&before, signal),
+                libc::sigismember(&inside, signal),
+                libc::sigismember(&after, signal),
+            )
+        };
+        assert_eq!((held, is), (1, was), "signal {signal}");
+    }
+}
