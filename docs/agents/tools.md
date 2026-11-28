@@ -1,6 +1,7 @@
 # Tools
 
-Read this before you start, add or change a tool under `crates/kestrike-tools`, or port a script to one.
+Read this before you start, add or change a tool under `crates/kestrike-tools`, port a script to one, or
+change a Python file that a row of [Rules held twice](#rules-held-twice) names.
 The repository's tools are modules of one Rust binary. A caller starts a tool through one launcher, and a
 port keeps its script's contract.
 
@@ -199,8 +200,9 @@ edits each caller's command text. The same change removes each row of
 ## Rules held twice
 
 Each row names a Rust module and a Python file that stays in the tree. The two hold the same rules and no
-check reads both files, so an editor of one reads the other. A Python file stays when no ticket of its own
-port deletes it.
+check reads both files, so an editor of one reads the other. Where an edit changes a rule a row lists,
+change both files in one pull request and show that they agree on recorded inputs, or port the Python file
+and remove its rows. A Python file stays when no ticket of its own port deletes it.
 
 | Rust module | Python file that stays | Rules held in both |
 | --- | --- | --- |
