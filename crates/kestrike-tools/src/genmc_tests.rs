@@ -187,14 +187,22 @@ fn a_walk_passes_over_a_directory_it_may_not_list() {
     let listable = fs::read_dir(&closed).is_ok();
     let found = walk(&scratch.0);
     fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
+    let mut found = found.expect("the walk reads");
+    found.sort();
     if listable {
         eprintln!(
-            "a_walk_passes_over_a_directory_it_may_not_list: this process lists a mode-000 directory; nothing checked"
+            "a_walk_passes_over_a_directory_it_may_not_list: this process lists a mode-000 directory; the listing is checked whole"
+        );
+        assert_eq!(
+            found,
+            [
+                closed.clone(),
+                closed.join("inner"),
+                scratch.0.join("open.rs")
+            ]
         );
         return;
     }
-    let mut found = found.expect("the walk passes over the closed directory");
-    found.sort();
     assert_eq!(found, [closed, scratch.0.join("open.rs")]);
 }
 
@@ -211,8 +219,9 @@ fn a_lookup_refused_permission_is_an_error() {
     fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
     if searchable {
         eprintln!(
-            "a_lookup_refused_permission_is_an_error: this process searches a mode-000 directory; nothing checked"
+            "a_lookup_refused_permission_is_an_error: this process searches a mode-000 directory; the lookup is checked"
         );
+        assert_eq!(found.ok(), Some(true));
         return;
     }
     let error = found.expect_err("the lookup is refused");
