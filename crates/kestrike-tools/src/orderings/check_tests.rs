@@ -3139,6 +3139,11 @@ fn a_disposition_entry_without_its_fields_is_refused() {
             "unrun",
             needs(list(&[with(DEPARTED, &[("tests", list(&[]))])])),
         ),
+        (
+            "a needs entry with a numeric test",
+            "unrun",
+            needs(list(&[with(DEPARTED, &[("tests", value(r#"["x", 7]"#))])])),
+        ),
         ("an empty kill", "kill", list(&[])),
         (
             "a kill that is an object",
