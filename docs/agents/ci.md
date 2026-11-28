@@ -1445,6 +1445,16 @@ holds the pull request's commits alone. The hook's range starts at the remote
 tip, so a pushed tip that merges `main` also brings `main`'s commits and their
 acknowledgements into it. The scanner compares the head with the merge base of
 the base and the head, so a change made only on the base side is no finding.
+It reads acknowledgements from the commits that the head reaches and the base
+does not, the range its hint names. It lists them with `git rev-list` and
+drops each commit the base reaches, since that walk bounds its base side by
+committer date and can list one. The step summary's header names the two
+commits it compares. A base that is no ancestor of the head can have two merge
+bases with it, as an amended merge commit has with the merge it replaces. The
+comparison then starts at the one `git merge-base` prints, and its result
+depends on which that is: a change that the base and the head both took from
+the other one is a finding, and a weakening at the head is no finding where
+the printed one already holds the weakened state.
 
 A change that ignores an existing test or changes the condition of its
 conditional ignore (`ignore-existing`), lowers a declared test budget
@@ -1462,9 +1472,11 @@ of unprintable code points that `Text::repr` in
 `crates/kestrike-tools/src/text.rs` uses, such as a control character, a
 bidirectional control, a line or paragraph separator or a byte order mark, as
 `repr` writes it (`\r`, `\x7f`, `\u202e`); a backslash and a quote stay. The
-acknowledging line carries the character itself, as Git stores the path. The
-argument parser's error, a usage line and an `error:` line, prints an
-unrecognized argument as it was given. The
+acknowledging line carries the character itself, as Git stores the path. A key
+that the hint shows with such an escape is spelled for reading: a commit line
+that repeats the escaped spelling names another key and acknowledges nothing.
+The argument parser's error, a usage line and an `error:` line, prints an
+unrecognized or ambiguous argument as it was given. The
 CI step runs the scanner through `scripts/ci-scan-weakened-tests.sh`, which
 stops the runner's workflow commands before the scan, with a token it draws at
 each run and keeps out of the scan's environment, writes the scan's two
