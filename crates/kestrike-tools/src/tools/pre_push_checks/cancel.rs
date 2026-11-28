@@ -3,9 +3,11 @@
 //! before reaping the leader.
 //!
 //! Each of the four signals records into [`RECORD`], whatever disposition the tool inherited, and a later
-//! signal changes nothing. A check leads a process group of its own, so the tool alone decides what the
-//! group receives: while the check's leader is the tool's child and not yet reaped, its process id cannot
-//! name another process, and on a record the group and the leader get SIGKILL, and the reap comes last. A
+//! signal changes nothing. A check leads a process group of its own, so the terminal's signals to the
+//! foreground group reach the tool and not the check: while the check's leader is the tool's child and not
+//! yet reaped, its process id cannot name another process, and on a record the group and the leader get
+//! SIGKILL, and the reap comes last. Off Linux a process that a member forks while the group's SIGKILL is
+//! delivered can run on. A
 //! leader already reaped gets no signal. [`install`] sets SIGCHLD to its default disposition
 //! before the tool starts any child, so the kernel keeps each ended child until the tool reaps it.
 //!
@@ -150,7 +152,7 @@ pub(super) fn wait(child: &mut Child) -> Result<ExitStatus, Unwaited> {
     loop {
         let ended = ended(child).map_err(Unwaited::Failed)?;
         if let Err(code) = check() {
-            return Err(match stop(child) {
+            return Err(match stop(child, ended) {
                 Ok(()) => Unwaited::Cancelled(code),
                 Err(error) => Unwaited::Unstopped(code, error),
             });
@@ -200,13 +202,14 @@ fn ended(child: &Child) -> io::Result<bool> {
 
 /// `stop` sends SIGKILL to the group `child` leads and to the leader, which the caller has not reaped, so
 /// its process id still names it and its group, and then reaps the leader. A leader that left its group
-/// still ends, and `killpg` finding no process in the group reads as a group already ended. The reap waits
+/// still ends, and `killpg` finding no process in the group reads as a group already ended, as does the
+/// `EPERM` that Apple's systems give for a group holding only its ended leader. The reap waits
 /// only on a leader whose SIGKILL was sent.
 ///
 /// # Errors
 ///
 /// `killpg` fails otherwise, or the kill or the reap of the leader fails; the first error is returned.
-fn stop(child: &mut Child) -> io::Result<()> {
+fn stop(child: &mut Child, ended: bool) -> io::Result<()> {
     let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
     // SAFETY: `killpg` takes two integers and touches no memory of the caller.
     let grouped = if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
@@ -215,6 +218,7 @@ fn stop(child: &mut Child) -> io::Result<()> {
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
             Some(libc::ESRCH) => Ok(()),
+            Some(libc::EPERM) if ended && cfg!(target_vendor = "apple") => Ok(()),
             _ => Err(error),
         }
     };

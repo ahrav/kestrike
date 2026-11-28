@@ -396,3 +396,14 @@ fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
     fx.git(&["worktree", "prune"]);
     assert_eq!(fx.worktrees(), 1);
 }
+
+/// A ref field holding a NUL byte reaches a Git argument that the standard library refuses before any
+/// start; the tool prints `pre-push: ` and the refusal and exits 2, as for a Git read that fails.
+#[test]
+fn a_nul_byte_in_a_ref_field_exits_2() {
+    let fx = Fixture::new();
+    let run = finished(fx.start(&format!("refs/heads/x a\0b refs/heads/x {}\n", fx.base)));
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(run.stderr.starts_with("pre-push: "), "{}", run.stderr);
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+}

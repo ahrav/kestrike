@@ -63,7 +63,10 @@ fn fail(line: &str, code: Exit) -> Exit {
 
 fn refused(failure: &Failure) -> Exit {
     match failure {
-        Failure::Git(GitError::Start(_)) => fail(&format!("{NAME}: {failure}"), 1),
+        Failure::Git(GitError::Start(error)) if error.raw_os_error().is_some() => {
+            fail(&format!("{NAME}: {failure}"), 1)
+        }
+        Failure::Git(GitError::Io(_)) => fail(&format!("{NAME}: {failure}"), 1),
         _ => fail(&format!("pre-push: {failure}"), 2),
     }
 }

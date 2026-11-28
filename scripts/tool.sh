@@ -6,6 +6,8 @@ set -euo pipefail
 # it gives rustup and Cargo stay in that subshell, and the shell that execs the binary keeps the caller's.
 # Its last step prints the path of the binary it built, under the top level; a failure exits before that
 # step and writes its reason to standard error.
+# The preparation reads its standard input from /dev/null, so rustup, rustc and Cargo read no byte the
+# caller wrote for the binary, such as Git's ref lines on the pre-push hook's standard input.
 
 fail() {
   printf 'tool.sh: %s\n' "$1" >&2 || true
