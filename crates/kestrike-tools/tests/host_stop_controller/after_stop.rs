@@ -17,7 +17,7 @@ use super::plane::{ALARMS, Action, CALLER, MONOTONIC, RECORD, STATUS, State};
 use super::steps::{Step, errno, links};
 use super::stop_run::{int, operator_seconds, time};
 use super::{CHILD, COPY, Case, child, guardrails, listing, set, tail, text_of};
-use crate::host_stop_support::{START, Scratch, TARGET};
+use crate::host_stop_support::{START, Scratch, TARGET, free_lock};
 
 const ALL: [&str; 4] = ["roles", "stop", "stopped", "abort"];
 const STOPPING: [&str; 3] = ["roles", "stop", "abort"];
@@ -276,7 +276,7 @@ fn the_run_holds_the_lock_of_injection_to_its_end() {
         matches!(refusals[0], Some(LockError::Taken(_))),
         "{refusals:?}"
     );
-    drop(lock(&Disk, &case.evidence.join("injection")).expect("the run freed its lock"));
+    drop(free_lock(&case.evidence.join("injection")));
     let missing = lock(&Disk, &case.evidence.join("no-such-directory"));
     assert!(matches!(missing, Err(LockError::Open(_))), "{missing:?}");
 }
