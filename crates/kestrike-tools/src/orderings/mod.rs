@@ -2,3 +2,4 @@
 //! production files.
 
 pub mod sites;
+pub mod sources;

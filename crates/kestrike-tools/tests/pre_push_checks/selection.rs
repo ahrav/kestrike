@@ -159,6 +159,7 @@ fn each_links_input_runs_its_checks() {
         "crates/cited.rs",
         "tla/Other.tla",
         "scripts/model-links.py",
+        "tla/M.tla",
     ] {
         repository.git(&["checkout", "-q", "--detach", &base]);
         let text = std::fs::read_to_string(repository.top.join(path)).expect("the file reads");
@@ -174,12 +175,18 @@ fn each_links_input_runs_its_checks() {
         &repository,
         &id(module_path!(), "each_links_input_runs_its_checks"),
         &pushed,
-        &[(&lines[0], &check), (&lines[1], &check), (&lines[3], &both)],
+        &[
+            (&lines[0], &check),
+            (&lines[1], &check),
+            (&lines[3], &both),
+            (&lines[4], &check),
+        ],
     );
 }
 
-/// A push that removes the registry from a tip that keeps the check runs the check; one that removes the
-/// check too runs nothing.
+/// A push that removes the registry from a tip that keeps the check runs the check, and so does one that
+/// moves the registry unchanged, since the changed paths are read without rename pairing; one that removes
+/// the check too runs nothing.
 #[test]
 fn a_push_that_removes_the_links_registry_runs_the_links_check_of_a_tip_that_keeps_it() {
     if child().is_some() {
@@ -199,14 +206,22 @@ fn a_push_that_removes_the_links_registry_runs_the_links_check_of_a_tip_that_kee
         "scripts/test-model-links.py",
     ]);
     let gone = repository.commit(&[]);
+    repository.git(&["checkout", "-q", "--detach", &base]);
+    repository.git(&["config", "diff.renames", "true"]);
+    repository.git(&[
+        "mv",
+        "verification/models/links.json",
+        "verification/models/moved.json",
+    ]);
+    let renamed = repository.commit(&[]);
     assert_plan(
         &repository,
         &id(
             module_path!(),
             "a_push_that_removes_the_links_registry_runs_the_links_check_of_a_tip_that_keeps_it",
         ),
-        &[(&kept, &base), (&gone, &base)],
-        &[(&kept, &[Check::Links])],
+        &[(&kept, &base), (&gone, &base), (&renamed, &base)],
+        &[(&kept, &[Check::Links]), (&renamed, &[Check::Links])],
     );
 }
 
@@ -305,6 +320,80 @@ fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
         ),
         &[(&unheld, &base), (&head, &held)],
         &[(&head, &[Check::HostStop])],
+    );
+}
+
+/// A change to an input of the game-day judge's self-test that the host stop self-test does not read runs
+/// the game-day self-test only at a tip that holds it.
+#[test]
+fn a_game_day_judge_input_runs_its_self_test_only_at_a_tip_that_holds_it() {
+    if child().is_some() {
+        return plan_row();
+    }
+    let (repository, base) = fixture("gameday");
+    let input = "verification/readiness/failover.json";
+    let unheld = repository.commit(&[(input, "{}\n")]);
+    let held = repository.commit(&[("scripts/test-gameday-judge.py", STUB)]);
+    let head = repository.commit(&[(input, "{\"x\": 1}\n")]);
+    assert_plan(
+        &repository,
+        &id(
+            module_path!(),
+            "a_game_day_judge_input_runs_its_self_test_only_at_a_tip_that_holds_it",
+        ),
+        &[(&unheld, &base), (&head, &held)],
+        &[(&head, &[Check::Gameday])],
+    );
+}
+
+/// A changed path that ends in a carriage return after `.rs` is no Rust path, so an ignore attribute it
+/// gains selects nothing, where the same edit to the path without the carriage return selects the
+/// selection checks.
+#[test]
+fn an_ignore_added_to_a_path_ending_in_a_carriage_return_runs_no_check() {
+    if child().is_some() {
+        return plan_row();
+    }
+    let (repository, base) = fixture("carriage-return");
+    let ignored = "#[ignore = \"slow\"]\nfn t() {}\n";
+    let returned = repository.commit(&[("crates/a.rs\r", ignored)]);
+    repository.git(&["checkout", "-q", "--detach", &base]);
+    let plain = repository.commit(&[("crates/a.rs", ignored)]);
+    assert_plan(
+        &repository,
+        &id(
+            module_path!(),
+            "an_ignore_added_to_a_path_ending_in_a_carriage_return_runs_no_check",
+        ),
+        &[(&returned, &base), (&plain, &base)],
+        &[(&plain, &SELECTION)],
+    );
+}
+
+/// A Rust file that holds a byte outside UTF-8 is read with the byte replaced, so an ignore attribute it
+/// gains selects the selection checks.
+#[test]
+fn an_ignore_added_to_a_file_outside_utf8_runs_selection_checks() {
+    if child().is_some() {
+        return plan_row();
+    }
+    let (repository, base) = fixture("outside-utf8");
+    let path = "crates/raw.rs";
+    let write = |text: &[u8]| {
+        std::fs::write(repository.top.join(path), text).expect("the file is written");
+        repository.git(&["add", "--", path]);
+        repository.commit(&[])
+    };
+    let before = write(b"// \xff\nfn t() {}\n");
+    let after = write(b"// \xff\n#[ignore]\nfn t() {}\n");
+    assert_plan(
+        &repository,
+        &id(
+            module_path!(),
+            "an_ignore_added_to_a_file_outside_utf8_runs_selection_checks",
+        ),
+        &[(&before, &base), (&after, &before)],
+        &[(&after, &SELECTION)],
     );
 }
 

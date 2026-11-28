@@ -1,6 +1,7 @@
 //! Rows of the chaos record guard: each builds the hook case's history, plans its push in a child, and
 //! asserts the guard's failures.
 
+use kestrike_tools::environ::remove;
 use kestrike_tools::git::caller_environ;
 use kestrike_tools::hook::{Record, account_numbers};
 use kestrike_tools::text::Text;
@@ -122,13 +123,14 @@ fn a_record_path_that_is_a_directory_fails_the_push() {
 }
 
 /// A pushed commit's record that a later commit removes still fails the push, and a commit that makes a
-/// record path a link fails once, naming that commit.
+/// record path a link fails once, naming that commit, also when the tip stands on two lines.
 #[test]
 fn a_pushed_commit_with_an_account_number_fails_a_push_whose_tip_removed_it() {
     if let Some(row) = child() {
         let (linked, leaked) = (row.get("LINKED"), row.get("LEAKED"));
+        let tip = (row.get("HEAD"), row.get("BASE"));
         assert_eq!(
-            pushed(),
+            guarded(&[tip.clone(), tip]),
             [
                 at(
                     "chaos/runs/linked/run.json",
@@ -215,13 +217,24 @@ fn a_chaos_record_that_is_not_json_or_cannot_be_read_fails() {
     );
 }
 
-/// A replace ref that stands a clean blob in for the record is passed over.
+/// A replace ref that stands a clean blob in for the record is passed over, also by the record read in an
+/// environment that does not turn replacements off.
 #[test]
 fn the_guard_reads_the_original_objects_past_a_replacement() {
     if let Some(row) = child() {
+        let head = row.get("HEAD");
+        let path = "chaos/runs/run/run.json";
+        assert_eq!(pushed(), [at(path, &head, REFUSED)]);
+        let mut environ = caller_environ();
+        remove(&mut environ, "GIT_NO_REPLACE_OBJECTS");
+        let record = Record {
+            commit: Text::from(head.as_str()),
+            path: path.to_owned(),
+            oid: row.get("ORIGINAL"),
+        };
         assert_eq!(
-            pushed(),
-            [at("chaos/runs/run/run.json", &row.get("HEAD"), REFUSED)]
+            account_numbers(&environ, &[record]).expect("the batch reads"),
+            [at(path, &head, REFUSED)]
         );
         return;
     }
@@ -237,7 +250,7 @@ fn the_guard_reads_the_original_objects_past_a_replacement() {
             module_path!(),
             "the_guard_reads_the_original_objects_past_a_replacement",
         ),
-        &[("BASE", &base), ("HEAD", &head)],
+        &[("BASE", &base), ("HEAD", &head), ("ORIGINAL", &original)],
     );
 }
 
@@ -410,7 +423,7 @@ fn a_new_branch_without_origin_main_guards_the_chaos_records_of_its_tip() {
     let (repository, _) = fixture("no-base-guard");
     contract(&repository);
     repository.git(&["rm", "-q", "--", "chaos/ledger.json"]);
-    let leaked = repository.commit(&[
+    repository.commit(&[
         ("chaos/runs/run/run.json", LEAK),
         ("chaos/elsewhere.json", "{}\n"),
     ]);
@@ -421,17 +434,22 @@ fn a_new_branch_without_origin_main_guards_the_chaos_records_of_its_tip() {
             module_path!(),
             "a_new_branch_without_origin_main_guards_the_chaos_records_of_its_tip",
         ),
-        &[("HEAD", &head), ("LEAKED", &leaked)],
+        &[("HEAD", &head)],
     );
 }
 
-/// `chaos` as a link and as a submodule each fail the tip of a line with a base.
+/// `chaos` as a link and as a submodule each fail the tip of a line with a base, once for a tip on two
+/// lines.
 #[test]
 fn a_link_or_a_submodule_at_the_chaos_root_fails_a_push_with_a_base() {
     if let Some(row) = child() {
         let (base, linked, submodule) = (row.get("BASE"), row.get("LINKED"), row.get("SUBMODULE"));
         assert_eq!(
-            guarded(&[(linked.clone(), base.clone()), (submodule.clone(), base)]),
+            guarded(&[
+                (linked.clone(), base.clone()),
+                (linked.clone(), base.clone()),
+                (submodule.clone(), base),
+            ]),
             [
                 at("chaos", &linked, "is a link or a submodule"),
                 at("chaos", &submodule, "is a link or a submodule"),
@@ -461,5 +479,147 @@ fn a_link_or_a_submodule_at_the_chaos_root_fails_a_push_with_a_base() {
             ("LINKED", &linked),
             ("SUBMODULE", &submodule),
         ],
+    );
+}
+
+/// A pushed commit's records under `chaos/receipts` and `chaos/tests/runs` that the tip removed are read,
+/// one at a path that holds a line feed, which the failure quotes.
+#[test]
+fn the_records_of_each_receipts_and_runs_directory_are_read() {
+    if let Some(row) = child() {
+        let leaked = row.get("LEAKED");
+        assert_eq!(
+            pushed(),
+            [
+                at("'chaos/receipts/line\\nfeed.json'", &leaked, REFUSED),
+                at("chaos/receipts/x/a.json", &leaked, REFUSED),
+                at("chaos/tests/runs/r/run.json", &leaked, REFUSED),
+            ]
+        );
+        return;
+    }
+    let (repository, _) = fixture("record-directories");
+    let base = contract(&repository);
+    let records = [
+        (
+            "chaos/receipts/line\nfeed.json",
+            r#"{"a": 123456789012, "n": 1}"#,
+        ),
+        ("chaos/receipts/x/a.json", r#"{"a": 123456789012, "n": 2}"#),
+        (
+            "chaos/tests/runs/r/run.json",
+            r#"{"a": 123456789012, "n": 3}"#,
+        ),
+    ];
+    let leaked = repository.commit(&records);
+    let mut removed = vec!["rm", "-q", "--"];
+    removed.extend(records.iter().map(|(path, _)| *path));
+    repository.git(&removed);
+    let head = repository.commit(&[]);
+    repository.in_child(
+        &id(
+            module_path!(),
+            "the_records_of_each_receipts_and_runs_directory_are_read",
+        ),
+        &[("BASE", &base), ("HEAD", &head), ("LEAKED", &leaked)],
+    );
+}
+
+/// A root commit adds each record it holds, so a root record that the tip removed fails a new branch of a
+/// clone with no `origin/main`, under the root.
+#[test]
+fn a_root_commit_adds_the_records_it_holds() {
+    if let Some(row) = child() {
+        assert_eq!(
+            guarded(&[(row.get("HEAD"), ZERO.to_owned())]),
+            [at("chaos/runs/run/run.json", &row.get("ROOT"), REFUSED)]
+        );
+        return;
+    }
+    let repository = Repository::new("root-record");
+    let root = repository.commit(&[("chaos/runs/run/run.json", LEAK)]);
+    repository.git(&["rm", "-q", "--", "chaos/runs/run/run.json"]);
+    let head = repository.commit(&[]);
+    repository.in_child(
+        &id(module_path!(), "a_root_commit_adds_the_records_it_holds"),
+        &[("HEAD", &head), ("ROOT", &root)],
+    );
+}
+
+/// A merge whose own result adds a record that neither parent holds fails under the merge.
+#[test]
+fn a_record_a_merge_adds_fails_under_the_merge() {
+    if let Some(row) = child() {
+        assert_eq!(
+            pushed(),
+            [at("chaos/runs/run/run.json", &row.get("MERGE"), REFUSED)]
+        );
+        return;
+    }
+    let (repository, _) = fixture("merge-record");
+    let base = contract(&repository);
+    let side = repository.commit(&[("crates/side.rs", "s\n")]);
+    repository.git(&["checkout", "-q", "--detach", &base]);
+    repository.commit(&[("crates/main.rs", "m\n")]);
+    repository.git(&["merge", "-q", "--no-ff", "--no-commit", &side]);
+    let merge = repository.commit(&[("chaos/runs/run/run.json", LEAK)]);
+    repository.git(&["rm", "-q", "--", "chaos/runs/run/run.json"]);
+    let head = repository.commit(&[]);
+    repository.in_child(
+        &id(
+            module_path!(),
+            "a_record_a_merge_adds_fails_under_the_merge",
+        ),
+        &[("BASE", &base), ("HEAD", &head), ("MERGE", &merge)],
+    );
+}
+
+/// A record whose bytes leave UTF-8 is read with each such byte replaced, so an account number after one
+/// inside a string fails as one.
+#[test]
+fn a_record_outside_utf8_is_read_with_its_bytes_replaced() {
+    if let Some(row) = child() {
+        assert_eq!(
+            pushed(),
+            [at("chaos/runs/run/run.json", &row.get("HEAD"), REFUSED)]
+        );
+        return;
+    }
+    let (repository, _) = fixture("record-bytes");
+    let base = contract(&repository);
+    std::fs::write(
+        repository.top.join("chaos/runs/run/run.json"),
+        b"{\"a\": \"x\xff123456789012\"}",
+    )
+    .expect("the record is written");
+    repository.git(&["add", "--", "chaos/runs/run/run.json"]);
+    let head = repository.commit(&[]);
+    repository.in_child(
+        &id(
+            module_path!(),
+            "a_record_outside_utf8_is_read_with_its_bytes_replaced",
+        ),
+        &[("BASE", &base), ("HEAD", &head)],
+    );
+}
+
+/// A line whose remote commit holds a refused record and whose tip changes nothing under `chaos` reads
+/// neither the tip's records nor the remote commit's history.
+#[test]
+fn an_unchanged_chaos_tree_over_a_known_remote_commit_reads_no_record() {
+    if child().is_some() {
+        assert_eq!(pushed(), Vec::<String>::new());
+        return;
+    }
+    let (repository, _) = fixture("known-remote");
+    contract(&repository);
+    let base = repository.commit(&[("chaos/runs/run/run.json", LEAK)]);
+    let head = repository.commit(&[("crates/plain.rs", "edited\n")]);
+    repository.in_child(
+        &id(
+            module_path!(),
+            "an_unchanged_chaos_tree_over_a_known_remote_commit_reads_no_record",
+        ),
+        &[("BASE", &base), ("HEAD", &head)],
     );
 }

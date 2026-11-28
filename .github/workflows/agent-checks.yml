@@ -101,7 +101,7 @@ jobs:
       - name: Weakened-test scan
         env:
           SCAN_BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || github.event.before || 'origin/main' }}
-        run: bash scripts/tool.sh scan-weakened-tests --base "$SCAN_BASE"
+        run: bash scripts/ci-scan-weakened-tests.sh --base "$SCAN_BASE"
 
   lane-script:
     if: >-

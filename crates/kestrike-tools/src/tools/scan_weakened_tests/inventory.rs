@@ -7,13 +7,12 @@ use std::collections::{HashMap, HashSet};
 use crate::environ::Environ;
 use crate::git::blob_texts;
 use crate::json::{self, Value};
-use crate::text::{Text, escaped};
+use crate::text::Text;
 
 use super::digits::{integer, is_digits};
 use super::finding::short;
 use super::hunks::paired;
 use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
-use super::tree::files;
 use super::{Change, Class, Failure, Shown};
 
 pub const INVENTORY: &str = "scripts/test-inventory.json";
@@ -41,8 +40,6 @@ impl<'v> Document<'v> {
                     if key.is_empty() || ALIASING.is_match(key.as_bytes()) {
                         let under = if path.is_empty() {
                             "the root".to_owned()
-                        } else if key.is_empty() {
-                            escaped(&path.to_string())
                         } else {
                             path.to_string()
                         };
@@ -153,8 +150,7 @@ pub fn inventory_changes(old_text: &str, new_text: &str) -> Result<Vec<Change>, 
             }
         {
             return Err(Failure::Refused(format!(
-                "{INVENTORY}: the value at {} changes from {} to {}",
-                escaped(&name),
+                "{INVENTORY}: the value at {name} changes from {} to {}",
                 kind(before),
                 kind(later)
             )));
@@ -248,10 +244,9 @@ fn text_changes(name: &str, before: &Text, after: &Text) -> Result<Vec<Change>, 
     Ok(found)
 }
 
-/// `inventory_text` returns the inventory's text at `rev`, and an empty text where `rev` holds no entry at its
-/// path. An entry that is no file, and a file that is empty or unreadable, is refused.
-pub fn inventory_text(environ: &Environ, rev: &str) -> Result<String, Failure> {
-    if files(environ, rev, &[INVENTORY])?.is_empty() {
+/// `held` indicates whether the inventory file exists at `rev`.
+pub fn inventory_text(environ: &Environ, rev: &str, held: bool) -> Result<String, Failure> {
+    if !held {
         return Ok(String::new());
     }
     let short = short(rev);

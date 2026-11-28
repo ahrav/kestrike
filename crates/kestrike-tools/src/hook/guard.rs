@@ -225,21 +225,19 @@ pub fn record_values(text: &str) -> Option<Vec<Text>> {
 /// `account_number` holds when `value` holds 12 ASCII digits with no ASCII letter or digit beside them, so a
 /// digit run inside a SHA-256 digest is no match, or three groups of 4 ASCII digits joined by `-` with no
 /// ASCII letter, digit or `-` beside them.
+///
+/// Every test is of an ASCII byte, and each byte of a code point outside ASCII is 0x80 or above in the
+/// text's encoding, so the bytes are tested in place of the code points.
 pub fn account_number(value: &Text) -> bool {
-    let codes: Vec<u32> = value.code_points().collect();
-    let digit = |at: usize| {
-        codes
-            .get(at)
-            .is_some_and(|&code| (0x30..=0x39).contains(&code))
-    };
+    let bytes = value.as_bytes();
+    let digit = |at: usize| bytes.get(at).is_some_and(u8::is_ascii_digit);
     let word = |at: Option<usize>| {
-        at.and_then(|at| codes.get(at))
-            .and_then(|&code| char::from_u32(code))
-            .is_some_and(|c| c.is_ascii_alphanumeric())
+        at.and_then(|at| bytes.get(at))
+            .is_some_and(u8::is_ascii_alphanumeric)
     };
-    let dash = |at: Option<usize>| at.and_then(|at| codes.get(at)) == Some(&0x2d);
+    let dash = |at: Option<usize>| at.and_then(|at| bytes.get(at)) == Some(&b'-');
     let digits = |from: usize, count: usize| (from..from + count).all(digit);
-    (0..codes.len()).any(|at| {
+    (0..bytes.len()).any(|at| {
         let before = at.checked_sub(1);
         let twelve = !word(before) && digits(at, 12) && !word(Some(at + 12));
         let grouped = !word(before)

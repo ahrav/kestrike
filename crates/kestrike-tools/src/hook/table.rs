@@ -107,6 +107,17 @@ pub const ORDER: [Row; 10] = [
     },
 ];
 
+const _: () = {
+    let mut at = 0;
+    while at < ORDER.len() {
+        assert!(
+            ORDER[at].check as usize == at,
+            "each row stands at its check's index"
+        );
+        at += 1;
+    }
+};
+
 impl Check {
     /// `row` is the row of this check in [`ORDER`].
     pub fn row(self) -> &'static Row {
