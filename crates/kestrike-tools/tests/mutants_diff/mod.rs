@@ -964,6 +964,31 @@ fn a_test_word_outside_utf_8_is_reported_as_it_was_split_and_passed_as_its_bytes
     );
 }
 
+/// The help's failed write prints one line on standard error and exits 120: a full standard output gives
+/// the error of the write.
+#[test]
+fn a_failed_write_of_the_help_exits_120_with_one_line() {
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full opens");
+    let top = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new(fixture::BINARY)
+        .arg(top)
+        .args(["mutants-diff", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(full)
+        .output()
+        .expect("the tool runs");
+    assert_eq!(
+        (out.status.code(), String::from_utf8_lossy(&out.stderr)),
+        (
+            Some(120),
+            "mutants-diff: standard output: No space left on device (os error 28)\n".into()
+        )
+    );
+}
+
 #[test]
 fn the_default_head_and_artifacts_come_from_the_invoking_checkout() {
     let fx = Fixture::new("defaults");

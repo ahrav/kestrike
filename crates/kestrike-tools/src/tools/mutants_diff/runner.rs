@@ -7,6 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -21,6 +22,7 @@ use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
 use crate::python::{hexdigest, say};
+use crate::stream::emit;
 use crate::text::{Text, text};
 
 const PACKAGE: &str = "kestrike";
@@ -47,6 +49,8 @@ const DIFF: [&str; 17] = [
 /// The tool exits 4 on a failed baseline, else 3 when a mutant timed out, else 2 when one is missed, else 0.
 const TOOL_RESULTS: [i32; 3] = [0, 2, 3];
 const BASELINE_FAILED: i32 = 4;
+/// The exit code of a run whose write to standard output or standard error failed.
+const STREAM_FAILED: u8 = 120;
 
 /// Standard output and standard error of the run. A write that fails turns the exit code into 120.
 #[derive(Default)]
@@ -66,7 +70,7 @@ impl Streams {
     }
 
     fn code(&self, code: u8) -> u8 {
-        if self.failed { 120 } else { code }
+        if self.failed { STREAM_FAILED } else { code }
     }
 
     /// `refuse` prints a stop that ends the run without a report and returns its exit code.
@@ -621,13 +625,16 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let options = match super::options::parse(args) {
         Parsed::Run(options) => options,
         Parsed::Help(help) => {
-            let mut out = io::stdout().lock();
-            let written = out.write_all(help.as_bytes()).and_then(|()| out.flush());
-            return if written.is_ok() { COMPLETE } else { 120 };
+            let Err(error) = emit(io::stdout().as_fd(), &help) else {
+                return COMPLETE;
+            };
+            let line = format!("{TOOL}: standard output: {error}\n");
+            let _ = emit(io::stderr().as_fd(), &line);
+            return STREAM_FAILED;
         }
         Parsed::Refused { code, text } => {
             let written = io::stderr().write_all(text.as_bytes());
-            return if written.is_ok() { code } else { 120 };
+            return if written.is_ok() { code } else { STREAM_FAILED };
         }
     };
     let prepared = match preflight(options) {
