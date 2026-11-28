@@ -48,6 +48,8 @@
 //! of `injection/` excludes another run, restore or seal of the directory it opened, and keeps no
 //! directory under its name. The process that starts a command ignores `SIGXFSZ` so a write past
 //! the file size limit returns an error to the step.
+//!
+//! A run holds the lock while removing `injection/`.
 
 #[cfg(not(panic = "unwind"))]
 ::core::compile_error!(

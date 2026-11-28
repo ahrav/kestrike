@@ -14,6 +14,7 @@ mod before_stop;
 mod command_line;
 mod kept_defects;
 mod late_reads;
+mod locks;
 mod marks;
 mod plane;
 mod refusals;

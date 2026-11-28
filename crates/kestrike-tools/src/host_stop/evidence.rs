@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use super::files::{Files, Links, proc_path};
@@ -10,7 +11,23 @@ use super::files::{Files, Links, proc_path};
 #[derive(Debug)]
 #[must_use = "the lock frees when the value drops"]
 pub struct Lock {
-    _held: File,
+    held: File,
+}
+
+impl Lock {
+    /// Whether `path` names the locked directory: an `lstat` of `path` finds the device and inode
+    /// numbers of the directory the lock holds open. The open directory keeps its inode number in
+    /// use, so a directory removed and made again at `path` reads as another one.
+    ///
+    /// # Errors
+    ///
+    /// The error of the open directory's `fstat` or of the `lstat` of `path`, `ENOENT` for a name
+    /// with no entry.
+    pub fn stands_at(&self, files: &impl Files, path: &Path) -> io::Result<bool> {
+        let held = self.held.metadata()?;
+        let found = files.lstat(path)?;
+        Ok((held.dev(), held.ino()) == (found.dev(), found.ino()))
+    }
 }
 
 /// `Open` carries the directory-open error; `Taken` carries the nonblocking `flock` error, whose
@@ -35,7 +52,7 @@ pub fn lock(files: &impl Files, directory: &Path) -> Result<Lock, LockError> {
         .map_err(LockError::Open)?;
     loop {
         match files.try_lock(&held) {
-            Ok(()) => return Ok(Lock { _held: held }),
+            Ok(()) => return Ok(Lock { held }),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(LockError::Taken(error)),
         }

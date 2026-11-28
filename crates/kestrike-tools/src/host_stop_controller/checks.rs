@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use super::context::{Stream, beside, pure};
 use super::controller::Controller;
 use super::fault::{Fault, Halt};
-use super::run::{TOOL, probe_refusal};
+use super::run::{TOOL, lock_sentence, probe_refusal};
 use crate::gameday::{FleetBounds, ReadError};
-use crate::host_stop::{Files, Seam, probe, stands};
+use crate::host_stop::{Files, Lock, Seam, lock, probe, stands};
 use crate::json::Value;
 use crate::plants::files::strerror;
 use crate::text::Text;
@@ -55,6 +55,36 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 strerror(&error)
             )))
         })
+    }
+
+    /// The lock of `injection/` that `restore` and `seal` hold, on the directory the name gives. A
+    /// run that holds the lock can remove its new `injection/` and free the lock between this
+    /// command's open of that directory and its `flock`, which then succeeds on the removed
+    /// directory; the lookup behind the lock refuses that. Once the lock is held on the directory
+    /// at the name, no command removes it: a run removes `injection/` only under its lock.
+    ///
+    /// # Errors
+    ///
+    /// A refusal for a lock that cannot be opened or is taken, for a name that gives another
+    /// directory than the one locked, and for a lookup of the name that fails, a name with no
+    /// entry included.
+    pub(super) fn locked(&self, injection: &Path) -> Result<Lock, Halt> {
+        let files = self.cx.files;
+        let held = lock(files, injection)
+            .map_err(|error| Halt::refused(lock_sentence(injection, &error)))?;
+        let mut sentence = Text::from_os(injection.as_os_str());
+        match held.stands_at(files, injection) {
+            Ok(true) => return Ok(held),
+            Ok(false) => sentence.push_str(
+                " is another directory than the one locked: the one this command opened was \
+                 removed while it took the lock",
+            ),
+            Err(error) => sentence.push_str(&format!(
+                " cannot be looked up behind its lock, so the directory locked may be another: {}",
+                strerror(&error)
+            )),
+        }
+        Err(Halt::refused(sentence))
     }
 
     /// Arms the record, runs `span`, passes its end through [`Controller::raised`] and disarms the

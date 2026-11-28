@@ -1,8 +1,10 @@
 //! After the operator starts the target again, `restore` checks the marks a run left, polls the
 //! target until a read shows it running again, and writes `restoration.json` once.
 //!
-//! `restore` names the evidence by the pathname `DIR/injection` and trusts the operator to keep that
-//! directory under that name until `restore` returns.
+//! `restore` names the evidence by the pathname `DIR/injection`. At the lock it refuses a name that
+//! gives another directory than the one it locked; from there no command of the controller removes
+//! that directory, and `restore` trusts the operator to keep it under that name until `restore`
+//! returns.
 
 use std::cmp::Ordering;
 use std::ffi::OsStr;
@@ -12,11 +14,11 @@ use super::checks::{check_roles, other_package, read_halt, refused};
 use super::context::{Stream, beside, seconds};
 use super::controller::{Controller, window};
 use super::fault::Halt;
-use super::run::{TOOL, lock_sentence};
+use super::run::TOOL;
 use crate::gameday::{ends_observation, read_evidence};
 use crate::host_stop::{
     Files, Number, Request, SKEW_SECONDS, Seam, check_reviewed, check_stopped, instance_id,
-    launch_time, lock, read_json,
+    launch_time, read_json,
 };
 use crate::json::{Object, Value};
 use crate::python::{repr, repr_float};
@@ -80,8 +82,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                  target and the operator's",
             ));
         }
-        let _held = lock(self.cx.files, &injection)
-            .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
+        let _held = self.locked(&injection)?;
         let shown = self.stands_in(&injection, "stopped.json")?;
         let aborted = self.stands_in(&injection, "abort.json")?;
         if !(aborted || shown) {

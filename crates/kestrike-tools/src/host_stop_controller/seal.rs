@@ -5,8 +5,9 @@
 //! `seal` opens each file relative to its directory's descriptor and rejects a symbolic link at the
 //! final path component. It syncs each file it reads, then `records/`, `injection/` and the
 //! evidence directory, before the mark. It looks up a standing mark and links its own by the
-//! pathname `DIR/injection`, and trusts the operator to keep that directory under that name until
-//! `seal` returns.
+//! pathname `DIR/injection`. At the lock it refuses a name that gives another directory than the
+//! one it locked; from there no command of the controller removes that directory, and `seal`
+//! trusts the operator to keep it under that name until `seal` returns.
 //!
 //! A seal run again after a refused sync opens new descriptors. Their sync can report success for
 //! pages whose writeback failed under the earlier descriptors, so the bytes a second seal names can
@@ -24,10 +25,10 @@ use super::checks::{check_roles, other_package, read_halt, refused};
 use super::context::Stream;
 use super::controller::{Controller, window};
 use super::fault::{Fault, Halt};
-use super::run::{TOOL, lock_sentence};
+use super::run::TOOL;
 use crate::fixtures::close;
 use crate::gameday::{FleetBounds, admit, entries, load_evidence, open_dir, package_of, parsed};
-use crate::host_stop::{Files, Number, Seam, encoded, lock};
+use crate::host_stop::{Files, Number, Seam, encoded};
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{hexdigest, repr_float};
@@ -57,7 +58,9 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// removal unsynced, or standing whole with its durability unknown, and `seal` prints the
     /// SHA-256 of the bytes it linked. `seal` publishes the mark bytes the judge's loader admitted.
     ///
-    /// After taking the lock, `seal` arms the signal record, ends a hold an earlier command left on
+    /// `seal` takes the lock ahead of every read and refuses, with nothing read or written, where
+    /// the name `injection/` gives another directory than the one it locked. After taking the lock,
+    /// `seal` arms the signal record, ends a hold an earlier command left on
     /// it and reads it. It reads the record again before each file read and once more at the end of
     /// its armed span. A signal reported by the final read takes precedence over a refusal. It then
     /// disarms the record and writes the mark. If a record read reports a signal, `seal` returns
@@ -80,8 +83,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         }
         let now = self.wall();
         let (root, injection) = self.evidence_dirs(evidence, "no run to seal")?;
-        let _held = lock(self.cx.files, &injection)
-            .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
+        let _held = self.locked(&injection)?;
         let sealed = self.armed(|c| c.sealing(evidence, &root, &injection, now))?;
         self.injection = Some(injection);
         self.write_seal(&sealed, now)

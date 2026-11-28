@@ -1,8 +1,10 @@
 //! The run's seven steps, the abort path, and the entry that reads the catalog and the operator
 //! file and prints the line of a run that ends before `roles.json` stands.
 //!
-//! Once `injection/` is made the run holds its lock to the run's end. A failure before `roles.json`
-//! counts as written removes `injection/` again and is a refusal; once it counts as written, every
+//! Once `injection/` is made the run takes its lock and holds it to the run's end. A failure before
+//! `roles.json` counts as written is a refusal: a run that holds the lock removes `injection/`
+//! again and syncs the evidence directory before it frees the lock, and a run that never took the
+//! lock leaves `injection/` as it stands and names it. Once `roles.json` counts as written, every
 //! end of steps 3 to 7 but the observation's enters the abort path, which attempts `abort.json`,
 //! then `stopped.json` when the stop was shown and the abort mark counts as written, reads the
 //! target's status once when a stop request may have left, and prints GD-2's restoration steps. A
@@ -118,10 +120,12 @@ fn caught<T>(step: impl FnOnce() -> Result<T, Halt>) -> Result<T, Halt> {
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// The run's seven steps on a controller that has made no step; returns the exit code of a run
     /// whose `roles.json` counts as written, and the refusal, the signal or the failure of one that
-    /// ends before it counts. The run's first read of the record ends a hold an earlier run left. A
-    /// panic before `injection/` is made, and one in the abort path outside its catches of a mark's
-    /// write and of the status read, unwinds out of `run` and may leave the record armed or held;
-    /// [`entry`] disarms it and ends the hold.
+    /// ends before it counts. A run that ends before it counts removes `injection/` and syncs the
+    /// evidence directory while it holds the lock; one that never took the lock removes nothing and
+    /// returns a refusal whose `may_stand` is set. The run's first read of the record ends a hold an
+    /// earlier run left. A panic before `injection/` is made, and one in the abort path outside its
+    /// catches of a mark's write and of the status read, unwinds out of `run` and may leave the
+    /// record armed or held; [`entry`] disarms it and ends the hold.
     ///
     /// # Errors
     ///
@@ -173,15 +177,25 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             drop(held);
             return Ok(code);
         }
-        drop(held);
         let mut what = detail;
         what.push_str(" before roles.json stood; ");
         what.push_text(&Text::from_os(injection.as_os_str()));
+        let Some(held) = held else {
+            what.push_str(
+                " is left as it stands, since this run never held its lock: remove it before \
+                 another run, once no run, restore or seal holds it",
+            );
+            return Err(Halt::Refused {
+                sentence: what,
+                may_stand: true,
+            });
+        };
         let removed = self
             .cx
             .files
             .rmdir(&injection)
             .and_then(|()| sync_directory(self.cx.files, &root));
+        drop(held);
         match removed {
             Err(error) => Err(Halt::Refused {
                 sentence: {
