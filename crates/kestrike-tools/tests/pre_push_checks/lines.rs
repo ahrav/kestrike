@@ -35,7 +35,7 @@ pub fn line(local: &str, remote: &str) -> OsString {
 
 /// `planned` reads `lines` into a plan of a push to `origin`, failing the row on any error.
 pub fn planned(lines: &[OsString]) -> Plan {
-    let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+    let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
     for line in lines {
         plan.line(line, |_| {}).expect("the line reads");
     }
@@ -77,7 +77,7 @@ fn a_deletion_runs_no_check() {
 #[test]
 fn a_blank_ref_line_is_skipped() {
     if child().is_some() {
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         plan.line(" \t".as_ref(), |_| panic!("a blank line has no note"))
             .expect("a blank line reads");
         assert_eq!((checks(&plan), scans(&plan)), (vec![], vec![]));
@@ -91,7 +91,7 @@ fn a_blank_ref_line_is_skipped() {
 #[test]
 fn a_malformed_ref_line_fails() {
     if child().is_some() {
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let error = plan
             .line("ref-update".as_ref(), |_| {})
             .expect_err("the line is malformed");
@@ -173,7 +173,7 @@ fn an_unknown_remote_commit_compares_against_origin_main() {
 fn a_ref_without_a_comparison_base_prints_the_skipped_scan_and_runs_every_check() {
     if let Some(row) = child() {
         let head = row.get("HEAD");
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let mut note = None;
         plan.line(&line(&head, ZERO), |skipped| note = Some(skipped))
             .expect("the line reads");
@@ -274,7 +274,7 @@ fn one_commit_pushed_to_two_refs_runs_the_union_of_their_checks() {
 fn an_unreadable_origin_main_fails_the_push_with_a_git_error() {
     if let Some(row) = child() {
         let head = row.get("HEAD");
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let error = plan
             .line(&line(&head, ZERO), |_| {
                 panic!("a line whose base read fails has no note")
@@ -383,7 +383,7 @@ pub fn assert_plan(
 fn an_unreadable_history_without_origin_main_still_notes_the_skipped_scan() {
     if let Some(row) = child() {
         let head = row.get("HEAD");
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let mut note = None;
         let error = plan
             .line(&line(&head, ZERO), |skipped| {
@@ -432,7 +432,7 @@ fn an_unreadable_history_without_origin_main_still_notes_the_skipped_scan() {
 #[test]
 fn a_sha256_null_id_is_read_as_a_commit() {
     if let Some(row) = child() {
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let error = plan
             .line(&line(&"0".repeat(64), &row.get("BASE")), |_| {})
             .expect_err("the diff fails");
@@ -460,7 +460,7 @@ fn the_origin_main_probe_and_the_merge_base_read_the_name_differently() {
                 (vec![], vec![(head.clone(), head)])
             );
         } else {
-            let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+            let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
             let error = plan
                 .line(&line(&head, ZERO), |_| {})
                 .expect_err("the merge base fails");

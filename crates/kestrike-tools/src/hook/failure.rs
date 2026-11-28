@@ -19,6 +19,9 @@ pub enum Failure {
     /// A commit named in a batch read whose text is not UTF-8, as a ref line's field the caller decoded
     /// from bytes outside UTF-8 can be.
     Unencodable(Text),
+    /// The plan's probe reported a recorded signal once a Git read returned; the field is the push's exit
+    /// code, and `Display` writes `cancelled with exit <code>`.
+    Cancelled(u8),
 }
 
 impl From<GitError> for Failure {
@@ -36,6 +39,7 @@ impl fmt::Display for Failure {
             Self::Unencodable(commit) => {
                 write!(f, "the batch name of {} is not UTF-8", commit.repr())
             }
+            Self::Cancelled(code) => write!(f, "cancelled with exit {code}"),
         }
     }
 }

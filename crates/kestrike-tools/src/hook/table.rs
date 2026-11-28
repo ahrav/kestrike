@@ -268,8 +268,8 @@ impl Default for Held {
 /// `checks_for` returns the checks that the changed `paths` require, in run order.
 ///
 /// `sources` are the paths the Verus inventory names and `links` the paths whose change needs the links
-/// check; `None` stands for a file that could not be read, and then any change runs that check, which
-/// reports the defect. `ignore_changed` says an ignore attribute of a Rust test, or the name of the fn it
+/// check; `None` stands for a file whose bytes Git printed but the selector cannot decode or iterate, and
+/// then any change runs that check, which reports the defect. `ignore_changed` says an ignore attribute of a Rust test, or the name of the fn it
 /// marks, changed. A change to the replay itself runs it at any tip, so a push that removes it fails on the
 /// missing file; the game-day judge, the host stop controller and their self-tests run their self-test at
 /// any tip for the same reason.

@@ -1511,11 +1511,22 @@ reads pathspecs with their magic whatever pathspec mode
 start in that environment too.
 
 Any other Rust change runs no worktree check here, with three exceptions: a
-tip whose Verus inventory is present but cannot be read as an object whose
-`sources` names paths runs reconciliation on any change, a tip whose links
-registry is present but cannot be read runs the links check on any change,
-and a changed Rust path that holds a line feed runs the selection and
-admission checks. The census and
+tip whose Verus inventory `git show` returns as bytes that are no UTF-8 JSON
+object, or whose `sources` is a number, a Boolean, `null` or a list holding a
+list or an object, runs reconciliation on any change; a tip whose links
+registry `git show` returns as bytes that are no UTF-8 JSON object, that lack
+`models` or `rows`, or whose models, rows or anchors cannot be iterated or
+hold an item of another shape than the selector reads, runs the links check
+on any change; and a
+changed Rust path that holds a line feed runs the selection and admission
+checks. The first two apply on any nonempty diff from the comparison base,
+whatever path changed, and the third to `.rs` paths alone. A `git show` that
+fails for any reason reads as an absent file: an absent inventory names no
+source, and an absent registry names the registry alone at a tip that holds
+the links check and nothing at another. The selector reads no further schema:
+an inventory with no `sources`, or whose `sources` is an object or a string,
+names the keys or the code points it iterates to, and a number, a Boolean or
+`null` among its items names nothing. The census and
 witness checks read production source and the intake checks of `admit` read
 the regression files, their crates' `Cargo.toml` and the module files on their
 paths, `narrate/rules.rs`, the history sources, the `site.path` file of each
@@ -1541,20 +1552,29 @@ line is skipped.
 The tool prints each failure as `pre-push: failed: FAILURE` at the end. Exit 0
 passes; 1 is a failed check or a failed step of the tool's own (reading
 standard input, making or removing the worktree's directory, starting or
-waiting for a check, or starting Git), named by a `pre-push-checks: ` line or,
+waiting for a check or for `git worktree add`, starting Git, or reading or
+writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
-the worktree; 2 is a malformed ref line, a Git command that exits nonzero
-(`pre-push: ` and Git's text) or signal handlers that cannot be installed; and
-120 is a failed write to standard error. A panic in the scan ends the tool
-with 101.
+the worktree; 2 is every other refusal before the checks, printed as
+`pre-push: ` and its text: a malformed ref line, a Git read that exits
+nonzero where the read is not a presence test (Git's own text), Git output or
+a record the tool cannot read and a Git argument the standard library refuses
+(the tool's text), and a `git worktree add` that exits nonzero, which exits 1
+where Git cannot start for the removal; 2 is also signal handlers that cannot
+be installed. A presence read, and a read of the inventory or the registry,
+whose Git command exits nonzero reads as an absent file, and a removal that
+Git refuses is a warning. 120 is a failed write to standard error. A panic in
+the scan ends the tool with 101.
 
 The tool records the first of SIGTERM, SIGHUP, SIGINT and SIGQUIT that
 reaches it, whatever disposition or mask it inherited: it blocks the four
 while it
 installs their handlers, then unblocks them, and it sets SIGCHLD to its
 default disposition before it starts any child. It reads the record after
-reading standard input, after each ref line's plan, after each scan, after the
-guard, and while it waits for `git worktree add` or a check. Each check,
+reading standard input, after each Git read of a ref line's plan and of the
+guard, after each scan, after each line it prints, and while it waits for
+`git worktree add` or a check; once it reads a record it starts no further
+Git read, scan or check. Each check,
 `git worktree add` and `git worktree remove` leads a process group of its own.
 On a record the tool sends SIGKILL to the group of the running check or add
 while its leader is the tool's own child that it has not reaped, a leader that
@@ -1562,9 +1582,10 @@ ended and waits for its reap included, then reaps the leader; a leader already
 reaped gets no signal. It removes the worktree once, and the removal runs to
 its end, since a signal to the tool's process group does not reach it. It
 prints only a failed removal and a check whose SIGKILL or reap failed, and
-exits `128 + n`. The read of standard input, the Git reads of one ref line's
-plan or of the guard, and the scan are not interrupted; the record is acted on
-when they return, also when they failed, so a tool started by hand with a
+exits `128 + n`. The read of standard input, each Git read of a plan or of
+the guard, and the scan are not interrupted; the record is acted on when each
+returns, also when it failed, before its result is used or a skipped scan's
+note is printed, so a tool started by hand with a
 pipe or a terminal on standard input waits for that input to end. No check
 has a time limit. On Linux the group's SIGKILL also reaches a process that a
 member of the group forks while it is delivered; on other systems such a

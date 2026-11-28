@@ -6,12 +6,13 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 
 use crate::environ::Environ;
-use crate::git::{git, push_environ};
+use crate::git::push_environ;
 use crate::text::{Text, words};
 
-use super::guard::{account_numbers, pushed_records, record_pathspecs, tip_records};
+use super::guard::{pushed_records, read_accounts, record_pathspecs, tip_records};
 use super::reads::{
-    ZERO, changes_ignore, comparison_base, destination_refs, holds_check, links, sources,
+    Probe, Reads, ZERO, changes_ignore, comparison_base, destination_refs, git, holds_check, links,
+    sources,
 };
 use super::table::{
     GAMEDAY_OWN, HOST_STOP_OWN, JUDGES_SOURCES, chaos_change, gameday_input, host_stop_input,
@@ -33,10 +34,12 @@ impl fmt::Display for Skipped {
     }
 }
 
-/// The decisions for one push so far. Every Git read starts in [`push_environ`], built once at [`Plan::new`].
-/// `Debug` writes the decisions and leaves the environment out.
+/// The decisions for one push so far. Every Git read starts in [`push_environ`], built once at [`Plan::new`],
+/// and the caller's probe runs once each read returns. `Debug` writes the decisions and leaves the
+/// environment and the probe out.
 pub struct Plan {
     environ: Environ,
+    probe: Probe,
     tracked: Vec<OsString>,
     planned: Vec<(Text, Vec<Check>)>,
     scans: Vec<(Text, Text)>,
@@ -59,20 +62,24 @@ impl fmt::Debug for Plan {
 
 impl Plan {
     /// `new` starts the plan of a push to `destination`, the hook's first argument. A nonempty name reads
-    /// `git remote` for the remotes whose refs [`destination_refs`] weighs.
+    /// `git remote` for the remotes whose refs [`destination_refs`] weighs. `probe` runs once each Git read
+    /// of the plan returns, before the read's result is used, and an `Err` from it ends the read's step at
+    /// once with [`Failure::Cancelled`] and its code.
     ///
     /// # Errors
     ///
-    /// The read of `git remote` fails.
-    pub fn new(destination: &OsStr) -> Result<Self, Failure> {
+    /// The read of `git remote` fails, or `probe` reports `Err` once it returns.
+    pub fn new(destination: &OsStr, probe: Probe) -> Result<Self, Failure> {
         let environ = push_environ();
+        let reads = Reads {
+            environ: &environ,
+            probe,
+        };
         let name = Text::from_os(destination);
         let remotes: Vec<Text> = if name.is_empty() {
             Vec::new()
         } else {
-            words(&git(&environ, &["remote"])?)
-                .map(Text::from)
-                .collect()
+            words(&git(reads, &["remote"])?).map(Text::from).collect()
         };
         let tracked = destination_refs(&name, &remotes)
             .iter()
@@ -80,6 +87,7 @@ impl Plan {
             .collect();
         Ok(Self {
             environ,
+            probe,
             tracked,
             planned: Vec::new(),
             scans: Vec::new(),
@@ -92,6 +100,14 @@ impl Plan {
     /// `environ` is the environment of the plan's Git reads, which the scan and the checks start in too.
     pub fn environ(&self) -> &Environ {
         &self.environ
+    }
+
+    /// `reads` makes the plan's Git reads in its environment, each followed by its probe.
+    fn reads(&self) -> Reads<'_> {
+        Reads {
+            environ: &self.environ,
+            probe: self.probe,
+        }
     }
 
     /// `scans` are the (base, tip) pairs the weakened-test scan reads, in first-seen order, each once.
@@ -128,8 +144,8 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// A line that is not blank and has other than four fields is [`Failure::Malformed`], and a failed read
-    /// is its error.
+    /// A line that is not blank and has other than four fields is [`Failure::Malformed`], a failed read is
+    /// its error, and a probe that reports `Err` once a read returns is [`Failure::Cancelled`].
     pub fn line(&mut self, line: &OsStr, note: impl FnOnce(Skipped)) -> Result<(), Failure> {
         let text = Text::from_os(line);
         if text.strip().is_empty() {
@@ -140,16 +156,17 @@ impl Plan {
         if local.to_str() == Some(ZERO) {
             return Ok(());
         }
-        let base = comparison_base(&self.environ, &local, &remote)?;
-        let links = links(&self.environ, &local)?;
+        let reads = self.reads();
+        let base = comparison_base(reads, &local, &remote)?;
+        let links = links(reads, &local)?;
         let (checks, guard) = match &base {
             None => {
                 note(Skipped(local.clone()));
-                (unbased_checks(&self.environ, &local, links.as_ref())?, true)
+                (unbased_checks(reads, &local, links.as_ref())?, true)
             }
             Some(base) => {
-                let paths = changed_paths(&self.environ, base, &local)?;
-                let checks = based_checks(&self.environ, base, &local, &paths, links.as_ref())?;
+                let paths = changed_paths(reads, base, &local)?;
+                let checks = based_checks(reads, base, &local, &paths, links.as_ref())?;
                 (checks, chaos_change(&paths))
             }
         };
@@ -200,7 +217,7 @@ impl Plan {
         }
         args.push("--".into());
         args.extend(record_pathspecs());
-        Ok(words(&git(&self.environ, &args)?).map(Text::from).collect())
+        Ok(words(&git(self.reads(), &args)?).map(Text::from).collect())
     }
 
     /// `guard` returns the chaos record guard's failures in order: each guarded tip's refused entries, then
@@ -209,27 +226,29 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// A failed Git read, and a tree entry or a raw diff record of another form than Git's manual gives.
+    /// A failed Git read, a tree entry or a raw diff record of another form than Git's manual gives, and a
+    /// probe that reports `Err` once a read returns, which is [`Failure::Cancelled`].
     pub fn guard(&self) -> Result<Vec<String>, Failure> {
+        let reads = self.reads();
         let mut failures = Vec::new();
         let mut records = Vec::new();
         for commit in &self.guarded {
-            let (found, held) = tip_records(&self.environ, commit)?;
+            let (found, held) = tip_records(reads, commit)?;
             failures.extend(found);
             records.extend(held);
         }
-        let (found, held) = pushed_records(&self.environ, &self.pushed)?;
+        let (found, held) = pushed_records(reads, &self.pushed)?;
         failures.extend(found);
         records.extend(held);
-        failures.extend(account_numbers(&self.environ, &records)?);
+        failures.extend(read_accounts(reads, &records)?);
         Ok(failures)
     }
 }
 
 /// `changed_paths` lists the paths that differ between `base` and `local`, each named from the top level.
-fn changed_paths(environ: &Environ, base: &Text, local: &Text) -> Result<Vec<String>, Failure> {
+fn changed_paths(reads: Reads<'_>, base: &Text, local: &Text) -> Result<Vec<String>, Failure> {
     let listed = git(
-        environ,
+        reads,
         &[
             OsString::from("diff"),
             "--no-renames".into(),
@@ -252,7 +271,7 @@ fn changed_paths(environ: &Environ, base: &Text, local: &Text) -> Result<Vec<Str
 /// the tip holds neither the registry nor its check, and each check that asks for a file only where the tip
 /// holds it, the replay only beside the contract.
 fn unbased_checks(
-    environ: &Environ,
+    reads: Reads<'_>,
     local: &Text,
     links: Option<&Members>,
 ) -> Result<Vec<Check>, Failure> {
@@ -260,15 +279,14 @@ fn unbased_checks(
     if links.is_none_or(|links| !links.is_empty()) {
         checks.extend([Check::Links, Check::LinksSelfTest]);
     }
-    if holds_check(environ, local, Check::Contract)? {
+    if holds_check(reads, local, Check::Contract)? {
         checks.push(Check::Contract);
     }
-    if holds_check(environ, local, Check::Contract)? && holds_check(environ, local, Check::Replay)?
-    {
+    if holds_check(reads, local, Check::Contract)? && holds_check(reads, local, Check::Replay)? {
         checks.push(Check::Replay);
     }
     for check in [Check::Judges, Check::Gameday, Check::HostStop] {
-        if holds_check(environ, local, check)? {
+        if holds_check(reads, local, check)? {
             checks.push(check);
         }
     }
@@ -279,7 +297,7 @@ fn unbased_checks(
 /// holds the replay on every line, and each other check's file only where a change to that check's inputs
 /// makes the answer count.
 fn based_checks(
-    environ: &Environ,
+    reads: Reads<'_>,
     base: &Text,
     local: &Text,
     paths: &[String],
@@ -287,17 +305,17 @@ fn based_checks(
 ) -> Result<Vec<Check>, Failure> {
     let changed = |list: &[&str]| paths.iter().any(|path| list.contains(&path.as_str()));
     let any = |test: fn(&str) -> bool| paths.iter().any(|path| test(path));
-    let sources = sources(environ, local)?;
-    let ignore_changed = changes_ignore(environ, base, local, paths)?;
+    let sources = sources(reads, local)?;
+    let ignore_changed = changes_ignore(reads, base, local, paths)?;
     let held = Held {
-        judges: changed(&JUDGES_SOURCES) && holds_check(environ, local, Check::Judges)?,
-        replay: holds_check(environ, local, Check::Replay)?,
+        judges: changed(&JUDGES_SOURCES) && holds_check(reads, local, Check::Judges)?,
+        replay: holds_check(reads, local, Check::Replay)?,
         gameday: !changed(&GAMEDAY_OWN)
             && any(gameday_input)
-            && holds_check(environ, local, Check::Gameday)?,
+            && holds_check(reads, local, Check::Gameday)?,
         host_stop: !changed(&HOST_STOP_OWN)
             && any(host_stop_input)
-            && holds_check(environ, local, Check::HostStop)?,
+            && holds_check(reads, local, Check::HostStop)?,
     };
     Ok(checks_for(
         paths,

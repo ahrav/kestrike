@@ -8,13 +8,18 @@
 //! chaos record guard, and each tip's checks in a worktree of the tip that the run adds and removes. Every
 //! failure is printed as `pre-push: failed: <failure>` at the end.
 //!
-//! Exit 0 passes, 1 is a failed check or a failed tool step, 2 a malformed ref line or a Git command that
-//! exits nonzero, 120 a failed write to standard error, and `128 + n` for the first signal `n` that
-//! [`cancel`] records, regardless of its inherited disposition. The tool checks
-//! the signal record after reading standard input, after each ref line's plan, after each scan, after the
-//! guard, and while a check or `git worktree add` runs. After a Git read or scan returns, the tool honors
-//! the recorded signal regardless of the result. Cancellation stops the push before the next step, and
-//! the tool then prints only a failed worktree removal and a running check whose SIGKILL or reap failed.
+//! Exit 0 passes; 1 is a failed check or a failed step of the tool's own, Git that cannot start or a
+//! failed read or write of the batch read's Git child among them, named by a `pre-push-checks: ` line; 2 is
+//! every other refusal before the checks, named by a `pre-push: ` line: a malformed ref line, a Git read
+//! that exits nonzero where the read is not a presence test, Git output or a record the tool cannot read, a
+//! Git argument the standard library refuses, and a `git worktree add` that exits nonzero, and also signal
+//! handlers that cannot be installed; 120 is a failed write to standard error; 101 a panic in the scan; and
+//! `128 + n` the first signal `n` that [`cancel`] records, regardless of its inherited disposition. The
+//! tool checks the signal record after reading standard input, after each Git read of a ref line's plan and
+//! of the guard, through the plan's probe, after each scan, after each line it prints, and while a check or
+//! `git worktree add` runs. After a Git read or scan returns, the tool honors the recorded signal
+//! regardless of the result and starts no further read, scan or check, and it then prints only a failed
+//! worktree removal and a running check whose SIGKILL or reap failed.
 
 mod cancel;
 mod worktree;
@@ -61,8 +66,12 @@ fn fail(line: &str, code: Exit) -> Exit {
     say(line).map_or_else(|failed| failed, |()| code)
 }
 
+/// `refused` ends the push on `failure` and returns its exit code: a recorded signal's code with nothing
+/// printed, `pre-push-checks: <failure>` and 1 for Git that cannot start and for a failed read or write of
+/// the batch read's child, and `pre-push: <failure>` and 2 for every other failure.
 fn refused(failure: &Failure) -> Exit {
     match failure {
+        Failure::Cancelled(code) => *code,
         Failure::Git(GitError::Start(error)) if error.raw_os_error().is_some() => {
             fail(&format!("{NAME}: {failure}"), 1)
         }
@@ -82,7 +91,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     }
     let lines = Text::from_os(OsStr::from_bytes(&input)).splitlines();
     drop(input);
-    let started = Plan::new(destination);
+    let started = Plan::new(destination, cancel::check);
     cancel::check()?;
     let mut plan = started.map_err(|failure| refused(&failure))?;
     for line in &lines {

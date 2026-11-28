@@ -31,11 +31,11 @@ use std::time::Duration;
 
 use crate::environ::Environ;
 use crate::git::{self, GitError};
-use crate::hook::{Check, Failure, argument, short};
+use crate::hook::{Check, argument, short};
 use crate::text::{Text, strip_str};
 
 use super::cancel::{self, Unwaited};
-use super::{Exit, NAME, fail, refused, say};
+use super::{Exit, NAME, fail, say};
 
 const PREFIX: &str = "kestrike-pre-push-";
 const LETTERS: &[u8; 37] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
@@ -55,12 +55,12 @@ enum Ended {
     Unstopped(u8, String),
     /// A failed write to standard error; the field is the exit code.
     Stream(u8),
-    /// `git worktree add` failed: once the worktree is removed, an add that exited nonzero prints
-    /// `pre-push: <error>` and exits 2, and an add that could not start or be waited on prints
-    /// `pre-push-checks: <error>` and exits 1.
+    /// `git worktree add` exited nonzero or wrote standard output that is not UTF-8: once the worktree is
+    /// removed, `pre-push: <error>` is printed, and the exit is 2, or 1 where Git could not start for the
+    /// removal.
     Git(GitError),
-    /// A check could not be started or waited on: `pre-push-checks: <message>` is printed once the worktree
-    /// is removed, and the exit is 1.
+    /// A check or `git worktree add` could not be started or waited on: `pre-push-checks: <message>` is
+    /// printed once the worktree is removed, and the exit is 1.
     Fault(String),
 }
 
@@ -72,9 +72,9 @@ enum Ended {
 ///
 /// The exit code where the push ends here: `128 + n` for a recorded signal, after a line that names the
 /// running check where it could not be stopped or reaped, 120 for a failed write to
-/// standard error, 2 for a failed `git worktree add`, and 1 where the directory cannot be made or
-/// removed, if starting or waiting for a check fails, or if Git fails to start for `git worktree add` or
-/// `git worktree remove`.
+/// standard error, 2 for a `git worktree add` that exits nonzero or writes output that is not UTF-8, and 1
+/// where the directory cannot be made or removed, if starting or waiting for a check or for
+/// `git worktree add` fails, or if Git fails to start for `git worktree remove`.
 pub(super) fn run_checks(
     environ: &Environ,
     tip: &Text,
@@ -98,15 +98,17 @@ pub(super) fn run_checks(
         return Err(*code);
     }
     cancel::check()?;
-    let unstarted = matches!(removed?, Removal::Unstarted);
+    let unstarted = !removed?;
     let failures = match ran {
         Ok(failures) => failures,
         Err(Ended::Cancelled(code) | Ended::Stream(code) | Ended::Unstopped(code, _)) => {
             return Err(code);
         }
         Err(Ended::Git(error)) => {
-            let code = refused(&Failure::Git(error));
-            return Err(if unstarted && code == 2 { 1 } else { code });
+            return Err(fail(
+                &format!("pre-push: {error}"),
+                if unstarted { 1 } else { 2 },
+            ));
         }
         Err(Ended::Fault(message)) => {
             return Err(fail(&format!("{NAME}: {message}"), 1));
@@ -176,13 +178,13 @@ fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
-        .map_err(|error| Ended::Git(GitError::Start(error)))?;
+        .map_err(|error| Ended::Fault(format!("git: {error}")))?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
     let status = cancel::wait(&mut child).map_err(|unwaited| match unwaited {
         Unwaited::Cancelled(code) => Ended::Cancelled(code),
         Unwaited::Unstopped(code, error) => Ended::Unstopped(code, format!("git: {error}")),
-        Unwaited::Failed(error) => Ended::Git(GitError::Start(error)),
+        Unwaited::Failed(error) => Ended::Fault(format!("git: {error}")),
     })?;
     let stdout = drained(stdout)?;
     if status.success() {
@@ -226,19 +228,11 @@ fn drained(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Result<Vec<u8>, Ended
     Ok(reader.join().unwrap_or_default())
 }
 
-enum Removal {
-    Removed,
-    /// Git returned an unsuccessful status, and `remove` reported the failure for `tree`.
-    Refused,
-    /// Starting or waiting for Git failed, and `remove` reported the failure for `tree`.
-    Unstarted,
-}
-
-/// `remove` runs `git worktree remove --force --force` on `tree` in its own process group, and prints
-/// `pre-push: could not remove worktree <tree>: <reason>` when it fails. `remove` converts CRLF and CR in
-/// Git's standard error to LF; for an error starting or waiting for Git it formats
-/// `GitError::Start(error)`. It trims either reason before printing.
-fn remove(environ: &Environ, tree: &Path) -> Result<Removal, Exit> {
+/// `remove` runs `git worktree remove --force --force` on `tree` in its own process group, prints
+/// `pre-push: could not remove worktree <tree>: <reason>` when it fails, and returns whether Git started.
+/// `remove` converts CRLF and CR in Git's standard error to LF; for an error starting or waiting for Git it
+/// formats `GitError::Start(error)`. It trims either reason before printing.
+fn remove(environ: &Environ, tree: &Path) -> Result<bool, Exit> {
     let args = [
         OsStr::new("worktree"),
         "remove".as_ref(),
@@ -250,20 +244,20 @@ fn remove(environ: &Environ, tree: &Path) -> Result<Removal, Exit> {
         .args(args)
         .process_group(0)
         .output();
-    let (reason, removal) = match ran {
-        Ok(output) if output.status.success() => return Ok(Removal::Removed),
+    let (reason, started) = match ran {
+        Ok(output) if output.status.success() => return Ok(true),
         Ok(output) => (
             crate::text::newlines(String::from_utf8_lossy(&output.stderr).into_owned()),
-            Removal::Refused,
+            true,
         ),
-        Err(error) => (GitError::Start(error).to_string(), Removal::Unstarted),
+        Err(error) => (GitError::Start(error).to_string(), false),
     };
     say(&format!(
         "pre-push: could not remove worktree {}: {}",
         shown(tree),
         strip_str(&reason)
     ))?;
-    Ok(removal)
+    Ok(started)
 }
 
 /// `shown` writes `path` as a line names it, each byte outside UTF-8 as `\udcXX`.
