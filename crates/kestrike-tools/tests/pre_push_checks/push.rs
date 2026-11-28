@@ -16,7 +16,9 @@
 //! sends its own two output streams and its child's to `/dev/null` first. A script that holds
 //! `# unlink-git` removes the file `STUB_GIT_LINK` names before anything else; one that holds `# deaf`
 //! ignores SIGINT, SIGTERM, SIGHUP and SIGQUIT and then hangs as `# hang` does; one that holds
-//! `# release` hangs, then exits 0 once `STUB_LOG.release` stands or 60 seconds pass.
+//! `# release` hangs, then exits 0 once `STUB_LOG.release` stands or 60 seconds pass; one that holds
+//! `# locked` makes the directory `locked` in its working directory, holding the empty file `kept`, with
+//! mode 0500.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
@@ -63,6 +65,7 @@ hang() {
   printf '%s\n' "$$" > "$STUB_LOG.leader.tmp" && mv "$STUB_LOG.leader.tmp" "$STUB_LOG.leader"
 }
 if grep -qx '# unlink-git' "$script"; then rm -f "$STUB_GIT_LINK"; fi
+if grep -qx '# locked' "$script"; then mkdir locked && : > locked/kept && chmod 500 locked; fi
 if grep -qx '# linger' "$script"; then child "$STUB_LOG.lingering"; exit 0; fi
 if grep -qx '# deaf' "$script"; then trap '' INT TERM HUP QUIT; hang; wait; fi
 if grep -qx '# hang' "$script"; then hang; wait; fi
@@ -361,19 +364,26 @@ impl Fixture {
         self.start_in(&self.repo, input, &[])
     }
 
+    /// `tool` prepares the built binary as `pre-push-checks origin url` in the repository, with the
+    /// fixture's environment alone.
+    pub fn tool(&self) -> Command {
+        let mut command = self.command(BINARY);
+        command
+            .arg(top())
+            .args(["pre-push-checks", "origin", "url"]);
+        command
+    }
+
     /// `start_in` is [`Fixture::start`] in `dir`, with each `STUB_<NAME>` of `codes` set for this run.
     pub fn start_in(&self, dir: &Path, input: &str, codes: &[(&str, i32)]) -> Child {
-        let mut command = self.command(BINARY);
+        let mut command = self.tool();
         for (name, code) in codes {
             command.env(
                 format!("STUB_{}", name.replace('-', "_").to_uppercase()),
                 code.to_string(),
             );
         }
-        command
-            .arg(top())
-            .args(["pre-push-checks", "origin", "url"])
-            .current_dir(dir);
+        command.current_dir(dir);
         spawn_with_input(&mut command, input)
     }
 
@@ -436,9 +446,9 @@ pub fn top() -> &'static Path {
         .expect("the package stands two levels below the checkout's top")
 }
 
-/// `spawn_with_input` starts `command` with both output streams piped, writes `input` to its standard
-/// input and closes it.
-pub fn spawn_with_input(command: &mut Command, input: &str) -> Child {
+/// `spawn_with_input` starts `command` with both output streams piped, writes the bytes of `input` to its
+/// standard input and closes it.
+pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Child {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -447,7 +457,7 @@ pub fn spawn_with_input(command: &mut Command, input: &str) -> Child {
         .expect("the tool starts");
     let mut stdin = child.stdin.take().expect("standard input is piped");
     stdin
-        .write_all(input.as_bytes())
+        .write_all(input.as_ref())
         .expect("the ref lines are written");
     child
 }

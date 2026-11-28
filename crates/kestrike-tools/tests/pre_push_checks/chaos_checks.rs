@@ -221,16 +221,18 @@ fn a_failing_contract_check_or_judges_test_fails_the_push() {
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert_eq!(fx.ran(), [CONTRACT_CHECK, "test_judges.py"]);
     assert_eq!(fx.isolated(), fx.ran());
-    for failed in [
+    let listed: Vec<usize> = [
         "python3 -I chaos/tools/validate_contract.py",
         "python3 -I chaos/tests/test_judges.py",
-    ] {
-        assert!(
-            run.stderr.contains(&format!("failed: {failed}")),
-            "{}",
-            run.stderr
-        );
-    }
+    ]
+    .iter()
+    .map(|failed| {
+        run.stderr
+            .find(&format!("failed: {failed}"))
+            .unwrap_or_else(|| panic!("{failed} is listed: {}", run.stderr))
+    })
+    .collect();
+    assert!(listed[0] < listed[1], "{}", run.stderr);
 }
 
 /// Without `origin/main`, each tip runs every check and the contract check and judges' test it holds.

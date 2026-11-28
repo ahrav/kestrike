@@ -5,12 +5,12 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 
-use super::push::{BINARY, Fixture, STUB, finished, spawn_with_input, top, which};
+use super::push::{Fixture, STUB, executable, finished, spawn_with_input, which};
 
 const PATHSPEC_MODES: [&str; 4] = [
     "GIT_LITERAL_PATHSPECS",
@@ -195,9 +195,7 @@ fn a_failed_write_to_standard_error_exits_120_before_any_check() {
         .open("/dev/full")
         .expect("the full device opens");
     let mut child = fx
-        .command(BINARY)
-        .arg(top())
-        .args(["pre-push-checks", "origin", "url"])
+        .tool()
         .stdin(Stdio::piped())
         .stderr(full)
         .spawn()
@@ -218,10 +216,8 @@ fn a_failed_write_to_standard_error_exits_120_before_any_check() {
 #[test]
 fn a_failed_read_of_standard_input_exits_1() {
     let fx = Fixture::new();
-    let mut command = fx.command(BINARY);
+    let mut command = fx.tool();
     command
-        .arg(top())
-        .args(["pre-push-checks", "origin"])
         .stdin(File::open(&fx.repo).expect("the directory opens"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -241,17 +237,14 @@ fn a_git_that_cannot_start_exits_1_before_any_check() {
     let empty = fx.temp.join("empty");
     fs::create_dir(&empty).expect("the directory is made");
     for ignored in [false, true] {
-        let mut command = fx.command(BINARY);
+        let mut command = fx.tool();
         if ignored {
             ignoring_sigchld(&mut command);
         }
-        command
-            .arg(top())
-            .args(["pre-push-checks", "origin", "url"])
-            .env("PATH", &empty);
+        command.env("PATH", &empty);
         let run = finished(spawn_with_input(
             &mut command,
-            &Fixture::input(&[(&head, &fx.base)]),
+            Fixture::input(&[(&head, &fx.base)]),
         ));
         assert_eq!(run.code, Some(1), "{ignored}: {}", run.stderr);
         assert_eq!(
@@ -269,15 +262,12 @@ fn a_tool_started_with_sigchld_ignored_reads_each_child_s_status() {
     let head = fx.commit(&[INVENTORY]);
     for code in [0, 1] {
         fx.clear();
-        let mut command = fx.command(BINARY);
+        let mut command = fx.tool();
         ignoring_sigchld(&mut command);
-        command
-            .arg(top())
-            .args(["pre-push-checks", "origin", "url"])
-            .env("STUB_TEST_SELECT_TESTS", code.to_string());
+        command.env("STUB_TEST_SELECT_TESTS", code.to_string());
         let run = finished(spawn_with_input(
             &mut command,
-            &Fixture::input(&[(&head, &fx.base)]),
+            Fixture::input(&[(&head, &fx.base)]),
         ));
         assert_eq!(run.code, Some(code), "{}", run.stderr);
         assert_eq!(
@@ -367,7 +357,7 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
 fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
     let fx = Fixture::new();
     let head = fx.commit(&[INVENTORY]);
-    super::push::executable(
+    executable(
         &fx.bin.join("git"),
         &format!(
             "#!/bin/sh\nif [ \"$1 $2\" = 'worktree add' ]; then\n  shift 2\n  \"{git}\" worktree add --lock \"$@\" || exit\n  rm -f \"$3/.git\"\n  exit 128\nfi\nexec \"{git}\" \"$@\"\n",
@@ -422,4 +412,226 @@ fn ignoring_sigchld(command: &mut std::process::Command) {
             Ok(())
         });
     }
+}
+
+/// `tree_line` holds when `line` names a worktree directory under `parent` and ends with `ending`.
+fn tree_line(line: &str, parent: &Path, ending: &str) -> bool {
+    line.strip_prefix(&format!(
+        "pre-push-checks: {}/kestrike-pre-push-",
+        parent.display()
+    ))
+    .is_some_and(|rest| rest.ends_with(ending))
+}
+
+/// A `TMPDIR` that names a missing directory fails the worktree's `mkdir`: the tool prints the path and
+/// the error, runs no check, registers no worktree and exits 1.
+#[test]
+fn a_tmpdir_that_names_a_missing_directory_exits_1() {
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let missing = fx.temp.join("missing");
+    fx.set("TMPDIR", missing.clone());
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the failure");
+    assert!(
+        tree_line(last, &missing, ": No such file or directory (os error 2)"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+    assert!(!missing.exists());
+}
+
+/// A relative `TMPDIR` is made absolute against the tool's working directory, its `..` components kept:
+/// Git's `worktree add` gets the absolute path, and the check runs there.
+#[test]
+fn a_relative_tmpdir_is_read_against_the_working_directory() {
+    let mut fx = Fixture::new();
+    let head = reporting(&fx);
+    let parent = fx.temp.join("relative");
+    fs::create_dir(&parent).expect("the parent is made");
+    let started = fx.repo.join("sub");
+    fs::create_dir(&started).expect("the working directory is made");
+    fx.set("TMPDIR", "../../relative");
+    fx.wrap_git_around(
+        "if [ \"$1 $2\" = 'worktree add' ]; then printf '%s\\n' \"$5\" >> \"$STUB_LOG.git\"; fi",
+    );
+    let run = finished(fx.start_in(&started, &Fixture::input(&[(&head, &fx.base)]), &[]));
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    let added = fs::read_to_string(fx.logged(".git")).expect("the wrapper logs the add");
+    assert!(
+        added.starts_with(&format!(
+            "{}/../../relative/kestrike-pre-push-",
+            started.display()
+        )),
+        "{added}"
+    );
+    let where_ = fs::read_to_string(fx.logged(".where")).expect("the check logs its directory");
+    in_worktree(&where_, &parent);
+    assert_eq!(fx.worktrees(), 1);
+}
+
+/// A check that passes but leaves a directory the removal cannot empty, a nonempty directory of mode 0500,
+/// makes the final removal of the worktree's directory fail: the tool prints the directory and the error
+/// and exits 1.
+#[test]
+fn a_worktree_directory_that_cannot_be_removed_exits_1() {
+    // SAFETY: `geteuid` takes no arguments and touches no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let fx = Fixture::new();
+    let head = fx.commit(&[
+        INVENTORY,
+        ("scripts/test-select-tests.py", &format!("# locked\n{STUB}")),
+    ]);
+    let run = fx.push(&[(&head, &fx.base)]);
+    let left = fx.left();
+    for tree in &left {
+        let locked = tree.join("locked");
+        if locked.exists() {
+            fs::set_permissions(&locked, fs::Permissions::from_mode(0o700))
+                .expect("the mode is restored");
+        }
+    }
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the failure");
+    assert!(
+        tree_line(last, &fx.tmp, ": Permission denied (os error 13)"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("failed:"), "{}", run.stderr);
+    assert_eq!(
+        fx.ran(),
+        ["test-select-tests.py", "verify-receipts.py admit"]
+    );
+    assert_eq!(left.len(), 1, "{left:?}");
+    fx.git(&["worktree", "prune"]);
+}
+
+/// Ref lines that hold bytes outside UTF-8 read each such byte as a surrogate: a malformed line is refused
+/// with the byte as `\udcff`, and a four-field line whose ref name holds one is planned as any other.
+#[test]
+fn bytes_outside_utf8_on_standard_input_read_as_surrogates() {
+    let fx = Fixture::new();
+    let run = finished(spawn_with_input(&mut fx.tool(), b"ref\xff\n"));
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert_eq!(run.stderr, "pre-push: malformed ref line: 'ref\\udcff'\n");
+    let head = fx.commit(&[INVENTORY]);
+    let mut line = b"refs/heads/\xff ".to_vec();
+    line.extend(format!("{head} refs/heads/x {}\n", fx.base).as_bytes());
+    let run = finished(spawn_with_input(&mut fx.tool(), line));
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(
+        fx.ran(),
+        ["test-select-tests.py", "verify-receipts.py admit"]
+    );
+}
+
+/// A removal that Git refuses with an interior CRLF and a lone CR in its error prints each as one line
+/// feed.
+#[test]
+fn a_refused_removal_s_carriage_returns_read_as_line_feeds() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    fx.wrap_git_around(
+        "if [ \"$1 $2\" = 'worktree remove' ]; then printf 'error: kept\\r\\nby the\\rstand-in\\r\\n' >&2; exit 1; fi",
+    );
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(
+        run.stderr.ends_with(": error: kept\nby the\nstand-in\n"),
+        "{:?}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains('\r'), "{:?}", run.stderr);
+    fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
+    fx.git(&["worktree", "prune"]);
+    assert_eq!(fx.worktrees(), 1);
+}
+
+/// A `git worktree add` that exits nonzero, after which Git cannot start for the removal, exits 1: the
+/// removal's line comes first and the add's refusal last.
+#[test]
+fn a_failed_add_beside_a_removal_whose_git_cannot_start_exits_1() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let tools = fx.temp.join("tools");
+    fs::create_dir(&tools).expect("the directory is made");
+    symlink(which("rm"), tools.join("rm")).expect("the link is made");
+    fx.wrap_git_around(
+        "if [ \"$1 $2\" = 'worktree add' ]; then rm -f \"$0\"; echo 'fatal: refused by the stand-in' >&2; exit 128; fi",
+    );
+    let mut searched = fx.bin.clone().into_os_string();
+    searched.push(":");
+    searched.push(&tools);
+    let mut command = fx.tool();
+    command.env("PATH", searched);
+    let run = finished(spawn_with_input(
+        &mut command,
+        Fixture::input(&[(&head, &fx.base)]),
+    ));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let lines: Vec<&str> = run.stderr.lines().collect();
+    let [.., removal, add] = lines.as_slice() else {
+        panic!("two lines end the run: {}", run.stderr);
+    };
+    assert!(
+        removal.starts_with(&format!(
+            "pre-push: could not remove worktree {}/kestrike-pre-push-",
+            fx.tmp.display()
+        )) && removal.ends_with(": git: No such file or directory (os error 2)"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        add.starts_with("pre-push: git worktree add")
+            && add.ends_with("fatal: refused by the stand-in"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+    assert_eq!(fx.worktrees(), 1);
+}
+
+/// Git that can no longer start once the plan, the scan and the guard have read it fails the worktree add:
+/// the tool prints `pre-push-checks: git: ` and the error after the removal's line, runs no check and
+/// exits 1.
+#[test]
+fn a_git_that_cannot_start_for_the_add_exits_1() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY, ("chaos/receipts/run/notes.txt", "n\n")]);
+    let rm = which("rm");
+    fx.wrap_git_around(&format!(
+        "if [ \"$1\" = diff-tree ]; then \"{}\" -f \"$0\"; fi",
+        rm.display()
+    ));
+    let mut command = fx.tool();
+    command.env("PATH", &fx.bin);
+    let run = finished(spawn_with_input(
+        &mut command,
+        Fixture::input(&[(&head, &fx.base)]),
+    ));
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .ends_with(": git: No such file or directory (os error 2)\npre-push-checks: git: No such file or directory (os error 2)\n"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+    assert_eq!(fx.worktrees(), 1);
 }

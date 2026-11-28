@@ -1,5 +1,4 @@
-use std::io::{BufRead, BufReader};
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard};
@@ -18,24 +17,34 @@ fn serial() -> MutexGuard<'static, ()> {
     guard
 }
 
-fn leader(script: &str) -> (Child, libc::pid_t) {
-    let mut child = Command::new("sh")
-        .args(["-c", script])
+/// `pair` starts a leader that reads one line of its standard input and exits 0, in a process group of
+/// its own, and then a `sleep 600` in that group as this process's own child, so the sleeper's end reads
+/// from its own wait status while the leader still runs.
+fn pair() -> (Child, Child) {
+    let leader = Command::new("sh")
+        .args(["-c", "read line; exit 0"])
         .process_group(0)
-        .stdout(Stdio::piped())
+        .stdin(Stdio::piped())
         .spawn()
         .expect("the leader starts");
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().expect("standard output is piped"))
-        .read_line(&mut line)
-        .expect("the leader prints its sleeper");
-    let sleeper = line.trim().parse().expect("the line holds a process id");
-    (child, sleeper)
+    let group = libc::pid_t::try_from(leader.id()).expect("a process id fits pid_t");
+    let sleeper = Command::new("sleep")
+        .arg("600")
+        .process_group(group)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("the sleeper joins the leader's group");
+    (leader, sleeper)
 }
 
-fn exited(child: &Child) {
-    let pid = libc::id_t::from(child.id());
-    // SAFETY: `info` is a zeroed `siginfo_t` that outlives the call, and `waitid` fills it.
+/// `end` closes the leader's standard input and returns once the leader has exited, leaving it unreaped.
+fn end(leader: &mut Child) {
+    drop(leader.stdin.take());
+    let pid = libc::id_t::from(leader.id());
+    // SAFETY: `info` is a zeroed `siginfo_t` that outlives the call, and `waitid` without `WNOHANG` returns
+    // once the leader has exited.
     let status = unsafe {
         let mut info: libc::siginfo_t = std::mem::zeroed();
         libc::waitid(libc::P_PID, pid, &mut info, libc::WEXITED | libc::WNOWAIT)
@@ -43,91 +52,96 @@ fn exited(child: &Child) {
     assert_eq!(status, 0, "{}", std::io::Error::last_os_error());
 }
 
-fn alive(pid: libc::pid_t) -> bool {
-    // SAFETY: `waitpid` accepts a null status pointer to discard the status; `kill` takes only scalar
-    // arguments.
-    unsafe {
-        libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG);
-        libc::kill(pid, 0) == 0
-    }
+/// `terminated` sends SIGTERM to `sleeper`, reaps it and returns the signal its status names. A sleeper
+/// that an earlier SIGKILL ended names SIGKILL.
+fn terminated(mut sleeper: Child) -> Option<i32> {
+    let pid = libc::pid_t::try_from(sleeper.id()).expect("a process id fits pid_t");
+    // SAFETY: `kill` takes only scalar arguments, and `sleeper` is this process's unreaped child.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    sleeper.wait().expect("the sleeper is reaped").signal()
 }
 
-fn gone(pid: libc::pid_t) -> bool {
+/// `stopped` waits up to ten seconds for `sleeper` to end and returns the signal its status names. A
+/// sleeper still running then is killed and reaped, and `stopped` returns `None`.
+fn stopped(mut sleeper: Child) -> Option<i32> {
     let start = Instant::now();
-    while alive(pid) {
+    loop {
+        if let Some(status) = sleeper.try_wait().expect("the sleeper is polled") {
+            return status.signal();
+        }
         if start.elapsed() >= Duration::from_secs(10) {
-            return false;
+            let _ = sleeper.kill();
+            let _ = sleeper.wait();
+            return None;
         }
         thread::sleep(Duration::from_millis(5));
     }
-    true
-}
-
-fn kill(pid: libc::pid_t) {
-    // SAFETY: `kill` takes only scalar arguments.
-    unsafe { libc::kill(pid, libc::SIGKILL) };
-    assert!(gone(pid), "the sleeper {pid} ends");
 }
 
 #[test]
 fn an_ended_leader_with_a_record_has_its_group_stopped_before_the_reap() {
     let _serial = serial();
-    let (mut child, sleeper) = leader("sleep 600 & echo $!");
-    exited(&child);
+    let (mut child, sleeper) = pair();
+    end(&mut child);
     RECORD.store(libc::SIGTERM, Ordering::SeqCst);
     let waited = wait(&mut child);
     RECORD.store(0, Ordering::SeqCst);
+    let ended = stopped(sleeper);
     assert!(
         matches!(waited, Err(Unwaited::Cancelled(143))),
         "the wait is cancelled"
     );
-    assert!(gone(sleeper), "the sleeper the leader left ends");
+    assert_eq!(
+        ended,
+        Some(libc::SIGKILL),
+        "the sleeper the leader left ends"
+    );
 }
 
 #[test]
 fn an_ended_leader_without_a_record_is_reaped_and_its_group_left_running() {
     let _serial = serial();
-    let (mut child, sleeper) = leader("sleep 600 & echo $!");
-    exited(&child);
+    let (mut child, sleeper) = pair();
+    end(&mut child);
     let waited = wait(&mut child);
-    let running = alive(sleeper);
-    kill(sleeper);
+    let ended = terminated(sleeper);
     assert!(
         waited.is_ok_and(|status| status.success()),
         "the leader's status is read"
     );
-    assert!(running, "the sleeper the leader left runs on");
+    assert_eq!(ended, Some(libc::SIGTERM), "wait sent the group no signal");
 }
 
 #[test]
 fn a_leader_another_reaper_took_fails_the_wait_and_its_group_gets_no_signal() {
     let _serial = serial();
-    let (mut child, sleeper) = leader("sleep 600 & echo $!");
+    let (mut child, sleeper) = pair();
+    drop(child.stdin.take());
     let pid = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
     // SAFETY: `waitpid` accepts a null status pointer to discard the status.
     assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) }, pid);
     RECORD.store(libc::SIGTERM, Ordering::SeqCst);
     let waited = wait(&mut child);
     RECORD.store(0, Ordering::SeqCst);
-    let running = alive(sleeper);
-    kill(sleeper);
+    let ended = terminated(sleeper);
     assert!(
         matches!(&waited, Err(Unwaited::Failed(error)) if error.raw_os_error() == Some(libc::ECHILD)),
         "the poll fails with ECHILD"
     );
-    assert!(running, "the sleeper of the reaped leader runs on");
+    assert_eq!(ended, Some(libc::SIGTERM), "wait sent the group no signal");
 }
 
 #[test]
 fn a_running_leader_with_a_record_has_its_group_stopped() {
     let _serial = serial();
-    let (mut child, sleeper) = leader("sleep 600 & echo $!; wait");
+    let (mut child, sleeper) = pair();
     RECORD.store(libc::SIGTERM, Ordering::SeqCst);
     let waited = wait(&mut child);
     RECORD.store(0, Ordering::SeqCst);
+    let ended = stopped(sleeper);
     assert!(
         matches!(waited, Err(Unwaited::Cancelled(143))),
         "the wait is cancelled"
     );
-    assert!(gone(sleeper), "the leader's sleeper ends");
+    assert_eq!(ended, Some(libc::SIGKILL), "the leader's sleeper ends");
 }

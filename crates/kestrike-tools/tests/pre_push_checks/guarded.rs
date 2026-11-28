@@ -396,3 +396,76 @@ fn the_guard_s_failures_are_listed_before_the_checks_failures() {
         .expect("the check is announced");
     assert!(announced < guard && guard < check, "{}", run.stderr);
 }
+
+/// `weakened_with_a_record` commits a test, then an ignore on it beside a refused record, over the chaos
+/// contract, and returns the test's commit and the tip.
+fn weakened_with_a_record(fx: &Fixture) -> (String, String) {
+    contract(fx);
+    let existing = fx.commit(&[("crates/plain.rs", "#[test]\nfn churn() {}\n")]);
+    let head = fx.commit(&[
+        (
+            "crates/plain.rs",
+            "#[test]\n#[ignore = \"slow\"]\nfn churn() {}\n",
+        ),
+        ("chaos/receipts/run/row.json", LEAK),
+    ]);
+    (existing, head)
+}
+
+/// One range that fails the scan, the guard and a check lists their failures in that order.
+#[test]
+fn the_scan_s_guard_s_and_checks_failures_are_listed_in_that_order() {
+    let fx = Fixture::new();
+    let (existing, head) = weakened_with_a_record(&fx);
+    let run = fx.push_with(&[(&head, &existing)], &[("validate_contract", 1)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let position = |line: &str| {
+        run.stderr
+            .find(line)
+            .unwrap_or_else(|| panic!("{line} is listed: {}", run.stderr))
+    };
+    let scan = position(&format!(
+        "failed: scripts/tool.sh scan-weakened-tests --base {existing} --head {head}"
+    ));
+    let guard = position(&failed("chaos/receipts/run/row.json", &head, REFUSED));
+    let check = position("failed: python3 -I chaos/tools/validate_contract.py");
+    assert!(scan < guard && guard < check, "{}", run.stderr);
+}
+
+/// A guard read that fails after the plan ends the push with exit 2 once the scan has run, and no check
+/// starts.
+#[test]
+fn a_failed_guard_read_ends_the_push_after_the_scan_and_before_any_check() {
+    let fx = Fixture::new();
+    let (existing, head) = weakened_with_a_record(&fx);
+    fx.wrap_git_around(
+        "printf '%s\\n' \"$1\" >> \"$STUB_LOG.git\"\n\
+         if [ \"$1\" = ls-tree ]; then echo 'fatal: refused by the stand-in' >&2; exit 128; fi",
+    );
+    let run = fx.push(&[(&head, &existing)]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    let finding = run
+        .stderr
+        .find("blocks ignore-existing:crates/plain.rs churn")
+        .unwrap_or_else(|| panic!("the scan reports: {}", run.stderr));
+    let refusal = run
+        .stderr
+        .find("pre-push: git ls-tree")
+        .unwrap_or_else(|| panic!("the guard's read is refused: {}", run.stderr));
+    assert!(finding < refusal, "{}", run.stderr);
+    assert!(
+        run.stderr.ends_with("fatal: refused by the stand-in\n"),
+        "{}",
+        run.stderr
+    );
+    let invoked = fs::read_to_string(fx.logged(".git")).expect("the wrapper logs each Git command");
+    let invoked: Vec<&str> = invoked.lines().collect();
+    let scanned = invoked.iter().position(|name| *name == "-c");
+    let guarded = invoked.iter().position(|name| *name == "ls-tree");
+    assert!(
+        scanned.is_some() && scanned < guarded,
+        "the scan reads Git before the guard: {invoked:?}"
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+}
