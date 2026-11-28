@@ -14,19 +14,20 @@ pub mod refusal;
 pub mod transcription;
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::classes::{SPACE, WORD, compiled, is_word};
-use crate::ownership::status;
+use crate::ownership::{ignored, status};
 use crate::paths::resolve;
+use crate::production_text::closing;
 use crate::rust_text::{Lexeme, lexemes};
-use crate::text::strip_str;
+use crate::text::{newlines, strip_str};
 
 /// A `#[path = "..."]` attribute at the start of a line, in the one spelling a case build's include scan
 /// reads; group 1 is the path.
@@ -35,10 +36,7 @@ pub static INCLUDED: LazyLock<Regex> =
 
 static SPACES: LazyLock<Regex> = LazyLock::new(|| compiled(&format!("{SPACE}+")));
 
-static PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| {
-    let word = WORD.trim_start_matches('[').trim_end_matches(']');
-    compiled(&format!(" ?([^{word} ]) ?"))
-});
+static PUNCTUATION: LazyLock<Regex> = LazyLock::new(|| compiled(&format!(" ?([^{WORD} ]) ?")));
 
 /// The text that stands for a lexeme of `kind` in [`code`].
 pub fn lexeme_text(kind: Lexeme) -> &'static str {
@@ -73,7 +71,9 @@ pub fn normalized(text: &str) -> String {
     strip_str(&PUNCTUATION.replace_all(&spaced, "$1")).to_owned()
 }
 
-/// The `{...}` bodies, in order, of the items in `text` whose header is `header`. A header counts where
+/// The `{...}` bodies, in order, of the items in `text` whose header is `header`. For Rust source the
+/// caller passes the [`normalized`] text and header: the header matches literally, and every brace and
+/// `;` counts as syntax. A header counts where
 /// neither a word character nor `.` stands before it and no word character after it. Its body is the
 /// brace block that opens at the first `{` after it; a `;` before that brace, or a block that never
 /// closes, gives it none.
@@ -110,20 +110,7 @@ fn body_after(text: &str, end: usize) -> Option<&str> {
     if text.as_bytes()[open] == b';' {
         return None;
     }
-    let mut depth = 0_usize;
-    for (offset, byte) in text.as_bytes()[open..].iter().enumerate() {
-        match byte {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&text[open..=open + offset]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
+    closing(text, open).map(|close| &text[open..close])
 }
 
 /// The text of the file at `path`, decoded as UTF-8, with `\r\n` and a lone `\r` read as `\n`.
@@ -133,18 +120,21 @@ fn body_after(text: &str, end: usize) -> Option<&str> {
 /// `read_text` returns the error of opening or reading the file, and an error of kind
 /// [`io::ErrorKind::InvalidData`] for bytes that are no UTF-8.
 pub fn read_text(path: &Path) -> io::Result<String> {
-    Ok(fs::read_to_string(path)?
-        .replace("\r\n", "\n")
-        .replace('\r', "\n"))
+    fs::read_to_string(path).map(newlines)
 }
 
-/// The text of `path`, relative to the checkout's top `top`, as [`read_text`] reads it.
+/// The text of `path`, relative to the checkout's top `top`, as [`read_text`] reads it; empty and `.`
+/// components of `path` name nothing.
 ///
 /// # Errors
 ///
 /// `read_source` returns the error [`read_text`] returns.
 pub fn read_source(top: &Path, path: &str) -> io::Result<String> {
-    read_text(&top.join(path))
+    let relative: PathBuf = Path::new(path)
+        .components()
+        .filter(|component| *component != Component::CurDir)
+        .collect();
+    read_text(&top.join(relative))
 }
 
 /// The metadata of `path` with links followed, or `None` for a path that names no file.
@@ -164,20 +154,49 @@ pub fn is_file(path: &Path) -> io::Result<bool> {
 
 /// Adds every entry under the directory `directory` to `found`, entering each subdirectory that is no
 /// link. A listing refused permission adds nothing.
-fn entries_under(directory: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
-    let entries = match fs::read_dir(directory).and_then(Iterator::collect::<io::Result<Vec<_>>>) {
+fn entries_under(directory: &Path, found: &mut Vec<PathBuf>, depth: usize) -> io::Result<()> {
+    if depth > WALK_DEPTH {
+        return Err(io::Error::other(format!(
+            "{} nests directories more than {WALK_DEPTH} deep",
+            directory.display()
+        )));
+    }
+    let listed = fs::read_dir(directory).and_then(|entries| {
+        entries
+            .map(|entry| entry.map(|entry| (entry.path(), entry.file_type())))
+            .collect::<io::Result<Vec<_>>>()
+    });
+    let entries = match listed {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => return Ok(()),
         Err(error) => return Err(error),
     };
-    for entry in entries {
-        let path = entry.path();
+    for (path, kind) in entries {
         found.push(path.clone());
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            entries_under(&path, found)?;
+        if descends(kind)? {
+            entries_under(&path, found, depth + 1)?;
         }
     }
     Ok(())
+}
+
+/// The deepest directory under its root that [`walk`] enters.
+pub const WALK_DEPTH: usize = 900;
+
+/// Whether the walk enters an entry of type `kind`, which a lookup without following links gave: a
+/// directory, and no link. A lookup that names no file, or one refused permission, is a leaf.
+///
+/// # Errors
+///
+/// `descends` returns every other error of the lookup.
+fn descends(kind: io::Result<fs::FileType>) -> io::Result<bool> {
+    match kind {
+        Ok(kind) => Ok(kind.is_dir()),
+        Err(error) if ignored(&error) || error.kind() == io::ErrorKind::PermissionDenied => {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Every entry under the directory `root` (files, directories and links), each once, in no stated order.
@@ -185,12 +204,13 @@ fn entries_under(directory: &Path, found: &mut Vec<PathBuf>) -> io::Result<()> {
 ///
 /// # Errors
 ///
-/// `walk` returns an error of a listing other than a refused permission, and of the lookup of `root`
-/// other than one that names no file.
+/// `walk` returns an error of a listing other than a refused permission, of an entry's type lookup other
+/// than one refused permission or naming no file, of the lookup of `root` other than one that names no
+/// file, and an error for directories nested more than [`WALK_DEPTH`] deep.
 pub fn walk(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     if stat(root)?.is_some_and(|metadata| metadata.is_dir()) {
-        entries_under(root, &mut found)?;
+        entries_under(root, &mut found, 0)?;
     }
     Ok(found)
 }
@@ -201,13 +221,22 @@ pub fn under_target(path: &Path, root: &Path) -> bool {
         .is_ok_and(|relative| relative.iter().any(|part| part == "target"))
 }
 
-/// The suffix of the last component of `path`, as bytes: from its last `.`, unless that `.` leads or
-/// ends the name.
-fn suffix(path: &Path) -> &[u8] {
-    let name = path.file_name().map_or(&[][..], |name| name.as_bytes());
-    match name.iter().rposition(|&byte| byte == b'.') {
-        Some(at) if at > 0 && at < name.len() - 1 => &name[at..],
-        _ => &[],
+/// `target` when it holds no NUL byte.
+///
+/// # Errors
+///
+/// `no_nul` refuses an include path that holds a NUL byte, which names no file.
+pub fn no_nul(target: &str) -> io::Result<&str> {
+    if target.contains('\0') {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the include path {} holds a NUL byte",
+                crate::text::Text::from(target).repr()
+            ),
+        ))
+    } else {
+        Ok(target)
     }
 }
 
@@ -231,14 +260,14 @@ pub fn package_sources(package: &Path) -> io::Result<Vec<PathBuf>> {
     files.sort();
     let mut included = BTreeSet::new();
     for path in &files {
-        if suffix(path) != b".rs" {
+        if path.extension() != Some(OsStr::new("rs")) {
             continue;
         }
         let text = read_text(path)?;
         let parent = path.parent().unwrap_or(Path::new(""));
         for found in INCLUDED.captures_iter(&text) {
             let target = found.get(1).expect("INCLUDED has group 1").as_str();
-            included.insert(resolve(&parent.join(target))?);
+            included.insert(resolve(&parent.join(no_nul(target)?))?);
         }
     }
     let listed: BTreeSet<&PathBuf> = files.iter().collect();

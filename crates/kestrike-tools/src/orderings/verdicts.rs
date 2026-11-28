@@ -13,7 +13,7 @@ use crate::genmc::evidence::{check_command, check_config};
 use crate::genmc::is_file;
 use crate::genmc::read_text;
 use crate::genmc::refusal::{
-    Error, lines, member, parse_json, read_error, read_replaced, read_strict,
+    Error, lines, member, open_file, parse_json, read_replaced, read_strict, replaced, strict,
 };
 use crate::json::{Integer, Object, Text, Value};
 use crate::python::{decimal, int, str_of};
@@ -224,10 +224,13 @@ pub fn genmc_result(
         Err(error) => return Err(error),
     }
     let check_log = evidence.join(format!("check-{case}.txt"));
-    if planted
-        && !(is_file(&check_log).map_err(Error::Os)?
-            && GENMC_REBUILT.is_match(&read_replaced(&check_log).map_err(Error::Os)?))
-    {
+    let rebuilt = |check_log: &Path| -> Result<bool, Error> {
+        Ok(match open_file(check_log).map_err(Error::Os)? {
+            Some(file) => GENMC_REBUILT.is_match(&replaced(file).map_err(Error::Os)?),
+            None => false,
+        })
+    };
+    if planted && !rebuilt(&check_log)? {
         return Ok(Outcome::none(
             "no evidence that the kernel rebuilt".to_owned(),
         ));
@@ -237,8 +240,8 @@ pub fn genmc_result(
     };
     let text = read_replaced(&evidence.join(format!("genmc-{case}.txt"))).map_err(Error::Os)?;
     let called = evidence.join(format!("genmc-{case}.intrinsics"));
-    let mut intrinsics: Vec<String> = if is_file(&called).map_err(Error::Os)? {
-        let text = read_text(&called).map_err(read_error)?;
+    let mut intrinsics: Vec<String> = if let Some(file) = open_file(&called).map_err(Error::Os)? {
+        let text = strict(file)?;
         Text::from(text.as_str())
             .split()
             .iter()

@@ -2,7 +2,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use crate::python::say;
-use crate::text::{Text, is_space};
+use crate::text::{Text, escaped, is_space};
 
 fn text(codes: &[u32]) -> Text {
     Text::from_code_points(codes.iter().copied()).expect("each code point is at most U+10FFFF")
@@ -272,4 +272,60 @@ fn join_separates_each_two_items() {
     for (separator, items, expected) in rows {
         assert_eq!(Text::join(separator, items).repr(), *expected, "{items:?}");
     }
+}
+
+/// `starts_with`, `ends_with` and `replace` match whole code points, a lone surrogate included, as
+/// `str.startswith`, `str.endswith` and `str.replace` do; an empty pattern leaves the text as it is, where
+/// `str.replace` writes the replacement before each code point and at the end.
+#[test]
+fn texts_match_and_replace_by_code_points() {
+    let surrogate = text(&[0x61, 0xdc80, 0x62]);
+    assert!(surrogate.starts_with(&text(&[0x61, 0xdc80])));
+    assert!(surrogate.ends_with(&text(&[0xdc80, 0x62])));
+    assert!(!surrogate.starts_with(&text(&[0x61, 0xdc81])));
+    assert!(Text::from("ab").starts_with(&Text::new()));
+    let rows: &[(&str, &str, &str, &str)] = &[
+        ("/w/a /w/b", "/w", "<work>", "<work>/a <work>/b"),
+        ("aaa", "aa", "b", "ba"),
+        ("abc", "x", "y", "abc"),
+        ("abc", "", "y", "abc"),
+        ("é/w", "/w", "!", "é!"),
+    ];
+    for (whole, from, to, replaced) in rows {
+        let got = Text::from(*whole).replace(&Text::from(*from), &Text::from(*to));
+        assert_eq!(
+            got,
+            Text::from(*replaced),
+            "{whole:?}.replace({from:?}, {to:?})"
+        );
+    }
+    let replaced = surrogate.replace(&text(&[0xdc80]), &Text::from("-"));
+    assert_eq!(replaced, Text::from("a-b"));
+}
+
+/// `text!` writes a path outside UTF-8 as `Text::from_os` decodes it, each stray byte a surrogate.
+#[cfg(target_os = "linux")]
+#[test]
+fn text_writes_a_path_as_its_decoded_text() {
+    let unencoded = OsStr::from_bytes(b"a\xff");
+    assert_eq!(crate::text::text!(unencoded, "/b"), {
+        let mut joined = Text::from_os(unencoded);
+        joined.push_str("/b");
+        joined
+    });
+}
+
+/// `escaped` writes each scalar value as `repr` writes it inside its quotes, apart from a backslash, which it
+/// keeps single, so a field of printable code points keeps its bytes.
+#[test]
+fn escaped_writes_each_scalar_value_as_repr_writes_it_inside_its_quotes() {
+    for code in (0..=0x10_ffff).filter_map(char::from_u32) {
+        let alone = code.to_string();
+        let quoted = Text::from(alone.as_str()).repr();
+        let inside = &quoted[1..quoted.len() - 1];
+        let expected = if code == '\\' { "\\" } else { inside };
+        assert_eq!(escaped(&alone), expected, "U+{:04X}", u32::from(code));
+    }
+    let printable = "a'b\"c\\'d";
+    assert_eq!(escaped(printable), printable);
 }

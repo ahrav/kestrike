@@ -321,3 +321,19 @@ fn a_message_outside_every_check_invocation_sits_in_none() {
         other => panic!("a refusal, not {other:?}"),
     }
 }
+
+#[test]
+fn a_graph_that_is_a_fifo_is_no_graph_and_is_read_without_waiting() {
+    let scratch = Scratch::new("check-graph-fifo");
+    let path = scratch.0.join("graph.dot");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo starts");
+    assert!(made.success());
+    let line = Integer::from(line_of(DEPARTURE));
+    match check_graph("c", "", &path, ("0", "4"), ("join_kernel.rs", &line)) {
+        Err(Error::Refusal(refusal)) => assert_eq!(refusal.reason(), "c left no error graph"),
+        other => panic!("a refusal, not {other:?}"),
+    }
+}

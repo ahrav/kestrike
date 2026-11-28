@@ -12,7 +12,7 @@ use crate::classes::{WORD, compiled, is_word};
 use crate::genmc::{bodies, normalized, read_source};
 use crate::json::{Integer, Object, Text, Value};
 use crate::orderings::sources::joined;
-use crate::python::{equal, repr, str_of};
+use crate::python::{equal, repr, str_of, truthy};
 
 static ORDERING: LazyLock<Regex> =
     LazyLock::new(|| compiled(&format!(r"^(?:{WORD}+::)*Ordering::({WORD}+)$")));
@@ -43,18 +43,6 @@ fn texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
         .iter()
         .map(|item| string(item, what).map(str::to_owned))
         .collect()
-}
-
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Integer(integer) => *integer != Integer::from(0_u64),
-        Value::Float(value) => *value != 0.0,
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(object) => !object.is_empty(),
-    }
 }
 
 fn present<'v>(value: &'v Value, key: &str) -> Result<Option<&'v Value>, Error> {
@@ -483,3 +471,7 @@ pub fn check_transcription(root: &Path, expected: &Value) -> Result<(), Error> {
         Err(Error::Refusal(Refusal::drift(&drift)))
     }
 }
+
+#[cfg(test)]
+#[path = "transcription_tests.rs"]
+mod tests;

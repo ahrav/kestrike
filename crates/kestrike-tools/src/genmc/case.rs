@@ -1,18 +1,16 @@
 //! The case judge checks the graph and the `check!` lines in the declared kernel file.
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use super::refusal::{
-    Code, Error, Refusal, lines, listed, lookup, member, read_json, read_replaced, read_strict,
-    single, string, strings, tool_failure,
+    Code, Error, Refusal, lines, listed, lookup, member, open_file, read_json, read_strict,
+    replaced, single, string, strings, tool_failure,
 };
 use crate::classes::{SPACE, compiled};
-use crate::genmc::is_file;
 use crate::json::{Integer, Text, Value};
 use crate::python::{decimal, equal, repr, str_of};
 
@@ -125,10 +123,11 @@ pub fn check_graph(
     event: (&str, &str),
     at: (&str, &Integer),
 ) -> Result<(), Error> {
-    if !is_file(graph).map_err(Error::Os)? || fs::metadata(graph).map_err(Error::Os)?.len() == 0 {
-        return Err(tool_failure(format!("{name} left no error graph")));
-    }
-    let dot = read_replaced(graph).map_err(Error::Os)?;
+    let file = match open_file(graph).map_err(Error::Os)? {
+        Some(file) if file.metadata().map_err(Error::Os)?.len() > 0 => file,
+        _ => return Err(tool_failure(format!("{name} left no error graph"))),
+    };
+    let dot = replaced(file).map_err(Error::Os)?;
     let errors: Vec<[String; 4]> = GRAPH_ERROR
         .captures_iter(&dot)
         .map(|found| [1, 2, 3, 4].map(|group| found[group].to_owned()))

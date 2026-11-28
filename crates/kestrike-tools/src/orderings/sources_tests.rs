@@ -14,6 +14,7 @@ use crate::paths::tests::Scratch;
 
 const STORAGE: &str = "crates/kestrike/src/storage/mod.rs";
 const TREE: &str = "crates/kestrike/src/mod.rs";
+const LIB: &str = "crates/kestrike/src/lib.rs";
 const CREDIT: &str = "crates/kestrike/src/storage/credit.rs";
 const STEPS: &str = "crates/kestrike/src/storage/credit_steps.rs";
 const FILL: &str = "crates/kestrike/src/storage/fill.rs";
@@ -500,7 +501,7 @@ fn added(file: &str, appended: &str) -> Added {
     let attributed = declared
         .attributed
         .iter()
-        .filter(|entry| !base.attributed.contains(entry))
+        .filter(|(path, names)| base.attributed.get(*path) != Some(*names))
         .map(|(path, names)| (path.clone(), names.iter().cloned().collect()))
         .collect();
     let refusals = messages(&declared.refusals)
@@ -717,6 +718,11 @@ fn an_include_no_module_file_declares_is_refused() {
         io::Error::from(io::ErrorKind::PermissionDenied)
     );
     assert!(refused.contains(&expected), "{refused:?}");
+    let prefix = format!("{STORAGE} cannot be read to classify ");
+    assert!(
+        refused.iter().all(|message| message.starts_with(&prefix)),
+        "{refused:?}"
+    );
     let extra = "crates/kestrike/src/storage/extra.rs";
     let scratch = planted_package(&[extra], None);
     let elsewhere = format!(
@@ -1231,8 +1237,8 @@ fn a_word_character_beside_path_names_no_attribute() {
 }
 
 /// The classification's refusals stand in the order of the package's sources, its includes in
-/// component order: the include outside the checkout, whose `aa_outside.rs` beside the checkout root
-/// sorts first, then the one no module file declares.
+/// component order: `aa_outside.rs` beside the checkout root sorts before the checkout's `top`, and
+/// `zz_outside.rs` after it, whatever order the planted source names them in.
 #[test]
 fn the_classification_refuses_in_the_order_of_the_sources() {
     let scratch = planted_package(
@@ -1247,6 +1253,27 @@ fn the_classification_refuses_in_the_order_of_the_sources() {
     let heads = [
         format!("the kernel package includes {}, outside the repository", outside.display()),
         "the kernel package includes crates/kestrike/src/storage/undeclared.rs and no module file declares it".to_owned(),
+    ];
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found
+            .iter()
+            .zip(&heads)
+            .all(|(message, head)| message.starts_with(head.as_str())),
+        "{found:?}"
+    );
+    let scratch = planted_package(
+        &[
+            "../zz_outside.rs",
+            "crates/kestrike/src/storage/undeclared.rs",
+        ],
+        None,
+    );
+    let found = scope_messages(&root_of(&scratch), vec![]);
+    let outside = scratch.0.join("zz_outside.rs");
+    let heads = [
+        "the kernel package includes crates/kestrike/src/storage/undeclared.rs and no module file declares it".to_owned(),
+        format!("the kernel package includes {}, outside the repository", outside.display()),
     ];
     assert_eq!(found.len(), 2, "{found:?}");
     assert!(
@@ -1705,4 +1732,803 @@ fn an_inline_module_is_found_by_its_name_as_written() {
         let path = super::module_file(&format!("{name}::t"), &read).map(|(path, _)| path);
         assert_eq!(path.as_deref(), found.then_some(TREE), "{label}");
     }
+}
+
+/// A name joined to a root keeps the root: one slash, or exactly two.
+#[test]
+fn a_join_keeps_the_root_of_its_base() {
+    assert_eq!(
+        (
+            super::joined("/", "child.rs"),
+            super::joined("//", "child.rs")
+        ),
+        ("/child.rs".to_owned(), "//child.rs".to_owned())
+    );
+}
+
+/// An include path that holds a NUL byte names no file, so the includes cannot be read.
+#[test]
+fn an_include_path_with_a_nul_byte_cannot_be_read() {
+    let kernels = BTreeMap::from([(
+        "src/p.rs".to_owned(),
+        "#[path = \"bad\0/../join.rs\"]\nmod j;\n".to_owned(),
+    )]);
+    let error =
+        include_defects(&top().join(PACKAGE), &kernels).expect_err("the include holds a NUL byte");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+
+/// An include that resolves to a name that is no UTF-8 is no kernel text, even beside a source whose
+/// name the same bytes would spell after a lossy decoding.
+#[test]
+fn an_include_that_resolves_to_no_utf8_name_is_no_kernel_source() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = planted_package(&[], Some("#[path = \"alias.rs\"]\nmod alias;\n"));
+    let package = package_of(&scratch);
+    fs::write(package.join("src/\u{fffd}.rs"), "").expect("the source is written");
+    symlink(OsStr::from_bytes(b"\xff.rs"), package.join("src/alias.rs")).expect("the link is made");
+    let kernels = kernel_texts(&package).expect("the package reads");
+    let defects = include_defects(&package, &kernels).expect("the includes resolve");
+    assert_eq!(
+        messages(&defects),
+        [
+            "kernels/src/planted.rs:1: the include 'alias.rs' is no Rust source of the package the scan reads"
+        ]
+    );
+}
+
+/// A chain of module files, each declared by a path attribute of the next, longer than the
+/// classification follows stops it with an error.
+#[test]
+fn a_chain_of_module_files_past_its_bound_is_an_error() {
+    let tree = Scratch::new("sources-chain");
+    let storage = tree.0.join("crates/kestrike/src/storage");
+    fs::create_dir_all(&storage).expect("the storage directory is made");
+    for at in 1..=super::CHAIN + 2 {
+        fs::write(
+            storage.join(format!("c{at}.rs")),
+            format!("#[path = \"c{}.rs\"]\nmod p;\n", at - 1),
+        )
+        .expect("a link of the chain is written");
+    }
+    let scratch = planted_package(&["crates/kestrike/src/storage/c0.rs"], None);
+    let root = tree.0.clone();
+    let read = move |path: &str| read_source(&root, path);
+    let error = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &tree.0)
+        .expect_err("the chain passes the bound");
+    assert!(
+        error.to_string().starts_with(&format!(
+            "module files chain more than {} deep",
+            super::CHAIN
+        )),
+        "{error}"
+    );
+}
+
+/// Plants by path.
+type Plants<'p> = Vec<(&'p str, Plant)>;
+
+/// Planted files by path and text.
+type Files = Vec<(&'static str, &'static str)>;
+
+/// A reader of the planted `files` alone.
+fn root_reader(files: Files) -> impl Fn(&str) -> io::Result<String> {
+    move |path: &str| {
+        files
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, text)| (*text).to_owned())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+    }
+}
+
+/// Kept readings of a model source. The lookup counts one declaration of each form, so a module a
+/// parent declares bare twice has its file; it finds an inline module anywhere in the parent's code, so
+/// an inline decoy nested in another module doubles a bare declaration, and alone makes the parent the
+/// source; and it reads an attribute a comment separates from its `mod` as none, so the bare file is the
+/// source.
+#[test]
+fn the_model_source_lookup_keeps_its_counting() {
+    let a = "crates/kestrike/src/a.rs";
+    let rows: [(&str, Files, Option<&str>); 4] = [
+        (
+            "a bare declaration twice",
+            vec![(TREE, "mod a;\nmod a;\n"), (a, "// a\n")],
+            Some(a),
+        ),
+        (
+            "an inline decoy beside a bare declaration",
+            vec![(TREE, "mod a;\nmod helper { mod a {} }\n"), (a, "// a\n")],
+            None,
+        ),
+        (
+            "an inline decoy alone",
+            vec![(TREE, "mod helper { mod a {} }\n")],
+            Some(TREE),
+        ),
+        (
+            "an attribute a comment separates",
+            vec![
+                (TREE, "#[path = \"other.rs\"]\n// note\nmod a;\n"),
+                (a, "// a\n"),
+                ("crates/kestrike/src/other.rs", "// o\n"),
+            ],
+            Some(a),
+        ),
+    ];
+    for (label, files, expected) in rows {
+        let read = root_reader(files);
+        let path = super::module_file("a::t", &read).map(|(path, _)| path);
+        assert_eq!(path.as_deref(), expected, "{label}");
+    }
+}
+
+/// Kept readings of message literals: every string literal in an assertion's brackets is a message, and
+/// a window that opens inside a longer name reads the name's tail as a name.
+#[test]
+fn the_message_literals_keep_their_reading() {
+    assert_eq!(
+        diagnostic_sites("assert!(state == \"ready\", \"other\");\n"),
+        [("ready".to_owned(), 1), ("other".to_owned(), 1)]
+    );
+    let padded = format!("my_assert!{}(x, \"m\");\n", " ".repeat(33));
+    assert_eq!(diagnostic_sites(&padded), [("m".to_owned(), 1)]);
+    let checked = format!("xcheck!{}(x, c\"n\");\n", " ".repeat(34));
+    assert_eq!(c_literals(&checked), ["n"]);
+}
+
+/// A macro call inside an inline module blanks its tokens and leaves its bracket, so the module's block
+/// runs to the end of the text and a later declaration loads from inside it.
+#[test]
+fn a_macro_inside_an_inline_module_keeps_the_module_open() {
+    let declared = loads(
+        "d/m.rs",
+        "d/m",
+        "mod helpers { fn f() { assert!(true); } }\nmod x;\n",
+        false,
+    );
+    assert_eq!(
+        declared.bare.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["d/m/helpers/x.rs", "d/m/helpers/x/mod.rs"]
+    );
+}
+
+/// A bare declaration inside an inline module of a module file that is no root declares nothing the
+/// classification finds: the file it loads is refused as declared by no module file.
+#[test]
+fn a_bare_child_of_an_inline_module_stands_undeclared() {
+    let include = "crates/kestrike/src/storage/nested/probe.rs";
+    let scratch = planted_package(&[include], None);
+    let parent = format!("{}mod nested {{\n    mod probe;\n}}\n", committed(STORAGE));
+    let found = scope_messages(&root_of(&scratch), vec![(STORAGE, text(parent))]);
+    let head = format!("the kernel package includes {include} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+}
+
+/// A path holder that cannot be read loses its path attributes without a refusal: the file only it
+/// declares stands declared by no module file.
+#[test]
+fn an_unreadable_path_holder_declares_nothing() {
+    let holder = "crates/kestrike/src/failover/reconcile_tests.rs";
+    let moved = planted(
+        STORAGE,
+        "\nmod fill;\n",
+        "\n#[path = \"fill_v2.rs\"]\nmod fill;\n",
+    );
+    let found = scope_messages(
+        &top(),
+        vec![(STORAGE, text(moved)), (holder, Plant::Refused)],
+    );
+    let head = format!("the kernel package includes {FILL} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+    assert!(
+        !found.iter().any(|message| message.contains(holder)),
+        "{found:?}"
+    );
+}
+
+/// A kernel source named exactly `.rs` is a kernel text, while its includes stay unread: the
+/// production file it includes is neither classified nor refused.
+#[test]
+fn a_source_named_dot_rs_is_a_kernel_text_with_unread_includes() {
+    let scratch = planted_package(&[], Some(""));
+    let package = package_of(&scratch);
+    fs::write(
+        package.join("src/.rs"),
+        "#[path = \"../../../../../crates/kestrike/src/storage/slot.rs\"]\nmod s;\n",
+    )
+    .expect("the source is written");
+    let kernels = kernel_texts(&package).expect("the package reads");
+    let read = reader(vec![]);
+    let scope = scope_files(&package, &root_of(&scratch), &read, &top()).expect("the scope reads");
+    let slot = "crates/kestrike/src/storage/slot.rs";
+    assert_eq!(
+        (
+            kernels.contains_key("src/.rs"),
+            scope.included().iter().any(|path| path == slot),
+            scope.refusals().is_empty()
+        ),
+        (true, false, true)
+    );
+}
+
+/// Word characters on either side of `mod` among a macro's tokens make no keyword, and a macro nested
+/// in another's tokens is refused once, on the outer macro's line.
+#[test]
+fn a_keyword_among_macro_tokens_needs_its_word_edges() {
+    let edged = loads(
+        "crates/kestrike/src/mod.rs",
+        "crates/kestrike/src",
+        "m!{ xmod modx \u{e9}mod mod\u{e9} }\n",
+        false,
+    );
+    assert_eq!(
+        (
+            edged.bare.len(),
+            edged.attributed.len(),
+            edged.refusals.len()
+        ),
+        (0, 0, 0)
+    );
+    let nested = loads(
+        "crates/kestrike/src/mod.rs",
+        "crates/kestrike/src",
+        "\nouter! {\n inner! { mod x; }\n}\n",
+        false,
+    );
+    assert_eq!(
+        (nested.bare.len(), messages(&nested.refusals)),
+        (
+            0,
+            vec![format!("crates/kestrike/src/mod.rs:2: {MACRO_TOKENS}").as_str()]
+        )
+    );
+}
+
+/// Kept readings: a `check!` whose arguments stand in brackets or braces holds no message, and an
+/// `expect` after `.` and a form feed reports the line of the `.`.
+#[test]
+fn the_check_and_expect_readings_keep_their_delimiters() {
+    let found = (
+        c_literals("check![a, c\"x\"];"),
+        c_literals("check!{a, c\"x\"};"),
+        c_literals("check!(a, c\"x\");"),
+    );
+    assert_eq!(found, (vec![], vec![], vec!["x".to_owned()]));
+    assert_eq!(
+        diagnostic_sites("x.\x0c\nexpect(\"m\");\n"),
+        [("m".to_owned(), 1)]
+    );
+}
+
+/// A loom control of one record subtracts the same test listed under another record's tests.
+#[test]
+fn a_control_subtracts_across_every_loom_record() {
+    let declared = json::parse(&committed("verification/genmc/expected.json"))
+        .expect("the declaration parses");
+    let litmus =
+        json::parse(&committed("verification/rc11/expected.json")).expect("the litmus list parses");
+    let records = json::parse(
+        "{\"records\": [{\"job\": \"loom\", \"tests\": [\"t4\", \"t5\"]}, {\"job\": \"loom\", \"tests\": [\"t6\"], \"controls\": [{\"test\": \"t4\"}]}]}",
+    )
+    .expect("the records parse");
+    let found = references(&declared, &litmus, &records, &top()).expect("the references read");
+    let names = |set: Option<&std::collections::BTreeSet<Text>>| -> Vec<String> {
+        set.expect("the lane exists")
+            .iter()
+            .map(Text::to_string)
+            .collect()
+    };
+    assert_eq!(
+        (names(found.positive("loom")), names(found.twins("loom"))),
+        (
+            vec!["t5".to_owned(), "t6".to_owned()],
+            vec!["t4".to_owned()]
+        )
+    );
+}
+
+/// A root's `lib.rs` declares a crate file live, and a live declaration of a file's home outranks a
+/// path attribute of another directory's source: each file stands as production with no refusal.
+#[test]
+fn a_root_and_a_live_home_declaration_make_production() {
+    let planted_file = "crates/kestrike/src/planted.rs";
+    let scratch = planted_package(&[planted_file], None);
+    let read = reader(vec![(
+        LIB,
+        text(format!("{}\nmod planted;\n", committed(LIB))),
+    )]);
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
+    assert_eq!(
+        (
+            scope.included().iter().any(|path| path == planted_file),
+            scope.refusals()
+        ),
+        (true, &[][..])
+    );
+    let extra = "crates/kestrike/src/storage/extra.rs";
+    let scratch = planted_package(&[extra], None);
+    let holder = "crates/kestrike/src/failover/reconcile_tests.rs";
+    let read = reader(vec![
+        (STORAGE, text(format!("{}mod extra;\n", committed(STORAGE)))),
+        (
+            holder,
+            text(format!(
+                "{}\n#[path = \"../storage/extra.rs\"]\nmod decoy;\n",
+                committed(holder)
+            )),
+        ),
+    ]);
+    let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+        .expect("the scope reads");
+    assert_eq!(
+        (
+            scope.included().iter().any(|path| path == extra),
+            scope.refusals()
+        ),
+        (true, &[][..])
+    );
+}
+
+/// A root that loads `storage.rs` by a path attribute makes that file the storage module: with the
+/// storage module's own text there, the files it declares bare stand declared by no module file, since
+/// they load from beside `storage.rs`.
+#[test]
+fn a_sibling_module_file_declares_from_its_own_directory() {
+    let by_path = planted(
+        TREE,
+        "pub mod storage;",
+        "#[path = \"storage.rs\"]\npub mod storage;",
+    );
+    let found = scope_messages(
+        &top(),
+        vec![
+            (TREE, text(by_path)),
+            ("crates/kestrike/src/storage.rs", text(committed(STORAGE))),
+        ],
+    );
+    let head = format!("the kernel package includes {FILL} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+}
+
+/// A header that is empty matches at each place its edges allow, and each match takes the next body.
+#[test]
+fn an_empty_header_takes_a_body_at_each_edge() {
+    assert_eq!(
+        crate::genmc::bodies("fn a() {x} fn b{y}", ""),
+        ["{x}", "{x}", "{x}", "{y}"]
+    );
+}
+
+/// A source path's empty and `.` components name nothing: `Cargo.toml/` and `Cargo.toml/.` read the file.
+#[test]
+fn a_source_path_reads_without_its_empty_components() {
+    let file = read_source(&top(), "Cargo.toml").expect("the manifest reads");
+    let found = (
+        read_source(&top(), "Cargo.toml/").ok(),
+        read_source(&top(), "Cargo.toml/.").ok(),
+    );
+    assert_eq!(found, (Some(file.clone()), Some(file)));
+}
+
+/// The declaration names the kernel package, read under the checkout root: a package of its own is
+/// read, a source of it that is no UTF-8 cannot be read, a name `os.fsencode` refuses names no package,
+/// and a surrogate escape names the directory of that byte.
+#[test]
+fn the_references_read_the_package_the_declaration_names() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = Scratch::new("sources-references");
+    fs::create_dir_all(scratch.0.join("selected/src")).expect("the package is made");
+    fs::write(scratch.0.join("selected/src/chosen.rs"), "a\r\nb\n").expect("the source is written");
+    let litmus = json::parse("{\"tests\": {}}").expect("the litmus list parses");
+    let records = json::parse("{\"records\": []}").expect("the records parse");
+    let declared = |package: &str| {
+        json::parse(&format!(
+            "{{\"package\": \"{package}\", \"cases\": {{}}, \"bindings\": []}}"
+        ))
+        .expect("the declaration parses")
+    };
+    let found = references(&declared("selected"), &litmus, &records, &scratch.0)
+        .expect("the references read");
+    assert_eq!(
+        found.kernels(),
+        &BTreeMap::from([("src/chosen.rs".to_owned(), "a\nb\n".to_owned())])
+    );
+    let empty = references(&declared("\\ud800"), &litmus, &records, &scratch.0)
+        .expect("the references read");
+    assert!(empty.kernels().is_empty());
+    fs::create_dir_all(scratch.0.join(OsStr::from_bytes(b"\xff/src")))
+        .expect("the byte directory is made");
+    fs::write(scratch.0.join(OsStr::from_bytes(b"\xff/src/x.rs")), "x\n")
+        .expect("the source is written");
+    let escaped = references(&declared("\\udcff"), &litmus, &records, &scratch.0)
+        .expect("the references read");
+    assert_eq!(escaped.kernels().keys().collect::<Vec<_>>(), ["src/x.rs"]);
+    fs::write(scratch.0.join("selected/src/chosen.rs"), b"\xff\n").expect("the source is written");
+    let error = references(&declared("selected"), &litmus, &records, &scratch.0)
+        .expect_err("the source is no UTF-8");
+    assert!(
+        matches!(error, super::ReferenceError::Kernel(ref error) if error.kind() == io::ErrorKind::InvalidData),
+        "{error}"
+    );
+    let package = scratch.0.join("selected");
+    assert_eq!(
+        (
+            kernel_texts(&package).map_err(|error| error.kind()).err(),
+            crate::genmc::package_sources(&package)
+                .map_err(|error| error.kind())
+                .err()
+        ),
+        (
+            Some(io::ErrorKind::InvalidData),
+            Some(io::ErrorKind::InvalidData)
+        )
+    );
+}
+
+/// Kept readings of the path class: the checkout's tracked text reaches outside the checkout. The
+/// declaration's package `../sibling` is read beside the checkout root, a package source that links to
+/// a file outside the checkout is a kernel text with that file's text, and a crate source that links
+/// out of the checkout reads its target.
+#[test]
+fn a_tracked_path_or_link_reads_outside_the_checkout() {
+    let scratch = Scratch::new("sources-outside");
+    let root = scratch.0.join("top");
+    fs::create_dir_all(root.join("crates")).expect("the checkout is made");
+    fs::create_dir_all(scratch.0.join("sibling/src")).expect("the sibling is made");
+    fs::write(scratch.0.join("sibling/src/a.rs"), "// sibling\n").expect("the source is written");
+    fs::write(scratch.0.join("outside.rs"), "// outside\n").expect("the file is written");
+    let litmus = json::parse("{\"tests\": {}}").expect("the litmus list parses");
+    let records = json::parse("{\"records\": []}").expect("the records parse");
+    let declared = json::parse("{\"package\": \"../sibling\", \"cases\": {}, \"bindings\": []}")
+        .expect("the declaration parses");
+    let found = references(&declared, &litmus, &records, &root).expect("the references read");
+    assert_eq!(found.kernels().keys().collect::<Vec<_>>(), ["src/a.rs"]);
+    let package = root.join("package/src");
+    fs::create_dir_all(&package).expect("the package is made");
+    symlink(scratch.0.join("outside.rs"), package.join("out.rs")).expect("the link is made");
+    let kernels = kernel_texts(&root.join("package")).expect("the package reads");
+    assert_eq!(
+        kernels.get("src/out.rs").map(String::as_str),
+        Some("// outside\n")
+    );
+    symlink(scratch.0.join("outside.rs"), root.join("crates/x.rs")).expect("the link is made");
+    assert_eq!(
+        read_source(&root, "crates/x.rs").ok().as_deref(),
+        Some("// outside\n")
+    );
+}
+
+/// The model source's path is the file its test path reaches: the parent that opens an inline module,
+/// a path declaration's target, a bare declaration's file, and a moved declaration's new target.
+#[test]
+fn a_model_source_names_the_file_it_reaches() {
+    let moved = planted(
+        STORAGE,
+        "\nmod fill_model;\n",
+        "\n#[path = \"fill_model_v2.rs\"]\nmod fill_model;\n",
+    );
+    let live = "crates/kestrike/src/storage/fill_model_v2.rs";
+    let rows: [(&str, Plants<'_>, &str, &str); 4] = [
+        (
+            "an inline module",
+            vec![],
+            "storage::readiness::authority_model::withdrawal_and_serving_publication_preserve_both_word_fields",
+            "crates/kestrike/src/storage/readiness.rs",
+        ),
+        (
+            "a path declaration",
+            vec![],
+            "net::client::route::route_model::a_read_racing_a_rebind_takes_one_binding_whole",
+            "crates/kestrike/src/net/client/route_model.rs",
+        ),
+        (
+            "a bare declaration",
+            vec![],
+            FILL_MODEL,
+            "crates/kestrike/src/storage/fill_model.rs",
+        ),
+        (
+            "a moved declaration",
+            vec![
+                (STORAGE, text(moved)),
+                (live, text("// The live model.\n".to_owned())),
+            ],
+            FILL_MODEL,
+            live,
+        ),
+    ];
+    for (label, plants, test, path) in rows {
+        let read = reader(plants);
+        assert_eq!(
+            super::module_file(test, &read)
+                .map(|(found, _)| found)
+                .as_deref(),
+            Some(path),
+            "{label}"
+        );
+    }
+}
+
+/// The kernel texts of a planted package: its `.rs` files with `\r\n` read as `\n`, a directory named
+/// like a source, other files and build state aside.
+#[test]
+fn the_kernel_texts_are_the_packages_sources() {
+    let scratch = Scratch::new("sources-kernels");
+    let package = scratch.0.join("package");
+    for directory in ["ops/src", "spare.rs", "target"] {
+        fs::create_dir_all(package.join(directory)).expect("the directory is made");
+    }
+    fs::write(package.join("build.rs"), "fn main() {}\r\n").expect("the source is written");
+    fs::write(package.join("ops/src/lib.rs"), "// ops\n").expect("the source is written");
+    fs::write(package.join("ops/Cargo.toml"), "[package]\n").expect("the manifest is written");
+    fs::write(package.join("target/x.rs"), "// built\n").expect("the output is written");
+    assert_eq!(
+        kernel_texts(&package).expect("the package reads"),
+        BTreeMap::from([
+            ("build.rs".to_owned(), "fn main() {}\n".to_owned()),
+            ("ops/src/lib.rs".to_owned(), "// ops\n".to_owned()),
+        ])
+    );
+}
+
+/// Kept readings of links: a package link that no `#[path]` names, into a crate file, is an include the
+/// classification reads as production; and a path attribute that names a link loads the link's name, so
+/// the file the link resolves to stands declared by no module file.
+#[test]
+fn a_link_is_classified_by_the_name_it_resolves_to() {
+    let scratch = planted_package(&[], None);
+    let root = root_of(&scratch);
+    let slot = "crates/kestrike/src/storage/slot.rs";
+    fs::create_dir_all(root.join("crates/kestrike/src/storage"))
+        .expect("the crate directory is made");
+    fs::write(root.join(slot), "// slot\n").expect("the file is written");
+    symlink(
+        format!("../../../../../{slot}"),
+        package_of(&scratch).join("src/extra.rs"),
+    )
+    .expect("the link is made");
+    let read = reader(vec![]);
+    let scope = scope_files(&package_of(&scratch), &root, &read, &top()).expect("the scope reads");
+    assert_eq!(
+        (
+            scope.included().iter().any(|path| path == slot),
+            scope.refusals()
+        ),
+        (true, &[][..])
+    );
+    let real = "crates/kestrike/src/storage/real.rs";
+    let scratch = planted_package(&[real], None);
+    let storage = root_of(&scratch).join("crates/kestrike/src/storage");
+    fs::create_dir_all(&storage).expect("the crate directory is made");
+    fs::write(storage.join("real.rs"), "// real\n").expect("the file is written");
+    symlink("real.rs", storage.join("alias.rs")).expect("the link is made");
+    let found = scope_messages(
+        &root_of(&scratch),
+        vec![(
+            STORAGE,
+            text(format!(
+                "{}#[path = \"alias.rs\"]\nmod alias;\n",
+                committed(STORAGE)
+            )),
+        )],
+    );
+    let head = format!("the kernel package includes {real} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+}
+
+/// Two module files that declare each other, where only the first has a live declaration from its
+/// directory's module file, leave the second declared by no module file in either order of the
+/// includes: the classification searches the module files the crate's committed sources name.
+#[test]
+fn a_file_only_a_planted_module_declares_stands_undeclared_in_any_order() {
+    let first = "crates/kestrike/src/storage/s_a.rs";
+    let second = "crates/kestrike/src/storage/s_b.rs";
+    let plants = || {
+        vec![
+            (STORAGE, text(format!("{}mod s_a;\n", committed(STORAGE)))),
+            (first, text("#[path = \"s_b.rs\"]\nmod b;\n".to_owned())),
+            (second, text("#[path = \"s_a.rs\"]\nmod a;\n".to_owned())),
+        ]
+    };
+    let head = format!("the kernel package includes {second} and no module file declares it");
+    for order in [[first, second], [second, first]] {
+        let scratch = planted_package(&order, None);
+        let read = reader(plants());
+        let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+            .expect("the scope reads");
+        let refused = messages(scope.refusals())
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count();
+        assert_eq!(
+            (scope.included().iter().any(|path| path == first), refused),
+            (true, 1),
+            "{order:?}"
+        );
+    }
+}
+
+/// Build state is set aside after its entries are looked up, so a source under `target` in a directory
+/// the process may list and not search stops the reading of the package's sources and texts.
+#[test]
+fn a_source_under_build_state_is_looked_up_before_it_is_set_aside() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("sources-target");
+    let locked = scratch.0.join("package/target/locked");
+    fs::create_dir_all(&locked).expect("the build directory is made");
+    fs::write(locked.join("x.rs"), "").expect("the output is written");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("the mode is set");
+    let package = scratch.0.join("package");
+    let found = (
+        kernel_texts(&package).map_err(|error| error.kind()).err(),
+        crate::genmc::package_sources(&package)
+            .map_err(|error| error.kind())
+            .err(),
+    );
+    let searchable = fs::metadata(locked.join("x.rs")).is_ok();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("the mode is restored");
+    if searchable {
+        eprintln!(
+            "a_source_under_build_state_is_looked_up_before_it_is_set_aside: this process searches a mode-644 directory; the reading is checked"
+        );
+        assert_eq!(found, (None, None));
+        return;
+    }
+    assert_eq!(
+        found,
+        (
+            Some(io::ErrorKind::PermissionDenied),
+            Some(io::ErrorKind::PermissionDenied)
+        )
+    );
+}
+
+/// The model source is read twice, once to choose the file and once for its text, so a reader whose
+/// second read differs gives the second text.
+#[test]
+fn a_model_source_is_read_again_for_its_text() {
+    use std::cell::Cell;
+    let file = "crates/kestrike/src/a.rs";
+    let reads = Cell::new(0);
+    let read = |path: &str| -> io::Result<String> {
+        match path {
+            TREE => Ok("mod a;\n".to_owned()),
+            _ if path == file => {
+                reads.set(reads.get() + 1);
+                Ok(format!("// read {}\n", reads.get()))
+            }
+            _ => Err(io::Error::from(io::ErrorKind::NotFound)),
+        }
+    };
+    assert_eq!(
+        super::module_file("a::t", &read),
+        Some((file.to_owned(), "// read 2\n".to_owned()))
+    );
+}
+
+/// Each declaration member of another shape than the references read reads no references, one
+/// member changed at a time; empty string controls read as none.
+#[test]
+fn a_declaration_of_another_shape_reads_no_references() {
+    let valid_declared = "{\"package\": \"none\", \"cases\": {\"a\": {\"expect\": \"positive\"}}, \"bindings\": [{\"id\": \"x\"}]}";
+    let valid_litmus = "{\"tests\": {\"sb\": {\"outcome\": \"Sometimes\"}}}";
+    let valid_records = "{\"records\": [{\"job\": \"loom\", \"tests\": [\"t\"], \"controls\": [{\"test\": \"c\"}]}]}";
+    let rows: [(&str, &str, &str, &str); 12] = [
+        ("records no object", valid_declared, valid_litmus, "[]"),
+        (
+            "a record that is a string",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [\"loom\"]}",
+        ),
+        (
+            "null controls",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\", \"tests\": [], \"controls\": null}]}",
+        ),
+        (
+            "a control with no test",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\", \"tests\": [], \"controls\": [{}]}]}",
+        ),
+        (
+            "a test that is an array",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\", \"tests\": [[1]]}]}",
+        ),
+        (
+            "a loom record with no tests",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\"}]}",
+        ),
+        (
+            "cases no object",
+            "{\"package\": \"none\", \"cases\": [], \"bindings\": []}",
+            valid_litmus,
+            valid_records,
+        ),
+        (
+            "a case with no expect",
+            "{\"package\": \"none\", \"cases\": {\"a\": {}}, \"bindings\": []}",
+            valid_litmus,
+            valid_records,
+        ),
+        (
+            "litmus tests no object",
+            valid_declared,
+            "{\"tests\": []}",
+            valid_records,
+        ),
+        (
+            "a litmus test with no outcome",
+            valid_declared,
+            "{\"tests\": {\"sb\": {}}}",
+            valid_records,
+        ),
+        (
+            "a binding id that is an array",
+            "{\"package\": \"none\", \"cases\": {}, \"bindings\": [{\"id\": [1]}]}",
+            valid_litmus,
+            valid_records,
+        ),
+        (
+            "a package that is no string",
+            "{\"package\": 1, \"cases\": {}, \"bindings\": []}",
+            valid_litmus,
+            valid_records,
+        ),
+    ];
+    let parsed = |text: &str| json::parse(text).expect("the plant parses");
+    for (label, declared, litmus, records) in rows {
+        let found = references(&parsed(declared), &parsed(litmus), &parsed(records), &top());
+        assert!(
+            matches!(found, Err(super::ReferenceError::Shape(_))),
+            "{label}"
+        );
+    }
+    let empty = "{\"records\": [{\"job\": \"loom\", \"tests\": [\"t\"], \"controls\": \"\"}]}";
+    let found = references(
+        &parsed(valid_declared),
+        &parsed(valid_litmus),
+        &parsed(empty),
+        &top(),
+    )
+    .expect("empty string controls read");
+    assert_eq!(found.positive("loom").map(|set| set.len()), Some(1));
 }

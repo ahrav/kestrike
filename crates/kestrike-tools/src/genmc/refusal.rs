@@ -2,13 +2,18 @@
 //! class has its own variant, so a caller can catch some classes and pass the rest on.
 
 use std::fmt;
-use std::io;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use regex::{Captures, Regex};
 
 use crate::genmc::read_text;
 use crate::json::{self, Text, Value};
+use crate::ownership::ignored;
+use crate::text::newlines;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Code {
@@ -160,9 +165,7 @@ pub fn read_strict(path: &Path) -> Result<String, Error> {
 /// `read_replaced` returns the error of opening or reading the file.
 pub fn read_replaced(path: &Path) -> io::Result<String> {
     let bytes = std::fs::read(path)?;
-    Ok(String::from_utf8_lossy(&bytes)
-        .replace("\r\n", "\n")
-        .replace('\r', "\n"))
+    Ok(newlines(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 /// # Errors
@@ -287,4 +290,33 @@ pub(crate) fn strings(items: &[String]) -> Value {
             .map(|item| Value::String(item.as_str().into()))
             .collect(),
     )
+}
+
+pub(crate) fn open_file(path: &Path) -> io::Result<Option<File>> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Ok(None);
+    }
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if ignored(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(file.metadata()?.is_file().then_some(file))
+}
+
+pub(crate) fn replaced(mut file: File) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(newlines(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+pub(crate) fn strict(mut file: File) -> Result<String, Error> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(Error::Os)?;
+    let text = String::from_utf8(bytes).map_err(|error| Error::Value(error.to_string()))?;
+    Ok(newlines(text))
 }

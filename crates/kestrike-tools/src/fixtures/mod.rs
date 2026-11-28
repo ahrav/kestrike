@@ -26,6 +26,8 @@ mod tests;
 
 mod write;
 
+#[cfg(target_os = "linux")]
+pub(crate) use write::close;
 pub use write::{Model, Rewrite, Style, Trace, keep, traces, write};
 #[cfg(test)]
 pub(crate) use write::{generate, replace};

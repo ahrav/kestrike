@@ -22,7 +22,7 @@ use std::process::{Command, ExitStatus, Stdio};
 
 use crate::environ::Environ;
 use crate::git::fed;
-use crate::text::Text;
+use crate::text::{Text, newlines};
 
 /// The options every call passes before `-C DIR`.
 pub const FIXED: [&str; 9] = [
@@ -136,15 +136,6 @@ fn code(status: ExitStatus) -> i32 {
         (Some(code), _) => code,
         (None, Some(signal)) => -signal,
         (None, None) => unreachable!("a waited child exited or a signal ended it"),
-    }
-}
-
-/// `newlines` reads `\r\n` and `\r` as `\n`.
-fn newlines(text: String) -> String {
-    if text.contains('\r') {
-        text.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        text
     }
 }
 

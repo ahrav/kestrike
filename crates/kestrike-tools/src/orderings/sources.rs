@@ -5,7 +5,7 @@
 //!
 //! A loom test is named by its whole module path. Its model source is the one module file that path
 //! reaches from `crates/kestrike/src/mod.rs`: each module the path names is loaded by a declaration
-//! the declaration reading reads in its parent, a `#[path]` one or a bare `mod name;`, and the last file reached
+//! the reading of a parent's module declarations finds in its parent, a `#[path]` one or a bare `mod name;`, and the last file reached
 //! declares the remaining module inline. A module that its parent declares more than once, inline or
 //! by two files, has none.
 //!
@@ -41,9 +41,9 @@ use regex::Regex;
 
 use super::sites::{MACRO, call_end, line_of, opener};
 use crate::classes::{SPACE, WORD, bounded_iter, captures_bounded, compiled, is_word};
-use crate::genmc::{INCLUDED, is_file, package_sources, read_text, under_target, walk};
+use crate::genmc::{INCLUDED, is_file, no_nul, package_sources, read_text, under_target, walk};
 use crate::json::{Text, Value};
-use crate::paths::resolve;
+use crate::paths::{normalize, resolve};
 use crate::production_text::blanked;
 use crate::rust_text::{Lexeme, back, blank, code, lexemes};
 use crate::text::is_space;
@@ -119,10 +119,11 @@ fn pure(path: &str) -> String {
 /// `name` joined to `base`; an absolute `name` replaces `base`.
 pub fn joined(base: &str, name: &str) -> String {
     if name.starts_with('/') {
-        pure(name)
-    } else {
-        pure(&format!("{base}/{name}"))
+        return pure(name);
     }
+    let (root, mut names) = parts(base);
+    names.extend(parts(name).1);
+    assembled(root, &names)
 }
 
 fn parent(path: &str) -> String {
@@ -164,27 +165,7 @@ fn with_suffix(path: &str, suffix: &str) -> io::Result<String> {
 /// The lexical normal form of `path`: each `..` drops the component before it, and a `..` that leads
 /// an absolute path is dropped.
 fn normpath(path: &str) -> String {
-    if path.is_empty() {
-        return ".".to_owned();
-    }
-    let slashes = root(path).len();
-    let mut names: Vec<&str> = Vec::new();
-    for component in path.split('/') {
-        if component.is_empty() || component == "." {
-            continue;
-        }
-        if component != ".." || (slashes == 0 && names.is_empty()) || names.last() == Some(&"..") {
-            names.push(component);
-        } else {
-            names.pop();
-        }
-    }
-    let text = format!("{}{}", "/".repeat(slashes), names.join("/"));
-    if text.is_empty() {
-        ".".to_owned()
-    } else {
-        text
-    }
+    String::from_utf8(normalize(path.as_bytes())).expect("a UTF-8 path normalizes to UTF-8")
 }
 
 /// Whether the name of `path` ends in `.rs`.
@@ -319,7 +300,7 @@ fn mod_keyword(text: &str) -> Option<usize> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Loads {
     bare: BTreeSet<String>,
-    attributed: Vec<(String, BTreeSet<String>)>,
+    attributed: BTreeMap<String, BTreeSet<String>>,
     refusals: Vec<Refusal>,
 }
 
@@ -327,18 +308,18 @@ impl Loads {
     /// Whether a path attribute loads `path`, when `attribute`, or else a bare declaration.
     fn holds(&self, path: &str, attribute: bool) -> bool {
         if attribute {
-            self.attributed.iter().any(|(target, _)| target == path)
+            self.attributed.contains_key(path)
         } else {
             self.bare.contains(path)
         }
     }
 }
 
-/// What the declarations of the module file `module`, whose text is `text` and whose bare declarations
-/// load from the directory `child`, load: the live declarations, with test-only items passed over, or
-/// every declaration outside comments and literals. `bare` holds `name.rs` and `name/mod.rs` of each
-/// bare `mod name;`; `attributed` holds each file a path attribute loads, in the order of its first
-/// attribute, with the names it is declared under, a name inside inline modules prefixed by theirs and
+/// What the module declarations of the module file `module`, whose text is `source` and whose bare
+/// declarations load from the directory `child`, load: when `live`, the declarations outside test-only
+/// items, else every declaration outside comments and literals. `bare` holds `name.rs` and `name/mod.rs`
+/// of each bare `mod name;`; `attributed` holds each file a path attribute loads with the names it is
+/// declared under, a name inside inline modules prefixed by theirs and
 /// `::`; `refusals` holds a declaration among a macro's tokens, a path attribute that holds an escape,
 /// and a path attribute the reading cannot pair with a declaration.
 ///
@@ -411,16 +392,7 @@ fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
         let mut names = inside.clone();
         names.push(declared.name("name").expect("DECLARED has name").as_str());
         let name = names.join("::");
-        match found
-            .attributed
-            .iter_mut()
-            .find(|(path, _)| *path == target)
-        {
-            Some((_, declared)) => {
-                declared.insert(name);
-            }
-            None => found.attributed.push((target, BTreeSet::from([name]))),
-        }
+        found.attributed.entry(target).or_default().insert(name);
     }
     if path_attributes(&view).len() != marked.len() {
         found.refusals.push(Refusal::scope(format!(
@@ -441,11 +413,12 @@ fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
 }
 
 /// (the repository path, the text) of the model source of loom test `test`, read down from the crate's
-/// `mod.rs` through `read`: each module the path names is loaded by a declaration the declaration reading reads in its
+/// `mod.rs` through `read`: each module the path names is loaded by a declaration the reading of module declarations finds in its
 /// parent with comments and literals passed over, and the last file reached declares the remaining
 /// module inline. `None` when a declaration or the file it loads is missing, or when a parent declares
 /// one module more than once, inline or by two files, which only a `cfg` this lookup does not evaluate
-/// tells apart.
+/// tells apart. A read error of any kind counts as a missing file, so `name/mod.rs` stands for a
+/// `name.rs` that cannot be read.
 pub fn module_file(test: &str, read: Reader<'_>) -> Option<(String, String)> {
     let mut names: Vec<&str> = test.split("::").collect();
     names.pop();
@@ -689,7 +662,7 @@ pub fn include_defects(
         let source_dir = package.join(path);
         let source_dir = source_dir.parent().unwrap_or(package);
         for (&offset, &target) in &read {
-            let resolved = resolve(&source_dir.join(target))?;
+            let resolved = resolve(&source_dir.join(no_nul(target)?))?;
             let repr = Text::from(target).repr();
             if target.contains('\\') {
                 defects.push(Refusal::scope(format!(
@@ -700,7 +673,9 @@ pub fn include_defects(
             }
             let home = resolve(package)?;
             if let Ok(relative) = resolved.strip_prefix(&home)
-                && !kernels.contains_key(&pure(&relative.to_string_lossy()))
+                && !relative
+                    .to_str()
+                    .is_some_and(|relative| kernels.contains_key(&pure(relative)))
             {
                 defects.push(Refusal::scope(format!(
                     "{}: the include {repr} is no Rust source of the package the scan reads",
@@ -733,6 +708,9 @@ fn path_holders(tree: &Path) -> io::Result<Vec<String>> {
     }
     Ok(holders)
 }
+
+/// The longest chain of module files, each declared by the next, that the classification follows.
+pub const CHAIN: usize = 400;
 
 /// The standing a declaration gives an included file, in rank order: a file with several standings
 /// takes the first.
@@ -792,7 +770,7 @@ impl Scope {
 
     /// The refusals: an include outside the repository, a file declared only by a path attribute
     /// elsewhere, one no module file declares, a module file that cannot be read, and the declaration
-    /// refusals of the declaration reading, each distinct sentence once.
+    /// refusals of the reading of module declarations, each distinct sentence once.
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
     }
@@ -808,6 +786,8 @@ struct Classifier<'r> {
     holders: Vec<String>,
     pathed: BTreeSet<String>,
     scope: Scope,
+    /// The module files whose standings are being found, one inside the next.
+    depth: usize,
 }
 
 impl Classifier<'_> {
@@ -858,34 +838,35 @@ impl Classifier<'_> {
         if let Some(&found) = self.places.get(file) {
             return Ok(found);
         }
+        if self.depth == CHAIN {
+            return Err(io::Error::other(format!(
+                "module files chain more than {CHAIN} deep at {file}"
+            )));
+        }
         self.places.insert(file.to_owned(), [None, None]);
+        self.depth += 1;
         let found = if self.roots.iter().any(|root| root == file) {
-            [Some(Standing::Production); 2]
+            Ok([Some(Standing::Production); 2])
         } else {
-            self.declared(file)?.0
+            self.declared(file).map(|(standings, _)| standings)
         };
+        self.depth -= 1;
+        let found = found?;
         self.places.insert(file.to_owned(), found);
         Ok(found)
     }
 
-    /// The standings of [`Classifier::place`] for `file`, and the module files whose bare declarations
-    /// load from its directory, which a refusal names as searched.
-    fn declared(&mut self, file: &str) -> io::Result<(Standings, Vec<String>)> {
-        let directory = if name(file) == "mod.rs" {
-            parent(&parent(file))
-        } else {
-            parent(file)
-        };
+    /// The module files whose bare declarations load from `directory`, the directory of `file`: its
+    /// `mod.rs` and sibling `D.rs` (the roots for the crate's source directory), then in component order
+    /// each file of the directory that a path attribute of a path holder or of those module files names.
+    fn searched(&mut self, file: &str, directory: &str) -> io::Result<Vec<String>> {
         let named: Vec<String> =
             if directory != CRATE && !directory.starts_with(&format!("{CRATE}/")) {
                 Vec::new()
             } else if directory == CRATE {
                 self.roots.to_vec()
             } else {
-                vec![
-                    joined(&directory, "mod.rs"),
-                    with_suffix(&directory, ".rs")?,
-                ]
+                vec![joined(directory, "mod.rs"), with_suffix(directory, ".rs")?]
             };
         let mut names = self.pathed.clone();
         for module in &named {
@@ -896,11 +877,22 @@ impl Classifier<'_> {
         let mut others: Vec<String> = names
             .iter()
             .filter(|name| *name != "mod.rs")
-            .map(|name| joined(&directory, name))
+            .map(|name| joined(directory, name))
             .filter(|module| module != file && !named.contains(module))
             .collect();
         others.sort_by(|left, right| parts(left).cmp(&parts(right)));
-        let modules: Vec<String> = named.into_iter().chain(others).collect();
+        Ok(named.into_iter().chain(others).collect())
+    }
+
+    /// The standings of [`Classifier::place`] for `file`, and the module files whose bare declarations
+    /// load from its directory, which a refusal names as searched.
+    fn declared(&mut self, file: &str) -> io::Result<(Standings, Vec<String>)> {
+        let directory = if name(file) == "mod.rs" {
+            parent(&parent(file))
+        } else {
+            parent(file)
+        };
+        let modules = self.searched(file, &directory)?;
         let extra: Vec<String> = self
             .roots
             .iter()
@@ -970,7 +962,9 @@ impl Classifier<'_> {
 /// whose text holds a path attribute; each holder and each module file is read through `read`. A source
 /// of the package that resolves inside it is passed over, one outside `root` is refused, and each other
 /// is production, excluded, refused as declared only by a path attribute elsewhere, refused as declared
-/// by no module file, or passed over when a module file that would declare it cannot be read.
+/// by no module file. A module file of its directory that cannot be read is refused by name, and the
+/// file takes the standing its other declarations give it, in neither list when they give none. A crate
+/// source that cannot be read from `tree`, or a holder `read` fails on, holds no path attribute.
 ///
 /// # Errors
 ///
@@ -993,6 +987,7 @@ pub fn scope_files(
         holders: Vec::new(),
         pathed: BTreeSet::new(),
         scope: Scope::default(),
+        depth: 0,
     };
     for holder in path_holders(tree)? {
         if let Source::Text(text) = classifier.source(&holder) {
@@ -1246,16 +1241,17 @@ pub fn references(
         }
     }
     let package = match subscript(&declared_member, "package", "the GenMC declaration")? {
-        Value::String(text) => text
-            .to_str()
-            .ok_or_else(|| shape("the GenMC declaration's package is no UTF-8 path".to_owned()))?,
+        Value::String(text) => text.to_os(),
         _ => {
             return Err(shape(
                 "the GenMC declaration's package is no string".to_owned(),
             ));
         }
     };
-    let kernels = kernel_texts(&root.join(package)).map_err(ReferenceError::Kernel)?;
+    let kernels = match package {
+        Some(package) => kernel_texts(&root.join(package)).map_err(ReferenceError::Kernel)?,
+        None => BTreeMap::new(),
+    };
     Ok(References {
         positive,
         twins: [controls, violations, sometimes],
