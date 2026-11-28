@@ -12,6 +12,7 @@ pub mod fixtures;
 pub mod gameday;
 pub mod genmc;
 pub mod git;
+pub mod hook;
 pub mod json;
 pub mod orderings;
 pub mod ownership;

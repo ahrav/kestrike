@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::environ::Environ;
 use crate::git::git_text;
 use crate::text::Text;
 
@@ -17,6 +18,7 @@ const TREE: &str = "040000";
 /// requested path that is a tree has its record whatever else the batch requests. A record that is not
 /// `<mode> <type> <id>`, a tab and a path is refused.
 fn entries(
+    environ: &Environ,
     commit: &str,
     paths: &[&str],
     recursive: bool,
@@ -34,7 +36,7 @@ fn entries(
     }
     args.extend(["--full-tree", commit, "--"]);
     args.extend(paths);
-    records(commit, &git_text(&args)?)
+    records(commit, &git_text(environ, &args)?)
 }
 
 /// `records` reads each NUL-ended record of `listed` as `(mode, path)`, the path being all of the record
@@ -93,10 +95,14 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 /// with `<path> at <short id> lies under <ancestor>, which is a link` (or `a submodule`), since a checkout
 /// reads the path through that entry; an ancestor that is a regular file or absent leaves the path absent.
 /// Each listing covers the batch's requested entries and the trees Git traverses to reach them.
-fn modes(commit: &str, paths: &[&str]) -> Result<HashMap<String, String>, Failure> {
+fn modes(
+    environ: &Environ,
+    commit: &str,
+    paths: &[&str],
+) -> Result<HashMap<String, String>, Failure> {
     let mut modes: HashMap<String, String> = HashMap::new();
     let list = |asked: &[&str], modes: &mut HashMap<String, String>| -> Result<(), Failure> {
-        for (mode, path) in entries(commit, asked, false)? {
+        for (mode, path) in entries(environ, commit, asked, false)? {
             if modes.get(&path).is_some_and(|known| *known != mode) {
                 return Err(Failure::Refused(format!(
                     "git ls-tree at {}: the path {} has two entries",
@@ -148,6 +154,7 @@ fn modes(commit: &str, paths: &[&str]) -> Result<HashMap<String, String>, Failur
 /// A directory that [`directory`] found to be no link or submodule, and to lie under none, at one commit.
 /// Its listing reads that same commit.
 pub struct Directory<'c> {
+    environ: &'c Environ,
     commit: &'c str,
     path: &'static str,
 }
@@ -155,28 +162,40 @@ pub struct Directory<'c> {
 impl Directory<'_> {
     /// `listing` returns `(mode, path)` for the directory and every entry under it, as [`entries`] reads them.
     pub fn listing(&self) -> Result<Vec<(String, String)>, Failure> {
-        entries(self.commit, &[self.path], true)
+        entries(self.environ, self.commit, &[self.path], true)
     }
 }
 
 /// `directory` refuses `dir` at `commit` when its entry is a link or a submodule, as
 /// `<dir> at <short id> is a link` (or `a submodule`), and when it has no entry under such an ancestor, as
 /// [`modes`] refuses a path.
-pub fn directory<'c>(commit: &'c str, dir: &'static str) -> Result<Directory<'c>, Failure> {
-    match redirect(modes(commit, &[dir])?.get(dir)) {
+pub fn directory<'c>(
+    environ: &'c Environ,
+    commit: &'c str,
+    dir: &'static str,
+) -> Result<Directory<'c>, Failure> {
+    match redirect(modes(environ, commit, &[dir])?.get(dir)) {
         Some(kind) => Err(Failure::Refused(format!(
             "{dir} at {} is {kind}",
             short(commit)
         ))),
-        None => Ok(Directory { commit, path: dir }),
+        None => Ok(Directory {
+            environ,
+            commit,
+            path: dir,
+        }),
     }
 }
 
 /// `files` returns the paths of `paths` that `commit` holds, and refuses the first whose entry has a mode
 /// other than `100644` and `100755` as `<path> at <short id> is not a file`. A path with no entry is an added
 /// or deleted file unless [`modes`] refuses it for an ancestor.
-pub fn files<'p>(commit: &str, paths: &[&'p str]) -> Result<Vec<&'p str>, Failure> {
-    let modes = modes(commit, paths)?;
+pub fn files<'p>(
+    environ: &Environ,
+    commit: &str,
+    paths: &[&'p str],
+) -> Result<Vec<&'p str>, Failure> {
+    let modes = modes(environ, commit, paths)?;
     let mut held = Vec::new();
     for &path in paths {
         match modes.get(path).map(String::as_str) {
