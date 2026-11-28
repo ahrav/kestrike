@@ -224,18 +224,11 @@ fn an_existing_test_that_gains_an_ignore_writes_the_scan_s_lines_to_the_given_st
 /// on `PATH` does not start, and the scan exits 2 with the system's error.
 #[test]
 fn a_git_without_an_interpreter_line_does_not_start_the_scan() {
-    use std::os::unix::fs::OpenOptionsExt;
     let (repository, _) = fixture("shebangless");
     let head = repository.git(&["rev-parse", "HEAD"]);
     let bin = repository.top.join("../bin");
     std::fs::create_dir(&bin).expect("the stand-in directory is made");
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o755)
-        .open(bin.join("git"))
-        .and_then(|mut file| file.write_all(b"exec /usr/bin/env -u PATH git \"$@\"\n"))
-        .expect("the stand-in is written");
+    super::push::executable(&bin.join("git"), "exec /usr/bin/env -u PATH git \"$@\"\n");
     let mut path = bin.into_os_string();
     path.push(":");
     path.push(std::env::var_os("PATH").unwrap_or_default());

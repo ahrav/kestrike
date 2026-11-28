@@ -37,7 +37,19 @@ fn the_rows_hold_the_hooks_checks_in_run_order() {
         &["python3", "-I", "scripts/chaos-receipt-replay.py"],
         &["python3", "-I", "chaos/tests/test_judges.py"],
         &["python3", "-I", "scripts/test-gameday-judge.py"],
-        &["python3", "-I", "scripts/test-host-stop-controller.py"],
+        &[
+            "cargo",
+            "test",
+            "--package",
+            "kestrike-tools",
+            "--test",
+            "tools",
+            "--",
+            "host_stop::",
+            "host_stop_checks::",
+            "host_stop_controller::",
+            "host_stop_support::",
+        ],
     ];
     assert_eq!(argvs, expected);
     for (at, row) in ORDER.iter().enumerate() {
@@ -277,7 +289,7 @@ fn each_row_names_the_file_the_plan_asks_the_tip_for() {
             (Check::Gameday, Some("scripts/test-gameday-judge.py")),
             (
                 Check::HostStop,
-                Some("scripts/test-host-stop-controller.py")
+                Some("crates/kestrike-tools/tests/host_stop_controller/mod.rs")
             ),
         ]
     );

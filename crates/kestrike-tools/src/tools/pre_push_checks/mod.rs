@@ -24,8 +24,9 @@
 //! Git read that exits nonzero where the read is not a presence test, Git output
 //! that is not UTF-8, a tree entry or a raw diff record of a form Git's manual does not give,
 //! and a `git worktree add` that exits nonzero, which exits 1
-//! where Git cannot start for the removal; 2 is also signal handlers that cannot be installed, named by a
-//! `pre-push-checks: ` line. A presence read, and a read of the inventory or the registry, whose Git
+//! where Git cannot start for the removal; 2 is also signal handlers that cannot be installed and a
+//! checkout's top that cannot be made absolute, each named by a `pre-push-checks: ` line.
+//! A presence read, and a read of the inventory or the registry, whose Git
 //! command exits nonzero reads as an absent file, and a removal that Git refuses is a warning. 120 is a
 //! failed write to standard error; 101 a panic in the scan; and
 //! `128 + n` the first signal `n` that [`cancel`] records, regardless of its inherited disposition. The
@@ -66,12 +67,19 @@ type Exit = u8;
 /// disposition, changes the calling thread's signal mask, and restores none of them, and the first signal
 /// it records stays recorded for the life of the process. Where the installation fails, part of those
 /// changes can stand, the four signals blocked in the calling thread among them.
-pub fn run(_top: &Path, args: &[OsString]) -> u8 {
+pub fn run(top: &Path, args: &[OsString]) -> u8 {
     if let Err(error) = cancel::install() {
         return fail(&format!("{NAME}: the signal handlers: {error}"), 2);
     }
     let destination = args.first().map_or(OsStr::new(""), OsString::as_os_str);
-    push(destination).unwrap_or_else(|code| code)
+    let top = match std::path::absolute(top) {
+        Ok(top) => top,
+        Err(error) => {
+            let shown = Text::from_os(top.as_os_str());
+            return fail(&format!("{NAME}: the checkout's top {shown}: {error}"), 2);
+        }
+    };
+    push(&top, destination).unwrap_or_else(|code| code)
 }
 
 /// The longest slice of a line that `say` writes after one poll: POSIX's least `PIPE_BUF`, so a pipe that
@@ -131,7 +139,7 @@ fn refused(failure: &Failure) -> Exit {
 /// `push` checks the scratch directory, reads the ref lines from standard input, checks the form of every
 /// line, plans them, and runs the scans, the guard and the checks
 /// in that order. It returns the exit code, through `Err` where the push ends early.
-fn push(destination: &OsStr) -> Result<Exit, Exit> {
+fn push(top: &Path, destination: &OsStr) -> Result<Exit, Exit> {
     let mut input = Vec::new();
     worktree::scratch()?;
     let read = io::stdin().lock().read_to_end(&mut input);
@@ -183,7 +191,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     cancel::check()?;
     failures.extend(guarded.map_err(|failure| refused(&failure))?);
     for (tip, checks) in plan.checks() {
-        failures.extend(worktree::run_checks(environ, tip, &checks)?);
+        failures.extend(worktree::run_checks(environ, top, tip, &checks)?);
     }
     for failure in &failures {
         let said = say(&format!("pre-push: failed: {failure}"));
