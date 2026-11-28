@@ -96,10 +96,10 @@ fn lead_new_session(command: &mut Command) {
     // SAFETY: `getpid` takes no argument and cannot fail.
     let parent = unsafe { libc::getpid() };
     let handled = handled_set();
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, `sigaction`,
-    // `sigprocmask`, `prctl`, `getppid` and `_exit`, which are async-signal-safe. It reads `handled`, its
-    // own copy of an initialized set, and writes only `current`, a local all-zero `sigaction` (a valid
-    // value) that each `sigaction` call overwrites.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, then
+    // `child_defaults`, whose contract states that it calls only async-signal-safe functions
+    // (`sigaction` and `sigprocmask`), then `prctl`, `getppid` and `_exit`, which are async-signal-safe.
+    // It reads `handled`, its own copy of an initialized set.
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 {

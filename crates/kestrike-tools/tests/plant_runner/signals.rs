@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use kestrike_tools::plants::{
-    Halt, Logged, Outcome, Run, Stopped, conclude, logged, prepare, publish, score,
+    Halt, Logged, Outcome, Run, Stopped, conclude, logged, prepare, publish, score, umask,
 };
 use kestrike_tools::process::{INTERRUPT, Interrupt, install_handlers};
 
@@ -143,7 +143,7 @@ fn score_window() {
     assert!(run.remove_trees().expect("the worktrees go").is_empty());
     let written = score::bytes(&score::score(inputs.head(), &entries, run.settings()));
     let write = |target: &Path, bytes: &str| {
-        publish(target, bytes)?;
+        publish(target, bytes, umask().expect("the mask reads"))?;
         raise(libc::SIGTERM);
         Ok::<(), kestrike_tools::ownership::PathError>(())
     };
@@ -183,8 +183,7 @@ fn a_signal_that_lands_once_the_score_is_written_leaves_the_run_its_own_exit() {
         &env,
     );
     fx.no_stand_in_failed();
-    let (written, _) = fx.results();
-    let sentence = super::fixture::text_of(written.get("sentence").expect("a sentence"));
+    let sentence = fx.sentence();
     assert!(stdout.contains(&sentence), "{stdout}");
     fx.verdict("p-miss", "missed", "each expected profile reached 300 runs");
 }

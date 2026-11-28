@@ -14,9 +14,14 @@ rule for `expected` and the meaning of each cause. Plants stay patch files:
 the runner applies them only in its scratch worktrees.
 
 The run judges the invoking checkout's `HEAD`, and the plant store must match
-it: a plant file that differs from `HEAD` is rejected. A store file staged as
-a rename to `score.json` passes that check, and the run writes its score over
-it. In that checkout the
+it: a path under the store that `git status` reports, ignored files included,
+is rejected, except one whose file name, leading dots removed, starts with
+`score.json`, which the check passes over in a plant directory too. So a store
+file staged as a rename to `score.json` passes that check, and the run writes
+its score over it. The runner runs on Linux alone: it reads the umask the
+score's file takes from the `Umask:` line of `/proc/thread-self/status`
+before any worktree, and a host without it ends the run there with exit 4.
+In that checkout the
 run writes `verification/plants/score.json` and leaves the index, the refs,
 the stash, the configuration and every other file as they were. Its Git
 commands read no replacement object (`refs/replace`). Its work lies
@@ -43,7 +48,9 @@ head under `<work>/plants/<id>/` with Git hooks disabled, it:
    copies under `<work>/proof/scripts/`, outside the tree a patch changes,
    and the run asks that copy, which `python3` loads, for the verdict texts
    of exits 0 and 1 in its `RESULTS` and whether its `reported` counts each
-   rerun's last line beside its exit. The
+   rerun's last line beside its exit. Each rerun and each of those questions
+   starts the first `python3` on `PATH`; a run that reaches no proof rerun
+   starts none. The
    run first reruns on the head the proof of each plant whose patch applies,
    then applies each such plant there in turn, reruns its proof and resets
    the tree. A rerun counts when the tree still holds a regular `Cargo.lock`
@@ -54,16 +61,19 @@ head under `<work>/plants/<id>/` with Git hooks disabled, it:
    other ending leaves the plant with no verdict: a build failure (3), a
    crash (4), a watchdog expiry (6), a rejected test ID (2), an exit of 0 or
    1 without its verdict line, a changed or missing `Cargo.lock`, or a helper
-   that cannot start or prints no UTF-8 text. A build failure on the head
+   that cannot start or prints no UTF-8 text. The lockfile is checked after a
+   rerun whose output is UTF-8 text; a rerun that prints no UTF-8 text gets
+   that no verdict before the check, so the next proof still reruns. A build failure on the head
    gives every proof not yet rerun there that reason. A setup of the proof's
    worktree or of the helper's check that fails, an apply or a reset there
-   that fails, or a rerun that changes the `Cargo.lock`, leaves that plant
+   that fails, or a rerun whose check finds the `Cargo.lock` changed, leaves that plant
    and every later one with no verdict. When the proof's worktree or target
    directory remains after the phase, every plant that waits for its archive
    has no verdict;
-3. applies the patch to the index, commits it on the detached head with the
+3. applies the staged `plant.patch`, as the file stands at the apply, to the
+   index, commits it on the detached head with the
    head's date, a fixed identity and the message `plant <id>`, so the planted
-   commit depends on the head, the patch and the plant's id alone, writes the checkout's `Cargo.lock`, read once at the
+   commit depends on the head, the applied patch and the plant's id alone, writes the checkout's `Cargo.lock`, read once at the
    start, into the tree, so every archive of the run resolves the same
    dependencies, and builds the archive with `campaign sim archive`, under
    `CARGO_PROFILE_DEV_OPT_LEVEL=3` and `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true`,
@@ -81,8 +91,12 @@ head under `<work>/plants/<id>/` with Git hooks disabled, it:
    holds at its `backlog` limit alone;
 6. runs the seed of each such suspect that `confirm` turned into a finding of
    the suspect's class with `campaign sim run` on the archive of the
-   unpatched head, which the run builds once, at the first such seed, under
-   `<work>/base/`. The check runs the sweep's manifest of the suspect's
+   unpatched head, under `<work>/base/`. The run prepares that archive at the
+   first such seed and keeps it, or its failure, for every later seed; a
+   failure before Git answers for its worktree, or a kept `Cargo.lock` that
+   cannot be opened or read, gives that seed check alone no run, and the next
+   seed check prepares the archive again, which ends at Git's refusal of the
+   worktree's path when the first attempt added it. The check runs the sweep's manifest of the suspect's
    profile with the seed as its root and the base archive's pins, and only
    when that manifest, before the pins change, hashes to the confirmed job's
    `manifest_sha256`.
@@ -150,15 +164,17 @@ a miss has no `miss_cause`. Exit 3: no miss lacks its cause, and a plant has
 no verdict, is not live or has a patch that does not apply, so the score
 counts fewer plants than the run selected. Exit 4: the run could not write its score, left a
 worktree it could not remove or could not list, failed to write a line to standard
-error, or failed outside a plant. Exit 120: the run wrote its score and could not
-write the score's lines to standard output. Exit 2:
+error, could not read its umask, or failed outside a plant. Exit 120: standard
+output refused its last lines, the score's lines once the score is written,
+which stays, or the help, with no score written. Exit 2:
 rejected input, found before any worktree: a plant whose record or patch is
 missing, no regular file or malformed, whose record or patch passes 1 MiB or
 differs from the regular file `HEAD` holds, whose id is `score.json`, passes 245 bytes or is one `campaign` cannot take
 in `plant-<id>`, whose `proof` holds a NUL or is no UTF-8 text, that names a
 profile `campaign` cannot take, or whose
 patch changes other paths than its `files` or renames, copies, deletes or changes a mode; a plant store that is
-a link, differs from `HEAD` (ignored files included) or cannot be read;
+a link, differs from `HEAD` by a path the check above does not pass over
+(ignored files included) or cannot be read;
 an unknown `--plant`; a `--runs` below 300; a Git variable that points Git at
 another repository or index; a checkout whose `Cargo.lock` is missing, a link or no regular file; a `--campaign`
 that names no executable; a work directory inside the checkout, under an
@@ -174,7 +190,8 @@ lands once the run has begun to write its score ends nothing: the run
 finishes with its score and its own exit. A signal the run inherited as
 ignored stays ignored. A Git command that runs when the signal arrives gets
 SIGKILL and a wait of at most 10 s; a worktree add, a child's start, the
-question to the staged helper, the removals of the proof's worktree and of an
+question to the head's copy of `reproduce-test.py` for its verdict check,
+the removals of the proof's worktree and of an
 archive's target directory, and the cleanup each run whole first. The proof's worktree and its target directory go after
 the last proof rerun, or with the other worktrees when the run ends before
 that; the run prints each one that remains.

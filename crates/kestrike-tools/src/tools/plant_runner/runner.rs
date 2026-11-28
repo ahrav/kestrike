@@ -12,7 +12,8 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 
 use crate::plants::{
-    Halt, Inputs, Outcome, Run, UNANNOUNCED, conclude, prepare, publish, said, score,
+    Halt, Inputs, Outcome, Run, THREAD_STATUS, UNANNOUNCED, conclude, prepare, publish, said,
+    score, umask,
 };
 use crate::process::{INTERRUPT, install_handlers};
 use crate::text::text;
@@ -91,7 +92,7 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
         return 4;
     }
     match started(&inputs) {
-        Ok(run) => finished(&inputs, run, &mut out, &mut err),
+        Ok((run, mask)) => finished(&inputs, run, mask, &mut out, &mut err),
         Err(halt) => failed(&halt, &mut err),
     }
 }
@@ -103,16 +104,29 @@ fn failed(halt: &Halt, err: &mut impl Write) -> u8 {
     halt.code()
 }
 
-/// `started` reads the head's date and installs the handlers.
-fn started(inputs: &Inputs) -> Result<Run<'_>, Halt> {
+/// `started` reads the head's date and the umask the score's file takes, before any worktree, and
+/// installs the handlers.
+fn started(inputs: &Inputs) -> Result<(Run<'_>, u32), Halt> {
     let run = Run::new(inputs, &INTERRUPT)?;
+    let mask = umask().map_err(|error| {
+        Halt::Failed(text!(
+            "the umask cannot be read from ",
+            THREAD_STATUS,
+            ": ",
+            error.to_string()
+        ))
+    })?;
     install_handlers()
         .map_err(|error| Halt::Failed(text!("the signal handlers: ", error.to_string())))?;
-    Ok(run)
+    Ok((run, mask))
 }
 
 /// `cleanup` removes the run's worktrees and the proof's target directory, naming on `err` each one that
-/// remains, and returns whether a worktree remains.
+/// remains, and returns whether a worktree remains or its removal cannot be told.
+///
+/// # Errors
+///
+/// A worktree's removal or listing cannot run, a status read fails, or a cleanup line cannot be written.
 fn cleanup(inputs: &Inputs, run: &Run<'_>, err: &mut impl Write) -> Result<bool, Halt> {
     let remained = run.remove_trees()?;
     let mut written = Ok(());
@@ -135,7 +149,7 @@ fn cleanup(inputs: &Inputs, run: &Run<'_>, err: &mut impl Write) -> Result<bool,
     }
     let target = inputs.work().join("proof").join("target");
     crate::plants::remove(&target);
-    if target.exists() {
+    if crate::plants::stands(&target, true)? {
         written = written.and(said(
             err,
             &text!("plant-runner left the proof's target directory ", target),
@@ -150,8 +164,15 @@ fn cleanup(inputs: &Inputs, run: &Run<'_>, err: &mut impl Write) -> Result<bool,
     Ok(!remained.is_empty())
 }
 
-/// `finished` runs the store, cleans up, and writes and prints the score.
-fn finished(inputs: &Inputs, mut run: Run<'_>, out: &mut impl Write, err: &mut impl Write) -> u8 {
+/// `finished` runs the store, cleans up, and writes the score with mode 0666 less `mask` and prints its
+/// lines.
+fn finished(
+    inputs: &Inputs,
+    mut run: Run<'_>,
+    mask: u32,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> u8 {
     let stored = run.run_store(err);
     let cleaned = cleanup(inputs, &run, err);
     if let Some(signal) = INTERRUPT.recorded() {
@@ -174,7 +195,7 @@ fn finished(inputs: &Inputs, mut run: Run<'_>, out: &mut impl Write, err: &mut i
         &inputs.score(),
         &entries,
         &bytes,
-        publish,
+        |target, bytes| publish(target, bytes, mask),
         out,
         err,
     )

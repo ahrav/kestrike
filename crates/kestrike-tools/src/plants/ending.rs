@@ -1,5 +1,6 @@
-//! A recorded signal or a failure outside a plant ends the run. A checked Git step that exits nonzero
-//! keeps its error output.
+//! How a step of a plant ends without its value: the plant's no verdict, which leaves the run going on
+//! to the next plant, or a halt, a recorded signal or a failure outside a plant, which ends the run. A
+//! checked Git step that exits nonzero keeps its error output.
 
 use super::git::CallError;
 use super::verdict::NoVerdict;
@@ -75,7 +76,8 @@ impl From<Interrupted> for Step {
     }
 }
 
-/// `Stopped` carries a plant's `NoVerdict` or a run's `Halt` into `Step`.
+/// How a child the run starts ended without its value: the plant's `NoVerdict`, after which the run
+/// goes on, or the run's `Halt`, which ends it; `Stopped` converts into `Step`.
 #[derive(Debug)]
 pub enum Stopped {
     NoVerdict(NoVerdict),

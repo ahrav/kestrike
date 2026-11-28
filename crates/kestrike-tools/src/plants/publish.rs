@@ -2,8 +2,8 @@
 //! `verification/plants/score.json` and renamed over it.
 //!
 //! The staging file is `.score.json.` and eight letters, created new with mode 0600 and then given mode
-//! 0666 less the umask; the rename replaces a link at the score's path, whose target stays. A write that
-//! fails removes the staging file. The write makes no sync.
+//! 0666 less the umask the caller read with [`umask`]; the rename replaces a link at the score's path,
+//! whose target stays. A write that fails removes the staging file. The write makes no sync.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -62,18 +62,23 @@ impl Run<'_> {
     }
 }
 
-fn umask() -> io::Result<u32> {
-    let status = fs::read_to_string("/proc/thread-self/status")?;
+/// The status file of the calling thread, whose `Umask:` line holds the thread's mask.
+pub const THREAD_STATUS: &str = "/proc/thread-self/status";
+
+/// `umask` is the calling thread's file mode creation mask, read from the `Umask:` line of
+/// [`THREAD_STATUS`] (Linux 4.7 or later), which reports the mask and leaves it as it stands; the mask
+/// is that of the thread's file system context, which a thread may hold apart from the process's.
+///
+/// # Errors
+///
+/// The status file cannot be read, or it holds no `Umask:` line of an octal mask.
+pub fn umask() -> io::Result<u32> {
+    let status = fs::read_to_string(THREAD_STATUS)?;
     status
         .lines()
         .find_map(|line| line.strip_prefix("Umask:"))
         .and_then(|mask| u32::from_str_radix(mask.trim(), 8).ok())
-        .ok_or_else(|| io::Error::other("/proc/thread-self/status names no umask"))
-}
-
-/// `staging` creates a new staging file beside `target`.
-fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
-    staging_with(target, random_letters)
+        .ok_or_else(|| io::Error::other("it names no umask"))
 }
 
 /// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from
@@ -102,17 +107,19 @@ fn staging_with(
     })
 }
 
-/// `publish` replaces `target` with `written` through a staging file it creates beside it.
+/// `publish` replaces `target` with `written` through a staging file it creates beside it, of mode
+/// 0666 less `mask`.
 ///
 /// # Errors
 ///
-/// The staging file cannot be created, given its mode, written, closed or renamed; the text names the
-/// path.
-pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
-    let (staged, mut file) = staging(target).map_err(|error| PathError::new(target, error))?;
+/// The staging file cannot be created, given its mode, written, closed or renamed, or `written` is
+/// longer than the soft file size limit allows (`EFBIG`, before any byte is written); the text names
+/// the score's path.
+pub fn publish(target: &Path, written: &str, mask: u32) -> Result<(), PathError> {
+    let (staged, mut file) =
+        staging_with(target, random_letters).map_err(|error| PathError::new(target, error))?;
     let written = crate::fixtures::fits(written.len())
-        .and_then(|()| umask())
-        .and_then(|mask| file.set_permissions(fs::Permissions::from_mode(0o666 & !mask)))
+        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o666 & !mask)))
         .and_then(|()| file.write_all(written.as_bytes()));
     let closed = crate::fixtures::close(file);
     let done = written
@@ -127,7 +134,8 @@ pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
 /// `conclude` takes the run's last two steps, which read no signal record: `write` writes the score's
 /// `bytes` to `target`, and the score's lines go to `out`, with the run's exit returned. A failed write
 /// prints `plant-runner wrote no score: ` with its text, then each plant's result line, on `err`, and
-/// returns 4.
+/// returns 4. A write of the score's lines to `out` that fails returns [`UNANNOUNCED`], with the score
+/// written.
 pub fn conclude<E: std::fmt::Display>(
     head: &str,
     target: &Path,
@@ -148,8 +156,12 @@ pub fn conclude<E: std::fmt::Display>(
     announce(head, entries, out)
 }
 
-pub const UNANNOUNCED: u8 = 120;
+/// The exit of a run whose standard output refused its last lines: the score's lines, after the score
+/// is written, or the help, when no score is written.
+pub(crate) const UNANNOUNCED: u8 = 120;
 
+/// `announce` prints the score's lines on `out` and returns the run's exit, or [`UNANNOUNCED`] when a
+/// line or the flush fails.
 fn announce(head: &str, entries: &[Finished], out: &mut impl Write) -> u8 {
     let printed = score::lines(head, entries)
         .iter()
