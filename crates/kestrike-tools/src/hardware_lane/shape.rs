@@ -226,7 +226,8 @@ pub(super) fn equals(value: &Value, bound: u64) -> bool {
 }
 
 /// `distinct` is `len(set(values))`, an absent value standing as `None`. Numbers that are equal in value
-/// are one member, so `1`, `1.0` and `true` are one; NaN equals no value, itself included.
+/// are one member, so `1`, `1.0` and `true` are one, and NaN is one member: a set compares by identity
+/// first, and every `NaN` of one decoded document is one object.
 pub(super) fn distinct(values: &[Option<&Value>]) -> Result<usize, Fault> {
     let mut kept: Vec<&Value> = Vec::new();
     for value in values {
@@ -255,11 +256,14 @@ fn number(value: &Value) -> Option<Number<'_>> {
     }
 }
 
-/// Python's `==` between two hashable values, exact where an integer meets a float.
+/// Whether two hashable values are one member of a Python set: `==`, exact where an integer meets a float,
+/// with two NaN floats one member.
 fn same_key(left: &Value, right: &Value) -> bool {
     match (number(left), number(right)) {
         (Some(Number::Integer(left)), Some(Number::Integer(right))) => left == right,
-        (Some(Number::Float(left)), Some(Number::Float(right))) => left == right,
+        (Some(Number::Float(left)), Some(Number::Float(right))) => {
+            left == right || (left.is_nan() && right.is_nan())
+        }
         (Some(Number::Integer(integer)), Some(Number::Float(float)))
         | (Some(Number::Float(float)), Some(Number::Integer(integer))) => {
             whole(float).is_some_and(|whole| whole == *integer)
