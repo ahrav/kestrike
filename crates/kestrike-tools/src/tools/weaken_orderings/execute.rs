@@ -72,17 +72,17 @@ pub(super) fn with_defaults(command: &mut Command) {
 /// `lead_session` makes the child lead a new session, and so a process group of its own, with the
 /// handled signals at their default actions and unblocked.
 fn lead_session(command: &mut Command) {
-    let handled = handled_set();
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, `sigaction` and
-    // `sigprocmask`, which are async-signal-safe, on its own copy of an initialized set.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, which is
+    // async-signal-safe.
     unsafe {
-        command.pre_exec(move || {
+        command.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            child_defaults(&handled)
+            Ok(())
         });
     }
+    with_defaults(command);
 }
 
 /// `stop` ends the process group that `child` leads: SIGTERM, then SIGKILL once the leader has exited,

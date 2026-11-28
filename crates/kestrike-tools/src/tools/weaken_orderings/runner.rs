@@ -86,27 +86,39 @@ fn status_failed(command: &str, code: i32) -> Halt {
 }
 
 /// `waited` waits for each of `children`, polling them and `interrupt` at pauses from 0.5 ms that double
-/// up to 20 ms; a recorded signal kills the children that still run with SIGKILL and reaps them.
+/// up to 20 ms. A recorded signal, or a wait that fails, kills each other child that still runs with
+/// SIGKILL and reaps it; the child whose wait failed, whose state is then unknown, gets no signal.
 fn waited(children: &mut [Child], interrupt: &Interrupt) -> Result<Vec<ExitStatus>, Halt> {
     let mut statuses: Vec<Option<ExitStatus>> = vec![None; children.len()];
     let mut pause = Duration::from_micros(500);
     loop {
-        for (child, status) in children.iter_mut().zip(&mut statuses) {
-            if status.is_none() {
-                *status = child.try_wait()?;
+        let mut failed = None;
+        for (at, (child, status)) in children.iter_mut().zip(&mut statuses).enumerate() {
+            if status.is_none() && failed.is_none() {
+                match child.try_wait() {
+                    Ok(found) => *status = found,
+                    Err(error) => failed = Some((at, Halt::from(error))),
+                }
             }
         }
-        if statuses.iter().all(Option::is_some) {
+        if failed.is_none() && statuses.iter().all(Option::is_some) {
             return Ok(statuses.into_iter().flatten().collect());
         }
-        if let Err(interrupted) = interrupt.check() {
-            for (child, status) in children.iter_mut().zip(&statuses) {
-                if status.is_none() {
+        let ended = match failed {
+            Some((at, halt)) => Some((Some(at), halt)),
+            None => interrupt
+                .check()
+                .err()
+                .map(|interrupted| (None, interrupted.into())),
+        };
+        if let Some((unknown, halt)) = ended {
+            for (at, (child, status)) in children.iter_mut().zip(&statuses).enumerate() {
+                if status.is_none() && Some(at) != unknown {
                     let _ = child.kill();
                     let _ = child.wait();
                 }
             }
-            return Err(interrupted.into());
+            return Err(halt);
         }
         std::thread::sleep(pause);
         pause = (pause * 2).min(Duration::from_millis(20));
@@ -169,6 +181,7 @@ impl<'l> Runner<'l> {
                 return Err(error.into());
             }
         };
+        drop(tar);
         let mut children = [archiving, extracting];
         let statuses = waited(&mut children, interrupt)?;
         let codes: Vec<i32> = statuses.into_iter().map(returncode).collect();
@@ -392,10 +405,6 @@ fn label_of(row: Option<&Text>) -> String {
     row.map_or_else(|| "baseline".to_owned(), ToString::to_string)
 }
 
-fn float(seconds: f64) -> Value {
-    Value::Float(seconds)
-}
-
 fn code_value(code: Option<i32>) -> Value {
     code.map_or(Value::Null, |code| {
         let digits = code.unsigned_abs().to_string();
@@ -461,7 +470,7 @@ impl Runner<'_> {
                 Value::String(text!("RUSTFLAGS=\"--cfg loom\" ", join(&words))),
             );
             members.insert("exit", code_value(code));
-            members.insert("seconds", float(seconds));
+            members.insert("seconds", Value::Float(seconds));
             members.insert("output", Value::String(text_of(&output)));
             let digest = hexdigest(&bytes);
             members.insert("digest", Value::String(Text::from(digest.as_str())));
@@ -494,14 +503,7 @@ impl Runner<'_> {
             site.as_ref().map(|(path, line)| (path.as_str(), *line)),
         )
         .map_err(Halt::failed)?;
-        let mut result = Object::new();
-        result.insert("lane", Value::String(Text::from("loom")));
-        result.insert("test", Value::String(test.clone()));
-        for (name, value) in ran.members.iter() {
-            result.insert(name.clone(), value.clone());
-        }
-        result.insert("result", Value::String(Text::from(verdict.name())));
-        result.insert("reason", Value::String(Text::from(reason.as_str())));
+        let result = result_record("loom", test, &ran.members, verdict.name(), &reason);
         Ok(Value::Object(result))
     }
 }
@@ -585,7 +587,7 @@ impl Runner<'_> {
                 members.insert("command", Value::String(join(&words)));
                 members.insert("exit", exit.clone().map_or(Value::Null, Value::Integer));
                 members.insert("lane_exit", code_value(code));
-                members.insert("seconds", float(seconds));
+                members.insert("seconds", Value::Float(seconds));
                 members.insert("output", Value::String(text_of(&output)));
                 let digest = if is_file(&output)? {
                     let digest = sha256(&output)
@@ -638,14 +640,7 @@ impl Runner<'_> {
                     executions,
                 )
             };
-            let mut result = Object::new();
-            result.insert("lane", Value::String(Text::from("genmc")));
-            result.insert("test", Value::String(case.clone()));
-            for (name, value) in ran.members.iter() {
-                result.insert(name.clone(), value.clone());
-            }
-            result.insert("result", Value::String(Text::from(verdict)));
-            result.insert("reason", Value::String(Text::from(reason.as_str())));
+            let mut result = result_record("genmc", case, &ran.members, verdict, &reason);
             result.insert("executions", executions);
             results.push(Value::Object(result));
         }
@@ -691,6 +686,20 @@ impl Runner<'_> {
             yielded(results)
         }
     }
+}
+
+/// `result_record` is a result's report members: its lane, its test, the members of its run, its verdict
+/// and its reason, in that order.
+fn result_record(lane: &str, test: &Text, members: &Object, verdict: &str, reason: &str) -> Object {
+    let mut result = Object::new();
+    result.insert("lane", Value::String(Text::from(lane)));
+    result.insert("test", Value::String(test.clone()));
+    for (name, value) in members.iter() {
+        result.insert(name.clone(), value.clone());
+    }
+    result.insert("result", Value::String(Text::from(verdict)));
+    result.insert("reason", Value::String(Text::from(reason)));
+    result
 }
 
 /// `json_path` is the member that `keys` reach from `value` through objects.

@@ -37,24 +37,17 @@ const JUDGING: [&str; 7] = [
     "scripts/judge-rc11.py",
 ];
 
-fn names(items: &[&str]) -> String {
-    repr(&Value::Array(
-        items
-            .iter()
-            .map(|item| Value::String(Text::from(*item)))
-            .collect(),
-    ))
-}
-
 fn texts(items: &[Text]) -> String {
-    repr(&Value::Array(
-        items.iter().cloned().map(Value::String).collect(),
-    ))
+    repr(&listed(items))
 }
 
 /// `differs` holds where `git status` in `top` names a path of [`JUDGING`]: a change against `HEAD`,
-/// staged or not, or an untracked file that no ignore rule covers; a status that fails or cannot start
-/// counts as a difference.
+/// staged or not, or an untracked file that no ignore rule covers; a status that exits nonzero counts as
+/// a difference.
+///
+/// # Errors
+///
+/// A recorded signal, or a status that cannot start or whose output cannot be read.
 fn differs(top: &Path) -> Result<bool, Halt> {
     let mut git = Command::new("git");
     git.args(["--no-optional-locks", "-C"])
@@ -111,7 +104,7 @@ fn checked_work(top: &Path, work: &Path) -> Result<(), Halt> {
         return Err(Halt::stop(
             2,
             text!(
-                names(&JUDGING),
+                texts(&JUDGING.map(Text::from)),
                 " differ from HEAD, so the report's revision would not name the code that judged it"
             ),
         ));
@@ -343,6 +336,11 @@ struct Report {
     no_verdict: Option<Vec<Text>>,
 }
 
+/// `result_is` holds where `result` is an object whose `result` member is the string `name`.
+fn result_is(result: &Value, name: &str) -> bool {
+    matches!(result, Value::Object(result) if result.get("result") == Some(&Value::String(Text::from(name))))
+}
+
 fn listed(items: &[Text]) -> Value {
     Value::Array(items.iter().cloned().map(Value::String).collect())
 }
@@ -409,7 +407,7 @@ fn machine() -> Result<Text, Halt> {
         .machine
         .iter()
         .take_while(|&&byte| byte != 0)
-        .copied()
+        .map(|&byte| u8::from_ne_bytes(byte.to_ne_bytes()))
         .collect();
     Ok(Text::from_os(std::os::unix::ffi::OsStrExt::from_bytes(
         bytes.as_slice(),
@@ -705,9 +703,7 @@ fn baseline(
         entry.insert("lane", Value::String(lane.clone()));
         entry.insert("tests", Value::Array(vec![Value::String(test.clone())]));
         let mut judged = |results: Vec<Value>| -> Result<(), Halt> {
-            let red = results
-                .iter()
-                .any(|result| !matches!(result, Value::Object(result) if result.get("result") == Some(&Value::String(Text::from("survived")))));
+            let red = results.iter().any(|result| !result_is(result, "survived"));
             report.baseline.extend(results);
             let drift = scoped.drifted()?;
             if !drift.is_empty() || red {
@@ -767,7 +763,6 @@ fn rows(
             wanted.map_or(Value::Null, |wanted| Value::String(Text::from(wanted))),
         );
         record.insert("results", Value::Array(Vec::new()));
-        report.rows.retain(|(held, _)| *held != id);
         report.rows.push((id.clone(), record));
         if entries.is_empty() {
             let reason_of = |kind: &str| match row.get(kind) {
@@ -806,9 +801,7 @@ fn rows(
         let record = report.record(&id);
         record.insert("seconds", Value::Float(seconds(row_started.elapsed())));
         let agrees = wanted.is_none_or(|wanted| match record.get("results") {
-            Some(Value::Array(results)) => results.iter().all(|result| {
-                matches!(result, Value::Object(result) if result.get("result") == Some(&Value::String(Text::from(wanted))))
-            }),
+            Some(Value::Array(results)) => results.iter().all(|result| result_is(result, wanted)),
             _ => true,
         });
         record.insert("agrees", Value::Bool(agrees));

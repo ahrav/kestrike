@@ -102,7 +102,7 @@ pub(super) fn shaping(name: &OsString) -> bool {
         return false;
     };
     let name = name.strip_suffix('\n').unwrap_or(name);
-    const EXACT: [&str; 8] = [
+    const EXACT: [&str; 7] = [
         "RUSTC",
         "RUSTC_WRAPPER",
         "RUSTC_WORKSPACE_WRAPPER",
@@ -110,9 +110,8 @@ pub(super) fn shaping(name: &OsString) -> bool {
         "RUSTDOCFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_ENCODED_RUSTDOCFLAGS",
-        "",
     ];
-    if EXACT[..7].contains(&name) {
+    if EXACT.contains(&name) {
         return true;
     }
     let word = |rest: &str| !rest.is_empty() && rest.chars().all(is_word);
