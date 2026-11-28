@@ -1406,11 +1406,15 @@ the pushing user and root owns, and one whose mode, or the mode of a
 directory its path is reached through, from the root down and through links,
 gives its group or every user write access without the sticky bit: such a
 user could swap the spool, a worktree or a directory on the way between the
-steps that name them. It reads the statuses again before each worktree it
-adds. A directory above the scratch directory that another user owns is
-trusted. The default `/tmp` is sticky and root's, and passes. Where root's
-directories read as another id, as in a user namespace that maps the pushing
-user alone, such a `/tmp` is refused and a `TMPDIR` the user owns passes. CI
+steps that name them. It also refuses a directory there whose path passes
+through a link that such a user owns in a directory its group or every user
+can write, a sticky one included, since that user can replace the link. It
+reads the statuses again before each worktree it adds. A directory above the
+scratch directory that another user owns is trusted, and with it a link in a
+directory that only its owner can write. The default `/tmp` is sticky and
+root's, and passes. Where root's directories read as another id, as in a user
+namespace that maps the pushing user alone, such a `/tmp` is refused and a
+`TMPDIR` the user owns passes. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's and the host stop
@@ -1572,7 +1576,7 @@ writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
 the worktree; 2 is every other refusal before the checks, printed as
 `pre-push: ` and its text: a scratch directory that another user can reach
-by ownership or a write bit, as stated above, a malformed ref
+by ownership, a write bit or a link, as stated above, a malformed ref
 line, a Git read that exits
 nonzero where the read is not a presence test (Git's own text), Git output
 that is not UTF-8, a tree entry or a raw diff record of a form Git's manual

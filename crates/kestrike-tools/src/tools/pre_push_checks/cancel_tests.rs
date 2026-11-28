@@ -495,3 +495,41 @@ fn a_record_outranks_every_result_of_the_scratch_parent_s_read() {
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700))
         .expect("the mode is restored");
 }
+
+/// The scratch check judges the parent's owner and each link on the way for the user it is given. Read
+/// for the user who made them, a private directory and a link to it in a sticky directory that others
+/// can write both pass. Read for another user, the directory is refused as another user's, and the link
+/// is refused first, by its own path.
+#[test]
+fn the_scratch_check_judges_the_parent_and_each_link_for_the_user_it_is_given() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::super::worktree::{Exposure, Unusable, judged};
+    let _serial = serial();
+    let scratch = crate::paths::tests::Scratch::new("scratch-user");
+    let shared = scratch.0.join("shared");
+    let (private, link) = (shared.join("private"), shared.join("own"));
+    std::fs::create_dir_all(&private).expect("the directories are made");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+        .expect("the mode is set");
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777))
+        .expect("the mode is set");
+    std::os::unix::fs::symlink("private", &link).expect("the link is made");
+    let me = crate::ownership::real_uid();
+    for path in [&private, &link] {
+        assert_eq!(judged(path.as_os_str(), me), Ok(path.clone()));
+    }
+    if me == 0 {
+        return;
+    }
+    for (path, exposure) in [(&private, Exposure::Owned), (&link, Exposure::Linked)] {
+        assert_eq!(
+            judged(path.as_os_str(), me + 1),
+            Err(Unusable::Exposed {
+                parent: path.clone(),
+                at: path.clone(),
+                exposure
+            })
+        );
+    }
+}

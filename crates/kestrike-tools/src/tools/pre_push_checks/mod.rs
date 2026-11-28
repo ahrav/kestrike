@@ -4,7 +4,8 @@
 //! takes its first argument as the name of the remote the push goes to and ignores later ones. Before it
 //! reads standard input it refuses a scratch directory, `TMPDIR` or `/tmp`, that a user other than its
 //! real user and root owns, or where the group or other users can write it or a directory its path is
-//! reached through while that directory has no sticky bit. It then reads
+//! reached through while that directory has no sticky bit, or whose path passes through a link that such a
+//! user owns in a directory its group or other users can write. It then reads
 //! standard input whole, decodes it as UTF-8 with each other byte kept as a surrogate, and splits it into
 //! lines, and refuses the input before any Git read where a line's local or remote field is no full
 //! object id. [`Plan`] decides each line's checks, scans and guarded records; the tool then runs the
@@ -18,7 +19,8 @@
 //! for Git that cannot start for the worktree's removal by the line `pre-push: could not remove worktree
 //! <tree>: git: <error>`; a guarded chaos record that is missing or not JSON is a failure listed at the
 //! end with the failed checks. 2 is every other refusal before the checks, named by a `pre-push: ` line:
-//! a scratch directory that another user can reach by ownership or a write bit, a malformed ref line, a
+//! a scratch directory that another user can reach by ownership, a write bit or a link, a malformed ref
+//! line, a
 //! Git read that exits nonzero where the read is not a presence test, Git output
 //! that is not UTF-8, a tree entry or a raw diff record of a form Git's manual does not give,
 //! and a `git worktree add` that exits nonzero, which exits 1
