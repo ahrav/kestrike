@@ -14,12 +14,13 @@ use kestrike_tools::host_stop::{
     AWS, Call, CallFailed, Delivered, Ended, Failure, Interrupted, Record, SLICE, Signal, launch,
 };
 
-use super::{Scratch, first_start, gone, starts};
+use super::{PLACE, ROLE, Scratch, first_start, gone, no_marker, passed, start_window, starts};
 
 /// The stand-in `aws`: it writes its process id to `$HOST_STOP_PID`, then acts as `$HOST_STOP_MODE`
 /// names. It uses shell builtins and programs named by their absolute paths alone, since its `PATH`
 /// holds its own directory alone.
 pub(super) const STANDIN: &str = r#"#!/bin/sh
+[ "$HOST_STOP_MODE" = hang ] && trap '' TERM INT HUP
 echo $$ >> "$HOST_STOP_PID"
 case "$HOST_STOP_MODE" in
   echo)
@@ -35,7 +36,8 @@ case "$HOST_STOP_MODE" in
     echo '{}'
     exit 254 ;;
   killed) printf 'dying\n' >&2; kill -KILL $$ ;;
-  hang) trap '' TERM INT HUP; exec /bin/sleep 5 ;;
+  hang) exec /bin/sleep 5 ;;
+  late) /bin/sleep 0.4; echo '{}' ;;
   gate) while [ ! -e "$HOST_STOP_PID.go" ]; do :; done; echo '{}' ;;
   invalid) printf '\377' ;;
   invalid-error) printf '\377' >&2; echo '{}' ;;
@@ -55,7 +57,7 @@ case "$HOST_STOP_MODE" in
     printf 'a\r\nEND\n' >&2
     exit 254 ;;
   group) read -r stat < /proc/$$/stat; set -- $stat; printf '%s' "$5" ;;
-  orphan) /bin/sleep 4 & echo '{}' ;;
+  orphan) /bin/sleep 4 & echo $! > "$HOST_STOP_PID.orphan"; echo '{}' ;;
   status) exec /bin/cat /proc/self/status ;;
 esac
 "#;
@@ -218,7 +220,19 @@ fn a_child_that_exits_other_than_0_is_a_failed_call_with_its_code() {
         &call(&argv, true, Duration::from_secs(5), &env),
     ));
     assert_eq!(message, "ec2 describe-instances exited -9: dying");
-    assert_eq!(standin.started().len(), 2, "one call starts one child");
+    let env = standin.env("fail");
+    let stop = ["ec2", "stop-instances", "--instance-ids", "i-h1"];
+    let message = failed(launch(
+        &mut record,
+        &call(&stop, false, Duration::from_secs(5), &env),
+    ));
+    assert_eq!(
+        message,
+        format!("ec2 stop-instances exited 254: {}END", "x".repeat(397))
+    );
+    let pids = standin.started();
+    assert_eq!(pids.len(), 3, "one call starts one child");
+    assert!(pids.iter().all(|&pid| gone(pid)));
 }
 
 /// A child past its cut gets SIGKILL and is reaped before the call returns a failed call, within a
@@ -271,6 +285,31 @@ fn a_child_whose_output_stays_open_is_cut() {
         elapsed < Duration::from_secs(2),
         "the call ends at its cut, not at the output's close: {elapsed:?}"
     );
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
+    let orphan = fs::read_to_string(standin.pid.with_extension("orphan"))
+        .expect("the stand-in names its descendant");
+    let status = Command::new("/bin/kill")
+        .args(["-KILL", orphan.trim()])
+        .status()
+        .expect("kill starts");
+    assert!(status.success(), "the descendant is ended");
+}
+
+#[test]
+fn a_child_that_answers_after_its_cut_gives_no_answer() {
+    let standin = Standin::new("launch-late");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let env = standin.env("late");
+    let cut = Duration::from_millis(200);
+    let message = failed(launch(&mut record, &call(&IDENTITY, true, cut, &env)));
+    assert_eq!(
+        message,
+        "sts get-caller-identity gave no answer: timed out after 200ms"
+    );
+    let pids = standin.started();
+    assert_eq!(pids.len(), 1, "one call starts one child");
+    assert!(pids.iter().all(|&pid| gone(pid)));
 }
 
 /// A signal delivered to an armed record ends the wait at the next slice: the child gets SIGKILL and is
@@ -306,6 +345,7 @@ fn a_signal_that_may_raise_ends_the_wait() {
     assert_eq!(standin.started(), [pid], "one call starts one child");
     assert!(!record.is_armed());
     assert_eq!(record.pending(), None);
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
 }
 
 /// A signal that may raise before the call raises at once and starts no process; a signal the record
@@ -331,7 +371,7 @@ fn a_signal_before_the_call_starts_no_process_and_an_unarmed_one_waits() {
         &call(&IDENTITY, true, Duration::from_secs(5), &env),
     );
     assert_eq!(ended, Err(Ended::Interrupted(Interrupted(Signal::Hangup))));
-    assert!(!standin.pid.exists(), "no process started");
+    no_marker(&standin.pid);
 }
 
 /// `aws` is found on the given `PATH` alone, in order, as an executable regular file. With none there,
@@ -384,10 +424,7 @@ fn no_aws_on_the_path_starts_no_process() {
             "sts get-caller-identity gave no answer: no directory of PATH holds an executable aws",
             "{paths:?}"
         );
-        assert!(
-            standin.started().is_empty(),
-            "{paths:?}: no process started"
-        );
+        no_marker(&standin.pid);
     }
     for paths in [
         vec![joined(&[&standin.bin]), joined(&[&empty])],
@@ -398,8 +435,13 @@ fn no_aws_on_the_path_starts_no_process() {
         let reply = launch(
             &mut record,
             &call(&IDENTITY, true, Duration::from_secs(5), &env),
+        )
+        .unwrap_or_else(|ended| panic!("{paths:?}: {ended:?}"));
+        let first = paths[0].to_str().expect("a UTF-8 PATH");
+        assert!(
+            reply.contains(&format!("|{first}|/dev/null|")),
+            "the child gets the first PATH: {reply}"
         );
-        assert!(reply.is_ok(), "{paths:?}: {reply:?}");
     }
     assert_eq!(standin.started().len(), 3, "one call starts one child");
 }
@@ -436,7 +478,7 @@ fn an_aws_the_kernel_refuses_is_a_failed_start() {
             "{dir}"
         );
     }
-    assert!(standin.started().is_empty(), "no process started");
+    no_marker(&standin.pid);
 }
 
 #[test]
@@ -500,6 +542,7 @@ fn a_child_that_floods_standard_error_still_answers() {
         &call(&IDENTITY, true, Duration::from_secs(20), &env),
     ));
     assert_eq!(message, "sts get-caller-identity exited 254: refused");
+    assert_eq!(standin.started().len(), 3, "one call starts one child");
 }
 
 /// Both outputs decode as UTF-8 before the exit code is read: standard error other than UTF-8 fails
@@ -521,6 +564,7 @@ fn either_output_other_than_utf8_gives_no_answer_whatever_the_code() {
             "{mode}: {message}"
         );
     }
+    assert_eq!(standin.started().len(), 3, "one call starts one child");
 }
 
 /// The tail of a failed call counts characters of the decoded text, whose `\r\n` reads as `\n`.
@@ -540,6 +584,7 @@ fn the_tail_of_a_failed_call_counts_characters_after_newline_translation() {
         message,
         format!("sts get-caller-identity exited 254: {tail}")
     );
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
 }
 
 /// The child stays in the tool's process group.
@@ -558,6 +603,7 @@ fn the_child_stays_in_the_process_group_of_the_tool() {
     let after = own.rsplit_once(") ").expect("a stat line").1;
     let own_group = after.split(' ').nth(2).expect("the process group");
     assert_eq!(group, own_group);
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
 }
 
 /// A test's seam builds a failed call through the public constructors: the two words are the first two
@@ -614,4 +660,49 @@ fn a_signal_before_the_child_ends_raises_in_place_of_its_answer() {
     );
     assert!(!record.is_armed());
     assert_eq!(record.pending(), None);
+    assert_eq!(standin.started().len(), 1, "one call starts one child");
+}
+
+const EMPTY_CASE: &str = "host_stop::launch::an_empty_path_entry_names_the_working_directory";
+
+#[test]
+fn an_empty_path_entry_names_the_working_directory() {
+    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        let bin = Path::new(&place);
+        let pid = bin
+            .parent()
+            .expect("the stand-in's directory has a parent")
+            .join("pid");
+        let delivered = Delivered::new();
+        let mut record = Record::new(&delivered);
+        for path in ["", ":/nonexistent"] {
+            let env: Vec<(OsString, OsString)> = [
+                ("PATH", OsString::from(path)),
+                ("HOST_STOP_MODE", OsString::from("echo")),
+                ("HOST_STOP_PID", pid.clone().into_os_string()),
+            ]
+            .into_iter()
+            .map(|(name, value)| (OsString::from(name), value))
+            .collect();
+            let reply = launch(
+                &mut record,
+                &call(&IDENTITY, true, Duration::from_secs(5), &env),
+            )
+            .unwrap_or_else(|ended| panic!("{path:?}: {ended:?}"));
+            assert!(reply.contains(&format!("|{path}|/dev/null|")), "{reply}");
+        }
+        assert_eq!(starts(&pid).len(), 2, "one call starts one child");
+        return;
+    }
+    let standin = Standin::new("launch-empty");
+    let output = start_window(
+        EMPTY_CASE,
+        "empty",
+        &standin.bin,
+        "cd \"$HOST_STOP_PLACE\" &&",
+    )
+    .output()
+    .expect("the window starts");
+    passed("empty", &output);
+    assert_eq!(standin.started().len(), 2, "the window ran its calls");
 }

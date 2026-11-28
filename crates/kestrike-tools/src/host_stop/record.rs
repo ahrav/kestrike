@@ -133,9 +133,9 @@ impl<'a> Record<'a> {
         self.delivered.stored()
     }
 
-    /// `read` preserves the record's state when the record is held or disarmed. Otherwise, `read` takes
-    /// the stored signal and disarms the record. Taking the signal frees `Delivered` to accept a later
-    /// delivery.
+    /// `read` raises only when the record is armed, not held, and holds a stored signal: it takes the
+    /// signal and disarms the record. Every other read preserves the record's state. Taking the signal
+    /// frees `Delivered` to accept a later delivery.
     ///
     /// # Errors
     ///
@@ -207,19 +207,21 @@ impl<'a> Record<'a> {
 /// `install` returns the first error from `ignored` or `register`.
 pub fn install(delivered: &'static Delivered) -> io::Result<()> {
     for signal in Signal::ALL {
-        if !ignored(signal)? {
+        if !ignored(signal.number())? {
             register(signal, delivered)?;
         }
     }
     Ok(())
 }
 
-fn ignored(signal: Signal) -> io::Result<bool> {
+/// Whether the disposition of the signal `number` is to ignore it.
+pub(super) fn ignored(number: i32) -> io::Result<bool> {
     // SAFETY: all-zero bytes are a valid `sigaction`. A null new action makes `sigaction` only write
-    // the current disposition into `current`, which outlives the call.
+    // the current disposition of `number`, a signal number the caller names, into `current`, which
+    // outlives the call.
     let (status, current) = unsafe {
         let mut current: libc::sigaction = std::mem::zeroed();
-        let status = libc::sigaction(signal.number(), std::ptr::null(), &mut current);
+        let status = libc::sigaction(number, std::ptr::null(), &mut current);
         (status, current)
     };
     if status != 0 {
@@ -232,11 +234,12 @@ fn register(signal: Signal, delivered: &'static Delivered) -> io::Result<()> {
     let number = signal.number();
     let action = move || delivered.deliver(signal);
     // SAFETY: each `sigset_t` is zeroed, then filled by `sigemptyset` or `pthread_sigmask`, and
-    // outlives the calls that use it. `SIG_BLOCK` defers delivery of `number` on this thread during
-    // `signal_hook::low_level::register`. Restoring `before` permits delivery of `number` on this
-    // thread if `before` leaves `number` unblocked. The `'static` reference keeps `delivered` valid
-    // for the handler's lifetime; `deliver` uses one atomic compare-exchange on an `AtomicI32`, which
-    // is async-signal-safe.
+    // outlives the calls that use it. `sigaddset` and `sigdelset` require `number` to be a valid
+    // signal number. `SIG_BLOCK` defers delivery of `number` on this thread during
+    // `signal_hook::low_level::register`. A successful `SIG_SETMASK` unblocks `number` regardless of
+    // the registration result and restores every other signal's prior mask setting.
+    // `delivered: &'static Delivered` keeps the handler's reference valid for its lifetime.
+    // `Delivered::deliver` must be async-signal-safe.
     unsafe {
         let mut blocked: libc::sigset_t = std::mem::zeroed();
         let mut before: libc::sigset_t = std::mem::zeroed();
@@ -247,7 +250,11 @@ fn register(signal: Signal, delivered: &'static Delivered) -> io::Result<()> {
             return Err(io::Error::from_raw_os_error(status));
         }
         let registered = signal_hook::low_level::register(number, action);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut());
+        libc::sigdelset(&mut before, number);
+        let restored = libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut());
+        if restored != 0 {
+            return Err(io::Error::from_raw_os_error(restored));
+        }
         registered.map(drop)
     }
 }

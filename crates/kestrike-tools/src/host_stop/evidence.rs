@@ -35,11 +35,11 @@ pub fn lock(files: &impl Files, directory: &Path) -> Result<Lock, LockError> {
         .map_err(LockError::Open)?;
     loop {
         match files.try_lock(&held) {
+            Ok(()) => return Ok(Lock { _held: held }),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            taken => break taken.map_err(LockError::Taken)?,
+            Err(error) => return Err(LockError::Taken(error)),
         }
     }
-    Ok(Lock { _held: held })
 }
 
 /// Why `root` cannot hold a mark: it takes no file without a name, or the `/proc/self/fd` path of

@@ -6,6 +6,8 @@
 //! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
 
 use std::io::{self, Write};
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 
 use sha2::{Digest, Sha256};
 
@@ -249,6 +251,14 @@ pub fn hexdigest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+pub fn returncode(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| -signal))
+        .or_else(|| status.stopped_signal().map(|signal| -signal))
+        .expect("a waited child exited, or a signal ended or stopped it")
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::{Child, Stdio};
@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kestrike_tools::host_stop::{Disk, Step, Unwritten, publish, sync_directory};
+use kestrike_tools::text::Text;
 
 use super::{Fault, MARKER_LIMIT, Observed, PLACE, ROLE, Scratch, listing, passed, start_window};
 
@@ -34,6 +35,17 @@ fn bytes_of(mark: &str) -> Vec<u8> {
         "x".repeat(300)
     )
     .into_bytes()
+}
+
+fn linked_inode(files: &Observed, path: &Path) {
+    let entry = fs::symlink_metadata(path).expect("the mark stands");
+    assert!(entry.file_type().is_file(), "{}", path.display());
+    assert_eq!(
+        Some((entry.dev(), entry.ino())),
+        *files.unnamed.borrow(),
+        "the name holds the unnamed file itself"
+    );
+    assert_eq!(entry.nlink(), 1);
 }
 
 fn umask() -> u32 {
@@ -90,12 +102,7 @@ fn each_mark_is_synced_linked_synced_again_and_its_directory_synced() {
         assert_eq!(listing(&directory), [file_name(mark)]);
         let path = directory.join(file_name(mark));
         assert_eq!(fs::read(&path).expect("the mark reads"), bytes_of(mark));
-        let mode = fs::metadata(&path)
-            .expect("the mark stands")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o644 & !umask());
+        linked_inode(&files, &path);
     }
 }
 
@@ -349,7 +356,6 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                         (error.raw_os_error(), removal.raw_os_error()),
                         (Some(libc::EIO), Some(libc::EACCES))
                     );
-                    assert!(failed.stands());
                     assert_eq!(
                         sentence,
                         format!(
@@ -362,6 +368,7 @@ fn a_failed_sync_after_the_link_removes_the_mark_and_names_what_holds() {
                         fs::read(directory.join(&name)).expect("reads"),
                         bytes_of(mark)
                     );
+                    linked_inode(&files, &directory.join(&name));
                 }
                 (case, other) => panic!("{mark} {case}: {other:?}"),
             }
@@ -656,8 +663,13 @@ const MODE_CASE: &str = "host_stop::marks::a_mark_has_mode_0644_under_an_umask_o
 /// bit.
 #[test]
 fn a_mark_has_mode_0644_under_an_umask_of_0() {
-    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
-        assert_eq!(umask(), 0);
+    if let (Some(window), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        let (mask, expected) = if window == "077" {
+            (0o77, 0o600)
+        } else {
+            (0, 0o644)
+        };
+        assert_eq!(umask(), mask);
         for mark in MARKS {
             let path = Path::new(&place).join(file_name(mark));
             publish(
@@ -668,20 +680,23 @@ fn a_mark_has_mode_0644_under_an_umask_of_0() {
             )
             .expect("the mark is written");
             let mode = fs::metadata(&path).expect("stands").permissions().mode() & 0o777;
-            assert_eq!(mode, 0o644, "{mark}");
+            assert_eq!(mode, expected, "{mark}");
         }
         return;
     }
     let scratch = Scratch::new("marks-mode");
-    let output = start_window(MODE_CASE, "mode", &scratch.0, "umask 000;")
-        .output()
-        .expect("the window starts");
-    passed("mode", &output);
-    assert_eq!(
-        listing(&scratch.0).len(),
-        MARKS.len(),
-        "the window wrote each mark"
-    );
+    for mask in ["000", "077"] {
+        let place = scratch.dir(mask);
+        let output = start_window(MODE_CASE, mask, &place, &format!("umask {mask};"))
+            .output()
+            .expect("the window starts");
+        passed(mask, &output);
+        assert_eq!(
+            listing(&place).len(),
+            MARKS.len(),
+            "the window wrote each mark"
+        );
+    }
 }
 
 /// The sentence renders the invalid UTF-8 byte `0xff` as `\udcff` in both the full path and the
@@ -691,24 +706,63 @@ fn a_sentence_keeps_a_path_byte_other_than_utf8() {
     let scratch = Scratch::new("marks-bytes");
     let directory = scratch.0.join(OsStr::from_bytes(b"evidence-\xff"));
     fs::create_dir(&directory).expect("the directory is made");
-    let files = Observed::failing(&[Fault {
+    let sync = Fault {
         step: "fsync",
         nth: 2,
         errno: libc::EIO,
-    }]);
-    let failed = publish(
-        &files,
-        &directory,
-        OsStr::new("stop.json"),
-        &bytes_of("stop"),
-    )
-    .expect_err("the planted sync fails");
-    let sentence = failed.sentence(&directory.join("stop.json")).to_string();
-    assert!(
-        sentence.contains("evidence-\\udcff/stop.json cannot be synced"),
-        "{sentence}"
-    );
-    assert!(!sentence.contains('\u{fffd}'), "{sentence}");
+    };
+    for (faults, tail) in [
+        (
+            vec![sync],
+            "/stop.json cannot be synced, so the mark is removed",
+        ),
+        (
+            vec![
+                sync,
+                Fault {
+                    step: "fsync_directory",
+                    nth: 1,
+                    errno: libc::ENOSPC,
+                },
+            ],
+            "/stop.json cannot be synced (Input/output error), so it is removed",
+        ),
+        (
+            vec![
+                sync,
+                Fault {
+                    step: "unlink",
+                    nth: 1,
+                    errno: libc::EACCES,
+                },
+            ],
+            "/stop.json stands, but it cannot be synced",
+        ),
+    ] {
+        let files = Observed::failing(&faults);
+        let failed = publish(
+            &files,
+            &directory,
+            OsStr::new("stop.json"),
+            &bytes_of("stop"),
+        )
+        .expect_err("the planted sync fails");
+        let text = failed.sentence(&directory.join("stop.json"));
+        let path = Text::from_os(directory.join("stop.json").as_os_str());
+        assert!(text.code_points().any(|code| code == 0xdcff), "{text:?}");
+        assert_eq!(
+            text.to_os().expect("the sentence encodes").as_bytes()[..path.len()],
+            *directory.join("stop.json").as_os_str().as_bytes(),
+            "the sentence begins with the path's own bytes"
+        );
+        let sentence = text.to_string();
+        assert!(
+            sentence.contains(&format!("evidence-\\udcff{tail}")),
+            "{sentence}"
+        );
+        assert!(!sentence.contains('\u{fffd}'), "{sentence}");
+        let _ = fs::remove_file(directory.join("stop.json"));
+    }
     let files = Observed {
         stall: Some(1),
         ..Observed::default()

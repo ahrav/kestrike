@@ -131,7 +131,7 @@ fn step(args: &[&OsStr]) -> Text {
 }
 
 /// `code` is the exit code, or the negated number of the signal that ended the call.
-pub(crate) fn code(status: ExitStatus) -> i32 {
+fn code(status: ExitStatus) -> i32 {
     match (status.code(), status.signal()) {
         (Some(code), _) => code,
         (None, Some(signal)) => -signal,

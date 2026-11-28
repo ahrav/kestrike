@@ -63,8 +63,9 @@ pub trait Files {
         linkat(file, directory, name)
     }
 
-    /// `unlink(2)` of `/proc/self/fd/<directory>/<name>`, the name in the directory the descriptor
-    /// holds. `Path::join` puts an absolute `name` in place of the directory's path.
+    /// `unlink(2)` of `/proc/self/fd/<directory>` joined with `name`. `Path::join` puts an absolute
+    /// `name` in place of the directory's path. During path resolution, each `..` selects the parent of
+    /// the directory reached at that component.
     fn unlink(&self, directory: &File, name: &OsStr) -> io::Result<()> {
         fs::remove_file(proc_path(directory).join(name))
     }
