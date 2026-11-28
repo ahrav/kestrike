@@ -1393,17 +1393,26 @@ change. A skipped proof lane is not proof credit.
 
 ## Pre-push checks
 
-With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` runs
-`bash scripts/tool.sh pre-push-checks REMOTE` with Git's ref lines on standard
-input, then the user-wide hook. The tool `pre-push-checks` runs the checks
+With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` reads
+Git's ref lines from its standard input once and holds them in the shell,
+its only copy of them. It runs `bash scripts/tool.sh pre-push-checks REMOTE` and then
+the user-wide hook, each with those bytes on its standard input through a
+pipe. An exit status of the tool other than 0 ends the hook with that status
+before the user-wide hook starts, and the user-wide hook's exit status is the
+hook's. A reader that exits before it has read the lines decides with its
+exit status as one that read them, and a signal that ends the hook's writer
+of the lines fails the push. Before it starts the tool, the hook refuses with
+exit 2 an input that holds a NUL byte, which Git writes in none of its ref
+lines, and with exit 1 an input whose read ends before the input does. The tool
+`pre-push-checks` runs the checks
 `AGENTS.md` requires before a push, each in a worktree of the pushed tip that
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
 commit pushed under a new name included. A failed check blocks the push. The
-tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
+tool trusts the directory `TMPDIR` names
 as the pushing user's: where another user can rename entries in it, as in a
 directory writable by others without the sticky bit, that user can swap
-either between the steps that name it. The default `/tmp` is sticky. CI
+a worktree between the steps that name it. The default `/tmp` is sticky. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's and the host stop

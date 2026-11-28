@@ -1,9 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
-refs=$(mktemp "${TMPDIR:-/tmp}/kestrike-pre-push.XXXXXX")
-trap 'rm -f "$refs"' EXIT
-cat > "$refs"
-bash "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/tool.sh" pre-push-checks "${1-}" < "$refs"
+
+# The hook holds Git's ref lines in the shell variable `refs`, its only copy of them. `unset` drops a
+# `refs` of the hook's own environment, so the lines stay in this shell alone and each program it starts
+# gets the environment without them. `read` takes bytes up to the first NUL byte or the end of standard
+# input. In the C locale it takes each byte as it stands, and with `TMOUT=0` it waits for the end of the
+# input however long that takes. Exit status 0 means it met a NUL byte, which Git writes in none of its
+# ref lines. Exit status 1 with `refs` set means it reached the end of the input with every byte in
+# `refs`, a final line feed or its absence included. A read error leaves `refs` unset.
+unset refs
+status=0
+LC_ALL=C TMOUT=0 IFS= read -r -d '' refs || status=$?
+if [ "$status" -eq 0 ]; then
+  echo "pre-push: standard input holds a NUL byte" >&2
+  exit 2
+fi
+if [ "$status" -ne 1 ] || [ -z "${refs+read}" ]; then
+  echo "pre-push: standard input could not be read to its end" >&2
+  exit 1
+fi
+
+# `send` writes the ref lines to its standard output from a subshell, so the reader of a pipeline gets
+# the bytes of `refs` on its standard input. A reader that closes the pipe before the last byte ends the
+# write, and the subshell still exits 0: the reader's exit status then decides the pipeline's. A subshell
+# that a signal ends gives the pipeline that signal's status.
+send() (
+  trap '' PIPE
+  printf '%s' "$refs" 2>&- || :
+)
+
+send | bash "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/tool.sh" pre-push-checks "${1-}"
 status=0
 hook_dir=$(git config --global --includes --path --get core.hooksPath) || status=$?
 if [ "$status" -eq 1 ]; then
@@ -20,5 +46,5 @@ if [ "$hook_dir/pre-push" -ef "$0" ]; then
   exit 2
 fi
 status=0
-"$hook_dir/pre-push" "$@" < "$refs" || status=$?
+send | "$hook_dir/pre-push" "$@" || status=$?
 exit "$status"
