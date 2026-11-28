@@ -44,13 +44,13 @@ impl std::error::Error for Failure {}
 
 /// `argument` is `text` as a Git argument. The texts the plan passes to Git are read from bytes or from
 /// Git's UTF-8 output, so each encodes as bytes.
-pub(super) fn argument(text: &Text) -> OsString {
+pub(crate) fn argument(text: &Text) -> OsString {
     text.to_os()
         .expect("a text read from bytes encodes as those bytes")
 }
 
 /// `short` writes the first twelve code points of `commit`.
-pub(super) fn short(commit: &Text) -> String {
+pub(crate) fn short(commit: &Text) -> String {
     Text::from_code_points(commit.code_points().take(12))
         .expect("a prefix of a text holds its code points")
         .to_string()

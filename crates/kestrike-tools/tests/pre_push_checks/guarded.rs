@@ -337,7 +337,24 @@ fn a_new_branch_without_origin_main_guards_the_chaos_records_of_its_tip() {
 
 #[test]
 fn the_recorded_run_is_a_record_the_pre_push_hook_guards() {
-    let record = "chaos/tests/runs/fixture-reach-live/run.json";
+    let reach =
+        fs::read_to_string(top().join("chaos/tests/test_reach.py")).expect("the reach suite reads");
+    let declared: Vec<&str> = reach
+        .lines()
+        .filter_map(|line| line.strip_prefix("RECORDED = TESTS / "))
+        .collect();
+    assert_eq!(declared.len(), 1, "the reach suite declares RECORDED once");
+    let mut record = String::from("chaos/tests");
+    for part in declared[0].split(" / ") {
+        let name = part
+            .strip_prefix('"')
+            .and_then(|part| part.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("{part} is a double-quoted name"));
+        record.push('/');
+        record.push_str(name);
+    }
+    record.push_str("/run.json");
+    let record = record.as_str();
     assert!(
         top().join(record).is_file(),
         "the checkout holds the recorded run at {record}"
@@ -349,4 +366,33 @@ fn the_recorded_run_is_a_record_the_pre_push_hook_guards() {
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     let line = failed(record, &head, REFUSED);
     assert!(run.stderr.contains(&line), "{line}: {}", run.stderr);
+    fx.git(&["rm", "-q", "--", record]);
+    fx.git(&["commit", "-q", "-m", "remove the record"]);
+    let clean = fx.git(&["rev-parse", "HEAD"]);
+    fx.clear();
+    let run = fx.push(&[(&clean, &base)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(run.stderr.contains(&line), "{line}: {}", run.stderr);
+}
+
+#[test]
+fn the_guard_s_failures_are_listed_before_the_checks_failures() {
+    let fx = Fixture::new();
+    let base = contract(&fx);
+    let head = fx.commit(&[("chaos/receipts/run/row.json", LEAK)]);
+    let run = fx.push_with(&[(&head, &base)], &[("validate_contract", 1)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let guard = run
+        .stderr
+        .find(&failed("chaos/receipts/run/row.json", &head, REFUSED))
+        .unwrap_or_else(|| panic!("the guard's failure is listed: {}", run.stderr));
+    let check = run
+        .stderr
+        .find("failed: python3 -I chaos/tools/validate_contract.py")
+        .unwrap_or_else(|| panic!("the check's failure is listed: {}", run.stderr));
+    let announced = run
+        .stderr
+        .find("python3 -I chaos/tools/validate_contract.py")
+        .expect("the check is announced");
+    assert!(announced < guard && guard < check, "{}", run.stderr);
 }

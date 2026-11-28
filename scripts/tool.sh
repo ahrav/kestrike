@@ -159,6 +159,6 @@ prepare() {
   printf '%s' "$top/target/tools/$host/debug/kestrike-tools"
 }
 
-set -- "$(prepare)" "$@"
+set -- "$(prepare < /dev/null)" "$@"
 [[ -n $1 ]] || exit 127
 exec "$1" "${1%/target/tools/*/debug/kestrike-tools}" "${@:2}"

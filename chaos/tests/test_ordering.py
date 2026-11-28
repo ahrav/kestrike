@@ -1163,6 +1163,9 @@ class Figure(unittest.TestCase):
                                     r"|(?<![0-9A-Za-z-])[0-9]{4}-[0-9]{4}-[0-9]{4}(?![0-9A-Za-z-])")
         self.assertTrue(account_number.search("a 123456789012 b"))
         self.assertTrue(account_number.search("account 1234-5678-9012"))
+        sample = '{"123456789012": ["role 1234-5678-9012", 123456789012, -7, 0.5, true, null], "k": "a", "k": "b"}'
+        self.assertEqual(sorted(decoded_values(sample)),
+                         ["-7", "123456789012", "123456789012", "a", "b", "k", "k", "role 1234-5678-9012"])
         for run_id in (LIVE, UNMET):
             tree = Tree(confidence=0.95123456789012)
             try:

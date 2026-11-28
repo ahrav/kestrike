@@ -1399,7 +1399,11 @@ input, then the user-wide hook. The tool `pre-push-checks` runs the checks
 `AGENTS.md` requires before a push, each in a worktree of the pushed tip that
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
-commit pushed under a new name included. A failed check blocks the push. CI
+commit pushed under a new name included. A failed check blocks the push. The
+tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
+as the pushing user's: where another user can rename entries in it, as in a
+directory writable by others without the sticky bit, that user can swap
+either between the steps that name it. The default `/tmp` is sticky. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's and the host stop
@@ -1506,7 +1510,12 @@ reads pathspecs with their magic whatever pathspec mode
 (`GIT_LITERAL_PATHSPECS` and its kin) the push set; the checks and the scan
 start in that environment too.
 
-Any other Rust change runs no worktree check here, although the census and
+Any other Rust change runs no worktree check here, with three exceptions: a
+tip whose Verus inventory is present but cannot be read as an object whose
+`sources` names paths runs reconciliation on any change, a tip whose links
+registry is present but cannot be read runs the links check on any change,
+and a changed Rust path that holds a line feed runs the selection and
+admission checks. The census and
 witness checks read production source and the intake checks of `admit` read
 the regression files, their crates' `Cargo.toml` and the module files on their
 paths, `narrate/rules.rs`, the history sources, the `site.path` file of each
@@ -1530,21 +1539,44 @@ guards that tip's chaos records. A deleted ref needs no check, and a blank
 line is skipped.
 
 The tool prints each failure as `pre-push: failed: FAILURE` at the end. Exit 0
-passes, 1 is a failed check, 2 a malformed ref line or a failed Git read
-(`pre-push: ` and Git's text), and 120 a failed write to standard error.
+passes; 1 is a failed check or a failed step of the tool's own (reading
+standard input, making or removing the worktree's directory, starting or
+waiting for a check, or starting Git), named by a `pre-push-checks: ` line or,
+for Git that cannot start for the worktree's removal, by the line that names
+the worktree; 2 is a malformed ref line, a Git command that exits nonzero
+(`pre-push: ` and Git's text) or signal handlers that cannot be installed; and
+120 is a failed write to standard error. A panic in the scan ends the tool
+with 101.
 
 The tool records the first of SIGTERM, SIGHUP and SIGINT that reaches it,
-whatever disposition it inherited, and reads the record between its steps
-and while it waits for a check. Each check leads a process group of its own.
-On a record the tool sends SIGKILL to the running check's group while the
-check's leader is its own child that it has not reaped, then reaps the leader;
-a leader already reaped gets no signal. It removes the worktree once, prints
-nothing more and exits `128 + n`. A Git read or the scan is not interrupted;
-the record is acted on when it returns, also when it failed. No check has a
-time limit.
+whatever disposition or mask it inherited: it blocks the three while it
+installs their handlers, then unblocks them, and it sets SIGCHLD to its
+default disposition before it starts any child. It reads the record after
+reading standard input, after each ref line's plan, after each scan, after the
+guard, and while it waits for `git worktree add` or a check. Each check,
+`git worktree add` and `git worktree remove` leads a process group of its own.
+On a record the tool sends SIGKILL to the group of the running check or add
+while its leader is the tool's own child that it has not reaped, a leader that
+ended and waits for its reap included, then reaps the leader; a leader already
+reaped gets no signal. It removes the worktree once, and the removal runs to
+its end, since a signal to the tool's process group does not reach it. It
+prints only a failed removal and a check whose SIGKILL or reap failed, and
+exits `128 + n`. The read of standard input, the Git reads of one ref line's
+plan or of the guard, and the scan are not interrupted; the record is acted on
+when they return, also when they failed, so a tool started by hand with a
+pipe or a terminal on standard input waits for that input to end. No check
+has a time limit. On Linux the group's SIGKILL also reaches a process that a
+member of the group forks while it is delivered; on other systems such a
+process can run on.
 
 No handler covers a signal that never reaches the tool. Git starts the hook
-in a process group of its own and signals no group. Dying of a signal, Git
+in Git's own process group and signals no group. At a terminal, the
+terminal's signals reach Git, the hook's bash, the tool and the tool's Git
+reads, and not a check or the worktree's add or removal, each of which leads a
+group of its own: the terminal's SIGINT reaches the tool, which stops the
+check as above, while its SIGQUIT ends the tool and leaves the running check
+and its worktree, its SIGTSTP stops the tool and not the check, and under
+`stty tostop` a check that writes to the terminal stops. Dying of a signal, Git
 2.50.1 to 2.53 signals no hook process (run on 2.50.1), and Git 2.54.0 to
 2.56.1 signals the hook's own process id alone (read in Git's
 `run-command.c`). The hook's bash then dies, or waits on SIGINT, and the tool

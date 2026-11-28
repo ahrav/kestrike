@@ -5,6 +5,15 @@
 //! while a name is taken. On every way out of [`run_checks`] after the directory is made,
 //! `git worktree remove --force --force` runs once, the second `--force` removing a worktree that a killed
 //! `git worktree add` left locked, and then the directory is removed if it still stands.
+//!
+//! The tool assumes the invoking user controls the worktree's parent directory. Where another user can
+//! rename entries in that parent, as in one writable by others without the sticky bit, that user can swap
+//! the worktree's directory between the steps that name it.
+//!
+//! `git worktree add` and `git worktree remove` each lead a process group of their own, so a signal sent to
+//! the tool's process group reaches them only through the tool. A recorded cancellation signal causes the
+//! tool to stop `git worktree add` as it would a running check. The tool waits for `git worktree remove`
+//! to finish.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, File};
@@ -13,19 +22,25 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::thread;
 
 use crate::environ::Environ;
 use crate::git::{self, GitError};
-use crate::hook::Check;
-use crate::text::Text;
+use crate::hook::{Check, Failure, argument, short};
+use crate::text::{Text, strip_str};
 
 use super::cancel::{self, Unwaited};
-use super::{Exit, NAME, fail, os, say, short};
+use super::{Exit, NAME, fail, refused, say};
 
 const PREFIX: &str = "kestrike-pre-push-";
 const LETTERS: &[u8; 37] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
 const NAME_LENGTH: usize = 8;
 const NAME_ATTEMPTS: usize = 10_000;
+
+#[cfg(test)]
+#[path = "worktree_tests.rs"]
+mod tests;
 
 /// How the checks of a tip ended before their last one returned.
 enum Ended {
@@ -53,7 +68,8 @@ enum Ended {
 /// The exit code where the push ends here: `128 + n` for a recorded signal, after a line that names the
 /// running check where it could not be stopped or reaped, 120 for a failed write to
 /// standard error, 2 for a failed `git worktree add`, and 1 where the directory cannot be made or
-/// removed or a check cannot be started or waited on.
+/// removed, if starting or waiting for a check fails, or if Git fails to start for `git worktree add` or
+/// `git worktree remove`.
 pub(super) fn run_checks(
     environ: &Environ,
     tip: &Text,
@@ -73,26 +89,27 @@ pub(super) fn run_checks(
         _ => Ok(()),
     };
     if let Err(Ended::Unstopped(code, message)) = &ran {
-        return Err(fail(&format!("{NAME}: {message}"), *code));
+        let _ = say(&format!("{NAME}: {message}"));
+        return Err(*code);
     }
     cancel::check()?;
+    let unstarted = matches!(removed?, Removal::Unstarted);
     let failures = match ran {
-        Ok(failures) => {
-            removed?;
-            failures
-        }
+        Ok(failures) => failures,
         Err(Ended::Cancelled(code) | Ended::Stream(code) | Ended::Unstopped(code, _)) => {
             return Err(code);
         }
         Err(Ended::Git(error)) => {
-            removed?;
-            return Err(fail(&format!("pre-push: {error}"), 2));
+            let code = refused(&Failure::Git(error));
+            return Err(if unstarted && code == 2 { 1 } else { code });
         }
         Err(Ended::Fault(message)) => {
-            removed?;
             return Err(fail(&format!("{NAME}: {message}"), 1));
         }
     };
+    if unstarted {
+        return Err(1);
+    }
     if let Err(error) = cleared {
         return Err(fail(&format!("{NAME}: {}: {error}", shown(&tree)), 1));
     }
@@ -107,19 +124,7 @@ fn checks_in(
     checks: &[Check],
 ) -> Result<Vec<String>, Ended> {
     cancel::check().map_err(Ended::Cancelled)?;
-    let added = git::git(
-        environ,
-        &[
-            OsStr::new("worktree"),
-            "add".as_ref(),
-            "--quiet".as_ref(),
-            "--detach".as_ref(),
-            tree.as_os_str(),
-            &os(tip),
-        ],
-    );
-    cancel::check().map_err(Ended::Cancelled)?;
-    added.map_err(Ended::Git)?;
+    add(environ, tree, tip)?;
     let mut failures = Vec::new();
     for check in checks {
         cancel::check().map_err(Ended::Cancelled)?;
@@ -147,9 +152,62 @@ fn checks_in(
     Ok(failures)
 }
 
-/// `remove` runs `git worktree remove --force --force` on `tree` and prints
-/// `pre-push: could not remove worktree <tree>: <Git's standard error>` when it fails.
-fn remove(environ: &Environ, tree: &Path) -> Result<(), Exit> {
+fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
+    let tip = argument(tip);
+    let args = [
+        OsStr::new("worktree"),
+        "add".as_ref(),
+        "--quiet".as_ref(),
+        "--detach".as_ref(),
+        tree.as_os_str(),
+        &tip,
+    ];
+    let mut child = git::command(environ, "git")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|error| Ended::Git(GitError::Start(error)))?;
+    let drained = child.stderr.take().map(|mut stream| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+            bytes
+        })
+    });
+    let status = cancel::wait(&mut child).map_err(|unwaited| match unwaited {
+        Unwaited::Cancelled(code) => Ended::Cancelled(code),
+        Unwaited::Unstopped(code, error) => Ended::Unstopped(code, format!("git: {error}")),
+        Unwaited::Failed(error) => Ended::Git(GitError::Start(error)),
+    })?;
+    if status.success() {
+        return Ok(());
+    }
+    let stderr = drained
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    Err(Ended::Git(GitError::Failed(format!(
+        "{}: {}",
+        git::label(&args),
+        strip_str(&String::from_utf8_lossy(&stderr))
+    ))))
+}
+
+enum Removal {
+    Removed,
+    /// Git returned an unsuccessful status, and `remove` reported the failure for `tree`.
+    Refused,
+    /// Starting or waiting for Git failed, and `remove` reported the failure for `tree`.
+    Unstarted,
+}
+
+/// `remove` runs `git worktree remove --force --force` on `tree` in its own process group, and prints
+/// `pre-push: could not remove worktree <tree>: <reason>` when it fails. `remove` converts CRLF and CR in
+/// Git's standard error to LF; for an error starting or waiting for Git it formats
+/// `GitError::Start(error)`. It trims either reason before printing.
+fn remove(environ: &Environ, tree: &Path) -> Result<Removal, Exit> {
     let args = [
         OsStr::new("worktree"),
         "remove".as_ref(),
@@ -157,16 +215,26 @@ fn remove(environ: &Environ, tree: &Path) -> Result<(), Exit> {
         "--force".as_ref(),
         tree.as_os_str(),
     ];
-    let reason = match git::output(environ, &args) {
-        Ok(output) if output.status.success() => return Ok(()),
-        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
-        Err(error) => error.to_string(),
+    let ran = git::command(environ, "git")
+        .args(args)
+        .process_group(0)
+        .output();
+    let (reason, removal) = match ran {
+        Ok(output) if output.status.success() => return Ok(Removal::Removed),
+        Ok(output) => (
+            String::from_utf8_lossy(&output.stderr)
+                .replace("\r\n", "\n")
+                .replace('\r', "\n"),
+            Removal::Refused,
+        ),
+        Err(error) => (GitError::Start(error).to_string(), Removal::Unstarted),
     };
     say(&format!(
         "pre-push: could not remove worktree {}: {}",
         shown(tree),
-        crate::text::strip_str(&reason)
-    ))
+        strip_str(&reason)
+    ))?;
+    Ok(removal)
 }
 
 /// `shown` writes `path` as a line names it, each byte outside UTF-8 as `\udcXX`.

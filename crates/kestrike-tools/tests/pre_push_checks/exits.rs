@@ -28,6 +28,7 @@ fn reporting(fx: &Fixture) -> String {
 }
 
 fn in_worktree(where_: &str, parent: &Path) {
+    let parent = fs::canonicalize(parent).expect("the parent resolves");
     let mut lines = where_.lines();
     let tree = lines.next().expect("the directory is logged");
     let name = tree
@@ -158,7 +159,7 @@ fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
         "pre-push: could not remove worktree {}/kestrike-pre-push-",
         fx.tmp.display()
     );
-    for code in [0, 1] {
+    for (pushes, code) in (1..).zip([0, 1]) {
         let run = fx.push_with(&[(&head, &fx.base)], &[("test_select_tests", code)]);
         assert_eq!(run.code, Some(code), "{}", run.stderr);
         let named: Vec<&str> = run
@@ -173,6 +174,11 @@ fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
             run.stderr
         );
         assert!(fx.left().is_empty(), "{:?}", fx.left());
+        assert_eq!(
+            fx.worktrees(),
+            1 + pushes,
+            "the refused worktree stays registered"
+        );
     }
     fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
     fx.git(&["worktree", "prune"]);
@@ -201,8 +207,8 @@ fn a_failed_write_to_standard_error_exits_120_before_any_check() {
         .expect("standard input is piped")
         .write_all(Fixture::input(&[(&head, &fx.base)]).as_bytes())
         .expect("the ref lines are written");
-    let status = child.wait().expect("the tool is reaped");
-    assert_eq!(status.code(), Some(120));
+    let status = finished(child);
+    assert_eq!(status.code, Some(120));
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
     assert!(fx.left().is_empty(), "{:?}", fx.left());
@@ -211,16 +217,17 @@ fn a_failed_write_to_standard_error_exits_120_before_any_check() {
 #[test]
 fn a_failed_read_of_standard_input_exits_1() {
     let fx = Fixture::new();
-    let output = fx
-        .command(BINARY)
+    let mut command = fx.command(BINARY);
+    command
         .arg(top())
         .args(["pre-push-checks", "origin"])
         .stdin(File::open(&fx.repo).expect("the directory opens"))
-        .output()
-        .expect("the tool runs");
-    assert_eq!(output.status.code(), Some(1));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = finished(command.spawn().expect("the tool starts"));
+    assert_eq!(output.code, Some(1));
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        output.stderr,
         "pre-push-checks: standard input: Is a directory (os error 21)\n"
     );
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
@@ -249,4 +256,128 @@ fn the_hook_s_empty_remote_name_reads_a_deletion_and_refuses_a_malformed_line() 
         assert_eq!(run.stderr, stderr, "{input:?}");
         assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     }
+}
+
+#[test]
+fn a_git_that_cannot_start_exits_1_before_any_check() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let empty = fx.temp.join("empty");
+    fs::create_dir(&empty).expect("the directory is made");
+    for ignored in [false, true] {
+        let mut command = fx.command("/bin/sh");
+        let trap = if ignored { "trap '' CHLD; " } else { "" };
+        command
+            .args(["-c", &format!("{trap}exec \"$0\" \"$@\""), BINARY])
+            .arg(top())
+            .args(["pre-push-checks", "origin", "url"])
+            .env("PATH", &empty);
+        let run = finished(spawn_with_input(
+            &mut command,
+            &Fixture::input(&[(&head, &fx.base)]),
+        ));
+        assert_eq!(run.code, Some(1), "{ignored}: {}", run.stderr);
+        assert_eq!(
+            run.stderr, "pre-push-checks: git: No such file or directory (os error 2)\n",
+            "{ignored}"
+        );
+        assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+        assert!(fx.left().is_empty(), "{:?}", fx.left());
+    }
+}
+
+#[test]
+fn a_tool_started_with_sigchld_ignored_reads_each_child_s_status() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    for code in [0, 1] {
+        fx.clear();
+        let mut command = fx.command("/bin/sh");
+        command
+            .args(["-c", "trap '' CHLD; exec \"$0\" \"$@\"", BINARY])
+            .arg(top())
+            .args(["pre-push-checks", "origin", "url"])
+            .env("STUB_TEST_SELECT_TESTS", code.to_string());
+        let run = finished(spawn_with_input(
+            &mut command,
+            &Fixture::input(&[(&head, &fx.base)]),
+        ));
+        assert_eq!(run.code, Some(code), "{}", run.stderr);
+        assert_eq!(
+            run.stderr
+                .contains("failed: python3 scripts/test-select-tests.py"),
+            code == 1,
+            "{}",
+            run.stderr
+        );
+        assert_eq!(
+            fx.ran(),
+            ["test-select-tests.py", "verify-receipts.py admit"]
+        );
+        assert_eq!(fx.worktrees(), 1);
+        assert!(fx.left().is_empty(), "{:?}", fx.left());
+    }
+}
+
+#[test]
+fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[
+        INVENTORY,
+        (
+            "scripts/test-select-tests.py",
+            &format!("# unlink-git\n{STUB}"),
+        ),
+    ]);
+    let tools = fx.temp.join("tools");
+    let linked = fx.temp.join("git-dir");
+    for dir in [&tools, &linked] {
+        fs::create_dir(dir).expect("the directory is made");
+    }
+    for program in [
+        "cat", "cut", "env", "grep", "head", "ls", "mv", "rm", "sed", "sleep", "tr",
+    ] {
+        symlink(which(program), tools.join(program)).expect("the link is made");
+    }
+    let link = linked.join("git");
+    symlink(which("git"), &link).expect("the link is made");
+    let path = fx
+        .env
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.clone())
+        .expect("the fixture sets PATH");
+    let mut searched = fx.bin.clone().into_os_string();
+    for dir in [&tools, &linked] {
+        searched.push(":");
+        searched.push(dir);
+    }
+    fx.set("PATH", searched);
+    fx.set("STUB_GIT_LINK", link.clone());
+    let run = fx.push(&[(&head, &fx.base)]);
+    fx.set("PATH", path);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let named = format!(
+        "pre-push: could not remove worktree {}/kestrike-pre-push-",
+        fx.tmp.display()
+    );
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the failure");
+    assert!(
+        last.starts_with(&named) && last.ends_with(": git: No such file or directory (os error 2)"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("failed:"), "{}", run.stderr);
+    assert_eq!(
+        fx.ran(),
+        ["test-select-tests.py", "verify-receipts.py admit"]
+    );
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+    assert_eq!(fx.worktrees(), 2, "the worktree stays registered");
+    fx.git(&["worktree", "prune"]);
+    assert_eq!(fx.worktrees(), 1);
 }

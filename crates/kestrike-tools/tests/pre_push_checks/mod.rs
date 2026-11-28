@@ -10,7 +10,7 @@ mod functions;
 mod guard;
 mod guarded;
 mod lines;
-mod push;
+pub(crate) mod push;
 mod reads;
 mod ref_lines;
 mod repository;

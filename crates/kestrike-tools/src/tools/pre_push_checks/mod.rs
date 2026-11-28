@@ -8,12 +8,13 @@
 //! chaos record guard, and each tip's checks in a worktree of the tip that the run adds and removes. Every
 //! failure is printed as `pre-push: failed: <failure>` at the end.
 //!
-//! Exit 0 passes, 1 is a failed check, 2 a malformed ref line or a failed Git read, 120 a failed write to
-//! standard error, and `128 + n` the first of SIGINT, SIGTERM and SIGHUP that arrived, which [`cancel`]
-//! records whatever disposition the tool inherited. The record is read between steps and while a check
-//! runs; a Git read and a scan run to their end, and the record is acted on once they return, whatever
-//! they returned. On a record the tool starts no further step and prints no check line and no failure
-//! list; a failed worktree removal and a running check whose SIGKILL or reap failed are still named.
+//! Exit 0 passes, 1 is a failed check or a failed tool step, 2 a malformed ref line or a Git command that
+//! exits nonzero, 120 a failed write to standard error, and `128 + n` the first of SIGINT, SIGTERM and
+//! SIGHUP that arrived, which [`cancel`] records whatever disposition the tool inherited. The tool checks
+//! the signal record after reading standard input, after each ref line's plan, after each scan, after the
+//! guard, and while a check or `git worktree add` runs. After a Git read or scan returns, the tool honors
+//! the recorded signal regardless of the result. Cancellation stops the push before the next step, and
+//! the tool then prints only a failed worktree removal and a running check whose SIGKILL or reap failed.
 
 mod cancel;
 mod worktree;
@@ -24,7 +25,8 @@ use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::hook::{Failure, Plan};
+use crate::git::GitError;
+use crate::hook::{Failure, Plan, argument, short};
 use crate::stream::emit;
 use crate::text::Text;
 use crate::tools::scan_weakened_tests::scan_range;
@@ -56,21 +58,11 @@ fn fail(line: &str, code: Exit) -> Exit {
     say(line).map_or_else(|failed| failed, |()| code)
 }
 
-/// `short` writes the first twelve code points of `commit`.
-fn short(commit: &Text) -> Text {
-    Text::from_code_points(commit.code_points().take(12))
-        .expect("a prefix of a text holds its code points")
-}
-
-/// `os` is `text` as a program argument; a text decoded from bytes or read from Git encodes as bytes.
-fn os(text: &Text) -> OsString {
-    text.to_os()
-        .expect("a text decoded from bytes encodes as those bytes")
-}
-
-/// `refused` prints the failure that ends the push before its checks start and returns exit 2.
 fn refused(failure: &Failure) -> Exit {
-    fail(&format!("pre-push: {failure}"), 2)
+    match failure {
+        Failure::Git(GitError::Start(_)) => fail(&format!("{NAME}: {failure}"), 1),
+        _ => fail(&format!("pre-push: {failure}"), 2),
+    }
 }
 
 /// `push` reads the ref lines from standard input, plans them, and runs the scans, the guard and the checks
@@ -83,12 +75,13 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
         return Err(fail(&format!("{NAME}: standard input: {error}"), 1));
     }
     let lines = Text::from_os(OsStr::from_bytes(&input)).splitlines();
+    drop(input);
     let started = Plan::new(destination);
     cancel::check()?;
     let mut plan = started.map_err(|failure| refused(&failure))?;
     for line in &lines {
         let mut noted = Ok(());
-        let planned = plan.line(&os(line), |skipped| {
+        let planned = plan.line(&argument(line), |skipped| {
             noted = say(&format!("pre-push: {skipped}"));
         });
         cancel::check()?;
@@ -103,7 +96,12 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
             short(tip),
             short(base)
         ))?;
-        let code = scan_range(environ, &os(base), &os(tip), io::stderr().as_fd());
+        let code = scan_range(
+            environ,
+            &argument(base),
+            &argument(tip),
+            io::stderr().as_fd(),
+        );
         cancel::check()?;
         if code != 0 {
             failures.push(format!(

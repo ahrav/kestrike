@@ -61,7 +61,7 @@ printf 'rustup %s|%s|RUSTUP_HOME=%s|CARGO_HOME=%s|RUSTUP_TOOLCHAIN=%s|RUSTUP_AUT
   "${RUSTUP_AUTO_INSTALL-unset}" >> "$root/log"
 echo 'info: the stand-in rustup on standard error' >&2
 case $#$args in
-'1[show]') cat "$root/answers/show" ;;
+'1[show]') [ ! -e "$root/answers/read-stdin" ] || cat > "$root/rustup.stdin"; cat "$root/answers/show" ;;
 '2[toolchain][list]') [ ! -e "$root/answers/list-fails" ] && cat "$root/answers/list" ;;
 '4[which][--toolchain]'*'][cargo]') [ ! -e "$root/answers/which-fails" ] && cat "$root/answers/cargo" ;;
 *) exit 3 ;;
@@ -1268,6 +1268,26 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
 /// through a link to its file, a chain of links with a relative target, a link to the top level, or a
 /// relative path with `CDPATH` set passes the same canonical path. A shell function named `rustup` in the
 /// caller's environment is passed over for the `rustup` on `PATH`.
+#[test]
+fn the_preparation_reads_no_byte_of_the_binary_s_standard_input() {
+    let tree = Tree::new(workflow_text("\n").as_bytes());
+    tree.answer("read-stdin", Some(""));
+    let input = b"refs/heads/a 1 refs/heads/a 2\nrefs/heads/b 3 refs/heads/b 4\n";
+    let output = tree.start_with_input(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.default_path(),
+        &[],
+        &["pre-push-checks"],
+        input,
+    );
+    ran("input", &output, 1);
+    let read = fs::read(tree.at("rustup.stdin")).expect("the preparation's read is recorded");
+    assert_eq!(read, b"");
+    let stdin = fs::read(tree.at("binary.stdin")).expect("the binary's standard input reads");
+    assert_eq!(stdin, input);
+}
+
 #[test]
 fn a_successful_call_passes_the_caller_through() {
     let tree = Tree::new(workflow_text("\n").as_bytes());

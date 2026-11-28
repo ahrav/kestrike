@@ -23,7 +23,8 @@ pub use plan::{Plan, Skipped};
 pub use reads::{destination_refs, ignored_tests};
 pub use table::{Check, Held, ORDER, Row, checks_for};
 
-use failure::{argument, short, shown};
+use failure::shown;
+pub(crate) use failure::{argument, short};
 
 #[cfg(test)]
 #[path = "../hook_tests.rs"]

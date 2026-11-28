@@ -17,7 +17,7 @@
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -53,11 +53,20 @@ if [ "$isolated" = yes ]; then printf '%s\n' "$line" >> "$STUB_LOG.isolated"; fi
 child() {
   sh -c 'printf "%s\n" "$$" > "$1.tmp" && mv "$1.tmp" "$1" && exec sleep 600' sh "$1" > /dev/null 2>&1 < /dev/null &
 }
-if grep -qx '# linger' "$script"; then child "$STUB_LOG.lingering"; exit 0; fi
-if grep -qx '# hang' "$script"; then
+hang() {
+  exec > /dev/null 2>&1
   child "$STUB_LOG.child"
   printf '%s\n' "$$" > "$STUB_LOG.leader.tmp" && mv "$STUB_LOG.leader.tmp" "$STUB_LOG.leader"
-  wait
+}
+if grep -qx '# unlink-git' "$script"; then rm -f "$STUB_GIT_LINK"; fi
+if grep -qx '# linger' "$script"; then child "$STUB_LOG.lingering"; exit 0; fi
+if grep -qx '# deaf' "$script"; then trap '' INT TERM HUP; hang; wait; fi
+if grep -qx '# hang' "$script"; then hang; wait; fi
+if grep -qx '# release' "$script"; then
+  hang
+  n=0
+  while [ ! -e "$STUB_LOG.release" ] && [ "$n" -lt 6000 ]; do sleep 0.01; n=$((n + 1)); done
+  exit 0
 fi
 if grep -qx '# env' "$script"; then
   env > "$STUB_LOG.env"
@@ -93,10 +102,23 @@ pub fn fresh(parent: &Path, prefix: &str) -> PathBuf {
     }
 }
 
-/// `executable` writes `text` to `path` with mode 0755.
+/// Opening `path` in the writer child keeps the writable descriptor out of the children of other test
+/// threads. `execve` fails with `ETXTBSY` while a child holds `path` open for writing.
 pub fn executable(path: &Path, text: &str) {
-    fs::write(path, text).expect("the program is written");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("the mode is set");
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the program's writer starts");
+    writer
+        .stdin
+        .take()
+        .expect("the writer's standard input is a pipe")
+        .write_all(text.as_bytes())
+        .expect("the program's text reaches the writer");
+    let status = writer.wait().expect("the program's writer is reaped");
+    assert!(status.success(), "the program is written: {status}");
 }
 
 /// One run of the tool: its exit code and both streams.
@@ -140,6 +162,7 @@ impl Fixture {
     /// `with` is [`Fixture::new`] with `extra` added to the caller's environment before the fixture drops
     /// its `GIT_` and `GITHUB_` variables.
     pub fn with(extra: &[(&str, &str)]) -> Self {
+        subreaper();
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(root).expect("the scratch root is made");
         let temp = fresh(root, "pre-push-tool-");
@@ -172,6 +195,7 @@ impl Fixture {
             ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
             ("GIT_CONFIG_GLOBAL", temp.join("global").into_os_string()),
             ("GIT_CEILING_DIRECTORIES", temp.clone().into_os_string()),
+            ("XDG_CONFIG_HOME", temp.join("config").into_os_string()),
             ("GIT_AUTHOR_NAME", "t".into()),
             ("GIT_AUTHOR_EMAIL", "t@example.com".into()),
             ("GIT_COMMITTER_NAME", "t".into()),
@@ -498,11 +522,24 @@ pub fn waited(mut ready: impl FnMut() -> bool) -> bool {
 /// id it holds.
 pub fn process_id(path: &Path) -> libc::pid_t {
     assert!(waited(|| path.exists()), "{} is written", path.display());
-    fs::read_to_string(path)
+    let pid: libc::pid_t = fs::read_to_string(path)
         .expect("the process id file reads")
         .trim()
         .parse()
-        .expect("the file holds a process id")
+        .expect("the file holds a process id");
+    assert!(pid > 0, "{} holds a positive process id", path.display());
+    pid
+}
+
+/// `subreaper` marks the test process a subreaper. When the test process is the nearest living subreaper
+/// ancestor, it adopts a check's child that outlives its leader, and [`group_alive`] can reap it.
+fn subreaper() {
+    static SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    SET.get_or_init(|| {
+        // SAFETY: `prctl` with `PR_SET_CHILD_SUBREAPER` reads its integer arguments alone.
+        let status = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+        assert_eq!(status, 0, "{}", io::Error::last_os_error());
+    });
 }
 
 /// `alive` holds while `pid` names a process, a zombie included.

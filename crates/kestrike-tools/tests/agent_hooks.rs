@@ -6,9 +6,11 @@ use std::fmt;
 use std::fs::{self, DirBuilder};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+use crate::pre_push_checks::push::executable;
 
 /// The override marker the cases plant. Splitting its literal keeps the scan from matching this
 /// definition in the case file.
@@ -320,9 +322,7 @@ fn pre_push_preserves_global_guard_arguments_input_and_failure() {
     let hooks = repo.path.join("shared hooks");
     fs::create_dir(&hooks).expect("the directory is made");
     let guard = hooks.join("pre-push");
-    fs::write(&guard, "#!/bin/sh\nprintf \"%s\\n\" \"$@\"\ncat\nexit 37\n")
-        .expect("the guard is written");
-    fs::set_permissions(&guard, fs::Permissions::from_mode(0o755)).expect("the mode is set");
+    executable(&guard, "#!/bin/sh\nprintf \"%s\\n\" \"$@\"\ncat\nexit 37\n");
     let config = repo.path.join("global-config");
     let hooks_path = hooks.to_str().expect("the path is UTF-8");
     for mode in ["direct", "include", "includeIf"] {
@@ -414,12 +414,10 @@ fn pre_push_ends_with_the_tool_s_failing_code_before_the_global_guard() {
     let hooks = repo.path.join("shared hooks");
     fs::create_dir(&hooks).expect("the directory is made");
     let guard = hooks.join("pre-push");
-    fs::write(
+    executable(
         &guard,
         "#!/bin/sh\ntouch \"$(dirname -- \"$0\")/guard.ran\"\n",
-    )
-    .expect("the guard is written");
-    fs::set_permissions(&guard, fs::Permissions::from_mode(0o755)).expect("the mode is set");
+    );
     repo.git(&[
         "config",
         "--global",
