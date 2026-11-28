@@ -2,11 +2,12 @@
 //! less the umask; a write that fails leaves no staging file. And the removal of a run's directory.
 
 use std::fs;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 use std::io::Write;
 
-use super::{publish, staging_with};
+use super::{UNANNOUNCED, conclude, publish, staging_with};
 use crate::paths::tests::Scratch;
 use crate::plants::run::remove;
 
@@ -121,4 +122,88 @@ fn a_removal_goes_past_what_it_cannot_remove_and_leaves_a_link() {
     assert!(!tree.join("free").exists());
     assert_eq!(tree.join("pinned/file").exists(), !root);
     fs::set_permissions(tree.join("pinned"), fs::Permissions::from_mode(0o700)).ok();
+}
+
+/// The removal walk treats directory symlinks as leaves.
+#[test]
+fn a_removal_removes_a_link_inside_the_tree_and_keeps_its_target() {
+    let scratch = Scratch::new("remove-inner-link");
+    let (tree, outside) = (scratch.0.join("tree"), scratch.0.join("outside"));
+    fs::create_dir_all(tree.join("inner")).expect("made");
+    fs::create_dir_all(&outside).expect("made");
+    fs::write(outside.join("sentinel"), "kept").expect("written");
+    symlink(&outside, tree.join("inner/link")).expect("linked");
+    remove(&tree);
+    assert!(!tree.exists());
+    assert_eq!(
+        fs::read_to_string(outside.join("sentinel")).expect("reads"),
+        "kept"
+    );
+}
+
+/// Each `dd/` adds three bytes to the path; directory-relative calls let the test build past
+/// `PATH_MAX`.
+#[test]
+fn a_removal_reaches_a_path_past_path_max() {
+    let scratch = Scratch::new("remove-deep");
+    let tree = scratch.0.join("tree");
+    fs::create_dir(&tree).expect("made");
+    let mut parent = fs::File::open(&tree).expect("opens");
+    let depth = usize::try_from(libc::PATH_MAX).expect("a bound") / 3 + 10;
+    for _ in 0..depth {
+        // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
+        let made = unsafe { libc::mkdirat(parent.as_raw_fd(), c"dd".as_ptr(), 0o700) };
+        assert_eq!(made, 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
+        let next = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c"dd".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+            )
+        };
+        assert!(next >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `next` is a new open descriptor that this loop alone owns.
+        parent = unsafe { fs::File::from_raw_fd(next) };
+    }
+    // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
+    let file = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            c"file".as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT,
+            0o600,
+        )
+    };
+    assert!(file >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: `file` is a new open descriptor, closed here once.
+    unsafe { libc::close(file) };
+    drop(parent);
+    remove(&tree);
+    assert!(!tree.exists());
+}
+
+struct Refusing;
+
+impl Write for Refusing {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::from_raw_os_error(libc::EPIPE))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `publish` renames the staging file over the target before `conclude` writes the score lines to
+/// standard output.
+#[test]
+fn a_refused_write_of_the_score_s_lines_exits_120_and_keeps_the_score() {
+    let scratch = Scratch::new("announce");
+    let target = scratch.0.join("score.json");
+    let mut err = Vec::new();
+    let code = conclude("h", &target, &[], "{}\n", publish, &mut Refusing, &mut err);
+    assert_eq!(code, UNANNOUNCED);
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "{}\n");
+    assert!(err.is_empty());
 }

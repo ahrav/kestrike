@@ -21,7 +21,7 @@ use super::git::{self, Done};
 use super::judgment::{Ask, Sweep, judge};
 use super::output::{Pins, archive_pins, first_object};
 use super::record::Plant;
-use super::run::{Run, open_lock, remove};
+use super::run::{Run, lock_bytes, open_lock, remove};
 use super::seed::Manifest;
 use super::status::profile_runs;
 use super::suspects::Suspect;
@@ -137,7 +137,7 @@ impl Run<'_> {
                 .into());
             }
         };
-        match self.lock_bytes(file) {
+        match lock_bytes(file, self.inputs.lock()) {
             Ok(Some(bytes)) if bytes == self.inputs.lock() => {}
             Ok(_) => return Err(unequal().into()),
             Err(error) => {

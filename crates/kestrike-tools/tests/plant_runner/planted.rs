@@ -20,8 +20,10 @@ fn field(fx: &Fixture, name: &str, member: &str) -> String {
 #[test]
 fn the_planted_commit_depends_on_the_head_and_the_patch_alone() {
     let mut fx = Fixture::new();
-    fx.run(&["p-miss"], &[]);
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 0, "{}", done.stderr);
     let first = (field(&fx, "p-miss", "commit"), field(&fx, "p-miss", "tree"));
+    std::fs::remove_file(&fx.score).expect("the first score is removed");
     std::thread::sleep(Duration::from_millis(1100));
     std::fs::write(
         fx.scratch.join("gitconfig"),
@@ -34,7 +36,8 @@ fn the_planted_commit_depends_on_the_head_and_the_patch_alone() {
         ("GIT_AUTHOR_NAME", "another"),
         ("GIT_COMMITTER_EMAIL", "another@invalid"),
     ];
-    fx.run_in(&["p-miss"], &[], &identity, Some(&again));
+    let done = fx.run_in(&["p-miss"], &[], &identity, Some(&again));
+    assert_eq!(done.code, 0, "{}", done.stderr);
     let second = (field(&fx, "p-miss", "commit"), field(&fx, "p-miss", "tree"));
     assert_ne!(first.0, "null");
     assert_eq!(first, second);

@@ -334,6 +334,8 @@ fn a_seed_check_that_fails_leaves_another_suspect_s_catch_in_either_order() {
     }
 }
 
+/// When `git worktree add` exits 128 for the unpatched head, `p-catch` reports `no verdict` with the
+/// reason `` `git worktree` exited 128 ``, and Git's error stays in `base/git.err`.
 #[test]
 fn a_failed_worktree_of_the_unpatched_head_fails_its_seed_checks_and_keeps_its_error() {
     let mut fx = Fixture::new();
@@ -352,4 +354,28 @@ fn a_failed_worktree_of_the_unpatched_head_fails_its_seed_checks_and_keeps_its_e
     let kept = fs::read_to_string(fx.work.join("base/git.err")).expect("the error is kept");
     assert_eq!(kept, "git worktree exited 128:\nfatal: no base\n");
     assert!(fx.calls(&["sim", "run"]).is_empty());
+}
+
+/// The first base worktree add writes byte 0xFF to stderr and exits 0 before creating the worktree;
+/// the next seed check retries the add and runs `sim run` once.
+#[test]
+fn a_base_worktree_add_that_prints_no_text_is_tried_again_at_the_next_seed_check() {
+    let mut fx = Fixture::new();
+    let (once, adds) = (fx.scratch.join("once"), fx.scratch.join("adds"));
+    let action = format!(
+        "case \"$*\" in */base/tree*) echo add >> '{}'; if [ ! -e '{}' ]; then touch '{}'; \
+         printf '\\377' >&2; exit 0; fi;; esac",
+        adds.display(),
+        once.display(),
+        once.display()
+    );
+    let (name, path) = fx.git_shim("add", &action);
+    let done = fx.run(&["p-twopass"], &[(name, path.as_str())]);
+    assert_eq!(done.code, 0, "{}", done.stderr);
+    assert_eq!(
+        fs::read_to_string(&adds).expect("the adds are logged"),
+        "add\nadd\n"
+    );
+    fx.verdict("p-twopass", "caught", "violation: a rule in run");
+    assert_eq!(fx.calls(&["sim", "run"]).len(), 1);
 }

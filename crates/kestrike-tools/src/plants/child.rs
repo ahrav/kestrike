@@ -1,13 +1,13 @@
 //! The children a plant run starts beside Git: a command with its output in two new log files, and the
-//! question to the head's staged helper; and the endings of a step and of a run.
+//! question to the head's staged helper.
 //!
-//! A child is started by name, found through the `PATH` of the environment it is given, with that
-//! environment as its whole environment, standard input inherited and each handled signal back at its
-//! default action. The run reads the signal record before it starts a logged command and while it waits
-//! for one; a signal recorded during the start is acted on once the child's handle is held. The question
-//! to the helper runs whole, and the run reads the record after it. A child that runs
-//! when a signal is recorded gets SIGTERM, by its handle and alone, and the run waits for it with no
-//! limit before it ends.
+//! The run resolves each child's name through the supplied `PATH`, passes the supplied environment
+//! unchanged, and restores the default action for each handled signal in the child. A logged command
+//! inherits standard input. The run reads the signal record before it starts a logged command and while
+//! it waits for one. If the signal record changes during startup, the run acts on the signal once it
+//! holds the child's handle. The run waits for the helper to finish before reading the signal record.
+//! When the signal record changes while a logged command is running, the run uses the child's handle to
+//! send SIGTERM to that child alone and waits indefinitely for the child to exit.
 
 use std::ffi::{CStr, OsString};
 use std::fs::{File, OpenOptions};

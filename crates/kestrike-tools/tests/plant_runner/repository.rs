@@ -13,7 +13,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder};
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -180,7 +180,7 @@ fn claimed(base: &Path) -> PathBuf {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        match DirBuilder::new().create(&scratch) {
+        match DirBuilder::new().mode(0o700).create(&scratch) {
             Ok(()) => {
                 chmod(&scratch, 0o700);
                 return scratch;

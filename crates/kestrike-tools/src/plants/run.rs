@@ -135,6 +135,22 @@ fn entries(directory: &File) -> Vec<CString> {
     names
 }
 
+/// The extra byte lets a caller detect trailing data after a matching lockfile prefix while keeping
+/// memory use bounded.
+///
+/// # Errors
+///
+/// `lock_bytes` propagates errors from `file.metadata()` and `read_to_end`.
+pub(super) fn lock_bytes(file: File, lock: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    if !file.metadata()?.is_file() {
+        return Ok(None);
+    }
+    let bound = u64::try_from(lock.len()).map_or(u64::MAX, |len| len.saturating_add(1));
+    let mut read = Vec::new();
+    file.take(bound).read_to_end(&mut read)?;
+    Ok(Some(read))
+}
+
 /// `open_lock` rejects a symbolic link in the final path component and opens a FIFO for reading even
 /// when no writer is present.
 pub(super) fn open_lock(path: &Path) -> io::Result<File> {
@@ -377,25 +393,8 @@ impl<'a> Run<'a> {
     /// run's lockfile.
     pub(super) fn holds_lock(&self, tree: &Path) -> bool {
         open_lock(&tree.join("Cargo.lock"))
-            .and_then(|file| self.lock_bytes(file))
+            .and_then(|file| lock_bytes(file, self.inputs.lock()))
             .is_ok_and(|read| read.as_deref() == Some(self.inputs.lock()))
-    }
-
-    /// The extra byte lets a caller detect trailing data after a matching lockfile prefix while keeping
-    /// memory use bounded.
-    ///
-    /// # Errors
-    ///
-    /// `lock_bytes` propagates errors from `file.metadata()` and `read_to_end`.
-    pub(super) fn lock_bytes(&self, file: File) -> io::Result<Option<Vec<u8>>> {
-        if !file.metadata()?.is_file() {
-            return Ok(None);
-        }
-        let bound =
-            u64::try_from(self.inputs.lock().len()).map_or(u64::MAX, |len| len.saturating_add(1));
-        let mut read = Vec::new();
-        file.take(bound).read_to_end(&mut read)?;
-        Ok(Some(read))
     }
 
     /// `keep_git_error` appends a failed Git step's error output to `place/git.err`, going past a write
@@ -562,3 +561,7 @@ impl Run<'_> {
         Ok(finished)
     }
 }
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;

@@ -1014,6 +1014,28 @@ fn helper(args: &[String], out: &mut File) -> i32 {
     if mode == "unlock" {
         fs::remove_file("Cargo.lock").expect("the lockfile is removed");
     }
+    if var("STANDIN_COMMIT_IN").is_some_and(|wanted| wanted == mode) {
+        let committed = Command::new("git")
+            .args([
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "--no-gpg-sign",
+                "--all",
+                "--message",
+                "moved",
+            ])
+            .status()
+            .expect("git starts");
+        assert!(committed.success(), "the rerun's commit is made");
+    }
+    if let (true, Some(target)) = (
+        var("STANDIN_LINK_TARGET_IN").is_some_and(|wanted| wanted == mode),
+        target.as_deref().filter(|target| !target.is_empty()),
+    ) {
+        fs::remove_dir_all(target).expect("the target is removed");
+        std::os::unix::fs::symlink("nowhere", target).expect("the link is made");
+    }
     if let (true, Some(target)) = (
         mode == "pintarget",
         target.as_deref().filter(|target| !target.is_empty()),

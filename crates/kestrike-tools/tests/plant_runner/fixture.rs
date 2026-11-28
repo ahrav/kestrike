@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -290,7 +290,7 @@ fn claimed(base: &Path) -> PathBuf {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        match DirBuilder::new().create(&scratch) {
+        match DirBuilder::new().mode(0o700).create(&scratch) {
             Ok(()) => {
                 chmod(&scratch, 0o700);
                 return scratch
@@ -509,6 +509,7 @@ impl Fixture {
             .env_clear()
             .envs(env.iter().cloned())
             .stdin(Stdio::null());
+        defaults(&mut command);
         command
     }
 
@@ -580,6 +581,7 @@ impl Fixture {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
+        defaults(&mut command);
         configure(&mut command);
         Runner {
             child: command.spawn().expect("the tool starts"),
@@ -859,20 +861,26 @@ pub fn wait_for(path: &Path, child: &mut Child) {
     panic!("no {} within 30 s", path.display());
 }
 
-/// `umask` reads this process's umask from `/proc/self/status`.
-pub fn umask() -> u32 {
-    let status = fs::read_to_string("/proc/self/status").expect("the status reads");
-    let line = status
-        .lines()
-        .find(|line| line.starts_with("Umask:"))
-        .expect("a Umask line");
-    u32::from_str_radix(line.trim_start_matches("Umask:").trim(), 8).expect("an octal umask")
-}
-
 pub fn mode_bits(path: &Path) -> u32 {
     fs::metadata(path)
         .expect("the path stats")
         .permissions()
         .mode()
         & 0o777
+}
+
+pub fn defaults(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, which is
+    // async-signal-safe.
+    unsafe {
+        command.pre_exec(|| {
+            for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
 }

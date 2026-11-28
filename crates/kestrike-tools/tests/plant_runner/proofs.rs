@@ -1004,3 +1004,78 @@ fn a_proof_worktree_that_cannot_be_added_gives_every_plant_its_first_cause() {
     let kept = std::fs::read_to_string(fx.work.join("proof/git.err")).expect("the error is kept");
     assert!(kept.contains("fatal: no room"), "{kept}");
 }
+
+/// An untracked file that a planted rerun leaves in the proof's worktree stays through the reset, so a
+/// later plant whose patch adds that path fails its apply and gives its proof no verdict.
+#[test]
+fn an_untracked_file_a_rerun_leaves_stays_for_the_next_plant() {
+    let mut fx = Fixture::new();
+    let adding = "diff --git a/leftover b/leftover\nnew file mode 100644\n--- /dev/null\n+++ b/leftover\n\
+                  @@ -0,0 +1 @@\n+x\ndiff --git a/mode b/mode\n--- a/mode\n+++ b/mode\n@@ -1 +1 @@\n-base\n\
+                  +pass\n";
+    write_plant(
+        &fx.store,
+        "p-zadd",
+        ("pass", &["a"], CAUSE, "base"),
+        &[("files", "[\"leftover\", \"mode\"]")],
+        Some(adding),
+    );
+    fx.commit("a plant that adds a file");
+    let left = r#"["leftover", "left by a rerun\n"]"#;
+    let done = fx.run(
+        &["p-catch", "p-zadd"],
+        &[("STANDIN_REWRITE", left), ("STANDIN_REWRITE_IN", "catch")],
+    );
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-zadd",
+        "no verdict",
+        "`git apply` exited 1; its error is in plants/p-zadd/git.err",
+    );
+    let kept = std::fs::read_to_string(fx.work.join("plants/p-zadd/git.err")).expect("kept");
+    assert!(kept.contains("leftover"), "{kept}");
+    assert_eq!(fx.proof_modes(), ["base", "catch"]);
+}
+
+/// A planted rerun that commits in the proof's worktree moves its HEAD, and the reset after it keeps
+/// that commit, so `git apply` runs against the planted tree and exits 1 for `p-miss`.
+#[test]
+fn a_commit_a_rerun_makes_moves_the_tree_the_next_plant_applies_to() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-catch", "p-miss"], &[("STANDIN_COMMIT_IN", "catch")]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "`git apply` exited 1; its error is in plants/p-miss/git.err",
+    );
+    assert_eq!(fx.proof_modes(), ["base", "catch"]);
+}
+
+/// When the first head rerun rewrites `Cargo.lock` and emits invalid UTF-8, the second head rerun still
+/// starts, and its check of the lockfile ends the head's reruns for both plants.
+#[test]
+fn a_relocking_rerun_with_undecodable_output_lets_the_next_head_rerun_start() {
+    let mut fx = Fixture::new();
+    other_proof(&mut fx);
+    let done = fx.run(
+        &["p-miss", "p-otherproof"],
+        &[
+            ("STANDIN_RELOCK_HEAD", "1"),
+            ("STANDIN_BINARY_PROOFS", r#"["a::test"]"#),
+        ],
+    );
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    assert_eq!(
+        fx.proof_tests(|mode| mode == "base"),
+        ["a::test", "b::test"]
+    );
+    for name in ["p-miss", "p-otherproof"] {
+        fx.verdict(
+            name,
+            "no verdict",
+            "the rerun of the proof b::test left the proof's worktree without the run's Cargo.lock; its \
+             output is in proof/head-1.out",
+        );
+    }
+}
