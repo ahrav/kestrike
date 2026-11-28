@@ -31,8 +31,8 @@ fn the_wall_reading_is_seconds_since_the_epoch() {
     assert!(before.as_secs_f64() - 1e-6 <= wall && wall <= after.as_secs_f64() + 1e-6);
 }
 
-/// A reading of `time.monotonic_ns()` in a child Python lies between two readings taken around the
-/// child, so both read one clock of the host.
+/// A reading of `time.monotonic_ns()` in a child Python, which shares the test's time namespace, lies
+/// between two readings taken around the child, so the child and the test read one clock.
 #[test]
 fn the_monotonic_reading_is_the_clock_other_processes_read() {
     let before = System.monotonic_ns().expect("the clock reads");
