@@ -4,7 +4,9 @@
 //! signal changes nothing. A check leads a process group of its own, so the tool alone decides what the
 //! group receives: while the check's leader is the tool's child and not yet reaped, its process id cannot
 //! name another process, and on a record the group and the leader get SIGKILL, and the reap comes last. A
-//! leader already reaped gets no signal.
+//! leader already reaped gets no signal. That holds while SIGCHLD is not ignored: a tool started with
+//! SIGCHLD ignored has each ended child reaped by the kernel, so its first Git read fails and no check
+//! starts.
 //!
 //! A check starts with the three signals at their default dispositions, since `execve` resets each caught
 //! signal to its default, and with no signal blocked, since `Command` clears the child's signal mask.
@@ -73,8 +75,8 @@ pub(super) enum Unwaited {
     /// On a recorded signal, `wait` sent SIGKILL to the check's group and leader, then reaped the leader;
     /// the field is the exit code.
     Cancelled(u8),
-    /// On a recorded signal, the SIGKILL or the reap failed, so the check's group may still run; the
-    /// fields are the exit code and the error.
+    /// On a recorded signal, the SIGKILL or the reap failed, so the check's group may still run and its
+    /// leader may stand unreaped; the fields are the exit code and the error.
     Unstopped(u8, io::Error),
     /// Polling the check failed. With `WNOHANG`, `waitpid` fails with `ECHILD` alone: the check is no
     /// longer this process's child and its process id may name another process, so `wait` signals
@@ -82,19 +84,19 @@ pub(super) enum Unwaited {
     Failed(io::Error),
 }
 
-/// `wait` returns the exit status of `check`, a leader of its own process group, polling it with a pause
+/// `wait` returns the exit status of `child`, a leader of its own process group, polling it with a pause
 /// that grows from [`FIRST_PAUSE`] to [`LONGEST_PAUSE`] and reading the record after each poll.
-pub(super) fn wait(check: &mut Child) -> Result<ExitStatus, Unwaited> {
+pub(super) fn wait(child: &mut Child) -> Result<ExitStatus, Unwaited> {
     let mut pause = FIRST_PAUSE;
     loop {
-        match check.try_wait() {
+        match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {}
             Err(error) => return Err(Unwaited::Failed(error)),
         }
-        if let Err(code) = self::check() {
-            return Err(match stop(check).and_then(|()| check.wait()) {
-                Ok(_) => Unwaited::Cancelled(code),
+        if let Err(code) = check() {
+            return Err(match stop(child) {
+                Ok(()) => Unwaited::Cancelled(code),
                 Err(error) => Unwaited::Unstopped(code, error),
             });
         }
@@ -103,20 +105,26 @@ pub(super) fn wait(check: &mut Child) -> Result<ExitStatus, Unwaited> {
     }
 }
 
-/// `stop` sends SIGKILL to the group `check` leads and to the leader, which the caller has not reaped, so
-/// its process id still names it and its group. A leader that left its group still ends.
+/// `stop` sends SIGKILL to the group `child` leads and to the leader, which the caller has not reaped, so
+/// its process id still names it and its group, and then reaps the leader. A leader that left its group
+/// still ends, and `killpg` finding no process in the group reads as a group already ended. The reap waits
+/// only on a leader whose SIGKILL was sent.
 ///
 /// # Errors
 ///
-/// `killpg` or the kill of the leader fails; `stop` attempts both and returns the first error.
-fn stop(check: &mut Child) -> io::Result<()> {
-    let group = libc::pid_t::try_from(check.id()).expect("a process id fits pid_t");
+/// `killpg` fails otherwise, or the kill or the reap of the leader fails; the first error is returned.
+fn stop(child: &mut Child) -> io::Result<()> {
+    let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
     // SAFETY: `killpg` takes two integers and touches no memory of the caller.
     let grouped = if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(()),
+            _ => Err(error),
+        }
     };
-    let killed = check.kill();
-    grouped.and(killed)
+    let reaped = child.kill().and_then(|()| child.wait().map(drop));
+    grouped.and(reaped)
 }

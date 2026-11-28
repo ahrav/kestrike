@@ -10,7 +10,9 @@
 //! without `.py` and with each `-` as `_`, or 0. A script that holds the line `# hang` first starts a
 //! child that writes its process id to `STUB_LOG.child` and sleeps, writes its own process id to
 //! `STUB_LOG.leader`, and waits for the child; one that holds `# linger` starts the same child, writing
-//! `STUB_LOG.lingering`, and exits 0 at once.
+//! `STUB_LOG.lingering`, and exits 0 at once. A script that holds `# env` writes its environment to
+//! `STUB_LOG.env`, its working directory and that directory's mode to `STUB_LOG.where`, and the line
+//! `output of NAME` to standard output.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
@@ -53,6 +55,12 @@ if grep -qx '# hang' "$script"; then
   child "$STUB_LOG.child"
   printf '%s\n' "$$" > "$STUB_LOG.leader.tmp" && mv "$STUB_LOG.leader.tmp" "$STUB_LOG.leader"
   wait
+fi
+if grep -qx '# env' "$script"; then
+  env > "$STUB_LOG.env"
+  pwd > "$STUB_LOG.where"
+  ls -ld . | cut -c1-10 >> "$STUB_LOG.where"
+  printf 'output of %s\n' "$name"
 fi
 var=$(printf '%s' "${name%.py}" | tr 'abcdefghijklmnopqrstuvwxyz-' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ_')
 eval "code=\${STUB_$var:-0}"
@@ -265,9 +273,19 @@ impl Fixture {
         self.env.retain(|(key, _)| key != name);
     }
 
-    /// `clear` removes the log, its `-I` record and the stand-ins' process id files.
+    /// `clear` removes the log, its `-I` record, the stand-ins' process id files and the `git` wrapper's log.
     pub fn clear(&self) {
-        for suffix in ["", ".isolated", ".child", ".leader", ".lingering", ".git"] {
+        for suffix in [
+            "",
+            ".isolated",
+            ".child",
+            ".leader",
+            ".lingering",
+            ".git",
+            ".env",
+            ".where",
+            ".release",
+        ] {
             let _ = fs::remove_file(self.logged(suffix));
         }
     }
@@ -315,22 +333,16 @@ impl Fixture {
     pub fn start_in(&self, dir: &Path, input: &str, codes: &[(&str, i32)]) -> Child {
         let mut command = self.command(BINARY);
         for (name, code) in codes {
-            command.env(format!("STUB_{}", name.to_uppercase()), code.to_string());
+            command.env(
+                format!("STUB_{}", name.replace('-', "_").to_uppercase()),
+                code.to_string(),
+            );
         }
-        let mut child = command
+        command
             .arg(top())
             .args(["pre-push-checks", "origin", "url"])
-            .current_dir(dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the tool starts");
-        let mut stdin = child.stdin.take().expect("standard input is piped");
-        stdin
-            .write_all(input.as_bytes())
-            .expect("the ref lines are written");
-        child
+            .current_dir(dir);
+        spawn_with_input(&mut command, input)
     }
 
     /// `push` runs the tool on the ref lines of `pairs` and returns the run.
@@ -358,22 +370,26 @@ impl Fixture {
             .collect()
     }
 
-    /// `wrap_git` puts a `git` first on `PATH` that logs each `git worktree remove` to `STUB_LOG.git`, runs
-    /// `git worktree add` with `--lock` and then sends SIGTERM to its parent where `kill_after_add` holds,
-    /// and runs Git's own program with the arguments.
-    pub fn wrap_git(&self, kill_after_add: bool) {
+    /// `wrap_git_around` puts a `git` first on `PATH` that runs the shell text `before` with Git's
+    /// arguments as `$@`, then Git's own program with the arguments.
+    pub fn wrap_git_around(&self, before: &str) {
         let git = which("git");
-        let after = if kill_after_add {
-            "kill -TERM \"$PPID\""
-        } else {
-            ":"
-        };
+        executable(
+            &self.bin.join("git"),
+            &format!("#!/bin/sh\n{before}\nexec \"{}\" \"$@\"\n", git.display()),
+        );
+    }
+
+    /// `wrap_git` puts a `git` first on `PATH` that runs `git worktree add` with `--lock` and then sends
+    /// SIGTERM to its parent, and runs every other Git command as Git's own program.
+    pub fn wrap_git(&self) {
+        let git = which("git");
         executable(
             &self.bin.join("git"),
             &format!(
-                "#!/bin/sh\nadd=no\nif [ \"$1\" = worktree ] && [ \"$2\" = remove ]; then printf 'remove\\n' >> \"$STUB_LOG.git\"; fi\n\
+                "#!/bin/sh\nadd=no\n\
                  if [ \"$1\" = worktree ] && [ \"$2\" = add ]; then add=yes; shift 2; set -- worktree add --lock \"$@\"; fi\n\
-                 \"{}\" \"$@\"\nstatus=$?\nif [ \"$add\" = yes ]; then {after}; fi\nexit \"$status\"\n",
+                 \"{}\" \"$@\"\nstatus=$?\nif [ \"$add\" = yes ]; then kill -TERM \"$PPID\"; fi\nexit \"$status\"\n",
                 git.display()
             ),
         );
@@ -386,6 +402,22 @@ pub fn top() -> &'static Path {
         .parent()
         .and_then(Path::parent)
         .expect("the package stands two levels below the checkout's top")
+}
+
+/// `spawn_with_input` starts `command` with both output streams piped, writes `input` to its standard
+/// input and closes it.
+pub fn spawn_with_input(command: &mut Command, input: &str) -> Child {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the tool starts");
+    let mut stdin = child.stdin.take().expect("standard input is piped");
+    stdin
+        .write_all(input.as_bytes())
+        .expect("the ref lines are written");
+    child
 }
 
 /// `finished` closes the child's standard input, waits for it and returns the run.

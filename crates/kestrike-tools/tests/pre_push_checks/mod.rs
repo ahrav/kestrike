@@ -5,6 +5,7 @@
 
 mod cancelled;
 mod chaos_checks;
+mod exits;
 mod functions;
 mod guard;
 mod guarded;

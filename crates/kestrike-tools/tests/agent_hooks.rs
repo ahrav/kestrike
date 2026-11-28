@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 
 /// The override marker the cases plant. Splitting its literal keeps the scan from matching this
 /// definition in the case file.
@@ -113,7 +113,10 @@ impl fmt::Display for Run {
 
 /// Invalid UTF-8 in the child's standard output or standard error fails the case.
 fn run(command: &mut Command) -> Run {
-    let done = command.output().expect("the child starts");
+    ran(command.output().expect("the child starts"))
+}
+
+fn ran(done: Output) -> Run {
     Run {
         code: done.status.code(),
         stdout: String::from_utf8(done.stdout).expect("standard output is UTF-8"),
@@ -262,7 +265,7 @@ fn pre_commit_runs_repository_check() {
 
 const DELETION: &str = "(delete) 0000000000000000000000000000000000000000 refs/heads/gone 1111111111111111111111111111111111111111\n";
 
-const TOOL: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname -- \"$0\")/../tool.args\"\ncat > \"$(dirname -- \"$0\")/../tool.input\"\n";
+const TOOL: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname -- \"$0\")/../tool.args\"\ncat > \"$(dirname -- \"$0\")/../tool.input\"\nexit \"${TOOL_EXIT:-0}\"\n";
 
 impl Repo {
     fn pre_push(&self) -> PathBuf {
@@ -278,11 +281,16 @@ impl Repo {
     }
 
     fn push(&self, args: &[&str], input: &str) -> Run {
+        self.push_with(args, input, "0")
+    }
+
+    fn push_with(&self, args: &[&str], input: &str, tool_exit: &str) -> Run {
         let hook = self.pre_push();
         let mut child = self
             .command("bash")
             .arg(&hook)
             .args(args)
+            .env("TOOL_EXIT", tool_exit)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -294,12 +302,7 @@ impl Repo {
             .expect("standard input is piped")
             .write_all(input.as_bytes())
             .expect("the ref lines are written");
-        let done = child.wait_with_output().expect("the hook's run is read");
-        Run {
-            code: done.status.code(),
-            stdout: String::from_utf8(done.stdout).expect("standard output is UTF-8"),
-            stderr: String::from_utf8(done.stderr).expect("standard error is UTF-8"),
-        }
+        ran(child.wait_with_output().expect("the hook's run is read"))
     }
 
     fn launched(&self) -> (String, String) {
@@ -402,5 +405,36 @@ fn pre_push_self_delegation_fails() {
     assert_eq!(
         done.stderr,
         "pre-push: global hook path points back to this hook\n"
+    );
+}
+
+#[test]
+fn pre_push_ends_with_the_tool_s_failing_code_before_the_global_guard() {
+    let repo = Repo::new("pre-push-tool-fails");
+    let hooks = repo.path.join("shared hooks");
+    fs::create_dir(&hooks).expect("the directory is made");
+    let guard = hooks.join("pre-push");
+    fs::write(
+        &guard,
+        "#!/bin/sh\ntouch \"$(dirname -- \"$0\")/guard.ran\"\n",
+    )
+    .expect("the guard is written");
+    fs::set_permissions(&guard, fs::Permissions::from_mode(0o755)).expect("the mode is set");
+    repo.git(&[
+        "config",
+        "--global",
+        "core.hooksPath",
+        hooks.to_str().expect("the path is UTF-8"),
+    ]);
+    for code in [1, 2, 120, 127, 143] {
+        let done = repo.push_with(&["origin", "remote-url"], DELETION, &code.to_string());
+        assert_eq!(done.code, Some(code), "{done}");
+        assert!(!hooks.join("guard.ran").exists(), "{code}: the guard ran");
+    }
+    let done = repo.push(&["origin", "remote-url"], DELETION);
+    assert_eq!(done.code, Some(0), "{done}");
+    assert!(
+        hooks.join("guard.ran").exists(),
+        "the guard runs after a passing tool"
     );
 }

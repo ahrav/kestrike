@@ -20,7 +20,7 @@ use crate::hook::Check;
 use crate::text::Text;
 
 use super::cancel::{self, Unwaited};
-use super::{Exit, NAME, os, say, short};
+use super::{Exit, NAME, fail, os, say, short};
 
 const PREFIX: &str = "kestrike-pre-push-";
 const LETTERS: &[u8; 37] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
@@ -63,8 +63,7 @@ pub(super) fn run_checks(
         Ok(tree) => tree,
         Err(error) => {
             cancel::check()?;
-            say(&format!("{NAME}: {error}"))?;
-            return Err(1);
+            return Err(fail(&format!("{NAME}: {error}"), 1));
         }
     };
     let ran = checks_in(environ, &tree, tip, checks);
@@ -74,30 +73,30 @@ pub(super) fn run_checks(
         _ => Ok(()),
     };
     if let Err(Ended::Unstopped(code, message)) = &ran {
-        say(&format!("{NAME}: {message}"))?;
-        return Err(*code);
+        return Err(fail(&format!("{NAME}: {message}"), *code));
     }
     cancel::check()?;
-    match ran {
-        Err(Ended::Cancelled(code) | Ended::Stream(code)) => return Err(code),
-        Err(Ended::Unstopped(..)) => unreachable!("an unstopped check returned above"),
+    let failures = match ran {
+        Ok(failures) => {
+            removed?;
+            failures
+        }
+        Err(Ended::Cancelled(code) | Ended::Stream(code) | Ended::Unstopped(code, _)) => {
+            return Err(code);
+        }
         Err(Ended::Git(error)) => {
             removed?;
-            say(&format!("pre-push: {error}"))?;
-            return Err(2);
+            return Err(fail(&format!("pre-push: {error}"), 2));
         }
         Err(Ended::Fault(message)) => {
             removed?;
-            say(&format!("{NAME}: {message}"))?;
-            return Err(1);
+            return Err(fail(&format!("{NAME}: {message}"), 1));
         }
-        Ok(_) => removed?,
-    }
+    };
     if let Err(error) = cleared {
-        say(&format!("{NAME}: {}: {error}", shown(&tree)))?;
-        return Err(1);
+        return Err(fail(&format!("{NAME}: {}: {error}", shown(&tree)), 1));
     }
-    ran.map_err(|_| unreachable!("every early end returned above"))
+    Ok(failures)
 }
 
 /// `checks_in` adds the worktree at `tree` and runs the checks there.

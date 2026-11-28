@@ -192,6 +192,7 @@ fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
     let head = fx.commit(&[("scripts/fis-profiles.json", "{\"x\": 1}\n")]);
     assert_eq!(fx.push(&[(&head, &held)]).code, Some(0));
     assert_eq!(fx.ran(), [name]);
+    assert_eq!(fx.isolated(), [name]);
     fx.clear();
     let run = fx.push_with(&[(&head, &held)], &[("test_host_stop_controller", 1)]);
     assert_eq!(run.code, Some(1), "{}", run.stderr);

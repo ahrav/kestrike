@@ -6,7 +6,10 @@
 use std::fs;
 use std::path::Path;
 
-use super::push::{Fixture, STUB, alive, finished, group_alive, process_id, signal, waited};
+use super::push::{
+    BINARY, Fixture, STUB, alive, finished, group_alive, process_id, signal, spawn_with_input, top,
+    waited,
+};
 
 /// `hanging` commits an inventory change with the selection script holding `first` and the admission
 /// script holding `second`, each a marker line before the stub, and returns the commit.
@@ -35,7 +38,7 @@ fn zombie(pid: libc::pid_t) -> bool {
 fn a_signal_during_worktree_creation_leaves_no_worktree() {
     let fx = Fixture::new();
     let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
-    fx.wrap_git(true);
+    fx.wrap_git();
     let run = fx.push(&[(&head, &fx.base)]);
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
@@ -71,17 +74,27 @@ fn each_signal_while_a_check_and_its_child_run_ends_the_group_and_removes_the_wo
     }
 }
 
-/// A SIGINT right after a SIGTERM changes nothing: the exit is 143 and the worktree is removed once and
-/// unregistered.
+/// A SIGINT that arrives while the worktree is being removed after a SIGTERM changes nothing: the exit is
+/// 143, the worktree is removed once and unregistered, and the check's leader had ended before the removal
+/// started.
 #[test]
 fn two_signals_in_a_row_remove_the_worktree_once() {
     let fx = Fixture::new();
     let head = hanging(&fx, "# hang", "");
-    fx.wrap_git(false);
+    fx.wrap_git_around(
+        "if [ \"$1 $2\" = 'worktree remove' ]; then\n\
+         \x20 if kill -0 \"$(cat \"$STUB_LOG.leader\")\" 2>/dev/null; then echo leader-alive >> \"$STUB_LOG.git\"; fi\n\
+         \x20 printf 'remove\\n' >> \"$STUB_LOG.git\"\n\
+         \x20 n=0\n\
+         \x20 while [ ! -e \"$STUB_LOG.release\" ] && [ \"$n\" -lt 1000 ]; do sleep 0.01; n=$((n + 1)); done\n\
+         fi",
+    );
     let tool = fx.start(&Fixture::input(&[(&head, &fx.base)]));
     let leader = process_id(&fx.logged(".leader"));
     signal(tool.id(), libc::SIGTERM);
+    assert!(waited(|| fx.logged(".git").exists()), "the removal starts");
     signal(tool.id(), libc::SIGINT);
+    fs::write(fx.logged(".release"), "").expect("the removal is released");
     let run = finished(tool);
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert!(waited(|| !group_alive(leader)), "the check's group ends");
@@ -103,11 +116,13 @@ fn a_leader_that_ended_before_the_signal_gets_none() {
     signal(tool.id(), libc::SIGTERM);
     let run = finished(tool);
     let survived = alive(lingering) && !zombie(lingering);
-    // SAFETY: `kill` takes two integers and touches no memory of the caller.
-    unsafe { libc::kill(lingering, libc::SIGKILL) };
-    // SAFETY: `waitpid` with a null status pointer reaps the child where this process is its subreaper and
-    // returns at once where it is not this process's child.
-    unsafe { libc::waitpid(lingering, std::ptr::null_mut(), 0) };
+    if survived {
+        // SAFETY: `kill` takes two integers and touches no memory of the caller.
+        unsafe { libc::kill(lingering, libc::SIGKILL) };
+        // SAFETY: `waitpid` with a null status pointer reaps the child where this process is its subreaper
+        // and returns at once where it is not this process's child.
+        unsafe { libc::waitpid(lingering, std::ptr::null_mut(), 0) };
+    }
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert!(
         waited(|| !group_alive(leader)),
@@ -121,6 +136,42 @@ fn a_leader_that_ended_before_the_signal_gets_none() {
         fx.ran(),
         ["test-select-tests.py", "verify-receipts.py admit"]
     );
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// A SIGHUP that the tool's starter ignores, as `nohup` does, is still recorded: the check's group ends and
+/// the exit is 129.
+#[test]
+fn an_ignored_signal_is_still_recorded() {
+    let fx = Fixture::new();
+    let head = hanging(&fx, "# hang", "");
+    let mut command = fx.command("sh");
+    command
+        .args(["-c", "trap '' HUP; exec \"$0\" \"$@\"", BINARY])
+        .arg(top())
+        .args(["pre-push-checks", "origin", "url"]);
+    let tool = spawn_with_input(&mut command, &Fixture::input(&[(&head, &fx.base)]));
+    let leader = process_id(&fx.logged(".leader"));
+    signal(tool.id(), libc::SIGHUP);
+    let run = finished(tool);
+    assert_eq!(run.code, Some(128 + libc::SIGHUP), "{}", run.stderr);
+    assert!(waited(|| !group_alive(leader)), "the check's group ends");
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// A SIGTERM that arrives while a ref line is planned ends the push with 143 once that Git read returns,
+/// before any scan, guard or check.
+#[test]
+fn a_signal_while_a_ref_line_is_planned_ends_the_push() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
+    fx.wrap_git_around("if [ \"$1\" = rev-list ]; then kill -TERM \"$PPID\"; fi");
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }

@@ -12,8 +12,8 @@
 //! standard error, and `128 + n` the first of SIGINT, SIGTERM and SIGHUP that arrived, which [`cancel`]
 //! records whatever disposition the tool inherited. The record is read between steps and while a check
 //! runs; a Git read and a scan run to their end, and the record is acted on once they return, whatever
-//! they returned. On a record the tool prints nothing more, apart from a line that names a running check
-//! whose SIGKILL or reap failed.
+//! they returned. On a record the tool starts no further step and prints no check line and no failure
+//! list; a failed worktree removal and a running check whose SIGKILL or reap failed are still named.
 
 mod cancel;
 mod worktree;
@@ -40,8 +40,7 @@ type Exit = u8;
 /// `run` installs the signal record, then runs the push's checks and returns the exit code.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     if let Err(error) = cancel::install() {
-        return say(&format!("{NAME}: the signal handlers: {error}"))
-            .map_or_else(|code| code, |()| 2);
+        return fail(&format!("{NAME}: the signal handlers: {error}"), 2);
     }
     let destination = args.first().map_or(OsStr::new(""), OsString::as_os_str);
     push(destination).unwrap_or_else(|code| code)
@@ -50,6 +49,11 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
 /// `say` writes `line` and a line feed to standard error; a failed write is exit 120.
 fn say(line: &str) -> Result<(), Exit> {
     emit(io::stderr().as_fd(), &format!("{line}\n")).map_err(|_| STREAM_FAILED)
+}
+
+/// `fail` writes `line` to standard error and returns `code`, or 120 where the write fails.
+fn fail(line: &str, code: Exit) -> Exit {
+    say(line).map_or_else(|failed| failed, |()| code)
 }
 
 /// `short` writes the first twelve code points of `commit`.
@@ -66,7 +70,7 @@ fn os(text: &Text) -> OsString {
 
 /// `refused` prints the failure that ends the push before its checks start and returns exit 2.
 fn refused(failure: &Failure) -> Exit {
-    say(&format!("pre-push: {failure}")).map_or_else(|code| code, |()| 2)
+    fail(&format!("pre-push: {failure}"), 2)
 }
 
 /// `push` reads the ref lines from standard input, plans them, and runs the scans, the guard and the checks
@@ -76,8 +80,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     let read = io::stdin().lock().read_to_end(&mut input);
     cancel::check()?;
     if let Err(error) = read {
-        say(&format!("{NAME}: standard input: {error}"))?;
-        return Err(1);
+        return Err(fail(&format!("{NAME}: standard input: {error}"), 1));
     }
     let lines = Text::from_os(OsStr::from_bytes(&input)).splitlines();
     let started = Plan::new(destination);
@@ -92,7 +95,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
         noted?;
         planned.map_err(|failure| refused(&failure))?;
     }
-    let environ = plan.environ().clone();
+    let environ = plan.environ();
     let mut failures = Vec::new();
     for (base, tip) in plan.scans() {
         say(&format!(
@@ -100,7 +103,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
             short(tip),
             short(base)
         ))?;
-        let code = scan_range(&environ, &os(base), &os(tip), io::stderr().as_fd());
+        let code = scan_range(environ, &os(base), &os(tip), io::stderr().as_fd());
         cancel::check()?;
         if code != 0 {
             failures.push(format!(
@@ -112,7 +115,7 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     cancel::check()?;
     failures.extend(guarded.map_err(|failure| refused(&failure))?);
     for (tip, checks) in plan.checks() {
-        failures.extend(worktree::run_checks(&environ, tip, &checks)?);
+        failures.extend(worktree::run_checks(environ, tip, &checks)?);
     }
     for failure in &failures {
         say(&format!("pre-push: failed: {failure}"))?;
