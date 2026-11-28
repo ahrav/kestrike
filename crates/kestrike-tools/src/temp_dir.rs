@@ -42,7 +42,7 @@ impl std::error::Error for TempDirError {}
 
 /// `random_letters` fills `letters` with letters of [`NAME_LETTERS`] drawn uniformly from the kernel's
 /// random bytes.
-fn random_letters(letters: &mut [u8]) -> io::Result<()> {
+pub(crate) fn random_letters(letters: &mut [u8]) -> io::Result<()> {
     let mut filled = 0;
     while filled < letters.len() {
         let mut byte = 0u8;
@@ -74,14 +74,32 @@ fn random_letters(letters: &mut [u8]) -> io::Result<()> {
 /// The random bytes cannot be read, a `mkdir` fails with another error than a taken name, or
 /// 10,000 names are all taken.
 pub fn make_temp_dir(prefix: &str, parent: &Path) -> Result<PathBuf, TempDirError> {
+    fresh(prefix.as_bytes(), parent, random_letters, |path| {
+        DirBuilder::new().mode(0o700).create(path)
+    })
+    .map(|(path, ())| path)
+}
+
+/// `fresh` runs `create` on `parent/PREFIX` and eight letters that `letters` draws, and draws a new name
+/// while `create` finds the name taken.
+///
+/// # Errors
+///
+/// `letters` fails, `create` fails with another error than a taken name, or 10,000 names are all taken.
+pub(crate) fn fresh<T>(
+    prefix: &[u8],
+    parent: &Path,
+    mut letters: impl FnMut(&mut [u8]) -> io::Result<()>,
+    mut create: impl FnMut(&Path) -> io::Result<T>,
+) -> Result<(PathBuf, T), TempDirError> {
     for _ in 0..NAME_ATTEMPTS {
-        let mut letters = [0u8; NAME_LENGTH];
-        random_letters(&mut letters).map_err(TempDirError::Random)?;
-        let mut name = prefix.as_bytes().to_vec();
-        name.extend_from_slice(&letters);
+        let mut drawn = [0u8; NAME_LENGTH];
+        letters(&mut drawn).map_err(TempDirError::Random)?;
+        let mut name = prefix.to_vec();
+        name.extend_from_slice(&drawn);
         let path = parent.join(OsStr::from_bytes(&name));
-        match DirBuilder::new().mode(0o700).create(&path) {
-            Ok(()) => return Ok(path),
+        match create(&path) {
+            Ok(made) => return Ok((path, made)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(TempDirError::Create(PathError::new(&path, error))),
         }

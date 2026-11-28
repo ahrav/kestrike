@@ -1,5 +1,6 @@
 //! The command line of the plant run: seven long options read by [`Reader`] with whole names alone, and
-//! the help. `--plant` keeps every occurrence in order; each other option keeps its last value.
+//! the help: the usage, the options and the rules of a run, which `help.md` states. `--plant` keeps
+//! every occurrence in order; each other option keeps its last value.
 //!
 //! A count is read as Python's `int` reads a string: surrounding whitespace, a sign and single
 //! underscores between digits are taken, the digits are ASCII, at most
@@ -131,7 +132,10 @@ fn floor(value: &Text) -> Result<(), String> {
 
 /// `parse` reads `args` with the option table above and whole names alone.
 pub(super) fn parse(args: &[OsString]) -> Parsed<Options> {
-    let help = format!("{USAGE}\n\n{HELP}");
+    let rules = include_str!("help.md")
+        .split_once("\n\n")
+        .map_or("", |(_, rules)| rules);
+    let help = format!("{USAGE}\n\n{HELP}\n{rules}");
     let reader = Reader::new(TOOL, USAGE, &help, Prefixes::Refuse, &TABLE);
     reader.parse(args).map(|values| {
         let number = |name, default: u64| match values.get(name) {

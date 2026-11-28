@@ -182,5 +182,13 @@ fn help_returns_the_usage_and_the_options() {
             "{text}"
         );
         assert!(text.contains("--plant ID"), "{text}");
+        assert!(
+            text.contains("A plant is a directory `verification/plants/<id>/`"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Exit 0: every plant is caught or missed"),
+            "{text}"
+        );
     }
 }
