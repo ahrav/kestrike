@@ -3,9 +3,13 @@
 
 pub mod evidence;
 pub mod expected;
+#[cfg(target_os = "linux")]
+mod legs;
 pub mod options;
 pub mod reasons;
 pub mod record;
+#[cfg(target_os = "linux")]
+pub mod run;
 pub mod runner;
 pub mod tree;
 
