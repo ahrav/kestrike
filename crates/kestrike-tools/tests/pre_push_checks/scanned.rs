@@ -3,9 +3,8 @@
 //! with the scan's command while the checks still run.
 
 use std::fs;
-use std::process::Stdio;
 
-use super::push::{BINARY, Fixture, top};
+use super::push::{BINARY, Fixture, finished, spawn_with_input, top};
 
 const SELECTION: [&str; 2] = ["test-select-tests.py", "verify-receipts.py admit"];
 
@@ -240,16 +239,14 @@ fn a_scan_through_the_tool_gives_the_lines_and_code_of_scan_weakened_tests() {
     );
     for (head, code) in [(&blocked, 1), (&acknowledged, 0)] {
         let base = fx.git(&["rev-parse", &format!("{head}~1")]);
-        let scan = fx
-            .command(BINARY)
+        let mut command = fx.command(BINARY);
+        command
             .arg(top())
-            .args(["scan-weakened-tests", "--base", &base, "--head", head])
-            .stdin(Stdio::null())
-            .output()
-            .expect("the scan starts");
-        let mut lines = String::from_utf8(scan.stdout).expect("the scan writes UTF-8");
-        lines.push_str(&String::from_utf8(scan.stderr).expect("the scan writes UTF-8"));
-        assert_eq!(scan.status.code(), Some(code), "{lines}");
+            .args(["scan-weakened-tests", "--base", &base, "--head", head]);
+        let scan = finished(spawn_with_input(&mut command, ""));
+        let mut lines = scan.stdout;
+        lines.push_str(&scan.stderr);
+        assert_eq!(scan.code, Some(code), "{lines}");
         assert!(!lines.is_empty());
         let run = fx.push(&[(head, &base)]);
         assert_eq!(run.code, Some(code), "{}", run.stderr);

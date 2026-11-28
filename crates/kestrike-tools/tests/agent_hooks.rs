@@ -4,13 +4,13 @@
 
 use std::fmt;
 use std::fs::{self, DirBuilder};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use crate::pre_push_checks::push::executable;
+use crate::pre_push_checks::push::{executable, finished, spawn_with_input};
 
 /// The override marker the cases plant. Splitting its literal keeps the scan from matching this
 /// definition in the case file.
@@ -288,23 +288,14 @@ impl Repo {
 
     fn push_with(&self, args: &[&str], input: &str, tool_exit: &str) -> Run {
         let hook = self.pre_push();
-        let mut child = self
-            .command("bash")
-            .arg(&hook)
-            .args(args)
-            .env("TOOL_EXIT", tool_exit)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the hook starts");
-        child
-            .stdin
-            .take()
-            .expect("standard input is piped")
-            .write_all(input.as_bytes())
-            .expect("the ref lines are written");
-        ran(child.wait_with_output().expect("the hook's run is read"))
+        let mut command = self.command("bash");
+        command.arg(&hook).args(args).env("TOOL_EXIT", tool_exit);
+        let done = finished(spawn_with_input(&mut command, input));
+        Run {
+            code: done.code,
+            stdout: done.stdout,
+            stderr: done.stderr,
+        }
     }
 
     fn launched(&self) -> (String, String) {
