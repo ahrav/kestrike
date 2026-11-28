@@ -28,7 +28,14 @@ const UTF8_MARK: &[u8] = b"\xef\xbb\xbf";
 pub fn read_manifest(path: &Path) -> Result<Object, Error> {
     let bytes = fs::read(path).map_err(Error::System)?;
     let document = decode(&bytes)?;
-    check_manifest(&document).cloned()
+    check_manifest(&document)?;
+    match document {
+        Value::Object(mut top) => match top.remove("platforms") {
+            Some(Value::Object(platforms)) => Ok(platforms),
+            _ => unreachable!("a checked manifest's platforms are an object"),
+        },
+        _ => unreachable!("a checked manifest is an object"),
+    }
 }
 
 /// `decode` drops one leading UTF-8 byte order mark and reads the rest as strict UTF-8 holding one JSON
@@ -97,7 +104,10 @@ pub fn check_manifest(document: &Value) -> Result<&Object, Error> {
         _ => None,
     }
     .filter(|top| {
-        let keys = members(document).unwrap_or_default();
+        let keys: Vec<Member> = top
+            .iter()
+            .map(|(key, _)| Member::Text(key.clone()))
+            .collect();
         holds_all(&keys, &["version", "platforms", "profiles"])
             && within(
                 &keys,
@@ -320,14 +330,13 @@ fn check_profile<'a>(
         .get("evidence")
         .is_none_or(|evidence| str_of(evidence).starts_with(&Text::from("KESTRIKE_")));
     need(evidence, || text!("profile ", name, " evidence"))?;
-    need(
-        profile.get("evidence").is_some() || !kills_a_role(name, roles)?,
-        || text!("profile ", name, " kills a role without an evidence gate"),
-    )?;
+    need(profile.get("evidence").is_some() || !kills, || {
+        text!("profile ", name, " kills a role without an evidence gate")
+    })?;
     for (role_name, role) in roles.iter() {
         check_role(name, role_name, role, roles)?;
     }
-    let clients: Vec<&Text> = roles
+    let mut clients: Vec<&Text> = roles
         .iter()
         .filter_map(|(_, role)| match role {
             Value::Object(role) => match role.get("env") {
@@ -340,12 +349,10 @@ fn check_profile<'a>(
             _ => None,
         })
         .collect();
-    let distinct_clients = clients
-        .iter()
-        .enumerate()
-        .filter(|(at, client)| !clients[..*at].contains(client))
-        .count();
-    need(clients.len() == distinct_clients, || {
+    let count = clients.len();
+    clients.sort_unstable();
+    clients.dedup();
+    need(clients.len() == count, || {
         text!("profile ", name, " declares one client index for two roles")
     })?;
     Ok(kills.then_some(name))

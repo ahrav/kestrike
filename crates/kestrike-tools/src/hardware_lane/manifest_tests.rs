@@ -1,6 +1,8 @@
-//! The manifest check over a base manifest and its changed copies, each copy's expected sentence recorded
-//! from the hardware lane at the base under Python 3.9.25, and the reader over the committed manifest and
-//! over bytes that are no UTF-8 JSON document.
+//! The manifest check over a base manifest and its changed copies, and the reader over the committed
+//! manifest, over a document's own rules, and over bytes that are no UTF-8 JSON document.
+//!
+//! Each copy of `copies.json` lists its edits of the base, the sentence of its refusal (`lane`), the
+//! sentence the module gives where it differs (`tool`), and the names of its platform rows where it passes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,6 +13,8 @@ use crate::paths::tests::Scratch;
 use crate::text::Text;
 
 const COPIES: &str = include_str!("copies.json");
+
+const COPY_COUNT: usize = 189;
 
 fn top() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -80,9 +84,10 @@ fn names(platforms: &Object) -> Vec<Text> {
     platforms.iter().map(|(name, _)| name.clone()).collect()
 }
 
-/// Each copy passes with the platform rows of its document, in document order, or is refused with its
-/// recorded sentence: the row's `tool` sentence where the row states one, which marks a stated
-/// difference, and the lane's otherwise.
+/// Each copy passes with the platform rows of its document under the names it records, or is refused with
+/// its sentence: the copy's `tool` sentence where it holds one, and its `lane` sentence otherwise. The 35
+/// copies named `check N:` each fail the check of that number alone; the copies named `order` fail two
+/// checks and are refused with the first.
 #[test]
 fn each_copy_passes_or_is_refused_with_its_recorded_sentence() {
     let fixture = json::parse(COPIES).expect("the fixture is JSON");
@@ -122,6 +127,11 @@ fn each_copy_passes_or_is_refused_with_its_recorded_sentence() {
                     panic!("{name}: the platforms")
                 };
                 assert_eq!(platforms, rows, "{name}");
+                let Some(Value::Array(recorded)) = copy.get("platforms") else {
+                    panic!("{name}: a passing copy records its platform names")
+                };
+                let recorded: Vec<Text> = recorded.iter().map(|name| text(name).clone()).collect();
+                assert_eq!(names(platforms), recorded, "{name}");
             }
             (Err(Error::Refused(sentence)), Value::String(expected)) => {
                 assert_eq!(&sentence, expected, "{name}");
@@ -136,14 +146,12 @@ fn each_copy_passes_or_is_refused_with_its_recorded_sentence() {
             checks.push(number.parse::<usize>().expect("a check number"));
         }
     }
-    assert_eq!(
-        checks,
-        (1..=35).collect::<Vec<_>>(),
-        "one copy per check, in order"
-    );
+    assert_eq!(checks, (1..=35).collect::<Vec<_>>(), "one copy per check");
+    assert_eq!(copies.len(), COPY_COUNT, "the fixture holds every copy");
 }
 
-/// The committed manifest passes, with the three platform rows the lane read from it at the base.
+/// The committed manifest passes with its three platform rows, all of them unsupported. A row added to the
+/// manifest is added to the list of names here.
 #[test]
 fn the_committed_manifest_gives_its_platform_rows_in_document_order() {
     let path = manifest_path(&top());
@@ -207,8 +215,7 @@ fn one_byte_order_mark_is_dropped() {
 }
 
 /// Bytes that are no UTF-8, the UTF-8 bytes of a surrogate, UTF-16 and text that is no JSON document are
-/// each refused after `malformed hardware manifest: ` with the reader's statement. The lane at the base
-/// passes the surrogate and the UTF-16 copies with no platform rows.
+/// each refused after `malformed hardware manifest: ` with the reader's statement.
 #[test]
 fn bytes_that_are_no_utf8_json_document_are_refused() {
     let scratch = Scratch::new("hardware-lane");
@@ -253,8 +260,42 @@ fn bytes_that_are_no_utf8_json_document_are_refused() {
     }
 }
 
-/// A path that names no file and a path that names a directory give the read's system error, with the
-/// lane's error numbers 2 and 21.
+/// A document is read whole before its check: a manifest of version 2 is refused, a document that is an
+/// array is refused by the first check, and a platform row named twice stands once, at its first place,
+/// with its last value.
+#[test]
+fn the_reader_checks_the_document_it_decodes() {
+    let scratch = Scratch::new("hardware-lane");
+    let version = written(
+        &scratch,
+        "version.json",
+        br#"{"version": 2, "platforms": {}, "profiles": {}}"#,
+    );
+    let array = written(&scratch, "array.json", b"[]");
+    for (path, sentence) in [(version, "version 2"), (array, "top-level keys")] {
+        let Err(Error::Refused(refused)) = read_manifest(&path) else {
+            panic!("{} is refused", path.display())
+        };
+        assert_eq!(
+            refused,
+            format!("malformed hardware manifest: {sentence}").as_str()
+        );
+    }
+    let repeated = written(
+        &scratch,
+        "repeated.json",
+        br#"{"version": 1, "platforms": {"a": {"machine": "x86_64", "supported": false, "owner": "first"}, "b": {"machine": "aarch64", "supported": false, "owner": "b"}, "a": {"machine": "x86_64", "supported": false, "owner": "last"}}, "profiles": {}}"#,
+    );
+    let platforms = read_manifest(&repeated).expect("a repeated row name passes");
+    assert_eq!(names(&platforms), [Text::from("a"), Text::from("b")]);
+    let Some(Value::Object(first)) = platforms.get("a") else {
+        panic!("the row a")
+    };
+    assert_eq!(first.get("owner"), Some(&Value::String(Text::from("last"))));
+}
+
+/// A path that names no file and a path that names a directory give the read's system error, numbers 2 and
+/// 21.
 #[test]
 fn an_absent_path_and_a_directory_give_the_system_error() {
     let scratch = Scratch::new("hardware-lane");

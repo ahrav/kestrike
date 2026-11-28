@@ -1,12 +1,11 @@
-//! The episode name, the seconds reader, the platform refusal and the lane's constants, each expected value
-//! recorded from the hardware lane at the base under Python 3.9.25.
+//! The episode name, the seconds reader, the platform refusal and the lane's constants.
 
 use std::path::Path;
 
 use crate::hardware_lane::{
-    CONTROLLER_SECONDS, CUSTODY_DIR, ENVIRONMENT_NAME, EPISODE_NAME, Error, HELD, INTERRUPTED,
-    MANIFEST, OBSERVER_SECONDS, PLATFORM_NAMED_BY, STOP_SECONDS, episode_name, finite_seconds,
-    manifest_path, platform_refusal,
+    CONTROLLER_SECONDS, CUSTODY_DIR, ENVELOPE_FIELDS, ENVIRONMENT_NAME, EPISODE_NAME, Error, HELD,
+    IDENTITY_LINES, INTERRUPTED, MANIFEST, OBSERVED, OBSERVER_SECONDS, PLATFORM_NAMED_BY,
+    STOP_SECONDS, episode_name, finite_seconds, identity_lines, manifest_path, platform_refusal,
 };
 use crate::text::Text;
 
@@ -37,8 +36,9 @@ fn an_episode_name_passes_whole_or_is_refused_with_its_repr() {
     }
 }
 
-/// The reader strips the white space `int()` strips, which holds U+00A0 and leaves U+001F, reads Rust's
-/// float syntax, and refuses a value that is not finite or is below 0 with the text's repr.
+/// The reader strips the white space `int()` strips, which holds U+00A0, U+0085 and U+2028 and leaves
+/// U+001C to U+001F, reads Rust's float syntax, and refuses a value that is not finite or is below 0 with
+/// the text's repr.
 #[test]
 fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
     for (seconds, value) in [
@@ -47,6 +47,8 @@ fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
         ("1e3", 1000.0),
         (" 2 ", 2.0),
         ("\u{a0}2", 2.0),
+        ("\u{85}2", 2.0),
+        ("\u{2028}2", 2.0),
     ] {
         let read = finite_seconds(&Text::from(seconds)).unwrap();
         assert_eq!(read.to_bits(), f64::to_bits(value), "{seconds:?}");
@@ -64,10 +66,11 @@ fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
         };
         assert_eq!(
             sentence,
-            format!("{shown} is not a finite duration of zero or more seconds").as_str()
+            format!("{shown} is not a finite duration of zero or more seconds").as_str(),
+            "{seconds:?}"
         );
     }
-    for seconds in ["x", "", "\u{1f}2", "1_0", "\u{661}"] {
+    for seconds in ["x", "", "\u{1c}2", "\u{1e}2", "\u{1f}2", "1_0", "\u{661}"] {
         assert!(
             matches!(finite_seconds(&Text::from(seconds)), Err(Error::NoNumber)),
             "{seconds:?} is no number"
@@ -104,4 +107,28 @@ fn the_constants_hold_the_lanes_values() {
     assert_eq!(CUSTODY_DIR, "/var/tmp/kestrike-hardware-custody");
     assert_eq!(EPISODE_NAME, "[A-Za-z0-9][A-Za-z0-9._-]*");
     assert_eq!(ENVIRONMENT_NAME, "KESTRIKE_[A-Z0-9_]+");
+    assert_eq!(
+        OBSERVED,
+        [
+            "instance_type",
+            "cpu_features",
+            "cpu_family",
+            "kernel",
+            "firmware",
+            "vfio",
+            "numa_nodes",
+            "page_size",
+            "hugepage_size",
+            "devices",
+        ]
+    );
+    assert_eq!(ENVELOPE_FIELDS[..OBSERVED.len()], OBSERVED);
+    let lines: [(&str, &[&str]); 2] = [
+        ("aarch64", &["CPU implementer", "CPU part"]),
+        ("x86_64", &["vendor_id", "cpu family", "model"]),
+    ];
+    assert_eq!(IDENTITY_LINES, lines);
+    assert_eq!(identity_lines(&Text::from("x86_64")), lines[1].1);
+    assert_eq!(identity_lines(&Text::from("aarch64")), lines[0].1);
+    assert!(identity_lines(&Text::from("riscv64")).is_empty());
 }
