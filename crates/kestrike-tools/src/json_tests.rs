@@ -4,7 +4,7 @@
 
 use crate::json::{
     Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, UniqueError, Value, dump, indented,
-    indented_in_order, parse, parse_unique, text,
+    indented_in_order, parse, parse_members, parse_unique, text,
 };
 
 fn round_trip(text: &str) -> String {
@@ -284,6 +284,33 @@ fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
         Ok(r#"{"a":2}"#.to_owned()),
         "the present read keeps the last value"
     );
+}
+
+/// The read that keeps every member turns each object into the array of its keys and values in document
+/// order, a repeated key's members and nested objects included, and refuses what `parse` refuses.
+#[test]
+fn parse_members_keeps_every_member_of_each_object() {
+    let read = parse_members(r#"{"a": 1, "b": {"c": []}, "a": "x"}"#).expect("the document reads");
+    let string = |text: &str| Value::String(Text::from(text));
+    assert_eq!(
+        read,
+        Value::Array(vec![
+            string("a"),
+            Value::Integer(Integer::from(1_u64)),
+            string("b"),
+            Value::Array(vec![string("c"), Value::Array(vec![])]),
+            string("a"),
+            string("x"),
+        ])
+    );
+    assert_eq!(parse_members("{}"), Ok(Value::Array(vec![])));
+    for refused in ["{\"a\": 1,}", "[", "{\"a\" 1}"] {
+        assert_eq!(
+            parse_members(refused).map_err(|error| error.reason()),
+            parse(refused).map_err(|error| error.reason()),
+            "{refused}"
+        );
+    }
 }
 
 /// With no repeated key, the unique read reads each number as the read that keeps repeats does: the three
