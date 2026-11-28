@@ -207,19 +207,21 @@ impl<'a> Record<'a> {
 /// `install` returns the first error from `ignored` or `register`.
 pub fn install(delivered: &'static Delivered) -> io::Result<()> {
     for signal in Signal::ALL {
-        if !ignored(signal)? {
+        if !ignored(signal.number())? {
             register(signal, delivered)?;
         }
     }
     Ok(())
 }
 
-fn ignored(signal: Signal) -> io::Result<bool> {
+/// Whether the disposition of the signal `number` is to ignore it.
+pub(super) fn ignored(number: i32) -> io::Result<bool> {
     // SAFETY: all-zero bytes are a valid `sigaction`. A null new action makes `sigaction` only write
-    // the current disposition into `current`, which outlives the call.
+    // the current disposition of `number`, a signal number the caller names, into `current`, which
+    // outlives the call.
     let (status, current) = unsafe {
         let mut current: libc::sigaction = std::mem::zeroed();
-        let status = libc::sigaction(signal.number(), std::ptr::null(), &mut current);
+        let status = libc::sigaction(number, std::ptr::null(), &mut current);
         (status, current)
     };
     if status != 0 {

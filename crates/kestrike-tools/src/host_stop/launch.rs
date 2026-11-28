@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::record::{Interrupted, Record, SLICE, left};
+use super::record::{Interrupted, Record, SLICE, ignored, left};
 use crate::environ;
 use crate::python::returncode;
 use crate::text::{newlines, strip_str};
@@ -140,6 +140,11 @@ fn run(
         |reason: &dyn fmt::Display| Ended::Failed(CallFailed::no_answer(call.argv, reason));
     record.read().map_err(Ended::Interrupted)?;
     environ::check(call.env).map_err(|error| no_answer(&error))?;
+    if ignored(libc::SIGCHLD).map_err(|error| no_answer(&error))? {
+        return Err(no_answer(
+            &"SIGCHLD is ignored, so the child's exit cannot be read",
+        ));
+    }
     let command = find(call.env).map(|program| command(program, call));
     record.read().map_err(Ended::Interrupted)?;
     let Some(mut command) = command else {

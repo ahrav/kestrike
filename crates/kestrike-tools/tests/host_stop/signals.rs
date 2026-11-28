@@ -7,7 +7,9 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kestrike_tools::host_stop::{Call, DELIVERED, Interrupted, Record, Signal, install, launch};
+use kestrike_tools::host_stop::{
+    Call, DELIVERED, Ended, Interrupted, Record, Signal, install, launch,
+};
 
 use super::launch::Standin;
 use super::{MARKER_LIMIT, PLACE, ROLE, passed, start_window, start_window_with};
@@ -217,4 +219,52 @@ fn each_handled_signal_reaches_the_record_and_a_blocked_one_waits_for_it() {
         .expect("the window starts");
     passed("each", &output);
     assert!(scratch.0.join("done").exists(), "the window ran its checks");
+}
+
+const CHILD_CASE: &str =
+    "host_stop::signals::an_ignored_sigchld_refuses_the_call_before_any_child_starts";
+
+/// In a process started with SIGCHLD ignored, where an exited child is reaped by the kernel and its
+/// status is lost, a call fails before any child starts and names the reason.
+#[test]
+fn an_ignored_sigchld_refuses_the_call_before_any_child_starts() {
+    if let (Some(_), Some(_)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        let place = std::path::PathBuf::from(std::env::var_os(PLACE).expect("the place is given"));
+        let bin = place.join("bin");
+        fs::create_dir(&bin).expect("the directory is made");
+        fs::write(bin.join("aws"), super::launch::STANDIN).expect("the stand-in is written");
+        fs::set_permissions(
+            bin.join("aws"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("the mode is set");
+        let pid = place.join("pid");
+        let env = vec![
+            ("PATH".into(), bin.into_os_string()),
+            ("HOST_STOP_MODE".into(), "echo".into()),
+            ("HOST_STOP_PID".into(), pid.clone().into_os_string()),
+        ];
+        let mut record = Record::new(&DELIVERED);
+        let argv = ["sts", "get-caller-identity"];
+        let call = Call {
+            argv: &argv,
+            retry: true,
+            cut: Duration::from_secs(10),
+            env: &env,
+        };
+        let Err(Ended::Failed(failed)) = launch(&mut record, &call) else {
+            panic!("an ignored SIGCHLD refuses the call")
+        };
+        assert_eq!(
+            failed.to_string(),
+            "sts get-caller-identity gave no answer: SIGCHLD is ignored, so the child's exit cannot be read"
+        );
+        assert!(!pid.exists(), "no child started");
+        return;
+    }
+    let scratch = super::Scratch::new("signals-chld");
+    let output = start_window(CHILD_CASE, "chld", &scratch.0, "trap '' CHLD;")
+        .output()
+        .expect("the window starts");
+    passed("chld", &output);
 }
