@@ -6,7 +6,7 @@ use std::fs;
 
 use super::push::{BINARY, Fixture, STUB, ZERO, finished, spawn_with_input, top};
 
-fn unnamed(fx: &Fixture, input: &str) -> std::process::Child {
+fn unnamed(fx: &Fixture, input: &str) -> super::push::Tool {
     let mut command = fx.command(BINARY);
     command.arg(top()).args(["pre-push-checks", ""]);
     spawn_with_input(&mut command, input)

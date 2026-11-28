@@ -241,7 +241,7 @@ fn a_failed_write_to_standard_error_exits_120_before_any_check() {
         .expect("standard input is piped")
         .write_all(Fixture::input(&[(&head, &fx.base)]).as_bytes())
         .expect("the ref lines are written");
-    let status = finished(child);
+    let status = finished(child.into());
     assert_eq!(status.code, Some(120));
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
@@ -256,7 +256,7 @@ fn a_failed_read_of_standard_input_exits_1() {
         .stdin(File::open(&fx.repo).expect("the directory opens"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = finished(command.spawn().expect("the tool starts"));
+    let output = finished(command.spawn().expect("the tool starts").into());
     assert_eq!(output.code, Some(1));
     assert_eq!(
         output.stderr,
@@ -324,13 +324,7 @@ fn a_tool_started_with_sigchld_ignored_reads_each_child_s_status() {
 #[test]
 fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
     let mut fx = Fixture::new();
-    let head = fx.commit(&[
-        INVENTORY,
-        (
-            "scripts/test-select-tests.py",
-            &format!("# unlink-git\n{STUB}"),
-        ),
-    ]);
+    let head = fx.commit(&[INVENTORY]);
     let tools = fx.temp.join("tools");
     let linked = fx.temp.join("git-dir");
     for dir in [&tools, &linked] {
@@ -341,8 +335,13 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
     ] {
         symlink(which(program), tools.join(program)).expect("the link is made");
     }
-    let link = linked.join("git");
-    symlink(which("git"), &link).expect("the link is made");
+    executable(
+        &linked.join("git"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'worktree add' ]; then \"{git}\" \"$@\"; status=$?; rm -f \"$0\"; exit \"$status\"; fi\nexec \"{git}\" \"$@\"\n",
+            git = which("git").display()
+        ),
+    );
     let path = fx
         .env
         .iter()
@@ -355,7 +354,6 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
         searched.push(dir);
     }
     fx.set("PATH", searched);
-    fx.set("STUB_GIT_LINK", link.clone());
     let run = fx.push(&[(&head, &fx.base)]);
     fx.set("PATH", path);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
@@ -386,8 +384,8 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
 
 /// A `git worktree add` that ends after registering a locked worktree whose directory lacks its `.git`
 /// file leaves the registration standing: the removal names the worktree it could not remove, the exit is
-/// the add's 2, and the locked entry stays registered until a `git worktree remove` or `prune` of the
-/// user's own clears it.
+/// the add's 2, and the locked entry stays registered until `git worktree unlock` and then
+/// `git worktree prune`, or a doubly forced `git worktree remove`, clears it.
 #[test]
 fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
     let fx = Fixture::new();
@@ -422,6 +420,51 @@ fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
     fx.git(&["worktree", "unlock", half_linked]);
     fx.git(&["worktree", "prune"]);
     assert_eq!(fx.worktrees(), 1);
+}
+
+/// A `git worktree add` stopped before it writes the worktree's `gitdir` file can leave an entry under the
+/// common `.git/worktrees` directory that holds only its `locked` file: Git lists no such worktree, the
+/// removal names a tree Git does not know, the exit is the add's 2, and the entry stays for its owner to
+/// delete.
+#[test]
+fn a_locked_only_entry_left_by_a_failed_add_stays_and_is_not_listed() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    executable(
+        &fx.bin.join("git"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'worktree add' ]; then\n\
+             \x20 entry=\"$(\"{git}\" rev-parse --git-common-dir)/worktrees/$(basename \"$5\")\"\n\
+             \x20 mkdir -p \"$entry\" && : > \"$entry/locked\" || exit\n\
+             \x20 printf '%s\\n' \"$entry\" > \"$STUB_LOG.entry\"\n\
+             \x20 exit 128\n\
+             fi\nexec \"{git}\" \"$@\"\n",
+            git = which("git").display()
+        ),
+    );
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    let prefix = format!(
+        "pre-push: could not remove worktree {}/kestrike-pre-push-",
+        fx.tmp.display()
+    );
+    assert!(
+        run.stderr.lines().any(|line| line.starts_with(&prefix)),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
+    assert_eq!(fx.worktrees(), 1);
+    let entry = fs::read_to_string(fx.logged(".entry")).expect("the stand-in names its entry");
+    let entry = fx.repo.join(entry.trim_end());
+    let held: Vec<_> = fs::read_dir(&entry)
+        .expect("the entry stays")
+        .map(|item| item.expect("the entry reads").file_name())
+        .collect();
+    assert_eq!(held, ["locked"]);
+    fs::remove_dir_all(&entry).expect("the entry is deleted");
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
 /// A ref field holding a NUL byte reaches a Git argument that the standard library refuses before any

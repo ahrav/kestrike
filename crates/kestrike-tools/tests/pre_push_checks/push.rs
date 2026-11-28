@@ -13,8 +13,7 @@
 //! `STUB_LOG.lingering`, and exits 0 at once. A script that holds `# env` writes its environment to
 //! `STUB_LOG.env`, its working directory and that directory's mode to `STUB_LOG.where`, the line
 //! `output of NAME` to standard output and `error output of NAME` to standard error. A `# hang` script
-//! sends its own two output streams and its child's to `/dev/null` first. A script that holds
-//! `# unlink-git` removes the file `STUB_GIT_LINK` names before anything else; one that holds `# deaf`
+//! sends its own two output streams and its child's to `/dev/null` first. A script that holds `# deaf`
 //! ignores SIGINT, SIGTERM, SIGHUP and SIGQUIT and then hangs as `# hang` does; one that holds
 //! `# release` hangs, then exits 0 once `STUB_LOG.release` stands or 60 seconds pass; one that holds
 //! `# locked` makes the directory `locked` in its working directory, holding the empty file `kept`, with
@@ -64,7 +63,6 @@ hang() {
   child "$STUB_LOG.child"
   printf '%s\n' "$$" > "$STUB_LOG.leader.tmp" && mv "$STUB_LOG.leader.tmp" "$STUB_LOG.leader"
 }
-if grep -qx '# unlink-git' "$script"; then rm -f "$STUB_GIT_LINK"; fi
 if grep -qx '# locked' "$script"; then mkdir locked && : > locked/kept && chmod 500 locked; fi
 if grep -qx '# linger' "$script"; then child "$STUB_LOG.lingering"; exit 0; fi
 if grep -qx '# deaf' "$script"; then trap '' INT TERM HUP QUIT; hang; wait; fi
@@ -360,7 +358,7 @@ impl Fixture {
 
     /// `start` starts the tool in the repository as `pre-push-checks origin url` with `input` on standard
     /// input and both output streams piped.
-    pub fn start(&self, input: &str) -> Child {
+    pub fn start(&self, input: &str) -> Tool {
         self.start_in(&self.repo, input, &[])
     }
 
@@ -375,7 +373,7 @@ impl Fixture {
     }
 
     /// `start_in` is [`Fixture::start`] in `dir`, with each `STUB_<NAME>` of `codes` set for this run.
-    pub fn start_in(&self, dir: &Path, input: &str, codes: &[(&str, i32)]) -> Child {
+    pub fn start_in(&self, dir: &Path, input: &str, codes: &[(&str, i32)]) -> Tool {
         let mut command = self.tool();
         for (name, code) in codes {
             command.env(
@@ -446,9 +444,36 @@ pub fn top() -> &'static Path {
         .expect("the package stands two levels below the checkout's top")
 }
 
+/// A started tool that a case has not yet passed to [`finished`]. Dropping it, as a failing case does when
+/// it unwinds, sends the tool SIGKILL, which also ends a stopped tool, and reaps it, so no tool outlives
+/// its case.
+pub struct Tool(Option<Child>);
+
+impl Tool {
+    /// `id` is the tool's process id.
+    pub fn id(&self) -> u32 {
+        self.0.as_ref().expect("the tool is held").id()
+    }
+}
+
+impl From<Child> for Tool {
+    fn from(child: Child) -> Self {
+        Self(Some(child))
+    }
+}
+
+impl Drop for Tool {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// `spawn_with_input` starts `command` with both output streams piped, writes the bytes of `input` to its
 /// standard input and closes it.
-pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Child {
+pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Tool {
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -456,15 +481,17 @@ pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Child
         .spawn()
         .expect("the tool starts");
     let mut stdin = child.stdin.take().expect("standard input is piped");
+    let tool = Tool(Some(child));
     stdin
         .write_all(input.as_ref())
         .expect("the ref lines are written");
-    child
+    tool
 }
 
 /// `finished` closes the child's standard input, reads both output streams and waits for the child against
 /// [`RUN_LIMIT`]; a child still running then gets SIGKILL while it is held unreaped, and the case fails.
-pub fn finished(mut child: Child) -> Run {
+pub fn finished(mut tool: Tool) -> Run {
+    let mut child = tool.0.take().expect("the tool is held");
     drop(child.stdin.take());
     let reader = |stream: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
@@ -499,9 +526,14 @@ pub fn finished(mut child: Child) -> Run {
         }
         std::thread::sleep(Duration::from_millis(5));
     };
+    let streams = Instant::now();
     while !(stdout.is_finished() && stderr.is_finished()) {
         assert!(
-            start.elapsed() < RUN_LIMIT,
+            status.is_some() || streams.elapsed() < Duration::from_secs(1),
+            "the tool ran past {RUN_LIMIT:?} and a process it started holds its output streams"
+        );
+        assert!(
+            status.is_none() || start.elapsed() < RUN_LIMIT,
             "a process the tool started holds its output streams past {RUN_LIMIT:?}"
         );
         std::thread::sleep(Duration::from_millis(5));
@@ -573,6 +605,18 @@ fn subreaper() {
 pub fn alive(pid: libc::pid_t) -> bool {
     // SAFETY: `kill` with signal 0 sends nothing and touches no memory of the caller.
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// `group_ended` waits up to [`LIMIT`] for the group `group` to end and returns whether it did; a group
+/// still alive then gets SIGKILL while [`group_alive`] has just read it alive, so a failing case leaves no
+/// check running.
+pub fn group_ended(group: libc::pid_t) -> bool {
+    let ended = waited(|| !group_alive(group));
+    if !ended && group_alive(group) {
+        // SAFETY: `killpg` takes two integers and touches no memory of the caller.
+        unsafe { libc::killpg(group, libc::SIGKILL) };
+    }
+    ended
 }
 
 /// `group_alive` holds while a process of the group `group` remains. It first reaps each member that ended
