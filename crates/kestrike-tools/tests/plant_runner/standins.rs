@@ -917,7 +917,21 @@ fn python(args: &[String], out: &mut File) -> i32 {
 }
 
 fn question(args: &[String], out: &mut File) -> i32 {
-    let helper = read(Path::new(&args[0]));
+    let mut given = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut given)
+        .expect("the question's input is read");
+    let at = given
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .expect("the source's length leads the input");
+    let size: usize = std::str::from_utf8(&given[..at])
+        .expect("a decimal length")
+        .parse()
+        .expect("a decimal length");
+    let rest = &given[at + 1..];
+    let helper = String::from_utf8(rest[..size].to_vec()).expect("the helper is text");
+    let given_line = String::from_utf8(rest[size..].to_vec()).expect("the line is text");
     if let Some(log) = var("STANDIN_LOG") {
         let place = Path::new(&log)
             .parent()
@@ -956,10 +970,7 @@ fn question(args: &[String], out: &mut File) -> i32 {
         }
         Some(code) => {
             let code: i32 = code.parse().expect("the question names an exit");
-            let mut line = String::new();
-            std::io::stdin()
-                .read_to_string(&mut line)
-                .expect("the line is read");
+            let line = given_line;
             if helper.contains(RAISES) {
                 eprintln!("Traceback (most recent call last):");
                 eprintln!("ValueError: no count");

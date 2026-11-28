@@ -29,25 +29,27 @@ use crate::text::{Text, newlines, text};
 /// The program the run starts for the head's helper and for the question to it.
 pub(crate) const PYTHON: &str = "python3";
 
-/// The question to the staged helper, given its path and, for a rerun, the exit and the last line on
-/// standard input. It loads the helper as a module, checks that its `reported` is callable, and prints
-/// as JSON the texts of the verdicts of exits 0 and 1, or whether `reported` counts the exit beside the
-/// line. The helper's writes to descriptor 1 go to standard error, leaving standard output for the JSON
+/// The question to the staged helper, given its path and, for a rerun, the exit; standard input holds
+/// the helper's source as read once at the proof's setup, framed by its length in decimal and a line
+/// feed, then a rerun's last line. It runs that source as the helper's module, checks that its
+/// `reported` is callable, and prints as JSON the texts of the verdicts of exits 0 and 1, or whether
+/// `reported` counts the exit beside the line. The helper's writes to descriptor 1 go to standard error, leaving standard output for the JSON
 /// answer alone.
 const QUESTION: &str = "import importlib.util, json, os, sys
 answer_out = os.dup(1)
 os.dup2(2, 1)
-spec = importlib.util.spec_from_file_location('staged_reproduce_test', sys.argv[1])
-if spec is None or spec.loader is None:
-    raise ImportError(sys.argv[1] + ' has no loader')
+size, _, given = sys.stdin.buffer.read().partition(b'\\n')
+source, line = given[:int(size)], given[int(size):]
+spec = importlib.util.spec_from_loader('staged_reproduce_test', loader=None, origin=sys.argv[1])
 module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(module)
+module.__file__ = sys.argv[1]
+exec(compile(source, sys.argv[1], 'exec'), module.__dict__)
 if not callable(module.reported):
     raise TypeError('its `reported` is not callable')
 if len(sys.argv) == 2:
     answer = [str(module.RESULTS[code]) for code in (0, 1)]
 else:
-    answer = bool(module.reported(int(sys.argv[2]), sys.stdin.buffer.read().decode()))
+    answer = bool(module.reported(int(sys.argv[2]), line.decode()))
 os.write(answer_out, (json.dumps(answer) + '\\n').encode())
 ";
 
@@ -210,6 +212,7 @@ fn memory_file(name: &CStr) -> io::Result<File> {
 fn asked<T>(
     env: &Environ,
     helper: &Path,
+    source: &[u8],
     code: Option<i32>,
     input: &[u8],
     shape: impl FnOnce(Value) -> Option<T>,
@@ -217,7 +220,9 @@ fn asked<T>(
     let failed = |error: io::Error| text!("`python3` did not run: ", strerror(&error));
     let mut stdin = memory_file(c"question-in").map_err(failed)?;
     stdin
-        .write_all(input)
+        .write_all(format!("{}\n", source.len()).as_bytes())
+        .and_then(|()| stdin.write_all(source))
+        .and_then(|()| stdin.write_all(input))
         .and_then(|()| stdin.rewind())
         .map_err(failed)?;
     let mut stdout = memory_file(c"question-out").map_err(failed)?;
@@ -266,8 +271,12 @@ fn asked<T>(
 /// # Errors
 ///
 /// As [`asked`].
-pub(crate) fn verdict_texts(env: &Environ, helper: &Path) -> Result<[Text; 2], Text> {
-    asked(env, helper, None, &[], |value| match value {
+pub(crate) fn verdict_texts(
+    env: &Environ,
+    helper: &Path,
+    source: &[u8],
+) -> Result<[Text; 2], Text> {
+    asked(env, helper, source, None, &[], |value| match value {
         Value::Array(items) => match <[Value; 2]>::try_from(items) {
             Ok([Value::String(zero), Value::String(one)]) => Some([zero, one]),
             _ => None,
@@ -281,10 +290,17 @@ pub(crate) fn verdict_texts(env: &Environ, helper: &Path) -> Result<[Text; 2], T
 /// # Errors
 ///
 /// As [`asked`].
-pub(crate) fn counts(env: &Environ, helper: &Path, code: i32, line: &Text) -> Result<bool, Text> {
+pub(crate) fn counts(
+    env: &Environ,
+    helper: &Path,
+    source: &[u8],
+    code: i32,
+    line: &Text,
+) -> Result<bool, Text> {
     asked(
         env,
         helper,
+        source,
         Some(code),
         line.as_bytes(),
         |value| match value {

@@ -39,6 +39,8 @@ pub struct Run<'a> {
     trees: Vec<PathBuf>,
     /// The staged helper's verdict texts of exits 0 and 1, once the proof's setup stands.
     pub(super) results: Option<[Text; 2]>,
+    /// The staged helper's source as read once at the proof's setup, which every question runs.
+    pub(super) helper_source: Vec<u8>,
     pub(super) on_head: Vec<(Text, Result<u8, NoVerdict>)>,
     pub(super) proof_tree: Option<PathBuf>,
     pub(super) proof_failure: Option<NoVerdict>,
@@ -228,6 +230,7 @@ impl<'a> Run<'a> {
             date: crate::text::strip_str(&shown.stdout).to_owned(),
             trees: Vec::new(),
             results: None,
+            helper_source: Vec::new(),
             on_head: Vec::new(),
             proof_tree: None,
             proof_failure: None,

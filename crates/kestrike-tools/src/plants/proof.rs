@@ -45,7 +45,7 @@ fn os(text: &Text) -> OsString {
 /// `copy` opens `from` once, following links and waiting for no writer, refuses a named pipe judged
 /// on the opened file, and reads through that descriptor at most one byte past the soft file size
 /// limit, so a source the copy could not write is refused before it is read whole.
-fn copy(from: &Path, to: &Path) -> io::Result<()> {
+fn copy(from: &Path, to: &Path) -> io::Result<Vec<u8>> {
     let source = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -63,7 +63,8 @@ fn copy(from: &Path, to: &Path) -> io::Result<()> {
         .write(true)
         .create_new(true)
         .open(to)?
-        .write_all(&bytes)
+        .write_all(&bytes)?;
+    Ok(bytes)
 }
 
 /// `size_bound` is one byte past the soft file size limit, or no bound when the limit is infinite.
@@ -148,18 +149,23 @@ impl Run<'_> {
                 super::files::strerror(&error)
             ))
         })?;
+        let mut sources = Vec::new();
         for name in HELPER {
-            copy(&tree.join("scripts").join(name), &scripts.join(name)).map_err(|error| {
-                NoVerdict::plain(text!(
-                    "the head's scripts/",
-                    name,
-                    " cannot be copied: ",
-                    super::files::strerror(&error)
-                ))
-            })?;
+            let copied =
+                copy(&tree.join("scripts").join(name), &scripts.join(name)).map_err(|error| {
+                    NoVerdict::plain(text!(
+                        "the head's scripts/",
+                        name,
+                        " cannot be copied: ",
+                        super::files::strerror(&error)
+                    ))
+                })?;
+            sources.push(copied);
         }
+        let source = sources.swap_remove(0);
         self.interrupt.check()?;
-        let answer = verdict_texts(self.inputs.env(), &self.helper());
+        let answer = verdict_texts(self.inputs.env(), &self.helper(), &source);
+        self.helper_source = source;
         self.interrupt.check()?;
         match answer {
             Ok(results) => self.results = Some(results),
@@ -268,7 +274,13 @@ impl Run<'_> {
             .expect("a rerun follows the helper's setup");
         let judged = judge_rerun(&rerun, |code, line| {
             let expected = results[usize::from(code == 1)].clone();
-            match counts(self.inputs.env(), &self.helper(), code, line) {
+            match counts(
+                self.inputs.env(),
+                &self.helper(),
+                &self.helper_source,
+                code,
+                line,
+            ) {
                 Ok(true) => Ok(HelperVerdict::Counted),
                 Ok(false) => Ok(HelperVerdict::Uncounted { expected }),
                 Err(why) => Err(text!(

@@ -1200,3 +1200,32 @@ fn the_staged_patch_is_applied_by_name_after_the_proof_reruns() {
     );
     assert_eq!(fx.proof_modes(), ["base", "pass"]);
 }
+
+/// A head rerun that rewrites the staged helper changes the program each later rerun starts, since every
+/// rerun starts the staged copy by its name; the question still runs the source read at the setup, so
+/// the plant's rerun, which prints the rewritten helper's verdict words, is judged by the setup's words
+/// and gives no verdict.
+#[test]
+fn a_rerun_that_rewrites_the_staged_helper_changes_later_reruns_and_not_their_judge() {
+    let mut fx = Fixture::new();
+    let staged = fx.work.join("proof/scripts/reproduce-test.py");
+    let rewritten = super::fixture::HELPER.replace("1: \"reproduced\"", "1: \"broken\"");
+    let pair = format!(
+        "[{}, {}]",
+        super::fixture::json_text(&staged.display().to_string()),
+        super::fixture::json_text(&rewritten)
+    );
+    let done = fx.run(
+        &["p-miss"],
+        &[("STANDIN_REWRITE", &pair), ("STANDIN_REWRITE_IN", "base")],
+    );
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "exited 1 without the verdict `reproduced`",
+    );
+    let out =
+        std::fs::read_to_string(fx.work.join("proof/plant-p-miss.out")).expect("the log reads");
+    assert!(out.starts_with("broken"), "{out}");
+}

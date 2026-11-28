@@ -114,7 +114,7 @@ fn the_question_reads_the_helper_s_answer_or_its_last_error_line() {
     let script = r#"#!/bin/sh
 case "$#" in
 4) echo '["held", "failed"]' ;;
-*) read -r line; if [ "$line" = yes ]; then echo true; else echo 'Traceback' >&2; echo 'TypeError: no' >&2; exit 1; fi ;;
+*) read -r size; read -r line; if [ "$line" = yes ]; then echo true; else echo 'Traceback' >&2; echo 'TypeError: no' >&2; exit 1; fi ;;
 esac
 "#;
     let written = std::process::Command::new("sh")
@@ -133,13 +133,13 @@ esac
     );
     let env = vec![(OsString::from("PATH"), scratch.0.clone().into_os_string())];
     let helper = scratch.0.join("reproduce-test.py");
-    let results = verdict_texts(&env, &helper).expect("an answer");
+    let results = verdict_texts(&env, &helper, b"").expect("an answer");
     assert_eq!(results, [Text::from("held"), Text::from("failed")]);
     let yes = crate::text::Text::from("yes");
-    assert_eq!(counts(&env, &helper, 0, &yes), Ok(true));
+    assert_eq!(counts(&env, &helper, b"", 0, &yes), Ok(true));
     let no = crate::text::Text::from("no");
     assert_eq!(
-        counts(&env, &helper, 1, &no)
+        counts(&env, &helper, b"", 1, &no)
             .expect_err("no answer")
             .to_string(),
         "TypeError: no"
