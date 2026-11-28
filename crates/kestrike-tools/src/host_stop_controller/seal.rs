@@ -13,18 +13,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::os::fd::AsFd;
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use super::context::{Stream, beside, pure};
+use super::context::Stream;
 use super::controller::Controller;
 use super::fault::{Fault, Halt};
-use super::restore::{directory, errno_text, names_package, refused};
-use super::run::{TOOL, lock_sentence, probe_refusal, shown_path};
+use super::restore::{check_roles, errno_text, other_package, refused};
+use super::run::{TOOL, lock_sentence};
+use crate::fixtures::close;
 use crate::gameday::{
     FleetBounds, Names, ReadError, admit, entries, load_evidence, open_dir, package_of, parsed,
 };
-use crate::host_stop::{Files, Number, Seam, encoded, lock, probe};
+use crate::host_stop::{Files, Number, Seam, encoded, lock};
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{hexdigest, repr, repr_float};
@@ -49,26 +49,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     ///
     /// # Errors
     ///
-    /// `seal` returns the first refusal in check order, and [`Halt::Interrupted`] for a signal it
-    /// reads.
+    /// `seal` returns the first refusal in check order, [`Halt::Interrupted`] for a signal it
+    /// reads, and [`Halt::Fault`] for a failed close of a file or a directory it read or a failed
+    /// write the mark does not word.
     pub fn seal(&mut self, evidence: &OsStr) -> Result<u8, Halt> {
         if evidence.is_empty() {
             return Err(refused("no evidence directory is named"));
         }
         let now = self.wall();
-        let root = pure(evidence.as_bytes());
-        let injection = beside(&root, "injection");
-        if !directory(&root) {
-            let mut sentence = Text::from_os(evidence);
-            sentence.push_str(" is no directory");
-            return Err(Halt::refused(sentence));
-        }
-        if !directory(&injection) {
-            let mut sentence = shown_path(&injection);
-            sentence.push_str(" is no directory: no run to seal");
-            return Err(Halt::refused(sentence));
-        }
-        probe(self.cx.files, &injection).map_err(|error| probe_refusal(&injection, &error))?;
+        let (root, injection) = self.evidence_dirs(evidence, "no run to seal")?;
         let _held = lock(self.cx.files, &injection)
             .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
         self.cx.record.arm();
@@ -103,24 +92,26 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         self.injection = Some(injection);
         self.cx.record.read()?;
         self.cx.record.disarm();
-        self.sealing(&mark, &names, count, now, &digest)
+        self.write_seal(&mark, &names, count, now, &digest)
     }
 
     /// The bytes of `package.json`, `injection/roles.json` and each other file the listing holds,
     /// by relative path, with the names the package gives, every file synced and then its
     /// directories.
-    fn collect(
-        &mut self,
-        evidence: &OsStr,
-        root: &Path,
-        now: f64,
-    ) -> Result<Collected, Halt> {
+    fn collect(&mut self, evidence: &OsStr, root: &Path, now: f64) -> Result<Collected, Halt> {
+        let shown = |rel: &str| {
+            if rel.is_empty() {
+                Text::from_os(evidence)
+            } else {
+                Text::from(rel)
+            }
+        };
         let mut dirs: Vec<File> = Vec::new();
         for rel in DIRECTORIES {
             let opened = if rel.is_empty() {
-                open_dir(root, None, &Text::from_os(evidence))
+                open_dir(root, None, &shown(rel))
             } else {
-                open_dir(Path::new(rel), Some(dirs[0].as_fd()), &Text::from(rel))
+                open_dir(Path::new(rel), Some(dirs[slot("")].as_fd()), &shown(rel))
             };
             dirs.push(File::from(opened.map_err(read_halt)?));
         }
@@ -128,18 +119,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let package = self.read_in(&dirs, "package.json")?;
         let approved = self.operator.approval().package_sha256();
         if *approved != hexdigest(&package).as_str() {
-            return Err(refused(
-                "package.json holds other bytes than the approval's package",
-            ));
+            return Err(other_package());
         }
         let bounds = self.bounds()?;
         let (p, names) = package_of(&package, &bounds)?;
         files.insert(Text::from("package.json"), package);
-        let kind = p.get("kind").expect("the package check admitted its kind");
-        if *kind != Value::String(Text::from("staging")) {
-            let Value::String(kind) = kind else {
-                unreachable!("the package check admitted a text kind")
-            };
+        let Some(Value::String(kind)) = p.get("kind") else {
+            unreachable!("the package check admitted a text kind")
+        };
+        if *kind != "staging" {
             let mut sentence = Text::from("package.json is of kind ");
             sentence.push_text(kind);
             sentence.push_str(
@@ -180,33 +168,34 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         admitted.insert(Text::from(SEAL));
         admit(&p, &admitted)?;
         let roles = self.read_in(&dirs, "injection/roles.json")?;
-        if !names_package(
+        check_roles(
             &parsed(&roles, &Text::from("injection/roles.json"))?,
             approved,
-        ) {
-            return Err(refused(
-                "injection/roles.json names another package than the approval's",
-            ));
-        }
+        )?;
         files.insert(Text::from("injection/roles.json"), roles);
         for rel in stand {
             if let Entry::Vacant(slot) = files.entry(rel) {
-                let shown = slot.key().to_str().expect("a listed name of the layout is UTF-8");
+                let shown = slot
+                    .key()
+                    .to_str()
+                    .expect("a listed name of the layout is UTF-8");
                 let data = self.read_in(&dirs, shown)?;
                 slot.insert(data);
             }
         }
-        for at in [1, 2, 0] {
-            self.cx.files.fsync_directory(&dirs[at]).map_err(|error| {
-                let mut sentence = if at == 0 {
-                    Text::from_os(evidence)
-                } else {
-                    Text::from(DIRECTORIES[at])
-                };
-                sentence.push_str(" cannot be synced: ");
-                sentence.push_str(&strerror(&error));
-                Halt::refused(sentence)
-            })?;
+        for rel in ["records", "injection", ""] {
+            self.cx
+                .files
+                .fsync_directory(&dirs[slot(rel)])
+                .map_err(|error| {
+                    let mut sentence = shown(rel);
+                    sentence.push_str(" cannot be synced: ");
+                    sentence.push_str(&strerror(&error));
+                    Halt::refused(sentence)
+                })?;
+        }
+        while let Some(dir) = dirs.pop() {
+            close(dir).map_err(|error| Halt::Fault(Fault::os(&error)))?;
         }
         Ok((files, names, bounds))
     }
@@ -219,14 +208,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             Some((at, name)) => (at, name),
             None => ("", rel),
         };
-        let index = DIRECTORIES
-            .iter()
-            .position(|dir| *dir == at)
-            .expect("a listed file stands in a directory of the layout");
         let what = Text::from(rel);
         self.cx
             .files
-            .read_synced(Path::new(name), &dirs[index], &what, self.cx.file_limit)
+            .read_synced(Path::new(name), &dirs[slot(at)], &what, self.cx.file_limit)
             .map_err(read_halt)
     }
 
@@ -239,7 +224,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// Writes the seal's `mark` under `names` and prints its `count` files, its time `now` and its
     /// `digest`. A link that finds an entry at the name is refused; a write that fails before the
     /// link exits 1, and so does one that fails after it, which prints the digest too.
-    fn sealing(
+    fn write_seal(
         &mut self,
         mark: &Value,
         names: &Names,
@@ -281,13 +266,21 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     }
 }
 
+/// The index in [`DIRECTORIES`] of the directory at the relative path `rel`.
+fn slot(rel: &str) -> usize {
+    DIRECTORIES
+        .iter()
+        .position(|dir| *dir == rel)
+        .expect("a listed file stands in a directory of the layout")
+}
+
 fn written_once() -> Halt {
     refused("injection/collected.json exists: the seal is written once")
 }
 
 /// The halt of a read or an open that failed: its refusal, or a failed close as a system error
 /// with the system's text.
-fn read_halt(error: ReadError) -> Halt {
+pub(super) fn read_halt(error: ReadError) -> Halt {
     match error {
         ReadError::Refused(refusal) => refusal.into(),
         ReadError::Closed(text) => Halt::Fault(Fault::Os { code: None, text }),

@@ -1,7 +1,7 @@
-//! The file steps under a mark's write, the evidence lock, the probe, the lookup and the seal's read
-//! of a file with its sync, each a method of [`Files`] whose default makes the step's system call. A test implements [`Files`] to fail or observe
-//! one step and keeps the defaults for the rest; [`Disk`] keeps every default. Every descriptor opens
-//! with `O_CLOEXEC`.
+//! [`Files`] exposes each file operation used for mark writes, evidence locking, probes, lookups,
+//! and seal reads and syncs. Each default method calls the corresponding system call. A test
+//! implements [`Files`] to fail or observe one step and keeps the defaults for the rest; [`Disk`]
+//! keeps every default. Every descriptor opens with `O_CLOEXEC`.
 
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions, TryLockError};

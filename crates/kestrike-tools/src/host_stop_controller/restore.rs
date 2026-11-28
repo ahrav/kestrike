@@ -7,14 +7,14 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::context::{Stream, beside, pure, seconds};
 use super::controller::Controller;
 use super::fault::{Fault, Halt};
 use super::run::{TOOL, lock_sentence, probe_refusal, shown_path};
-use super::seal::run_end;
-use crate::gameday::{ReadError, ends_observation, read_evidence};
+use super::seal::{read_halt, run_end};
+use crate::gameday::{ends_observation, read_evidence};
 use crate::host_stop::{
     Files, Number, Request, SKEW_SECONDS, Seam, check_reviewed, check_stopped, instance_id,
     launch_time, lock, probe, read_json, stands,
@@ -32,25 +32,14 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     ///
     /// # Errors
     ///
-    /// `restore` returns the first refusal in check order.
+    /// `restore` returns the first refusal in check order, and [`Halt::Fault`] for a failed close
+    /// of a file its sealed branch reads or a failed write the mark does not word.
     pub fn restore(&mut self, evidence: &OsStr, reviewed: Option<&Path>) -> Result<u8, Halt> {
         if evidence.is_empty() {
             return Err(refused("no evidence directory is named"));
         }
         let start = self.wall();
-        let root = pure(evidence.as_bytes());
-        let injection = beside(&root, "injection");
-        if !directory(&root) {
-            let mut sentence = Text::from_os(evidence);
-            sentence.push_str(" is no directory");
-            return Err(Halt::refused(sentence));
-        }
-        if !directory(&injection) {
-            let mut sentence = shown_path(&injection);
-            sentence.push_str(" is no directory: no stop to restore from");
-            return Err(Halt::refused(sentence));
-        }
-        probe(self.cx.files, &injection).map_err(|error| probe_refusal(&injection, &error))?;
+        let (root, injection) = self.evidence_dirs(evidence, "no stop to restore from")?;
         let limit = self.cx.file_limit;
         let what = Text::from("injection/stop.json");
         let stop = read_json(&beside(&injection, "stop.json"), &what, limit)?;
@@ -88,11 +77,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         }
         let what = Text::from("injection/roles.json");
         let roles = read_json(&beside(&injection, "roles.json"), &what, limit)?;
-        if !names_package(&roles, approval.package_sha256()) {
-            return Err(refused(
-                "injection/roles.json names another package than the approval's",
-            ));
-        }
+        check_roles(&roles, approval.package_sha256())?;
         let sealed = if self.stands_in(&injection, "collected.json")? {
             Some(self.sealed(&root)?)
         } else {
@@ -161,7 +146,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             self.cx.say(Stream::Out, &line);
             return Ok(1);
         };
-        let code = self.restoration(&instance, ready, reviewed_sha256)?;
+        let code = self.write_restoration(&instance, ready, reviewed_sha256)?;
         if code != 0 {
             return Ok(code);
         }
@@ -188,16 +173,9 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// [`read_evidence`] admits it, with `package.json` of the approval's digest.
     fn sealed(&mut self, root: &Path) -> Result<Object, Halt> {
         let bounds = self.bounds()?;
-        let evidence =
-            read_evidence(root, self.cx.file_limit, &bounds).map_err(|error| match error {
-                ReadError::Refused(refusal) => refusal.into(),
-                ReadError::Closed(text) => Halt::Fault(Fault::Os { code: None, text }),
-                ReadError::Nul => unreachable!("a pathname argument holds no NUL byte"),
-            })?;
+        let evidence = read_evidence(root, self.cx.file_limit, &bounds).map_err(read_halt)?;
         if *self.operator.approval().package_sha256() != evidence.package_sha256() {
-            return Err(refused(
-                "package.json holds other bytes than the approval's package",
-            ));
+            return Err(other_package());
         }
         Ok(evidence.package().clone())
     }
@@ -253,15 +231,17 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             ));
             return Ok(None);
         }
-        let (ready, shown) = self.dated(instance, at, floor, stopped_at)?;
-        if let Some(shown) = shown {
-            *seen = shown;
+        match self.dated(instance, at, floor, stopped_at)? {
+            Ok(ready) => Ok(Some(ready)),
+            Err(shown) => {
+                *seen = shown;
+                Ok(None)
+            }
         }
-        Ok(ready)
     }
 
-    /// `dated` returns `(Some(time), None)` when the record supports a restoration time for the
-    /// ready read at wall reading `at`, and `(None, Some(reason))` when it does not. The time is
+    /// `dated` returns `Ok(time)` when the record supports a restoration time for the ready read
+    /// at wall reading `at`, and `Err(reason)` when it does not. The time is
     /// the record's `LaunchTime` less [`SKEW_SECONDS`], at least `floor`.
     fn dated(
         &mut self,
@@ -269,13 +249,13 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         at: f64,
         floor: Number,
         stopped_at: Option<Number>,
-    ) -> Result<(Option<Number>, Option<Text>), Halt> {
+    ) -> Result<Result<Number, Text>, Halt> {
         let record = self.instance_record(instance, None)?;
         let launch = launch_time(record.launch()).map_err(Halt::Failed)?;
         if *record.state() != "running" {
             let mut shown = Text::from("the target's record reads ");
             shown.push_text(record.state());
-            return Ok((None, Some(shown)));
+            return Ok(Err(shown));
         }
         let skew = Number::from(SKEW_SECONDS);
         if let Some(stopped_at) = stopped_at
@@ -285,7 +265,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 "the target's record dates its last launch at {launch}, more than {SKEW_SECONDS} s \
                  before the stopped report at {stopped_at}, so it shows no start after the stop"
             );
-            return Ok((None, Some(Text::from(shown))));
+            return Ok(Err(Text::from(shown)));
         }
         if launch.minus(skew) > Number::from(at) {
             let shown = format!(
@@ -293,13 +273,18 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                  after the read at {} that shows it running",
                 repr_float(at)
             );
-            return Ok((None, Some(Text::from(shown))));
+            return Ok(Err(Text::from(shown)));
         }
         let earliest = launch.minus(skew);
-        Ok((Some(if earliest > floor { earliest } else { floor }), None))
+        Ok(Ok(if earliest > floor { earliest } else { floor }))
     }
 
-    fn restoration(&mut self, instance: &Text, ready: Number, reviewed: Value) -> Result<u8, Halt> {
+    fn write_restoration(
+        &mut self,
+        instance: &Text,
+        ready: Number,
+        reviewed: Value,
+    ) -> Result<u8, Halt> {
         let mut mark = Object::new();
         mark.insert("instance", Value::String(instance.clone()));
         mark.insert("state", Value::String(Text::from("running")));
@@ -325,6 +310,31 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         Ok(0)
     }
 
+    /// The evidence root that `evidence` names, in `pathlib`'s form, and its `injection/`, once
+    /// both are directories that no link names and `injection/` takes an unnamed file. `missing`
+    /// ends the refusal of an `injection/` that is no directory.
+    pub(super) fn evidence_dirs(
+        &self,
+        evidence: &OsStr,
+        missing: &str,
+    ) -> Result<(PathBuf, PathBuf), Halt> {
+        let root = pure(evidence.as_bytes());
+        let injection = beside(&root, "injection");
+        if !directory(&root) {
+            let mut sentence = Text::from_os(evidence);
+            sentence.push_str(" is no directory");
+            return Err(Halt::refused(sentence));
+        }
+        if !directory(&injection) {
+            let mut sentence = shown_path(&injection);
+            sentence.push_str(" is no directory: ");
+            sentence.push_str(missing);
+            return Err(Halt::refused(sentence));
+        }
+        probe(self.cx.files, &injection).map_err(|error| probe_refusal(&injection, &error))?;
+        Ok((root, injection))
+    }
+
     pub(super) fn stands_in(&self, injection: &Path, name: &str) -> Result<bool, Halt> {
         stands(self.cx.files, &beside(injection, name)).map_err(|error| {
             Halt::refused(Text::from(format!(
@@ -344,9 +354,20 @@ pub(super) fn directory(path: &Path) -> bool {
         && !fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_symlink())
 }
 
-pub(super) fn names_package(roles: &Value, digest: &Text) -> bool {
-    matches!(roles, Value::Object(roles)
-        if matches!(roles.get("package_sha256"), Some(Value::String(named)) if named == digest))
+/// Refuses a `roles.json` that names another package than the approval's `digest`.
+pub(super) fn check_roles(roles: &Value, digest: &Text) -> Result<(), Halt> {
+    let named = matches!(roles, Value::Object(roles)
+        if matches!(roles.get("package_sha256"), Some(Value::String(named)) if named == digest));
+    if named {
+        return Ok(());
+    }
+    Err(refused(
+        "injection/roles.json names another package than the approval's",
+    ))
+}
+
+pub(super) fn other_package() -> Halt {
+    refused("package.json holds other bytes than the approval's package")
 }
 
 pub(super) fn errno_text(code: Option<i32>, text: &str) -> String {

@@ -82,7 +82,7 @@ pub fn read_file(
 }
 
 /// The function a file read by [`read_file_with`] is synced through, once its bytes are read.
-pub type Syncer<'s> = &'s dyn Fn(&File) -> io::Result<()>;
+pub(crate) type Syncer<'s> = &'s dyn Fn(&File) -> io::Result<()>;
 
 /// `read_file_with` reads as [`read_file`] does, and with `sync` it syncs the opened file through
 /// that function in place of `fsync(2)`; the failures and their sentences are [`read_file`]'s, a
@@ -91,7 +91,7 @@ pub type Syncer<'s> = &'s dyn Fn(&File) -> io::Result<()>;
 /// # Errors
 ///
 /// Each failure [`read_file`] names, in its order.
-pub fn read_file_with(
+pub(crate) fn read_file_with(
     path: &Path,
     dir: Option<BorrowedFd<'_>>,
     what: &Text,

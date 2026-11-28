@@ -21,6 +21,7 @@ pub enum Command {
         package: PathBuf,
         evidence: OsString,
     },
+    /// `restore --operator F --evidence DIR [--reviewed F]`.
     Restore {
         operator: PathBuf,
         evidence: OsString,
