@@ -449,10 +449,15 @@ fn one_commit_pushed_to_two_refs_runs_the_union_of_their_checks() {
     assert_eq!(fx.ran(), strings(&SELECTION));
 }
 
-/// An added `cfg_attr(miri, ignore)` runs the selection checks.
+/// An added ignore under `cfg_attr` for Miri runs the selection checks.
 #[test]
 fn a_miri_ignore_change_runs_selection_checks() {
-    ran_selection("#[cfg_attr(miri, ignore = \"slow\")]\nfn t() {}\n");
+    // The split keeps `cfg_attr(` and `miri` apart in this file's text, which the checkout's count of Miri
+    // ignore attributes reads.
+    ran_selection(concat!(
+        "#[cfg_attr(",
+        "miri, ignore = \"slow\")]\nfn t() {}\n"
+    ));
 }
 
 /// An ignore under a nested predicate runs the selection checks.
