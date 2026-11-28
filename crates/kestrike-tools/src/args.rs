@@ -37,6 +37,18 @@ pub enum Kind {
     Repeated {
         check: Check,
     },
+    /// An option that takes no value and is present or absent, as `action="store_true"` gives. An explicit
+    /// value, as in `--name=V`, is refused as `ignored explicit argument 'V'`.
+    Flag,
+    /// An option that takes one or more values at each occurrence and keeps every value in command-line
+    /// order, as `nargs="+"` with `action="append"` gives. Without an explicit value it takes each
+    /// following argument of kind `Arg::Value`, at least one; with one, as in `--name=V`, it takes `V`
+    /// alone. `check` judges each value as it does for [`Kind::Value`]. `required` asks that the option
+    /// appear.
+    Many {
+        required: bool,
+        check: Check,
+    },
 }
 
 impl Opt {
@@ -51,7 +63,9 @@ pub struct Values(Vec<(&'static [&'static str], Vec<OsString>)>);
 impl Values {
     /// Returns the value the command line gave for the row that lists `name`, `None` when the command
     /// line left the option out; any of a row's names selects it. A required option's value is `Some`.
-    /// For a [`Kind::Repeated`] row it is the last value.
+    /// It is the last entry of [`Values::all`]: the last value for a [`Kind::Repeated`] or [`Kind::Many`]
+    /// row, whose every value `all` returns, and the empty value for a [`Kind::Flag`] row that appeared,
+    /// whose presence [`Values::flag`] tells.
     ///
     /// # Panics
     ///
@@ -62,7 +76,9 @@ impl Values {
     }
 
     /// Returns every value the command line gave for the row that lists `name`, in command-line order:
-    /// each occurrence for a [`Kind::Repeated`] row, and at most the last for any other row.
+    /// each occurrence for a [`Kind::Repeated`] row, each value of each occurrence for a [`Kind::Many`]
+    /// row, one empty value for a [`Kind::Flag`] row that appeared, and at most the last for any other
+    /// row.
     ///
     /// # Panics
     ///
@@ -73,6 +89,16 @@ impl Values {
             Some((_, values)) => values,
             None => panic!("the option table names {name}"),
         }
+    }
+
+    /// Whether the command line gave the [`Kind::Flag`] row that lists `name`.
+    ///
+    /// # Panics
+    ///
+    /// `flag` panics when no row of the option table lists `name`.
+    #[track_caller]
+    pub fn flag(&self, name: &str) -> bool {
+        !self.all(name).is_empty()
     }
 }
 
@@ -208,10 +234,13 @@ impl<'t> Reader<'t> {
     }
 
     /// `parse` classifies every argument before it reads any value, so a classification error takes
-    /// precedence over help and value errors. A value-taking option consumes the next argument only when it
-    /// lacks an explicit value and the next argument has kind `Arg::Value`. `parse` calls the option's
+    /// precedence over help and value errors. An occurrence of [`Kind::Value`] or [`Kind::Repeated`] consumes
+    /// the next argument only when it lacks an explicit value and the next argument has kind `Arg::Value`.
+    /// An occurrence of [`Kind::Many`] with an explicit value takes that value alone; without one it takes
+    /// each next argument of kind `Arg::Value` up to the first that is not, and is refused where it takes
+    /// none. `parse` calls the option's
     /// `check` for every supplied value; a later occurrence replaces an earlier one, except under
-    /// [`Kind::Repeated`], which keeps each. `parse` returns
+    /// [`Kind::Repeated`] and [`Kind::Many`], which keep each. `parse` returns
     /// `Parsed::Help` immediately upon accepting help. Missing required options take precedence over
     /// leftover arguments.
     pub fn parse(&self, args: &[OsString]) -> Parsed {
@@ -266,6 +295,45 @@ impl<'t> Reader<'t> {
                         )),
                     };
                 }
+                Kind::Flag => {
+                    if let Some(explicit) = found.explicit {
+                        return self.refuse(format!(
+                            "argument {}: ignored explicit argument {}",
+                            option.name(),
+                            Text::from_os(OsStr::from_bytes(explicit)).repr()
+                        ));
+                    }
+                    values[found.option] = vec![OsString::new()];
+                    at += 1;
+                    continue;
+                }
+                Kind::Many { check, .. } => {
+                    let mut taken = Vec::new();
+                    match found.explicit {
+                        Some(explicit) => taken.push(explicit),
+                        None => {
+                            while let Some(Arg::Value) = kinds.get(at + 1) {
+                                at += 1;
+                                taken.push(args[at]);
+                            }
+                        }
+                    }
+                    if taken.is_empty() {
+                        return self.refuse(format!(
+                            "argument {}: expected at least one argument",
+                            option.name()
+                        ));
+                    }
+                    at += 1;
+                    for value in taken {
+                        let value = OsStr::from_bytes(value);
+                        if let Err(message) = check(&Text::from_os(value)) {
+                            return self.refuse(format!("argument {}: {message}", option.name()));
+                        }
+                        values[found.option].push(value.to_owned());
+                    }
+                    continue;
+                }
                 Kind::Value { check, .. } | Kind::Repeated { check } => check,
             };
             let value = match (found.explicit, kinds.get(at + 1)) {
@@ -295,7 +363,10 @@ impl<'t> Reader<'t> {
             .iter()
             .zip(&values)
             .filter(|(option, value)| {
-                matches!(option.kind, Kind::Value { required: true, .. }) && value.is_empty()
+                matches!(
+                    option.kind,
+                    Kind::Value { required: true, .. } | Kind::Many { required: true, .. }
+                ) && value.is_empty()
             })
             .map(|(option, _)| option.name())
             .collect();

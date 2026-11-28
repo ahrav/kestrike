@@ -6,6 +6,8 @@
 //! as written. When a link's target leads back to a link still being resolved, `resolve` keeps that link
 //! and everything after it unresolved, and the final path is normalized lexically. `resolve` refuses a
 //! final path whose own lookup fails with a loop error, and links that nest more than [`DEPTH`] deep.
+//! `realpath` follows links by the same walk over the path's components as written and returns the path
+//! without that final lookup.
 //!
 //! `joined`, `parent`, `name` and `pure` read a path's text alone, as a pure POSIX path: a root of
 //! `//` stays, empty and `.` components drop, and `..` stays.
@@ -16,7 +18,8 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-/// The deepest chain of links whose targets `resolve` follows, one link inside the target of the next.
+/// The deepest chain of links whose targets `resolve` and `realpath` follow, one link inside the target of
+/// the next.
 pub const DEPTH: usize = 993;
 
 /// # Errors
@@ -40,15 +43,7 @@ pub fn resolve(path: &Path) -> io::Result<PathBuf> {
         }
         parsed.extend_from_slice(name);
     }
-    let (joined, _) = walk(Vec::new(), &parsed, &mut HashMap::new(), 0)?;
-    let absolute = if joined.starts_with(b"/") {
-        joined
-    } else {
-        let mut base = std::env::current_dir()?.into_os_string().into_vec();
-        base = join(&base, &joined);
-        base
-    };
-    let resolved = PathBuf::from(OsStr::from_bytes(&normalize(&absolute)));
+    let resolved = walked(&parsed)?;
     match std::fs::metadata(&resolved) {
         Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(format!(
             "symlink loop from {}",
@@ -56,6 +51,33 @@ pub fn resolve(path: &Path) -> io::Result<PathBuf> {
         ))),
         _ => Ok(resolved),
     }
+}
+
+/// `realpath` resolves `path` as Python's `os.path.realpath` does and returns the absolute, lexically
+/// normalized result. It reads the components of `path` as written: after a link whose target leads back
+/// to a link still being resolved, an unread rest that opens with `/`, as a repeated separator leaves it,
+/// replaces the path resolved so far. The result may name a path whose own lookup reports `ELOOP`.
+/// A component that holds a NUL is walked as a name that is no link, so a caller that needs such a path
+/// refused refuses it before the call.
+///
+/// # Errors
+///
+/// `realpath` returns an error when reading the working directory fails for a result that is relative,
+/// when a link that `lstat` reports cannot be read, and when links nest more than [`DEPTH`] deep.
+pub fn realpath(path: &Path) -> io::Result<PathBuf> {
+    walked(path.as_os_str().as_bytes())
+}
+
+fn walked(path: &[u8]) -> io::Result<PathBuf> {
+    let (joined, _) = walk(Vec::new(), path, &mut HashMap::new(), 0)?;
+    let absolute = if joined.starts_with(b"/") {
+        joined
+    } else {
+        let mut base = std::env::current_dir()?.into_os_string().into_vec();
+        base = join(&base, &joined);
+        base
+    };
+    Ok(PathBuf::from(OsStr::from_bytes(&normalize(&absolute))))
 }
 
 /// `join` appends `name` to `path` with one `/` between them; an absolute `name` replaces `path`.
@@ -230,9 +252,29 @@ pub(crate) fn joined(base: &str, name: &str) -> String {
 }
 
 pub(crate) fn parent(path: &str) -> String {
-    let (root, mut names) = parts(path);
+    String::from_utf8(parent_os(path.as_bytes())).expect("the parent of UTF-8 text is UTF-8")
+}
+
+/// The parent of `path`'s bytes as a pure POSIX path: the root `//` when exactly two slashes lead it and
+/// `/` for one or three or more, the components with empty and `.` ones dropped and the last removed, and
+/// `.` where neither a root nor a component is left.
+pub(crate) fn parent_os(path: &[u8]) -> Vec<u8> {
+    let root: &[u8] = if path.starts_with(b"//") && !path.starts_with(b"///") {
+        b"//"
+    } else if path.starts_with(b"/") {
+        b"/"
+    } else {
+        b""
+    };
+    let mut names: Vec<&[u8]> = path
+        .split(|&byte| byte == b'/')
+        .filter(|name| !name.is_empty() && *name != b".")
+        .collect();
     names.pop();
-    assembled(root, &names)
+    if names.is_empty() && root.is_empty() {
+        return b".".to_vec();
+    }
+    [root, &names.join(&b'/')].concat()
 }
 
 pub(crate) fn name(path: &str) -> &str {

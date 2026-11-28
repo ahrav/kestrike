@@ -13,6 +13,7 @@ libc = "0.2.189"
 regex = { version = "=1.13.2", default-features = false, features = ["std", "unicode-perl", "unicode-case", "unicode-gencat"] }
 regex-automata = { version = "=0.4.19", default-features = false }
 regex-syntax = { version = "=0.8.12", default-features = false, features = ["unicode-perl", "unicode-gencat"] }
+sha1 = { version = "=0.11.0", default-features = false }
 sha2 = "0.11.0"
 signal-hook = { version = "0.3.18", default-features = false }
 
