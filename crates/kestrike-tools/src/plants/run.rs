@@ -1,4 +1,5 @@
-//! One plant run after its checks: its worktrees, its proof reruns and its base archive.
+//! One plant run after its checks: its worktrees, its proof reruns and its base archive, and the two
+//! phases over the selected plants.
 //!
 //! The first phase checks that each patch applies in the plant's worktree, reruns on the head the proof
 //! of each plant whose patch applies, then applies each such plant to the proof's worktree in turn,
@@ -17,10 +18,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use super::child::{GitFailed, Halt, Step};
-use super::entry::Entry;
+use super::entry::{Entry, Finished};
 use super::git::{self, CallError, Done};
 use super::output::Pins;
 use super::prepare::Inputs;
+use super::record::Plant;
 use super::verdict::NoVerdict;
 use crate::environ::{Environ, set};
 use crate::ownership::make_private;
@@ -331,5 +333,112 @@ impl<'a> Run<'a> {
             Step::Halt(halt) => return Err(halt),
         }
         Ok(())
+    }
+}
+
+/// `said` writes `line` to `err`, which a failed write leaves as it is.
+fn said(err: &mut impl Write, line: &Text) {
+    let _ = writeln!(err, "{line}");
+    let _ = err.flush();
+}
+
+/// `proof_line` is the line a plant prints once its proof reruns end: its result, or its exits.
+fn proof_line(plant: &Plant, entry: &Entry, exits: Option<(u8, u8)>) -> Text {
+    if let Some(verdict) = entry.verdict() {
+        return text!(plant.id(), ": proof ", verdict.as_str());
+    }
+    let (head, planted) = exits.expect("a plant without a result has its proof's exits");
+    text!(
+        plant.id(),
+        ": proof {'head': ",
+        format!("{head}"),
+        ", 'plant': ",
+        format!("{planted}"),
+        "}"
+    )
+}
+
+impl Run<'_> {
+    /// `run_store` runs the selected plants in the two phases and returns their entries in store order.
+    /// Each plant writes a line to `err` as the first phase settles it, `ID: RESULT` or `ID: proof
+    /// EXITS`, and as the second ends, `ID: RESULT`. The run reads the signal record after each step.
+    ///
+    /// # Errors
+    ///
+    /// A signal was recorded, or the run failed outside a plant.
+    pub fn run_store(&mut self, err: &mut impl Write) -> Result<Vec<Finished>, Halt> {
+        let plants = self.inputs.plants();
+        let mut entries = Vec::with_capacity(plants.len());
+        for plant in plants {
+            let mut entry = Entry::new(plant);
+            let place = self.place(plant.id());
+            let tree = match self.applies(plant, &mut entry) {
+                Ok(tree) => tree,
+                Err(ending) => {
+                    self.settle(&mut entry, &place, ending)?;
+                    None
+                }
+            };
+            self.interrupt.check()?;
+            if let Some(verdict) = entry.verdict() {
+                said(err, &text!(plant.id(), ": ", verdict.as_str()));
+            }
+            entries.push((plant, entry, tree));
+        }
+        let mut proofs: Vec<Text> = Vec::new();
+        for (plant, entry, _) in &entries {
+            if entry.verdict().is_none() && !proofs.contains(plant.proof()) {
+                proofs.push(plant.proof().clone());
+            }
+        }
+        if !proofs.is_empty() {
+            self.prove_head(&proofs)?;
+            self.interrupt.check()?;
+        }
+        for (plant, entry, _) in &mut entries {
+            if entry.verdict().is_some() {
+                continue;
+            }
+            let exits = match self.live(plant) {
+                Ok((head, planted)) => {
+                    entry.prove(head, planted);
+                    Some((head, planted))
+                }
+                Err(ending) => {
+                    let place = self.place(plant.id());
+                    self.settle(entry, &place, ending)?;
+                    None
+                }
+            };
+            self.interrupt.check()?;
+            said(err, &proof_line(plant, entry, exits));
+        }
+        let remained = self.release_proof()?;
+        let held: Vec<Text> = remained
+            .iter()
+            .map(|path| text!(self.in_work(path)))
+            .collect();
+        let mut finished = Vec::with_capacity(entries.len());
+        for (plant, mut entry, tree) in entries {
+            if entry.verdict().is_none() && !held.is_empty() {
+                entry.no_verdict(&NoVerdict::plain(text!(
+                    "the proof's ",
+                    Text::join(", ", &held),
+                    " remained after the last proof rerun, so no archive builds beside it"
+                )));
+            } else if let (None, Some(tree)) = (entry.verdict(), tree) {
+                if let Err(ending) = self.judge_plant(plant, &mut entry, &tree) {
+                    let place = self.place(plant.id());
+                    self.settle(&mut entry, &place, ending)?;
+                }
+                self.interrupt.check()?;
+            }
+            let done = entry
+                .finish(self.work())
+                .expect("every plant has its result once the second phase ends");
+            said(err, &text!(done.id(), ": ", done.verdict().as_str()));
+            finished.push(done);
+        }
+        Ok(finished)
     }
 }

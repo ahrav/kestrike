@@ -49,6 +49,7 @@ mod status;
 mod stop;
 mod store;
 mod suspects;
+mod sweeps;
 pub(crate) mod values;
 mod verdict;
 mod work;
