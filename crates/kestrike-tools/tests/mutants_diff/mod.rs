@@ -936,6 +936,34 @@ fn the_report_binds_the_diff_the_configuration_and_the_test_arguments() {
     assert_eq!(string(get(&report, "debug_assertions")), "false");
 }
 
+/// A `--tests` word outside UTF-8 is written to the report as the code points it was split into and
+/// reaches the tool as its bytes: the bytes `e4 27 b8 27 ad` split into the one word of the three bytes
+/// `e4 b8 ad`, which the report writes as three escaped code points and not as the character those bytes
+/// spell in UTF-8.
+#[test]
+fn a_test_word_outside_utf_8_is_reported_as_it_was_split_and_passed_as_its_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+    let fx = Fixture::new("tests-bytes");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let mut tests = b"--tests=".to_vec();
+    tests.extend_from_slice(b"\xe4'\xb8'\xad");
+    let out = fx.start().args([std::ffi::OsString::from_vec(tests)]).run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    let report = fs::read(only(fx.reports())).expect("the report reads");
+    let report = String::from_utf8(report).expect("the report is ASCII");
+    assert!(
+        report.contains("\"tests\": [\n    \"\\udce4\\udcb8\\udcad\"\n  ]"),
+        "{report}"
+    );
+    let calls = fs::read(fx.state.join("calls")).expect("the calls are recorded");
+    assert!(
+        calls
+            .windows(7)
+            .any(|window| window == b"--\0\xe4\xb8\xad\0"),
+        "the word reaches the tool as its three bytes"
+    );
+}
+
 #[test]
 fn the_default_head_and_artifacts_come_from_the_invoking_checkout() {
     let fx = Fixture::new("defaults");

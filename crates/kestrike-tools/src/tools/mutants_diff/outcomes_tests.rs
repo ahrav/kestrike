@@ -58,7 +58,17 @@ fn outcomes_is_an_array_and_no_other_value() {
 /// two strings are one name only when their code points are equal.
 #[test]
 fn a_name_is_a_string_and_names_compare_by_code_point() {
-    for name in ["1", "1.0", "true", "false", "null", "NaN", "-0.0", "[1]", r#"{"a":1}"#] {
+    for name in [
+        "1",
+        "1.0",
+        "true",
+        "false",
+        "null",
+        "NaN",
+        "-0.0",
+        "[1]",
+        r#"{"a":1}"#,
+    ] {
         let text = file(&[BASELINE.to_owned(), caught(r#""a""#), caught(name)]);
         assert!(
             read_outcomes(text.as_bytes()).is_none(),
@@ -72,7 +82,11 @@ fn a_name_is_a_string_and_names_compare_by_code_point() {
         .iter()
         .map(|(name, _, _)| name.to_string())
         .collect();
-    assert_eq!(names, ["1", "1.0"], "the strings '1' and '1.0' are two names");
+    assert_eq!(
+        names,
+        ["1", "1.0"],
+        "the strings '1' and '1.0' are two names"
+    );
     for (first, second) in [(r#""a""#, r#""a""#), (r#""\u00e9""#, "\"\u{e9}\"")] {
         let text = file(&[BASELINE.to_owned(), caught(first), caught(second)]);
         assert!(

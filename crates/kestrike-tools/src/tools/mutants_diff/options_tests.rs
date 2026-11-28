@@ -2,6 +2,7 @@ use std::ffi::OsString;
 
 use super::options::{Options, parse};
 use crate::args::Parsed;
+use crate::text::Text;
 
 fn read(args: &[&str]) -> Parsed<Options> {
     parse(&args.iter().map(OsString::from).collect::<Vec<_>>())
@@ -55,7 +56,7 @@ fn the_token_after_an_option_is_a_value_unless_it_reads_as_an_option() {
     let tests = options(read(&["--tests", "-x y"])).tests;
     assert_eq!(
         tests,
-        Some(vec![OsString::from("-x"), OsString::from("y")]),
+        Some(vec![Text::from("-x"), Text::from("y")]),
         "tests: ['-x', 'y']"
     );
 }
@@ -71,7 +72,7 @@ fn dash_dash_after_an_equals_sign_is_the_value_and_each_check_decides_about_it()
     assert_eq!(given("--head").head, OsString::from("--"));
     assert_eq!(
         given("--tests").tests,
-        Some(vec![OsString::from("--")]),
+        Some(vec![Text::from("--")]),
         "shlex.split('--') gives ['--']"
     );
     assert_eq!(given("--artifacts").artifacts, Some(OsString::from("--")));

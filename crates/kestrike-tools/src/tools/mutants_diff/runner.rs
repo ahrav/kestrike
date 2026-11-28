@@ -367,7 +367,15 @@ impl Run {
         argv.extend([diff.as_os_str(), OsStr::new("--output"), output.as_os_str()]);
         argv.extend(self.shard_args());
         argv.push(OsStr::new("--"));
-        argv.extend(prepared.tests.iter().map(OsString::as_os_str));
+        let tests: Vec<OsString> = prepared
+            .tests
+            .iter()
+            .map(|word| {
+                word.to_os()
+                    .expect("a word split from an argument encodes to its bytes")
+            })
+            .collect();
+        argv.extend(tests.iter().map(OsString::as_os_str));
         let (stdout, stderr) = (dir.join("tool.stdout"), dir.join("tool.stderr"));
         let env = &prepared.env;
         let exit = supervise(&INTERRUPT, &argv, &stdout, &stderr, Some(tree), env)?;
@@ -464,10 +472,7 @@ impl Run {
             Value::Object(numbers)
         });
         report.insert("shard", shard);
-        let tests = prepared
-            .tests
-            .iter()
-            .map(|word| Value::String(Text::from_os(word)));
+        let tests = prepared.tests.iter().cloned().map(Value::String);
         report.insert("tests", Value::Array(tests.collect()));
         report.insert("diff_sha256", string(self.diff_sha256.as_deref()));
         report.insert("config_sha256", string(self.config_sha256.as_deref()));

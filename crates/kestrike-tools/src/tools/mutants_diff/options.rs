@@ -33,14 +33,15 @@ pub(super) struct Shard {
     pub(super) n: Integer,
 }
 
-/// The options [`parse`] accepted, `tests` as the shell-split words of `--tests`.
+/// The options [`parse`] accepted, `tests` as the shell-split words of `--tests`, each kept as it was
+/// split.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub(super) base: Option<OsString>,
     pub(super) head: OsString,
     pub(super) max_mutants: Integer,
     pub(super) shard: Option<Shard>,
-    pub(super) tests: Option<Vec<OsString>>,
+    pub(super) tests: Option<Vec<Text>>,
     pub(super) artifacts: Option<OsString>,
     pub(super) cargo: OsString,
 }
@@ -162,13 +163,8 @@ pub fn parse(args: &[OsString]) -> Parsed<Options> {
             let (k, n) = (integer(k), integer(n));
             Shard { value: text, k, n }
         });
-        let tests = given("--tests").map(|value| {
-            let words = words(&Text::from_os(&value)).expect("checked test arguments split");
-            let encoded = words
-                .iter()
-                .map(|word| word.to_os().expect("a word of an argument encodes back"));
-            encoded.collect()
-        });
+        let tests = given("--tests")
+            .map(|value| words(&Text::from_os(&value)).expect("checked test arguments split"));
         Options {
             base: given("--base"),
             head: or_default("--head", "HEAD"),

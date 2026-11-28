@@ -41,7 +41,7 @@ pub struct Prepared {
     pub(super) head: String,
     pub(super) version: Text,
     pub(super) machine: Text,
-    pub(super) tests: Vec<OsString>,
+    pub(super) tests: Vec<Text>,
     pub(super) artifacts: PathBuf,
     pub(super) git_env: Environ,
     pub(super) env: Environ,
@@ -362,7 +362,7 @@ pub fn preflight(options: Options) -> Result<Prepared, Stop> {
     let tests = options
         .tests
         .clone()
-        .unwrap_or_else(|| DEFAULT_TESTS.map(OsString::from).to_vec());
+        .unwrap_or_else(|| DEFAULT_TESTS.map(Text::from).to_vec());
     Ok(Prepared {
         options,
         top,
