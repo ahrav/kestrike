@@ -29,8 +29,7 @@ pub const STEPS: usize = 14;
 const RECIPE_SEED: u64 = 0x6b00;
 pub const SEEDS: [u64; 6] = [0x6b01, 0x6b02, 0x6b03, 0x6b05, 0x6b08, 0x6b0d];
 
-/// The first three recipes equal `RUNS` of `quint/marklog_check.py`, which `quint/check.py` runs as checked
-/// runs.
+/// The model's check runs the first three recipes as checked runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 6] = [
     ("partly_landed", &[

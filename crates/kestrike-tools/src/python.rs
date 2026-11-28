@@ -7,6 +7,8 @@
 //! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
 
 use std::io::{self, Write};
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
 
 use sha2::{Digest, Sha256};
 
@@ -253,6 +255,37 @@ pub fn hexdigest(bytes: &[u8]) -> String {
         .collect()
 }
 
+pub fn returncode(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|signal| -signal))
+        .or_else(|| status.stopped_signal().map(|signal| -signal))
+        .expect("a waited child exited, or a signal ended or stopped it")
+}
+
+/// `equal` compares objects by their members in any order and arrays by their items in order, and uses
+/// `Value`'s `PartialEq` implementation for scalar comparisons.
+pub fn equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .iter()
+                        .any(|(other, found)| other == key && equal(value, found))
+                })
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| equal(left, right))
+        }
+        _ => left == right,
+    }
+}
+
 /// The code points outside category `Nd` for which Python 3.9's `str.isdigit()` holds, under Unicode 13.0.
 const OTHER_DIGITS: [(u32, u32); 20] = [
     (0xb2, 0xb3),
@@ -314,6 +347,40 @@ pub(crate) fn digit_value(c: char) -> Option<u32> {
         code -= 1;
     }
     Some(before % 10)
+}
+
+/// `text` with each non-ASCII decimal digit (category `Nd`) written as the ASCII digit of its value, the
+/// form in which Python's `int` reads a string's digits.
+pub fn ascii_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| match digit_value(c) {
+            Some(value) if !c.is_ascii() => char::from_digit(value, 10).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// `decimal` applies Python's `int` to `digits`, a run of Unicode decimal digits (category `Nd`).
+///
+/// # Errors
+///
+/// `decimal` accepts 1 through [`MAX_INTEGER_DIGITS`] digits, including leading zeros, and returns an
+/// error for any other text.
+pub fn decimal(digits: &str) -> Result<Integer, String> {
+    let ascii: Option<String> = digits
+        .chars()
+        .map(|c| digit_value(c).and_then(|value| char::from_digit(value, 10)))
+        .collect();
+    let ascii = ascii
+        .filter(|ascii| !ascii.is_empty())
+        .ok_or_else(|| format!("no decimal digits: {}", Text::from(digits).repr()))?;
+    if ascii.len() > MAX_INTEGER_DIGITS {
+        return Err(format!(
+            "a string of {} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion",
+            ascii.len()
+        ));
+    }
+    Ok(Integer::from_digits(false, &ascii).expect("ASCII digits within the limit"))
 }
 
 /// A run of digits that [`int_digits`] refuses.

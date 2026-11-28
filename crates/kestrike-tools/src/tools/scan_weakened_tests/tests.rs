@@ -491,6 +491,29 @@ fn a_tree_record_of_another_form_is_refused() {
     }
 }
 
+/// `git ls-tree -z` terminates every record with NUL, including the last.
+#[test]
+fn a_tree_listing_that_ends_inside_a_record_is_refused_and_an_empty_one_holds_no_record() {
+    let commit = "0123456789abcdef";
+    assert_eq!(
+        records(commit, "").expect("an empty listing reads"),
+        Vec::<(String, String)>::new()
+    );
+    for listed in [
+        "100644 blob 1111\ta.rs",
+        "100644 blob 1111\tz.rs\x00100644 blob 2222\ta.rs",
+        "100644 blob 1111\tz.rs\x00100644 blob",
+    ] {
+        let error = records(commit, listed).expect_err("the listing is refused");
+        assert!(matches!(error, Failure::Refused(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "git ls-tree at 0123456789ab: the listing ends inside a record",
+            "{listed:?}"
+        );
+    }
+}
+
 #[test]
 fn duplicate_keys_keep_the_last_value_at_the_first_place() {
     let old = r#"{"seeds": 1, "seconds": 9, "seeds": 7}"#;

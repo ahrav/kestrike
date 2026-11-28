@@ -402,6 +402,7 @@ impl PathError {
         &self.error
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn into_error(self) -> io::Error {
         self.error
     }

@@ -836,3 +836,67 @@ fn a_failure_outside_a_plant_exits_4_with_its_line() {
     assert!(!fx.score.exists());
     assert!(!fx.work.join("plants").exists());
 }
+
+/// A standard output opened read-only refuses the score's lines: the score stands, and the tool exits
+/// 120, the exit of a score whose lines were not printed.
+#[test]
+fn a_read_only_standard_output_refuses_the_score_s_lines_and_exits_120() {
+    let mut fx = Fixture::new();
+    let args = fx.args(&["p-miss"], &[], None);
+    let env = fx.environment(&[]);
+    let sink = fx.scratch.join("read-only.out");
+    std::fs::write(&sink, "").expect("written");
+    let repo = fx.repo.clone();
+    let status = fx
+        .command(&args, &env, &repo)
+        .stdout(std::fs::File::open(&sink).expect("opens read-only"))
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the tool starts");
+    assert_eq!(status.code(), Some(120));
+    let (written, _) = fx.results();
+    assert_eq!(text_of(written.get("commit").expect("a commit")), fx.head);
+    assert_eq!(std::fs::read_to_string(&sink).expect("reads"), "");
+}
+
+/// A standard output past the soft file size limit refuses the score's lines with `EFBIG`, which ends
+/// no process: the score stands and the tool exits 120.
+#[test]
+fn a_standard_output_past_the_file_size_limit_refuses_the_score_s_lines_and_exits_120() {
+    let mut fx = Fixture::new();
+    let args = fx.args(&["p-miss"], &[], None);
+    let env = fx.environment(&[]);
+    let sink = fx.scratch.join("full.out");
+    std::fs::write(&sink, vec![b'x'; 600 * 1024]).expect("written");
+    let out = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&sink)
+        .expect("opens");
+    let output = std::process::Command::new("sh")
+        .args([
+            "-c",
+            "ulimit -f 1000; exec \"$@\"",
+            "sh",
+            super::fixture::BINARY,
+        ])
+        .arg(&fx.repo)
+        .arg("plant-runner")
+        .args(&args)
+        .current_dir(&fx.repo)
+        .env_clear()
+        .envs(env.iter().cloned())
+        .stdin(std::process::Stdio::null())
+        .stdout(out)
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("the tool starts");
+    assert_eq!(
+        output.status.code(),
+        Some(120),
+        "{:?} {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (written, _) = fx.results();
+    assert_eq!(text_of(written.get("commit").expect("a commit")), fx.head);
+}

@@ -72,6 +72,7 @@ fn the_planted_commit_takes_the_head_s_date_beside_a_shown_signature() {
     let done = fx.run(&["p-miss"], &[]);
     assert_eq!(done.code, 0, "{}", done.stderr);
     let first = field(&fx, "p-miss", "commit");
+    std::fs::remove_file(&fx.score).expect("the first score is removed");
     fx.git(&["config", "log.showSignature", "true"]);
     let shown = std::process::Command::new("git")
         .arg("-C")
@@ -112,12 +113,14 @@ fn the_planted_tree_holds_the_patch_s_bytes_under_a_configured_whitespace_fix() 
         field(&fx, "p-space", "tree"),
         field(&fx, "p-space", "commit"),
     );
+    std::fs::remove_file(&fx.score).expect("the first score is removed");
     fx.git(&["config", "apply.whitespace", "fix"]);
     let again = fx.scratch.join("again");
     let done = fx.run_in(&["p-space"], &[], &[], Some(&again));
     assert_eq!(done.code, 0, "{}", done.stderr);
     assert_ne!(first.0, "null");
-    assert_eq!(fx.git(&["show", &format!("{}:mode", first.1)]), "pass \n");
+    let commit = field(&fx, "p-space", "commit");
+    assert_eq!(fx.git(&["show", &format!("{commit}:mode")]), "pass \n");
     assert_eq!(
         first,
         (

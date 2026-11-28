@@ -28,8 +28,7 @@ pub const SEEDS: [(&str, u64); 6] = [
     ("step_a", 0x7c01), ("step_b", 0x7c02), ("step_c", 0x7c03), ("step_d", 0x7c04), ("step_e", 0x7c05), ("step_f", 0x7c06),
 ];
 
-/// The first four recipes equal `RUNS` of `quint/reclaim_check.py`, which `quint/check.py` runs as checked
-/// runs.
+/// The model's check runs the first four recipes as checked runs.
 #[rustfmt::skip]
 pub const RECIPES: [(&str, &[&str]); 5] = [
     ("anchorLast", &["unlease", "retire", "certify", "certify", "service"]),

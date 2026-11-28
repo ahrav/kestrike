@@ -19,6 +19,7 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -115,6 +116,11 @@ fn command(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Command, CallEr
         .env_clear()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, which is
+    // async-signal-safe.
+    unsafe {
+        command.pre_exec(crate::process::file_size_signal_default);
+    }
     let mut given: Vec<&OsStr> = Vec::with_capacity(env.len());
     for (name, value) in env {
         if name.as_bytes().iter().skip(1).any(|&byte| byte == b'=') {

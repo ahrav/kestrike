@@ -10,9 +10,9 @@
 //! later plant reports that cause.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::child::{Logged, PYTHON, counts, logged, verdict_texts};
@@ -42,23 +42,45 @@ fn os(text: &Text) -> OsString {
         .expect("a checked record's text names no lone surrogate")
 }
 
-/// `copy` follows symbolic links when checking `from` for a named pipe, and refuses one before any
-/// open, so a pipe with no writer cannot hold the run.
-fn copy(from: &Path, to: &Path) -> io::Result<()> {
-    if fs::metadata(from).is_ok_and(|status| status.file_type().is_fifo()) {
+/// `copy` opens `from` once, following links and waiting for no writer, refuses a named pipe judged
+/// on the opened file, and reads through that descriptor at most one byte past the soft file size
+/// limit, so a source the copy could not write is refused before it is read whole.
+fn copy(from: &Path, to: &Path) -> io::Result<Vec<u8>> {
+    let source = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(from)?;
+    if source.metadata()?.file_type().is_fifo() {
         return Err(io::Error::other(format!(
             "`{}` is a named pipe",
             from.display()
         )));
     }
     let mut bytes = Vec::new();
-    File::open(from)?.read_to_end(&mut bytes)?;
+    source.take(size_bound()?).read_to_end(&mut bytes)?;
     crate::fixtures::fits(bytes.len())?;
     OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(to)?
-        .write_all(&bytes)
+        .write_all(&bytes)?;
+    Ok(bytes)
+}
+
+/// `size_bound` is one byte past the soft file size limit, or no bound when the limit is infinite.
+fn size_bound() -> io::Result<u64> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: `getrlimit` writes one `rlimit` through the pointer, which refers to a live local.
+    if unsafe { libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if limit.rlim_cur == libc::RLIM_INFINITY {
+        return Ok(u64::MAX);
+    }
+    Ok(limit.rlim_cur.saturating_add(1))
 }
 
 impl Run<'_> {
@@ -127,18 +149,23 @@ impl Run<'_> {
                 super::files::strerror(&error)
             ))
         })?;
+        let mut sources = Vec::new();
         for name in HELPER {
-            copy(&tree.join("scripts").join(name), &scripts.join(name)).map_err(|error| {
-                NoVerdict::plain(text!(
-                    "the head's scripts/",
-                    name,
-                    " cannot be copied: ",
-                    super::files::strerror(&error)
-                ))
-            })?;
+            let copied =
+                copy(&tree.join("scripts").join(name), &scripts.join(name)).map_err(|error| {
+                    NoVerdict::plain(text!(
+                        "the head's scripts/",
+                        name,
+                        " cannot be copied: ",
+                        super::files::strerror(&error)
+                    ))
+                })?;
+            sources.push(copied);
         }
+        let source = sources.swap_remove(0);
         self.interrupt.check()?;
-        let answer = verdict_texts(self.inputs.env(), &self.helper());
+        let answer = verdict_texts(self.inputs.env(), &self.helper(), &source);
+        self.helper_source = source;
         self.interrupt.check()?;
         match answer {
             Ok(results) => self.results = Some(results),
@@ -247,7 +274,13 @@ impl Run<'_> {
             .expect("a rerun follows the helper's setup");
         let judged = judge_rerun(&rerun, |code, line| {
             let expected = results[usize::from(code == 1)].clone();
-            match counts(self.inputs.env(), &self.helper(), code, line) {
+            match counts(
+                self.inputs.env(),
+                &self.helper(),
+                &self.helper_source,
+                code,
+                line,
+            ) {
                 Ok(true) => Ok(HelperVerdict::Counted),
                 Ok(false) => Ok(HelperVerdict::Uncounted { expected }),
                 Err(why) => Err(text!(

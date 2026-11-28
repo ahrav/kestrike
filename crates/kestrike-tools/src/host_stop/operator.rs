@@ -1,0 +1,306 @@
+//! The operator file: its shape, its bounds and its names, checked in one order, and the snapshot
+//! path it names made absolute against the file's own directory.
+
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
+
+use super::checked::{get, list, number, object_at, text, text_at};
+use super::constants::{ALARM_NAME_MAX, BOUNDS, LIMIT_SECONDS, MAX_INSTANCES, REGION};
+use super::forms::{instance_id, iso_time, matches, plain};
+use super::inputs::read_json;
+use super::number::Number;
+use super::preflight::Gd2;
+use super::words::sentence;
+use crate::gameday::{Each, Names, Refusal, Scalar, Schema, conform, need};
+use crate::json::Value;
+use crate::paths::{join, normalize, split};
+use crate::plants::files::strerror;
+use crate::text::Text;
+
+const fn s(scalar: Scalar) -> Schema {
+    Schema::scalar(scalar)
+}
+
+/// The operator file's shape, in the order its keys are checked.
+const OPERATOR: Schema = Schema::Object(&[
+    ("region", s(Scalar::Name)),
+    ("identity", s(Scalar::Name)),
+    ("instances", Schema::List(&s(Scalar::Name))),
+    ("snapshot", s(Scalar::Name)),
+    (
+        "approval",
+        Schema::Object(&[
+            ("approver", s(Scalar::Name)),
+            ("package_sha256", s(Scalar::Digest)),
+            ("instance", s(Scalar::Name)),
+            ("not_after", s(Scalar::Name)),
+        ]),
+    ),
+    (
+        "alarms",
+        Schema::Each(Each {
+            keys: "guardrail",
+            value: &s(Scalar::Name),
+            exact: true,
+        }),
+    ),
+    (BOUNDS[0], s(Scalar::Positive)),
+    (BOUNDS[1], s(Scalar::Positive)),
+    (BOUNDS[2], s(Scalar::Positive)),
+    (BOUNDS[3], s(Scalar::Positive)),
+]);
+
+/// The owner's recorded approval of one run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Approval {
+    approver: Text,
+    package_sha256: Text,
+    instance: Text,
+    not_after: Text,
+}
+
+impl Approval {
+    pub fn approver(&self) -> &Text {
+        &self.approver
+    }
+
+    /// The SHA-256 of the filled package's bytes, 64 lowercase hexadecimal digits.
+    pub fn package_sha256(&self) -> &Text {
+        &self.package_sha256
+    }
+
+    /// The target instance, an instance ID.
+    pub fn instance(&self) -> &Text {
+        &self.instance
+    }
+
+    /// The ISO time at which the approval lapses, a calendar second.
+    pub fn not_after(&self) -> &Text {
+        &self.not_after
+    }
+}
+
+/// `Operator` is an operator file that [`read_operator`] admitted: every value of the shape and the
+/// bounds that function states.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Operator {
+    region: Text,
+    identity: Text,
+    approval: Approval,
+    instances: Vec<Text>,
+    snapshot: PathBuf,
+    alarms: Vec<(Text, Text)>,
+    snapshot_max_age_seconds: Number,
+    effect_timeout_seconds: Number,
+    observe_seconds: Number,
+    deadline_seconds: Number,
+}
+
+impl Operator {
+    /// The AWS region name.
+    pub fn region(&self) -> &Text {
+        &self.region
+    }
+
+    /// The ARN the run's caller has.
+    pub fn identity(&self) -> &Text {
+        &self.identity
+    }
+
+    pub fn approval(&self) -> &Approval {
+        &self.approval
+    }
+
+    /// The declared instance set: 1 to 100 distinct instance IDs, in the file's order.
+    pub fn instances(&self) -> &[Text] {
+        &self.instances
+    }
+
+    /// The snapshot directory, an absolute path.
+    pub fn snapshot(&self) -> &Path {
+        &self.snapshot
+    }
+
+    /// Each guardrail text with its distinct alarm name, in the file's order.
+    pub fn alarms(&self) -> &[(Text, Text)] {
+        &self.alarms
+    }
+
+    /// The alarm name of the guardrail `text`.
+    pub fn alarm(&self, text: &Text) -> Option<&Text> {
+        self.alarms
+            .iter()
+            .find(|(guardrail, _)| guardrail == text)
+            .map(|(_, alarm)| alarm)
+    }
+
+    pub fn snapshot_max_age_seconds(&self) -> Number {
+        self.snapshot_max_age_seconds
+    }
+
+    pub fn effect_timeout_seconds(&self) -> Number {
+        self.effect_timeout_seconds
+    }
+
+    pub fn observe_seconds(&self) -> Number {
+        self.observe_seconds
+    }
+
+    pub fn deadline_seconds(&self) -> Number {
+        self.deadline_seconds
+    }
+}
+
+/// `read_operator` reads the operator file at `path`, at most `limit` bytes, against GD-2's entry
+/// `gd2`, whose guardrail texts key `alarms`. The snapshot path is joined to the directory of `path`
+/// made absolute against the working directory, which a relative `path` reads.
+///
+/// # Errors
+///
+/// The first refusal in this order: each of [`read_json`]; `the operator file holds no approval of this
+/// run`; the shape off its schema; the region; the approval's instance and its time; each declared
+/// instance; `instances holds <n> IDs, not 1 to 100`; `instances repeats an instance`; each bound past
+/// 86,400 s; a deadline that holds less than the effect timeout and the observation together; each
+/// alarm name of more than 255 characters, with a leading `-` or outer white space; one alarm for two
+/// guardrails; the snapshot path and each alarm name with a control character; and
+/// `the working directory cannot be read: <reason>` for a relative `path`.
+pub fn read_operator(path: &Path, gd2: &Gd2<'_>, limit: u64) -> Result<Operator, Refusal> {
+    let what = Text::from("the operator file");
+    let value = read_json(path, &what, limit)?;
+    let shaped =
+        matches!(&value, Value::Object(o) if matches!(o.get("approval"), Some(Value::Object(_))));
+    need(shaped, || {
+        sentence!("the operator file holds no approval of this run")
+    })?;
+    let mut names = Names::new();
+    names.insert("guardrail", gd2.guardrails().into_iter().cloned().collect());
+    conform(&value, &OPERATOR, &what, &names)?;
+    let o = super::checked::object(&value);
+    let region = text_at(o, "region");
+    need(matches(&REGION, region), || {
+        sentence!("region ", region.repr(), " is no AWS region name")
+    })?;
+    let approval = object_at(o, "approval");
+    let target = instance_id(get(approval, "instance"), &Text::from("approval instance"))?;
+    iso_time(
+        get(approval, "not_after"),
+        &Text::from("approval not_after"),
+    )?;
+    let instances = list(get(o, "instances"))
+        .iter()
+        .enumerate()
+        .map(|(at, value)| instance_id(value, &sentence!("instances[", at.to_string(), "]")))
+        .collect::<Result<Vec<_>, _>>()?;
+    need(
+        !instances.is_empty() && instances.len() <= MAX_INSTANCES,
+        || {
+            sentence!(
+                "instances holds ",
+                instances.len().to_string(),
+                " IDs, not 1 to ",
+                MAX_INSTANCES.to_string()
+            )
+        },
+    )?;
+    let distinct: BTreeSet<&Text> = instances.iter().collect();
+    need(distinct.len() == instances.len(), || {
+        sentence!("instances repeats an instance")
+    })?;
+    for bound in BOUNDS {
+        let value = number(get(o, bound));
+        need(value <= Number::from(LIMIT_SECONDS), || {
+            sentence!(
+                bound,
+                " ",
+                value,
+                " is past its limit of ",
+                LIMIT_SECONDS.to_string(),
+                " s"
+            )
+        })?;
+    }
+    let snapshot_max_age_seconds = number(get(o, "snapshot_max_age_seconds"));
+    let effect_timeout_seconds = number(get(o, "effect_timeout_seconds"));
+    let observe_seconds = number(get(o, "observe_seconds"));
+    let deadline_seconds = number(get(o, "deadline_seconds"));
+    need(
+        effect_timeout_seconds.plus(observe_seconds) <= deadline_seconds,
+        || {
+            sentence!(
+                "deadline_seconds holds less than effect_timeout_seconds and observe_seconds together"
+            )
+        },
+    )?;
+    let alarms: Vec<(Text, Text)> = object_at(o, "alarms")
+        .iter()
+        .map(|(key, alarm)| (key.clone(), text(alarm).clone()))
+        .collect();
+    for (key, alarm) in &alarms {
+        let named = alarm.len() <= ALARM_NAME_MAX
+            && alarm.code_points().next() != Some(u32::from('-'))
+            && alarm.strip() == *alarm;
+        need(named, || {
+            sentence!(
+                "the alarm of ",
+                key.repr(),
+                " is no alarm name: ",
+                alarm.repr()
+            )
+        })?;
+    }
+    let distinct: BTreeSet<&Text> = alarms.iter().map(|(_, alarm)| alarm).collect();
+    need(distinct.len() == alarms.len(), || {
+        sentence!("alarms names one alarm for two guardrails")
+    })?;
+    let snapshot = text_at(o, "snapshot");
+    let named = std::iter::once((Text::from("snapshot"), snapshot)).chain(
+        alarms
+            .iter()
+            .map(|(key, alarm)| (sentence!("the alarm of ", key.repr()), alarm)),
+    );
+    for (what, text) in named {
+        need(plain(text), || {
+            sentence!(
+                what,
+                " holds a control character or text with no UTF-8 form: ",
+                text.repr()
+            )
+        })?;
+    }
+    let snapshot = snapshot.to_str().expect("a plain text has a UTF-8 form");
+    let (directory, _) = split(&abspath(path.as_os_str().as_bytes())?);
+    Ok(Operator {
+        region: region.clone(),
+        identity: text_at(o, "identity").clone(),
+        approval: Approval {
+            approver: text_at(approval, "approver").clone(),
+            package_sha256: text_at(approval, "package_sha256").clone(),
+            instance: target,
+            not_after: text_at(approval, "not_after").clone(),
+        },
+        instances,
+        snapshot: PathBuf::from(OsStr::from_bytes(&join(&directory, snapshot.as_bytes()))),
+        alarms,
+        snapshot_max_age_seconds,
+        effect_timeout_seconds,
+        observe_seconds,
+        deadline_seconds,
+    })
+}
+
+/// `path` made absolute against the working directory and normalized lexically, as
+/// `os.path.abspath` makes it; an absolute `path` reads no working directory.
+fn abspath(path: &[u8]) -> Result<Vec<u8>, Refusal> {
+    if path.starts_with(b"/") {
+        return Ok(normalize(path));
+    }
+    let cwd = std::env::current_dir().map_err(|error| {
+        Refusal::new(sentence!(
+            "the working directory cannot be read: ",
+            strerror(&error)
+        ))
+    })?;
+    Ok(normalize(&join(&cwd.into_os_string().into_vec(), path)))
+}

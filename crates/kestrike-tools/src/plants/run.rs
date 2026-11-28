@@ -15,7 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::ending::{GitFailed, Halt, Step};
@@ -39,6 +39,8 @@ pub struct Run<'a> {
     trees: Vec<PathBuf>,
     /// The staged helper's verdict texts of exits 0 and 1, once the proof's setup stands.
     pub(super) results: Option<[Text; 2]>,
+    /// The staged helper's source as read once at the proof's setup, which every question runs.
+    pub(super) helper_source: Vec<u8>,
     pub(super) on_head: Vec<(Text, Result<u8, NoVerdict>)>,
     pub(super) proof_tree: Option<PathBuf>,
     pub(super) proof_failure: Option<NoVerdict>,
@@ -49,11 +51,24 @@ pub struct Run<'a> {
 /// exit of a `git worktree list` that failed and so leaves it unknown.
 pub type Remained = (PathBuf, Option<i32>);
 
+/// The deepest directory level `remove` walks below its root; a directory deeper than this stays in
+/// place with everything under it.
+pub(super) const REMOVAL_DEPTH: usize = 512;
+
 /// `remove` removes `path` and everything under it, going past each entry it cannot remove; a link at
 /// `path` stays. The walk opens each directory relative to its parent's descriptor with `O_NOFOLLOW`
 /// and unlinks a link inside the tree itself. After `remove` opens the parent of `path`, each `openat`
-/// and `unlinkat` call resolves a single name relative to a directory descriptor.
+/// and `unlinkat` call resolves a single name relative to a directory descriptor. The root is walked
+/// only when the directory opened at `path` has the device and inode that the status read of `path`
+/// gave; a directory put in its place between the two stays as it is. The walk goes at most
+/// [`REMOVAL_DEPTH`] levels below the root.
 pub fn remove(path: &Path) {
+    remove_with(path, || {});
+}
+
+/// `remove_with` is [`remove`] with `between` run after the status read of `path` and before the open
+/// of its directory.
+pub(super) fn remove_with(path: &Path, between: impl FnOnce()) {
     let Ok(status) = fs::symlink_metadata(path) else {
         return;
     };
@@ -71,19 +86,25 @@ pub fn remove(path: &Path) {
     let (Ok(parent), Ok(name)) = (File::open(parent), CString::new(name.as_bytes())) else {
         return;
     };
-    remove_at(&parent, &name, true);
+    between();
+    remove_at(&parent, &name, Some((status.dev(), status.ino())), 0);
 }
 
-/// `remove_at` removes the directory `name` of the open directory `parent` with its entries. If
-/// `openat` fails and `root` is false, `remove_at` attempts to unlink `name` as a non-directory entry.
-/// The caller continues with the remaining siblings.
-fn remove_at(parent: &File, name: &CStr, root: bool) {
+/// `remove_at` removes the directory `name` of the open directory `parent` with its entries. With
+/// `root`, the device and inode of the root's status read, it walks the opened directory only when its
+/// own status matches them and never unlinks `name` as a non-directory; otherwise, if `openat` fails,
+/// it attempts to unlink `name` as a non-directory entry. Below [`REMOVAL_DEPTH`] levels it leaves
+/// `name` as it is. The caller continues with the remaining siblings.
+fn remove_at(parent: &File, name: &CStr, root: Option<(u64, u64)>, depth: usize) {
+    if depth > REMOVAL_DEPTH {
+        return;
+    }
     let flags =
         libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
     // SAFETY: `parent` is an open descriptor and `name` a NUL-terminated string, both live for the call.
     let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
     if descriptor < 0 {
-        if !root {
+        if root.is_none() {
             // SAFETY: `parent` is open and `name` points to a live NUL-terminated string.
             unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
         }
@@ -91,8 +112,16 @@ fn remove_at(parent: &File, name: &CStr, root: bool) {
     }
     // SAFETY: `descriptor` is a new open descriptor that this call alone owns.
     let directory = unsafe { File::from_raw_fd(descriptor) };
+    if let Some((device, inode)) = root {
+        let same = directory
+            .metadata()
+            .is_ok_and(|opened| opened.dev() == device && opened.ino() == inode);
+        if !same {
+            return;
+        }
+    }
     for inner in entries(&directory) {
-        remove_at(&directory, &inner, false);
+        remove_at(&directory, &inner, None, depth + 1);
     }
     drop(directory);
     // SAFETY: dropping `directory` leaves `parent` open. `name` points to a live NUL-terminated string
@@ -123,9 +152,10 @@ fn entries(directory: &File) -> Vec<CString> {
         if entry.is_null() {
             break;
         }
-        // SAFETY: `readdir` returned a live entry whose `d_name` is NUL-terminated; the name is copied
-        // before the next `readdir`.
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        // SAFETY: `readdir` returned a live entry whose `d_name` is NUL-terminated. The raw place
+        // projection addresses the first byte of `d_name` even when the record holds fewer than 256
+        // bytes for the field.
+        let name = unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast::<libc::c_char>()) };
         if name != c"." && name != c".." {
             names.push(name.to_owned());
         }
@@ -200,6 +230,7 @@ impl<'a> Run<'a> {
             date: crate::text::strip_str(&shown.stdout).to_owned(),
             trees: Vec::new(),
             results: None,
+            helper_source: Vec::new(),
             on_head: Vec::new(),
             proof_tree: None,
             proof_failure: None,

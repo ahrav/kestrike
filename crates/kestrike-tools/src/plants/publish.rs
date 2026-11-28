@@ -63,12 +63,12 @@ impl Run<'_> {
 }
 
 fn umask() -> io::Result<u32> {
-    let status = fs::read_to_string("/proc/self/status")?;
+    let status = fs::read_to_string("/proc/thread-self/status")?;
     status
         .lines()
         .find_map(|line| line.strip_prefix("Umask:"))
         .and_then(|mask| u32::from_str_radix(mask.trim(), 8).ok())
-        .ok_or_else(|| io::Error::other("/proc/self/status names no umask"))
+        .ok_or_else(|| io::Error::other("/proc/thread-self/status names no umask"))
 }
 
 /// `staging` creates a new staging file beside `target`.

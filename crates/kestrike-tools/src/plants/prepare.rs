@@ -22,7 +22,7 @@ use super::stop::Stop;
 use super::store::{SCORE, STORE, load_plants};
 use super::work::work_directory;
 use crate::args::Parsed;
-use crate::environ::{Environ, get, set};
+use crate::environ::{Environ, first_of_each, get, set};
 use crate::git::REPOSITORY_VARIABLES;
 use crate::paths;
 use crate::process::refuse_ignored_sigchld;
@@ -127,17 +127,6 @@ pub fn prepare(args: &[OsString], env: Environ, here: io::Result<PathBuf>) -> Ou
         Err(Stop::Rejected(reason)) => Outcome::Rejected(reason),
         Err(Stop::Failed(reason)) => Outcome::Failed(reason),
     }
-}
-
-/// `first_of_each` keeps the first variable of each name, the one a lookup of the name reads.
-fn first_of_each(env: Environ) -> Environ {
-    let mut kept: Environ = Vec::with_capacity(env.len());
-    for (name, value) in env {
-        if !kept.iter().any(|(seen, _)| *seen == name) {
-            kept.push((name, value));
-        }
-    }
-    kept
 }
 
 /// `rev_parse` runs `git rev-parse ARGS` in `dir` and returns its output stripped, or `refusal` when it

@@ -40,7 +40,7 @@ fn object(line: &str, what: &str) -> Result<Object, NoVerdict> {
         Err(UniqueError::Syntax(error)) => {
             Err(NoVerdict::plain(text!(printed, ": ", error.to_string())))
         }
-        Err(UniqueError::Repeated(name)) => {
+        Err(UniqueError::Repeated(name, _)) => {
             Err(NoVerdict::plain(text!(printed, ": repeated member ", name)))
         }
     }
