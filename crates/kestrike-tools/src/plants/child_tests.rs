@@ -2,10 +2,15 @@
 //! exits of a run's halt.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::{Halt, Logged, Staged, Stopped, counts, logged, verdict_texts};
 use crate::paths::tests::Scratch;
+use crate::plants::tests::Opens;
 use crate::process::Interrupt;
 use crate::text::Text;
 
@@ -84,14 +89,20 @@ fn a_child_without_text_or_without_a_new_log_leaves_no_verdict() {
     assert!(!marker.exists(), "no child started");
 }
 
-/// A signal recorded before the start ends the run with no child started.
+/// A signal recorded before the start ends the run with no child started: the watch holds no open of
+/// the program. The same command with no signal recorded starts the program, which the watch shows
+/// first.
 #[test]
 fn a_recorded_signal_starts_no_child() {
     let scratch = Scratch::new("logged-signal");
-    let (log, env) = (scratch.0.join("sweep"), host_env());
-    let marker = scratch.0.join("ran");
-    let argv = sh(&format!("touch '{}'", marker.display()));
+    let (first, log, env) = (scratch.0.join("first"), scratch.0.join("sweep"), host_env());
+    let program = scratch.0.join("program");
+    let opens = Opens::inert(&program);
+    let argv = [program.into_os_string()];
     let interrupt = Interrupt::new();
+    let ran = logged(&started(&first, &argv, &env, &scratch.0), &interrupt);
+    assert_eq!(ran.expect("the child runs"), (0, String::new()));
+    assert!(opens.any(), "a child that starts opens its program");
     interrupt.record(libc::SIGHUP);
     let Err(Stopped::Halt(halt)) = logged(&started(&log, &argv, &env, &scratch.0), &interrupt)
     else {
@@ -102,7 +113,7 @@ fn a_recorded_signal_starts_no_child() {
         (Halt::Interrupted(libc::SIGHUP), 129)
     );
     assert_eq!(Halt::Failed(crate::text::Text::from("x")).code(), 4);
-    assert!(!marker.exists());
+    assert!(!opens.any(), "no child started");
 }
 
 /// The question reads the answer the `python3` on the given `PATH` prints, and words a missing answer
@@ -110,28 +121,13 @@ fn a_recorded_signal_starts_no_child() {
 #[test]
 fn the_question_reads_the_helper_s_answer_or_its_last_error_line() {
     let scratch = Scratch::new("question");
-    let python = scratch.0.join("python3");
     let script = r#"#!/bin/sh
 case "$#" in
 4) echo '["held", "failed"]' ;;
 *) read -r size; read -r line; if [ "$line" = yes ]; then echo true; else echo 'Traceback' >&2; echo 'TypeError: no' >&2; exit 1; fi ;;
 esac
 "#;
-    let written = std::process::Command::new("sh")
-        .args([
-            "-c",
-            "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
-            "sh",
-        ])
-        .arg(&python)
-        .arg(script)
-        .status()
-        .expect("the writer starts");
-    assert!(
-        written.success(),
-        "the stand-in is written by a child, the one process that holds it open"
-    );
-    let env = vec![(OsString::from("PATH"), scratch.0.clone().into_os_string())];
+    let env = stand_in(&scratch.0, script);
     let helper = scratch.0.join("reproduce-test.py");
     let staged = Staged {
         env: &env,
@@ -162,19 +158,16 @@ esac
     );
 }
 
+/// `stand_in` writes `script` as the `python3` of `dir` and returns an environment whose `PATH` holds
+/// `dir` alone, so the question starts that stand-in or no program. A `dir` with a colon is refused,
+/// since `PATH` would read it as several directories.
 fn stand_in(dir: &Path, script: &str) -> crate::environ::Environ {
-    let python = dir.join("python3");
-    let written = std::process::Command::new("sh")
-        .args([
-            "-c",
-            "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
-            "sh",
-        ])
-        .arg(&python)
-        .arg(script)
-        .status()
-        .expect("the writer starts");
-    assert!(written.success(), "the stand-in is written by a child");
+    assert!(
+        !dir.as_os_str().as_encoded_bytes().contains(&b':'),
+        "{} is no single entry of `PATH`",
+        dir.display()
+    );
+    crate::fixtures::tests::script(&dir.join("python3"), script);
     vec![(OsString::from("PATH"), dir.as_os_str().to_os_string())]
 }
 
@@ -200,15 +193,14 @@ fn an_answer_that_is_no_utf_8_is_no_answer() {
     );
 }
 
-/// A signal recorded before the question starts no `python3`, and the caller reads the record after.
+/// A signal recorded before the question starts no `python3`, and the caller reads the record after:
+/// the watch holds no open of the stand-in. The same question with no signal recorded is answered by
+/// the stand-in, which the watch shows opened first.
 #[test]
 fn a_signal_recorded_before_the_question_starts_no_python3() {
     let scratch = Scratch::new("question-signal");
-    let marker = scratch.0.join("ran");
-    let env = stand_in(
-        &scratch.0,
-        &format!("#!/bin/sh\ntouch '{}'\necho true\n", marker.display()),
-    );
+    let env = stand_in(&scratch.0, "#!/bin/sh\necho true\n");
+    let opens = Opens::of(&scratch.0.join("python3"));
     let helper = scratch.0.join("reproduce-test.py");
     let staged = Staged {
         env: &env,
@@ -217,23 +209,135 @@ fn a_signal_recorded_before_the_question_starts_no_python3() {
         source: b"",
     };
     let interrupt = Interrupt::new();
+    assert_eq!(
+        counts(&staged, 0, &Text::from("line"), &interrupt),
+        Ok(true)
+    );
+    assert!(opens.any(), "a question that starts opens the stand-in");
     interrupt.record(libc::SIGTERM);
     assert_eq!(
         counts(&staged, 0, &Text::from("line"), &interrupt),
         Err(Text::from("`python3` did not start: a signal was recorded"))
     );
-    assert!(!marker.exists(), "no question started");
+    assert!(!opens.any(), "no question started");
 }
 
-/// The wait ends when the question exits while a descendant it left holds standard error open and
-/// writes to it; an accepted answer is returned without reading that stream.
+/// The longest a test of the descendant waits for a step that a library holding the property takes at
+/// once.
+const BOUND: Duration = Duration::from_secs(20);
+
+/// The stand-in forks a descendant and answers once that descendant says it is ready. The descendant
+/// holds the question's streams, takes its turns through the FIFOs beside the stand-in, and runs shell
+/// builtins alone, so it forks no process of its own.
+const HELD: &str = r#"#!/bin/sh
+at=${0%/*}
+(
+    exec 4< "$at/release" 3> "$at/done" || exit 1
+    echo ready > "$at/ready" || exit 1
+    read -r go <&4 || exit 1
+    echo late >&2
+    echo done >&3
+) &
+read -r ready < "$at/ready" && [ "$ready" = ready ] || exit 1
+echo true
+"#;
+
+/// `Turns` holds the three FIFOs through which the descendant of [`HELD`] and its test take turns: the
+/// descendant writes a line to `ready`, waits for a line of `release`, and writes a line to `done` as
+/// its last act. The test holds both ends of `ready` and `release`, so no open and no write of either
+/// side waits for the other. Dropping the value stops both waits and removes the three names before it
+/// closes them, so a stand-in at any step ends: a wait that holds its FIFO reads a line, and an open
+/// that comes later finds no FIFO to wait on.
+struct Turns {
+    dir: PathBuf,
+    ready: File,
+    release: File,
+    done: File,
+}
+
+impl Turns {
+    const NAMES: [&str; 3] = ["ready", "release", "done"];
+
+    fn at(dir: &Path) -> Self {
+        for name in Self::NAMES {
+            let path = dir.join(name);
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("a name");
+            // SAFETY: `name` is a NUL-terminated path that outlives the call.
+            let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+            assert_eq!(made, 0, "{name:?}: {}", std::io::Error::last_os_error());
+        }
+        let both = |name| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(dir.join(name))
+                .expect("a FIFO opens for both ends at once")
+        };
+        let done = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(dir.join("done"))
+            .expect("a FIFO opens for reading without a writer");
+        Self {
+            dir: dir.to_path_buf(),
+            ready: both("ready"),
+            release: both("release"),
+            done,
+        }
+    }
+
+    /// `release` lets the descendant go on from its wait.
+    fn release(&self) {
+        (&self.release)
+            .write_all(b"go\n")
+            .expect("the release is written");
+    }
+
+    /// `stop` ends both waits: the stand-in's for the descendant, without an answer, and the
+    /// descendant's for its release.
+    fn stop(&self) {
+        let _ = (&self.ready).write_all(b"stop\n");
+        let _ = (&self.release).write_all(b"go\n");
+    }
+
+    /// `ended` returns what the descendant wrote to `done` once its last writer has closed it, which the
+    /// descendant does when it exits.
+    fn ended(&self) -> Vec<u8> {
+        let (mut said, mut part) = (Vec::new(), [0_u8; 64]);
+        let end = Instant::now() + BOUND;
+        loop {
+            match (&self.done).read(&mut part) {
+                Ok(0) => return said,
+                Ok(count) => said.extend_from_slice(&part[..count]),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < end =>
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("`done` is read to its end: {error}"),
+            }
+        }
+    }
+}
+
+impl Drop for Turns {
+    fn drop(&mut self) {
+        self.stop();
+        for name in Self::NAMES {
+            let _ = std::fs::remove_file(self.dir.join(name));
+        }
+    }
+}
+
+/// The wait ends when the question exits while a descendant it left holds standard error open; an
+/// accepted answer is returned without reading that stream. The answer comes while the descendant
+/// waits for its release with the streams open, and the descendant then writes to the stream and ends
+/// before the test does.
 #[test]
 fn a_descendant_holding_the_question_s_streams_does_not_hold_the_answer() {
     let scratch = Scratch::new("question-descendant");
-    let env = stand_in(
-        &scratch.0,
-        "#!/bin/sh\n(sleep 30; echo late >&2) &\necho true\n",
-    );
+    let turns = Turns::at(&scratch.0);
+    let env = stand_in(&scratch.0, HELD);
     let helper = scratch.0.join("reproduce-test.py");
     let staged = Staged {
         env: &env,
@@ -241,14 +345,27 @@ fn a_descendant_holding_the_question_s_streams_does_not_hold_the_answer() {
         helper: &helper,
         source: b"",
     };
-    let start = std::time::Instant::now();
+    let (sent, answered) = std::sync::mpsc::channel();
+    let answer = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let _ = sent.send(counts(&staged, 0, &Text::from("line"), &Interrupt::new()));
+        });
+        let answer = answered.recv_timeout(BOUND);
+        if answer.is_err() {
+            turns.stop();
+        }
+        answer
+    });
     assert_eq!(
-        counts(&staged, 0, &Text::from("line"), &Interrupt::new()),
-        Ok(true)
+        answer,
+        Ok(Ok(true)),
+        "the answer came before the descendant's release"
     );
-    assert!(
-        start.elapsed() < std::time::Duration::from_secs(20),
-        "the answer came at the question's exit"
+    turns.release();
+    assert_eq!(
+        turns.ended(),
+        b"done\n",
+        "the descendant waited for its release and then ended"
     );
 }
 
