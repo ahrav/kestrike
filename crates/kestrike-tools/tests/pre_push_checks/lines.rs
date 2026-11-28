@@ -565,3 +565,148 @@ fn a_local_field_shaped_as_an_option_reaches_git_as_one() {
     );
     assert_eq!(std::fs::read(&victim).expect("the file reads"), b"");
 }
+
+/// The number of probe calls of the running plan, and the call that reports `Err`.
+static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FAILING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The number of Git commands the trace held when the failing call ran.
+static TRACED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `traced` counts the Git commands that `GIT_TRACE` has logged so far.
+fn traced() -> usize {
+    let trace = std::env::var_os("GIT_TRACE").expect("the row traces Git");
+    std::fs::read_to_string(trace)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("trace: built-in: git"))
+        .count()
+}
+
+/// `counting` reports `Err(143)` on the call [`FAILING`] names and `Ok` on every other call.
+fn counting() -> Result<(), u8> {
+    use std::sync::atomic::Ordering;
+    let call = CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    if call == FAILING.load(Ordering::SeqCst) {
+        TRACED.store(traced(), Ordering::SeqCst);
+        return Err(143);
+    }
+    Ok(())
+}
+
+/// `probed_plan` plans `lines` and then the guard with [`counting`], failing at call `failing`, and
+/// returns the first error, with no note given after the failing call.
+fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
+    use std::sync::atomic::Ordering;
+    CALLS.store(0, Ordering::SeqCst);
+    FAILING.store(failing, Ordering::SeqCst);
+    let mut plan = match Plan::new("origin".as_ref(), counting) {
+        Ok(plan) => plan,
+        Err(failure) => return Some(failure),
+    };
+    for line in lines {
+        let mut late = false;
+        let planned = plan.line(line, |_| {
+            late = failing != 0 && CALLS.load(Ordering::SeqCst) >= failing;
+        });
+        assert!(!late, "the note is given after the failing call");
+        if let Err(failure) = planned {
+            return Some(failure);
+        }
+    }
+    plan.guard().err()
+}
+
+/// A probe that reports `Err` once any read of a plan returns ends the plan as [`Failure::Cancelled`]
+/// with its code and starts no later Git read, for a line with no comparison base, a line whose remote
+/// commit the clone lacks so the merge base is read, a changed Rust file whose ignore spans are read in a
+/// batch, and the guard's batch read of a pushed chaos record.
+#[test]
+fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read() {
+    use std::sync::atomic::Ordering;
+    if let Some(values) = child() {
+        let lines = [
+            line(&values.get("HEAD"), &"1".repeat(40)),
+            line(&values.get("UNBASED"), ZERO),
+        ];
+        assert!(
+            probed_plan(&lines, 0).is_none(),
+            "the plan reads with no failing call"
+        );
+        let reads = CALLS.load(Ordering::SeqCst);
+        assert!(reads > 8, "the plan reads {reads} times");
+        for failing in 1..=reads {
+            let failure = probed_plan(&lines, failing);
+            assert!(
+                matches!(failure, Some(Failure::Cancelled(143))),
+                "call {failing}: {failure:?}"
+            );
+            assert_eq!(
+                traced(),
+                TRACED.load(Ordering::SeqCst),
+                "call {failing} is followed by a Git read"
+            );
+        }
+        return;
+    }
+    let (repository, _) = fixture("probed");
+    let head = repository.commit(&[
+        ("crates/plain.rs", "#[test]\n#[ignore]\nfn t() {}\n"),
+        ("chaos/runs/r.json", "{\"run\": 1}"),
+    ]);
+    let unbased = repository.git(&[
+        "commit-tree",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "-m",
+        "an unrelated root",
+    ]);
+    let trace = repository.top.join("trace");
+    repository.in_child_with(
+        &repository.top,
+        &id(
+            module_path!(),
+            "a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read",
+        ),
+        &[("HEAD", &head), ("UNBASED", &unbased)],
+        &[("GIT_TRACE", trace.as_os_str())],
+    );
+}
+
+/// A signal recorded while the skipped-scan note is given ends the line before its next Git read: the
+/// probe runs once the note returns.
+#[test]
+fn a_probe_after_the_skipped_scan_note_starts_no_later_read() {
+    use std::sync::atomic::Ordering;
+    if let Some(values) = child() {
+        CALLS.store(0, Ordering::SeqCst);
+        FAILING.store(0, Ordering::SeqCst);
+        let mut plan = Plan::new("origin".as_ref(), counting).expect("the plan starts");
+        let mut noted = None;
+        let planned = plan.line(&line(&values.get("UNBASED"), ZERO), |_| {
+            FAILING.store(CALLS.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+            noted = Some(traced());
+        });
+        assert!(
+            matches!(planned, Err(Failure::Cancelled(143))),
+            "{planned:?}"
+        );
+        assert_eq!(noted, Some(traced()), "a Git read starts after the note");
+        return;
+    }
+    let (repository, _) = fixture("noted");
+    let unbased = repository.git(&[
+        "commit-tree",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "-m",
+        "an unrelated root",
+    ]);
+    let trace = repository.top.join("trace");
+    repository.in_child_with(
+        &repository.top,
+        &id(
+            module_path!(),
+            "a_probe_after_the_skipped_scan_note_starts_no_later_read",
+        ),
+        &[("UNBASED", &unbased)],
+        &[("GIT_TRACE", trace.as_os_str())],
+    );
+}

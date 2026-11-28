@@ -576,7 +576,7 @@ pub fn alive(pid: libc::pid_t) -> bool {
 }
 
 /// `group_alive` holds while a process of the group `group` remains. It first reaps each member that ended
-/// and is this process's child: another case can make the test process a subreaper, and then a check's
+/// and is this process's child: on Linux [`Fixture::with`] makes the test process a subreaper, so a check's
 /// orphaned child waits for this process's reap once it ends.
 pub fn group_alive(group: libc::pid_t) -> bool {
     // SAFETY: `waitpid` with a null status pointer and `WNOHANG` reaps an ended child of the group, if any,

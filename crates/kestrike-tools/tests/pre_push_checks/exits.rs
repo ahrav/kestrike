@@ -124,6 +124,41 @@ fn a_check_that_cannot_start_exits_1_after_the_worktree_is_removed() {
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
+/// A `git worktree add` that registers the worktree and exits 0 after writing a byte outside UTF-8 to its
+/// standard output is refused: the tool runs no check, removes the worktree and exits 2 with a
+/// `pre-push: git worktree add` line.
+#[test]
+fn a_worktree_add_whose_output_is_not_utf8_exits_2_before_any_check() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let git = which("git");
+    executable(
+        &fx.bin.join("git"),
+        &format!(
+            "#!/bin/sh
+\
+             if [ \"$1 $2\" = 'worktree add' ]; then \"{git}\" \"$@\" || exit; printf '\\377'; exit 0; fi\n\
+             exec \"{git}\" \"$@\"\n",
+            git = git.display()
+        ),
+    );
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the refusal");
+    assert!(
+        last.starts_with("pre-push: git worktree add"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
 #[test]
 fn a_failed_worktree_add_exits_2_after_the_directory_is_removed() {
     let fx = Fixture::new();
@@ -149,6 +184,8 @@ fn a_failed_worktree_add_exits_2_after_the_directory_is_removed() {
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
+/// A `git worktree remove` that Git runs and refuses is named by its line, the worktree stays registered,
+/// and the checks decide the exit, as the script's removal did.
 #[test]
 fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
     let fx = Fixture::new();
@@ -190,14 +227,12 @@ fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
 fn a_failed_write_to_standard_error_exits_120_before_any_check() {
     let fx = Fixture::new();
     let head = fx.commit(&[INVENTORY]);
-    let full = File::options()
-        .write(true)
-        .open("/dev/full")
-        .expect("the full device opens");
+    let (reader, unread) = std::io::pipe().expect("the pipe is made");
+    drop(reader);
     let mut child = fx
         .tool()
         .stdin(Stdio::piped())
-        .stderr(full)
+        .stderr(unread)
         .spawn()
         .expect("the tool starts");
     child
@@ -458,6 +493,7 @@ fn a_relative_tmpdir_is_read_against_the_working_directory() {
     fs::create_dir(&parent).expect("the parent is made");
     let started = fx.repo.join("sub");
     fs::create_dir(&started).expect("the working directory is made");
+    let started = fs::canonicalize(&started).expect("the working directory resolves");
     fx.set("TMPDIR", "../../relative");
     fx.wrap_git_around(
         "if [ \"$1 $2\" = 'worktree add' ]; then printf '%s\\n' \"$5\" >> \"$STUB_LOG.git\"; fi",
