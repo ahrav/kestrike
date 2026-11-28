@@ -504,7 +504,7 @@ fn polled_until<T>(
             return Ok(Some(value));
         }
         let left = cutoff.map(|cutoff| cutoff.saturating_duration_since(Instant::now()));
-        if ended() || left == Some(Duration::ZERO) {
+        if left == Some(Duration::ZERO) || ended() {
             return Ok(None);
         }
         thread::sleep(left.map_or(pause, |left| pause.min(left)));
