@@ -169,7 +169,7 @@ fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
         tree.as_os_str(),
         &tip,
     ];
-    let mut child = git::command(environ, "git")
+    let mut child = git::git_command(environ)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -191,11 +191,7 @@ fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
         });
     }
     let stderr = drained(stderr)?;
-    Err(Ended::Git(GitError::Failed(format!(
-        "{}: {}",
-        git::label(&args),
-        strip_str(&String::from_utf8_lossy(&stderr))
-    ))))
+    Err(Ended::Git(git::failed(&args, &stderr)))
 }
 
 /// `drain` reads `stream` to its end on a thread of its own. Where the thread cannot start, the stream is
@@ -250,16 +246,14 @@ fn remove(environ: &Environ, tree: &Path) -> Result<Removal, Exit> {
         "--force".as_ref(),
         tree.as_os_str(),
     ];
-    let ran = git::command(environ, "git")
+    let ran = git::git_command(environ)
         .args(args)
         .process_group(0)
         .output();
     let (reason, removal) = match ran {
         Ok(output) if output.status.success() => return Ok(Removal::Removed),
         Ok(output) => (
-            String::from_utf8_lossy(&output.stderr)
-                .replace("\r\n", "\n")
-                .replace('\r', "\n"),
+            crate::text::newlines(String::from_utf8_lossy(&output.stderr).into_owned()),
             Removal::Refused,
         ),
         Err(error) => (GitError::Start(error).to_string(), Removal::Unstarted),
