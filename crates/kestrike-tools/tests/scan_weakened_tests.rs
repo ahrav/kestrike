@@ -3317,3 +3317,78 @@ fn a_path_whose_ancestors_pass_the_argument_limit_reads_as_before() {
     assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
     assert_eq!(run.stderr, "");
 }
+
+impl Repo {
+    fn git_stdin(&self, args: &[&str], input: &str) -> String {
+        use std::io::Write;
+        let mut child = self
+            .command("git")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("git starts");
+        child
+            .stdin
+            .take()
+            .expect("the input is piped")
+            .write_all(input.as_bytes())
+            .expect("the input is written");
+        let output = child.wait_with_output().expect("git exits");
+        assert!(output.status.success(), "git {args:?}");
+        String::from_utf8(output.stdout)
+            .expect("git writes UTF-8")
+            .trim()
+            .to_owned()
+    }
+}
+
+/// An inventory entry that is a tree at either commit, the empty tree included, is refused as no file,
+/// although an empty tree lists no path under it in the diff.
+#[test]
+fn an_inventory_that_is_an_empty_tree_at_either_commit_exits_two() {
+    let repo = Repo::new("empty-tree-inventory");
+    let empty = repo.git_stdin(&["mktree"], "");
+    let scripts: String = repo
+        .git(&["ls-tree", &repo.base, "scripts/"])
+        .lines()
+        .map(|line| {
+            let (head, path) = line.split_once('\t').expect("a record holds a tab");
+            let name = path
+                .strip_prefix("scripts/")
+                .expect("the path lies in scripts");
+            if name == "test-inventory.json" {
+                format!("040000 tree {empty}\t{name}\n")
+            } else {
+                format!("{head}\t{name}\n")
+            }
+        })
+        .collect();
+    let scripts = repo.git_stdin(&["mktree"], &scripts);
+    let root: String = repo
+        .git(&["ls-tree", &repo.base])
+        .lines()
+        .map(|line| {
+            let (head, name) = line.split_once('\t').expect("a record holds a tab");
+            if name == "scripts" {
+                format!("040000 tree {scripts}\t{name}\n")
+            } else {
+                format!("{head}\t{name}\n")
+            }
+        })
+        .collect();
+    let root = repo.git_stdin(&["mktree"], &root);
+    let tree = repo.git(&[
+        "commit-tree",
+        &root,
+        "-p",
+        &repo.base,
+        "-m",
+        "an empty tree",
+    ]);
+    let base_tree = format!("{}^{{tree}}", repo.base);
+    let file = repo.git(&["commit-tree", &base_tree, "-p", &tree, "-m", "a file again"]);
+    let line = format!("{INVENTORY} at {} is not a file", &tree[..12]);
+    repo.refused(&repo.base, &tree, &line);
+    repo.refused(&tree, &file, &line);
+}

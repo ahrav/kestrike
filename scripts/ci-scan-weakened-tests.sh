@@ -9,6 +9,7 @@ set -euo pipefail
 
 unset -v token
 token=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+export -n token
 if [[ ! $token =~ ^[0-9a-f]{32}$ ]]; then
   printf 'ci-scan-weakened-tests.sh: the random source gave no token of 32 hex digits\n' >&2
   exit 1

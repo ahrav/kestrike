@@ -113,7 +113,12 @@ fn the_wrapper_stops_workflow_commands_around_the_scan_and_keeps_its_status() {
             format!("{arguments}##[error]a report line\n##[warning]a hint line\n"),
             &[("token", "inherited")][..],
         ),
-        (Some(quiet.as_str()), 0, arguments.to_owned(), &[][..]),
+        (
+            Some(quiet.as_str()),
+            0,
+            arguments.to_owned(),
+            &[("SHELLOPTS", "allexport")][..],
+        ),
         (
             Some(refused.as_str()),
             2,
@@ -130,7 +135,7 @@ fn the_wrapper_stops_workflow_commands_around_the_scan_and_keeps_its_status() {
     ] {
         tree.launcher(launcher);
         let output = tree.run(env);
-        assert_eq!(output.status.code(), Some(code), "{launcher:?}");
+        assert_eq!(output.status.code(), Some(code), "{launcher:?} {env:?}");
         assert!(
             output.stderr.is_empty(),
             "{}",
