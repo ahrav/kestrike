@@ -856,24 +856,17 @@ impl Classifier<'_> {
         Ok(found)
     }
 
-    /// The standings of [`Classifier::place`] for `file`, and the module files whose bare declarations
-    /// load from its directory, which a refusal names as searched.
-    fn declared(&mut self, file: &str) -> io::Result<(Standings, Vec<String>)> {
-        let directory = if name(file) == "mod.rs" {
-            parent(&parent(file))
-        } else {
-            parent(file)
-        };
+    /// The module files whose bare declarations load from `directory`, the directory of `file`: its
+    /// `mod.rs` and sibling `D.rs` (the roots for the crate's source directory), then in component order
+    /// each file of the directory that a path attribute of a path holder or of those module files names.
+    fn searched(&mut self, file: &str, directory: &str) -> io::Result<Vec<String>> {
         let named: Vec<String> =
             if directory != CRATE && !directory.starts_with(&format!("{CRATE}/")) {
                 Vec::new()
             } else if directory == CRATE {
                 self.roots.to_vec()
             } else {
-                vec![
-                    joined(&directory, "mod.rs"),
-                    with_suffix(&directory, ".rs")?,
-                ]
+                vec![joined(directory, "mod.rs"), with_suffix(directory, ".rs")?]
             };
         let mut names = self.pathed.clone();
         for module in &named {
@@ -884,11 +877,22 @@ impl Classifier<'_> {
         let mut others: Vec<String> = names
             .iter()
             .filter(|name| *name != "mod.rs")
-            .map(|name| joined(&directory, name))
+            .map(|name| joined(directory, name))
             .filter(|module| module != file && !named.contains(module))
             .collect();
         others.sort_by(|left, right| parts(left).cmp(&parts(right)));
-        let modules: Vec<String> = named.into_iter().chain(others).collect();
+        Ok(named.into_iter().chain(others).collect())
+    }
+
+    /// The standings of [`Classifier::place`] for `file`, and the module files whose bare declarations
+    /// load from its directory, which a refusal names as searched.
+    fn declared(&mut self, file: &str) -> io::Result<(Standings, Vec<String>)> {
+        let directory = if name(file) == "mod.rs" {
+            parent(&parent(file))
+        } else {
+            parent(file)
+        };
+        let modules = self.searched(file, &directory)?;
         let extra: Vec<String> = self
             .roots
             .iter()

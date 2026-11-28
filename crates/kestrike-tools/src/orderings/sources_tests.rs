@@ -2437,3 +2437,98 @@ fn a_model_source_is_read_again_for_its_text() {
         Some((file.to_owned(), "// read 2\n".to_owned()))
     );
 }
+
+/// Each declaration member of another shape than the references read reads no references, one
+/// member changed at a time; empty string controls read as none.
+#[test]
+fn a_declaration_of_another_shape_reads_no_references() {
+    let valid_declared = "{\"package\": \"none\", \"cases\": {\"a\": {\"expect\": \"positive\"}}, \"bindings\": [{\"id\": \"x\"}]}";
+    let valid_litmus = "{\"tests\": {\"sb\": {\"outcome\": \"Sometimes\"}}}";
+    let valid_records = "{\"records\": [{\"job\": \"loom\", \"tests\": [\"t\"], \"controls\": [{\"test\": \"c\"}]}]}";
+    let rows: [(&str, &str, &str, &str); 12] = [
+        ("records no object", valid_declared, valid_litmus, "[]"),
+        (
+            "a record that is a string",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [\"loom\"]}",
+        ),
+        (
+            "null controls",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\", \"tests\": [], \"controls\": null}]}",
+        ),
+        (
+            "a control with no test",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\", \"tests\": [], \"controls\": [{}]}]}",
+        ),
+        (
+            "a test that is an array",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\", \"tests\": [[1]]}]}",
+        ),
+        (
+            "a loom record with no tests",
+            valid_declared,
+            valid_litmus,
+            "{\"records\": [{\"job\": \"loom\"}]}",
+        ),
+        (
+            "cases no object",
+            "{\"package\": \"none\", \"cases\": [], \"bindings\": []}",
+            valid_litmus,
+            valid_records,
+        ),
+        (
+            "a case with no expect",
+            "{\"package\": \"none\", \"cases\": {\"a\": {}}, \"bindings\": []}",
+            valid_litmus,
+            valid_records,
+        ),
+        (
+            "litmus tests no object",
+            valid_declared,
+            "{\"tests\": []}",
+            valid_records,
+        ),
+        (
+            "a litmus test with no outcome",
+            valid_declared,
+            "{\"tests\": {\"sb\": {}}}",
+            valid_records,
+        ),
+        (
+            "a binding id that is an array",
+            "{\"package\": \"none\", \"cases\": {}, \"bindings\": [{\"id\": [1]}]}",
+            valid_litmus,
+            valid_records,
+        ),
+        (
+            "a package that is no string",
+            "{\"package\": 1, \"cases\": {}, \"bindings\": []}",
+            valid_litmus,
+            valid_records,
+        ),
+    ];
+    let parsed = |text: &str| json::parse(text).expect("the plant parses");
+    for (label, declared, litmus, records) in rows {
+        let found = references(&parsed(declared), &parsed(litmus), &parsed(records), &top());
+        assert!(
+            matches!(found, Err(super::ReferenceError::Shape(_))),
+            "{label}"
+        );
+    }
+    let empty = "{\"records\": [{\"job\": \"loom\", \"tests\": [\"t\"], \"controls\": \"\"}]}";
+    let found = references(
+        &parsed(valid_declared),
+        &parsed(valid_litmus),
+        &parsed(empty),
+        &top(),
+    )
+    .expect("empty string controls read");
+    assert_eq!(found.positive("loom").map(|set| set.len()), Some(1));
+}
