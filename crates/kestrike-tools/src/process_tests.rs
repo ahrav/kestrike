@@ -173,6 +173,11 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
         parsed(&line("a) Z (b", "S", 12, 1), 12, own),
         Ok(Leader::Running)
     );
+    assert_eq!(
+        parsed(&line("a) Z (b", "Z", 12, 1), 12, own),
+        Ok(Leader::Exited),
+        "the state after the name decides, whatever the name holds"
+    );
     assert_eq!(parsed(&line("sh", "Z", 12, 1), 12, own), Ok(Leader::Exited));
     assert_eq!(
         parsed(&line("sh", "Z", 12, 2), 12, own),
