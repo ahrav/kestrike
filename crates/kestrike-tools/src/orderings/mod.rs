@@ -4,3 +4,4 @@
 pub mod check;
 pub mod sites;
 pub mod sources;
+pub mod verdicts;
