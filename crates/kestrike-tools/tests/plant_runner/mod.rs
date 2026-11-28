@@ -14,6 +14,7 @@
 //! reader's text in this crate.
 #![cfg(target_os = "linux")]
 
+mod exits;
 mod fixture;
 mod git_call;
 mod inputs;
