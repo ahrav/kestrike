@@ -43,7 +43,7 @@ use super::sites::{MACRO, call_end, line_of, opener};
 use crate::classes::{SPACE, WORD, bounded_iter, captures_bounded, compiled, is_word};
 use crate::genmc::{INCLUDED, is_file, no_nul, package_sources, read_text, under_target, walk};
 use crate::json::{Text, Value};
-use crate::paths::{normalize, resolve};
+use crate::paths::{joined, name, normalize, parent, parts, pure, resolve};
 use crate::production_text::blanked;
 use crate::rust_text::{Lexeme, back, blank, code, lexemes};
 use crate::text::is_space;
@@ -78,62 +78,6 @@ impl Refusal {
     pub fn message(&self) -> &str {
         &self.message
     }
-}
-
-/// The root of `path`: `//` when exactly two slashes lead it, `/` for one or three or more, else none.
-fn root(path: &str) -> &'static str {
-    if path.starts_with("//") && !path.starts_with("///") {
-        "//"
-    } else if path.starts_with('/') {
-        "/"
-    } else {
-        ""
-    }
-}
-
-/// The root of a repository path's text and its other components, with empty and `.` components
-/// dropped.
-fn parts(path: &str) -> (&str, Vec<&str>) {
-    let root = root(path);
-    let names = path
-        .split('/')
-        .filter(|name| !name.is_empty() && *name != ".")
-        .collect();
-    (root, names)
-}
-
-fn assembled(root: &str, names: &[&str]) -> String {
-    if names.is_empty() && root.is_empty() {
-        ".".to_owned()
-    } else {
-        format!("{root}{}", names.join("/"))
-    }
-}
-
-/// The text of `path` with empty and `.` components dropped, `..` kept.
-fn pure(path: &str) -> String {
-    let (root, names) = parts(path);
-    assembled(root, &names)
-}
-
-/// `name` joined to `base`; an absolute `name` replaces `base`.
-fn joined(base: &str, name: &str) -> String {
-    if name.starts_with('/') {
-        return pure(name);
-    }
-    let (root, mut names) = parts(base);
-    names.extend(parts(name).1);
-    assembled(root, &names)
-}
-
-fn parent(path: &str) -> String {
-    let (root, mut names) = parts(path);
-    names.pop();
-    assembled(root, &names)
-}
-
-fn name(path: &str) -> &str {
-    parts(path).1.last().copied().unwrap_or("")
 }
 
 /// The suffix of `path`'s name: from its last `.`, unless that `.` leads or ends the name.

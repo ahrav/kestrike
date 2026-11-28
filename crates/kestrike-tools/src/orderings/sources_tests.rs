@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Refusal, c_literals, diagnostic_sites, diagnostics, include_defects, kernel_texts, loads,
-    loom_site, module_source, normpath, pure, references, scope_files,
+    loom_site, module_source, normpath, references, scope_files,
 };
 use crate::genmc::read_source;
 use crate::json::{self, Text, Value};
+use crate::paths::pure;
 use crate::paths::tests::Scratch;
 
 const STORAGE: &str = "crates/kestrike/src/storage/mod.rs";

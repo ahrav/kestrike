@@ -11,6 +11,7 @@ use std::process::ExitStatus;
 
 use sha2::{Digest, Sha256};
 
+use crate::classes::is_digit;
 use crate::json::{Integer, MAX_INTEGER_DIGITS, Value};
 use crate::text::{Text, is_space, push_backslashed, push_repr};
 
@@ -259,6 +260,85 @@ pub fn returncode(status: ExitStatus) -> i32 {
         .or_else(|| status.signal().map(|signal| -signal))
         .or_else(|| status.stopped_signal().map(|signal| -signal))
         .expect("a waited child exited, or a signal ended or stopped it")
+}
+
+/// `equal` compares objects by their members in any order and arrays by their items in order, and uses
+/// `Value`'s `PartialEq` implementation for scalar comparisons.
+pub fn equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().all(|(key, value)| {
+                    right
+                        .iter()
+                        .any(|(other, found)| other == key && equal(value, found))
+                })
+        }
+        (Value::Array(left), Value::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| equal(left, right))
+        }
+        _ => left == right,
+    }
+}
+
+/// The value of a decimal digit, a code point of category `Nd`. Those code points stand in runs of ten
+/// from zero to nine, and adjoining runs each start at zero, so the count of digits right before it
+/// gives its value modulo ten.
+fn digit_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return c.to_digit(10);
+    }
+    if !is_digit(c) {
+        return None;
+    }
+    let mut before = 0;
+    let mut code = u32::from(c);
+    while let Some(previous) = code.checked_sub(1).and_then(char::from_u32) {
+        if !is_digit(previous) {
+            break;
+        }
+        before += 1;
+        code -= 1;
+    }
+    Some(before % 10)
+}
+
+/// `text` with each non-ASCII decimal digit (category `Nd`) written as the ASCII digit of its value, the
+/// form in which Python's `int` reads a string's digits.
+pub fn ascii_digits(text: &str) -> String {
+    text.chars()
+        .map(|c| match digit_value(c) {
+            Some(value) if !c.is_ascii() => char::from_digit(value, 10).unwrap_or(c),
+            _ => c,
+        })
+        .collect()
+}
+
+/// `decimal` applies Python's `int` to `digits`, a run of Unicode decimal digits (category `Nd`).
+///
+/// # Errors
+///
+/// `decimal` accepts 1 through [`MAX_INTEGER_DIGITS`] digits, including leading zeros, and returns an
+/// error for any other text.
+pub fn decimal(digits: &str) -> Result<Integer, String> {
+    let ascii: Option<String> = digits
+        .chars()
+        .map(|c| digit_value(c).and_then(|value| char::from_digit(value, 10)))
+        .collect();
+    let ascii = ascii
+        .filter(|ascii| !ascii.is_empty())
+        .ok_or_else(|| format!("no decimal digits: {}", Text::from(digits).repr()))?;
+    if ascii.len() > MAX_INTEGER_DIGITS {
+        return Err(format!(
+            "a string of {} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion",
+            ascii.len()
+        ));
+    }
+    Ok(Integer::from_digits(false, &ascii).expect("ASCII digits within the limit"))
 }
 
 #[cfg(test)]
