@@ -9,7 +9,7 @@ use std::io::Write;
 
 use super::{UNANNOUNCED, conclude, publish, staging_with};
 use crate::paths::tests::Scratch;
-use crate::plants::run::remove;
+use crate::plants::run::{REMOVAL_DEPTH, remove, remove_with};
 
 fn umask() -> u32 {
     let status = fs::read_to_string("/proc/thread-self/status").expect("the status reads");
@@ -208,6 +208,64 @@ fn a_removal_reaches_a_path_past_path_max() {
     drop(parent);
     remove(&tree);
     assert!(!tree.exists());
+}
+
+/// A directory put at the root's path between the status read and the open has another inode, so the
+/// removal leaves it and its entries as they are.
+#[test]
+fn a_root_substituted_after_its_status_read_stays() {
+    let scratch = Scratch::new("remove-swap");
+    let tree = scratch.0.join("tree");
+    let moved = scratch.0.join("moved");
+    fs::create_dir(&tree).expect("made");
+    fs::write(tree.join("first"), "first").expect("written");
+    remove_with(&tree, || {
+        fs::rename(&tree, &moved).expect("moved");
+        fs::create_dir(&tree).expect("made again");
+        fs::write(tree.join("marker"), "kept").expect("written");
+    });
+    assert_eq!(
+        fs::read_to_string(tree.join("marker")).expect("reads"),
+        "kept"
+    );
+    assert_eq!(
+        fs::read_to_string(moved.join("first")).expect("reads"),
+        "first"
+    );
+}
+
+/// The walk goes [`REMOVAL_DEPTH`] levels below the root: the directory one level deeper stays, with
+/// the levels above it.
+#[test]
+fn a_removal_leaves_what_lies_past_its_depth_bound() {
+    let scratch = Scratch::new("remove-bound");
+    let tree = scratch.0.join("tree");
+    fs::create_dir(&tree).expect("made");
+    let mut parent = fs::File::open(&tree).expect("opens");
+    for _ in 0..=REMOVAL_DEPTH {
+        // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
+        let made = unsafe { libc::mkdirat(parent.as_raw_fd(), c"d".as_ptr(), 0o700) };
+        assert_eq!(made, 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `parent` is an open directory and the name a NUL-terminated literal.
+        let next = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c"d".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(next >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: `next` is a new open descriptor that this loop alone owns.
+        parent = unsafe { fs::File::from_raw_fd(next) };
+    }
+    drop(parent);
+    remove(&tree);
+    assert!(tree.join("d").exists(), "the levels above the bound stay");
+    let mut deepest = tree.clone();
+    for _ in 0..=REMOVAL_DEPTH {
+        deepest.push("d");
+    }
+    assert!(deepest.exists(), "the level past the bound stays");
 }
 
 struct Refusing;
