@@ -37,7 +37,10 @@ The run judges the head commit, in this order:
    words of `--tests=ARGS` in their place. It sets
    `CARGO_PROFILE_DEV_OPT_LEVEL=1`, `CARGO_PROFILE_DEV_DEBUG=line-tables-only`,
    `RUSTUP_TOOLCHAIN` to the `STABLE` pin of
-   `.github/workflows/agent-checks.yml`, `CARGO_TARGET_DIR` and
+   `.github/workflows/agent-checks.yml` (the one line that holds, after
+   spaces or tabs alone, `STABLE: "` and one or more characters up to the
+   next `"` of that line, which may be followed by any text; `\n`, `\r\n`
+   and `\r` end a line), `CARGO_TARGET_DIR` and
    `CARGO_BUILD_BUILD_DIR` to `<artifacts>/build`, and `PATH`'s entries,
    `CARGO_HOME` and `RUSTUP_HOME` to their values resolved against the
    invoking directory. It refuses an inherited
@@ -82,10 +85,12 @@ phase time that is not a finite nonnegative number, a worktree configuration who
 `additional_cargo_args` the runner cannot read, and a worktree that remains
 after the removal make the run incomplete.
 
-`report.json` holds `base` and `head` (full commit ids), `diff_sha256` (the
-file the tool read), `tool_version`, `config_sha256` (the worktree's
-`.cargo/mutants.toml`, or null when it has none), `tests` (the arguments the
-runner passes after the tool's first `--`; the worktree configuration's own
+`report.json` holds `base` and `head` (full commit ids), `diff_sha256` (of
+the bytes the runner wrote to `diff.patch`), `tool_version`, `config_sha256`
+(the worktree's `.cargo/mutants.toml`, or null when it has none), `tests` (the
+words the runner passes after the tool's first `--`, as the shell split gave
+them: a byte of `--tests=ARGS` that is no UTF-8 is recorded as the escape
+`\udcXX` and passed to Cargo as that byte; the worktree configuration's own
 test settings, which `config_sha256` identifies, also apply), `machine` (the
 architecture part of the `host:` triple that `cargo -vV` prints),
 `debug_assertions` (the value of the last `profile.dev.debug-assertions=`
@@ -126,8 +131,11 @@ later signal changes nothing. The runner then stops the supervised process
 group (the worktree add, the listing or the tool), removes the worktree,
 writes an incomplete report and exits 1. A stop sends SIGTERM to the group,
 waits up to 10 s for the leader's exit, sends SIGKILL and waits up to 10 s
-again while the leader runs, and ends with SIGKILL to the group; a group
-whose leader exited by itself gets the first SIGTERM and the closing SIGKILL.
+again while the leader runs, sends a closing SIGKILL to the group, and then
+waits up to 10 s to reap the leader; each wait reads the leader's state at
+pauses of at most 20 ms. A leader that still runs after the reap's 10 s stays
+unreaped and the run fails. A group whose leader exited by itself gets the
+first SIGTERM and the closing SIGKILL.
 The runner reads the leader's state from `/proc/<pid>/stat` and reaps the
 leader only after the group's last signal, so each signal reaches the group
 the leader still names. Each supervised process receives SIGTERM when the runner
@@ -162,4 +170,8 @@ regular file the invoking user owns or is held by another run; or more listed
 mutants than `--max-mutants`. Only the last of these reaches the worktree, and
 none starts a build. The limit refusal takes precedence over a worktree that
 remains: it exits 2, writes no report and names that worktree on standard
-error.
+error. Exit 120 replaces any other exit code when a write to standard output
+or standard error fails, whether or not a report was written. `--help`
+exits 0 and writes no report; when its write to standard output fails, the
+runner tries to print `mutants-diff: standard output: ERROR` on standard
+error and exits 120.
