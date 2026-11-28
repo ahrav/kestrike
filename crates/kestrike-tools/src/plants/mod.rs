@@ -29,8 +29,8 @@
 //!
 //! [`Run`] runs the checked plants: the run's worktrees, the proof reruns in the proof's worktree with
 //! the head's staged helper as their judge, the planted commits, the archives, the sweeps and the
-//! children a judgment asks for. [`publish`] writes the score's bytes, and [`conclude`] writes them and
-//! prints the score's lines.
+//! children a judgment asks for. [`publish`] writes the score's bytes, [`publish_with`] another tool's
+//! file the same way, and [`conclude`] writes the score and prints its lines.
 
 mod campaign;
 mod child;
@@ -66,7 +66,7 @@ pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
-pub use publish::{UNANNOUNCED, conclude, publish};
+pub use publish::{Creation, UNANNOUNCED, conclude, publish, publish_with};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
 pub(crate) use run::said;

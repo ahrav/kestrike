@@ -21,7 +21,7 @@ use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
-use crate::plants::{publish, remove};
+use crate::plants::{Creation, publish_with, remove};
 use crate::process::refuse_ignored_sigchld;
 use crate::python::{hexdigest, say};
 use crate::stream::emit;
@@ -548,7 +548,7 @@ impl Run {
         let mut written = json::indented(&Value::Object(self.report(judgment)))
             .expect("every phase time of a report is finite");
         written.push('\n');
-        publish(&path, &written).map_err(|error| {
+        publish_with(&path, &written, Creation::Mode(0o666)).map_err(|error| {
             Fault::os(error.error(), Some(error.path().as_os_str()))
                 .text()
                 .clone()

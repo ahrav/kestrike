@@ -7,7 +7,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use std::io::Write;
 
-use super::{UNANNOUNCED, conclude, publish, staging_with};
+use super::{Creation, UNANNOUNCED, conclude, publish, publish_with, staging_with};
 use crate::paths::tests::Scratch;
 use crate::plants::run::{REMOVAL_DEPTH, remove, remove_with};
 
@@ -54,6 +54,30 @@ fn a_score_replaces_a_link_and_takes_its_mode() {
     assert_eq!(staged(&scratch.0), 0);
 }
 
+/// A file published with a creation mode is created with that mode less the umask, which the kernel
+/// applies, and replaces a link at its path while the link's target stays.
+#[test]
+fn a_file_published_with_a_creation_mode_takes_it_less_the_umask() {
+    let scratch = Scratch::new("publish-mode");
+    let (target, elsewhere) = (scratch.0.join("report.json"), scratch.0.join("elsewhere"));
+    fs::write(&elsewhere, "kept\n").expect("written");
+    symlink(&elsewhere, &target).expect("linked");
+    publish_with(&target, "{}\n", Creation::Mode(0o666)).expect("the report is written");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "{}\n");
+    assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "kept\n");
+    let status = fs::symlink_metadata(&target).expect("stats");
+    assert!(status.is_file());
+    assert_eq!(status.permissions().mode() & 0o777, 0o666 & !umask());
+    let leftover = fs::read_dir(&scratch.0)
+        .expect("lists")
+        .filter(|entry| {
+            let name = entry.as_ref().expect("an entry").file_name();
+            name.to_string_lossy().starts_with(".report.json.")
+        })
+        .count();
+    assert_eq!(leftover, 0);
+}
+
 #[test]
 fn a_score_takes_the_publishing_thread_s_mask() {
     let scratch = Scratch::new("publish");
@@ -91,7 +115,7 @@ fn a_taken_staging_name_is_left_as_it_is() {
     fs::write(scratch.0.join(".score.json.aaaaaaaa"), "taken\n").expect("written");
     symlink(&elsewhere, scratch.0.join(".score.json.bbbbbbbb")).expect("linked");
     let mut names = b"abc".iter().copied();
-    let (path, mut file) = staging_with(&target, |letters| {
+    let (path, mut file) = staging_with(&target, 0o600, |letters| {
         letters.fill(names.next().expect("three names are drawn at most"));
         Ok(())
     })

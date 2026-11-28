@@ -1,9 +1,12 @@
 //! The score's file: the run's settings, and the bytes written to a staging file beside
-//! `verification/plants/score.json` and renamed over it.
+//! `verification/plants/score.json` and renamed over it. [`publish_with`] writes another tool's file,
+//! such as `mutants-diff`'s `report.json`, the same way.
 //!
-//! The staging file is `.score.json.` and eight letters, created new with mode 0600 and then given mode
-//! 0666 less the umask; the rename replaces a link at the score's path, whose target stays. A write that
-//! fails removes the staging file. The write makes no sync.
+//! The staging file is `.NAME.` and eight letters beside the target. The score's is created new with mode
+//! 0600 and then given mode 0666 less the umask the publishing thread reads; a file published with
+//! [`Creation::Mode`] is created new with that mode, which the kernel lessens by the umask, and reads no
+//! procfs. The rename replaces a link at the target's path, whose target stays. A write, close or rename
+//! that fails leads to an attempt to remove the staging file. The write makes no sync.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -62,8 +65,11 @@ impl Run<'_> {
     }
 }
 
+/// The status file whose `Umask:` line the score's mode reads.
+const UMASK_STATUS: &str = "/proc/thread-self/status";
+
 fn umask() -> io::Result<u32> {
-    let status = fs::read_to_string("/proc/thread-self/status")?;
+    let status = fs::read_to_string(UMASK_STATUS)?;
     status
         .lines()
         .find_map(|line| line.strip_prefix("Umask:"))
@@ -71,15 +77,25 @@ fn umask() -> io::Result<u32> {
         .ok_or_else(|| io::Error::other("/proc/thread-self/status names no umask"))
 }
 
-/// `staging` creates a new staging file beside `target`.
-fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
-    staging_with(target, random_letters)
+/// How a published file takes its permission bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Creation {
+    /// Created with mode 0600 and then given mode 0666 less the publishing thread's umask.
+    Private,
+    /// Created with this mode, which the kernel lessens by the umask at creation.
+    Mode(u32),
+}
+
+/// `staging` creates a new staging file beside `target` with the creation mode `mode`.
+fn staging(target: &Path, mode: u32) -> io::Result<(PathBuf, File)> {
+    staging_with(target, mode, random_letters)
 }
 
 /// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from
 /// `letters`; a name that is taken is left as it is and another is drawn.
 fn staging_with(
     target: &Path,
+    mode: u32,
     letters: impl FnMut(&mut [u8]) -> io::Result<()>,
 ) -> io::Result<(PathBuf, File)> {
     let parent = target.parent().unwrap_or(Path::new("."));
@@ -90,7 +106,7 @@ fn staging_with(
         OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(mode)
             .open(path)
     };
     fresh(&prefix, parent, letters, create).map_err(|error| match error {
@@ -102,25 +118,48 @@ fn staging_with(
     })
 }
 
-/// `publish` replaces `target` with `written` through a staging file it creates beside it.
+/// `publish` replaces `target` with `written` as [`publish_with`] does with [`Creation::Private`].
 ///
 /// # Errors
 ///
-/// The staging file cannot be created, given its mode, written, closed or renamed; the text names the
-/// path.
+/// As [`publish_with`].
 pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
-    let (staged, mut file) = staging(target).map_err(|error| PathError::new(target, error))?;
+    publish_with(target, written, Creation::Private)
+}
+
+/// `publish_with` replaces `target` with `written` through a staging file it creates beside it, whose
+/// permission bits `creation` decides.
+///
+/// # Errors
+///
+/// The staging file cannot be created, given its mode, written, closed or renamed, which names the
+/// target's path, or the umask cannot be read, which names the status file.
+pub fn publish_with(target: &Path, written: &str, creation: Creation) -> Result<(), PathError> {
+    let at_target = |error| PathError::new(target, error);
+    let created = match creation {
+        Creation::Private => 0o600,
+        Creation::Mode(mode) => mode,
+    };
+    let (staged, mut file) = staging(target, created).map_err(at_target)?;
+    let moded = match creation {
+        Creation::Private => umask()
+            .map_err(|error| PathError::new(Path::new(UMASK_STATUS), error))
+            .and_then(|mask| {
+                file.set_permissions(fs::Permissions::from_mode(0o666 & !mask))
+                    .map_err(at_target)
+            }),
+        Creation::Mode(_) => Ok(()),
+    };
     let written = crate::fixtures::fits(written.len())
-        .and_then(|()| umask())
-        .and_then(|mask| file.set_permissions(fs::Permissions::from_mode(0o666 & !mask)))
-        .and_then(|()| file.write_all(written.as_bytes()));
-    let closed = crate::fixtures::close(file);
+        .map_err(at_target)
+        .and(moded)
+        .and_then(|()| file.write_all(written.as_bytes()).map_err(at_target));
+    let closed = crate::fixtures::close(file).map_err(at_target);
     let done = written
         .and(closed)
-        .and_then(|()| fs::rename(&staged, target));
-    done.map_err(|error| {
+        .and_then(|()| fs::rename(&staged, target).map_err(at_target));
+    done.inspect_err(|_| {
         let _ = fs::remove_file(&staged);
-        PathError::new(target, error)
     })
 }
 
