@@ -5,7 +5,7 @@ use kestrike_tools::host_stop::{Disk, Signal, lock};
 
 use super::plane::{CALLER, STATUS};
 use super::steps::{Step, links, syncs};
-use super::{COPY, Case, listing, listing_top};
+use super::{COPY, Case, listing};
 
 const ENOSPC: i32 = libc::ENOSPC;
 
@@ -89,7 +89,7 @@ fn an_injection_directory_that_cannot_be_removed_or_whose_removal_is_unsynced_is
         assert!(output.contains(&named), "{output}");
         assert!(!output.contains("nothing written"), "{output}");
         assert_eq!(case.ops(), [CALLER, STATUS], "{output}");
-        assert_eq!(listing_top(&case.evidence), left, "{removal}");
+        assert_eq!(listing(&case.evidence), left, "{removal}");
     }
 }
 

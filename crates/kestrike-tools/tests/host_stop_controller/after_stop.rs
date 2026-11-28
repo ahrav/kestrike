@@ -587,6 +587,10 @@ fn a_step_of_the_wall_clock_moves_no_bound() {
     let names: Vec<&String> = marks.keys().collect();
     assert_eq!(names, ["abort", "roles", "stop"]);
     assert_eq!(text_of(&marks["abort"], "cause"), "stop-not-shown");
+    assert!(
+        time(&marks["abort"]) < time(&marks["stop"]),
+        "the abort mark takes the stepped wall reading"
+    );
     let sent = case.stops()[0].start;
     let log = case.log();
     let last = log[..log.len() - 1]

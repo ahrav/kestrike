@@ -5,6 +5,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod abort_marks;
 mod abort_path;
 mod after_stop;
 mod before_stop;
@@ -351,13 +352,18 @@ impl Case {
         fs::read_dir(&root)
             .expect("injection/ lists")
             .map(|entry| {
-                let path = entry.expect("injection/ lists").path();
-                let stem = path
-                    .file_stem()
-                    .expect("a mark's name")
-                    .to_string_lossy()
-                    .into_owned();
-                let text = fs::read_to_string(&path).expect("a mark reads");
+                let entry = entry.expect("injection/ lists");
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .expect("a mark's name is UTF-8");
+                let stem = name
+                    .strip_suffix(".json")
+                    .unwrap_or_else(|| panic!("{name} is a mark's name"))
+                    .to_owned();
+                let kind = fs::symlink_metadata(entry.path()).expect("a mark stands");
+                assert!(kind.is_file(), "{name} is a regular file");
+                let text = fs::read_to_string(entry.path()).expect("a mark reads");
                 (stem, value(&text))
             })
             .collect()
@@ -459,11 +465,20 @@ impl Case {
         let stops = self.stops();
         assert!(stops.len() <= 1, "{ops:?}");
         self.assert_retries();
-        if !stops.is_empty() {
-            let log = self.log();
+        let log = self.log();
+        let after: Vec<&Logged> = log
+            .iter()
+            .filter(|logged| logged.marks.iter().any(|mark| mark == "abort"))
+            .collect();
+        if stops.is_empty() {
+            assert!(after.is_empty(), "{ops:?}");
+        } else {
             let last = log.last().expect("a call");
             assert_eq!(last.op, STATUS, "{ops:?}");
             assert!(last.marks.iter().any(|mark| mark == "abort"), "{last:?}");
+            assert_eq!(after.len(), 1, "one call after the abort mark: {ops:?}");
+            assert_eq!(after[0].args.last(), stops[0].args.last(), "{:?}", after[0]);
+            assert_eq!(after[0].args.len(), 3, "{:?}", after[0]);
         }
         found
     }
