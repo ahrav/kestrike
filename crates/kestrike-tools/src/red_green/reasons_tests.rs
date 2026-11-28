@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::{NO_EVIDENCE, base_reason, head_reason, tree_reason};
-use crate::red_green::evidence::{Evidence, Readings};
+use crate::red_green::evidence::{Evidence, Readings, STREAMS};
 use crate::red_green::options::{DEFAULT_WATCHDOG, Options};
 use crate::red_green::record::Leg;
 use crate::text::Text;
@@ -9,14 +9,17 @@ use crate::text::Text;
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
 const EXPECT: &str = "a poll counts that completion as delivered";
 
-fn read(outputs: &[(&'static str, &str)]) -> Evidence {
+fn read(outputs: &[(&str, &str)]) -> Evidence {
+    let output = |stream: &str| {
+        outputs
+            .iter()
+            .find(|(name, _)| *name == stream)
+            .map(|(_, data)| data.as_bytes().to_vec())
+    };
     Evidence::Read(Readings {
         artifact: PathBuf::from("/r/a/artifact.json"),
         data: b"{}\n".to_vec(),
-        outputs: outputs
-            .iter()
-            .map(|(stream, data)| (*stream, data.as_bytes().to_vec()))
-            .collect(),
+        outputs: STREAMS.map(output),
     })
 }
 
@@ -73,12 +76,8 @@ fn base_reason_names_each_outcome_of_the_base_leg() {
          Some(format!("the test failed on the base without the expected text: {red}; the search skips framing and \
                        backtrace lines")), Some(vec![])),
         ("a failure without evidence", 1, red, Evidence::Absent, Some(failed.clone()), None),
-        ("a failure with a stream of another name", 1, red, read(&[("stdout", EXPECT), ("other", "")]),
-         Some(failed.clone()), None),
-        ("a failure with one stream twice", 1, red, read(&[("stdout", EXPECT), ("stdout", "")]),
-         Some(failed.clone()), None),
-        ("a red base with standard error first", 1, red, read(&[("stderr", ""), ("stdout", EXPECT)]), None,
-         Some(vec!["stdout"])),
+        ("a red base on both streams", 1, red, read(&[("stderr", EXPECT), ("stdout", EXPECT)]), None,
+         Some(vec!["stdout", "stderr"])),
         ("a failure after a failed read", 1, red, Evidence::Unreadable(Text::from("x")), Some(failed.clone()), None),
         ("a failure with one stream", 1, red, read(&[("stdout", EXPECT)]), Some(failed), None),
         ("an unreported failure", 1, "Traceback", both(), Some(incomplete(1, "'Traceback'")), None),
@@ -126,9 +125,7 @@ fn head_reason_names_each_outcome_of_the_head_leg() {
         ("a green head", 0, green, both(), None),
         ("a pass without evidence", 0, green, Evidence::Absent, Some(passed.clone())),
         ("a pass with one stream", 0, green, read(&[("stderr", "")]), Some(passed.clone())),
-        ("a pass with a stream of another name", 0, green, read(&[("stdout", ""), ("other", "")]),
-         Some(passed.clone())),
-        ("a pass with one stream twice", 0, green, read(&[("stdout", ""), ("stdout", "")]), Some(passed)),
+        ("a pass with standard output alone", 0, green, read(&[("stdout", "")]), Some(passed)),
         ("a failure", 1, "reproduced: on attempt 1", both(),
          Some("the test fails on the head: reproduced: on attempt 1".to_owned())),
         ("an unreported failure", 1, "", both(), Some("the head leg did not pass: exit 1, verdict ''".to_owned())),

@@ -1,16 +1,18 @@
 //! A leg's evidence: the `artifact.json` the runner announced and the attempt outputs beside it.
 //!
 //! `evidence` reads the artifact at the path returned by `paths::realpath`. The artifact counts only as
-//! `artifact.json` in a directory directly under the receipt directory. That directory's name must match
-//! [`runner::leg_directory`], optionally followed by `.` and one or more Unicode decimal digits, with the
-//! receipt directory's name as the run. An attempt output counts where `attempt-1.stdout` or
-//! `attempt-1.stderr` beside the artifact is a regular file once links are followed; the kind comes from
-//! the file opened for the read, so an output that is a link is read at its target. An announcement that
-//! holds a NUL names no artifact.
+//! `artifact.json` in a directory directly under the receipt directory, the parent compared as the bytes
+//! of the canonical receipt path, so a resolved path whose root is `//` lies outside a receipt under `/`.
+//! That directory's name must match [`runner::leg_directory`], optionally followed by `.` and one or more
+//! Unicode decimal digits, with the receipt directory's name as the run. An attempt output counts where
+//! `attempt-1.stdout` or `attempt-1.stderr` beside the artifact is a regular file once links are
+//! followed; the kind comes from the file opened for the read, so an output that is a link is read at its
+//! target. An announcement that holds a NUL names no artifact.
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
@@ -20,28 +22,42 @@ use crate::ownership::{PathError, ignored};
 use crate::paths;
 use crate::text::{Text, text};
 
-/// The attempt output streams, in the order a leg's readings and its record list them.
+/// The attempt output streams. [`Readings::outputs`] holds one slot for each, at its index here, and
+/// [`Readings::read`] and a base leg's `expect_streams` list them in this order. The record writes
+/// `attempt_sha256` with its keys sorted.
 pub const STREAMS: [&str; 2] = ["stdout", "stderr"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Readings {
+    /// The resolved path of `artifact.json`.
     pub artifact: PathBuf,
+    /// The bytes of `artifact.json`.
     pub data: Vec<u8>,
-    pub outputs: Vec<(&'static str, Vec<u8>)>,
+    /// The bytes of each attempt output at the index of its stream in [`STREAMS`], or `None` for an
+    /// output that counts as absent. A present output may hold no bytes.
+    pub outputs: [Option<Vec<u8>>; 2],
 }
 
 impl Readings {
-    /// Whether `outputs` holds one reading of each of [`STREAMS`] and nothing else, in any order.
+    /// Whether both attempt outputs were read.
     pub fn complete(&self) -> bool {
-        let read = |stream: &str| self.outputs.iter().any(|(name, _)| *name == stream);
-        self.outputs.len() == STREAMS.len() && STREAMS.into_iter().all(read)
+        self.outputs.iter().all(Option::is_some)
+    }
+
+    /// Each attempt output read, with its stream's name, in the order of [`STREAMS`].
+    pub fn read(&self) -> impl Iterator<Item = (&'static str, &[u8])> {
+        STREAMS
+            .into_iter()
+            .zip(&self.outputs)
+            .filter_map(|(stream, data)| data.as_deref().map(|data| (stream, data)))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Evidence {
-    /// `evidence` returns `Absent` for a missing announcement or a resolved path outside the leg's
-    /// accepted `artifact.json` paths.
+    /// `evidence` returns `Absent` for a missing announcement, an announcement that holds a NUL or a
+    /// surrogate that [`Text::to_os`] refuses, and a resolved path outside the leg's accepted
+    /// `artifact.json` paths.
     Absent,
     /// A read of the artifact or an attempt output failed, with the error's text.
     Unreadable(Text),
@@ -76,20 +92,28 @@ fn unreadable(path: &Path, error: io::Error) -> Evidence {
 }
 
 /// `None` means `path` names no regular file once links are followed, or its status fails with `ENOENT`,
-/// `ENOTDIR`, `EBADF` or `ELOOP`. A failed open is a failed read only where the status of `path` shows a
-/// regular file or fails with another error.
+/// `ENOTDIR`, `EBADF` or `ELOOP`. The first open does not wait, so a FIFO with no writer is passed over.
+/// Where it fails with `EWOULDBLOCK` and the status of `path` shows a regular file, as under another
+/// process's write lease, a second open waits for the lease to break. Any other failed open is a failed
+/// read where the status of `path` shows a regular file or fails with another error.
 fn output(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let flags = libc::O_NONBLOCK | libc::O_NOCTTY;
-    let mut file = match OpenOptions::new().read(true).custom_flags(flags).open(path) {
+    let open = |flags| {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(flags | libc::O_NOCTTY)
+            .open(path)
+    };
+    let mut file = match open(libc::O_NONBLOCK) {
         Ok(file) => file,
-        Err(error) => {
-            return match fs::metadata(path) {
-                Ok(status) if status.is_file() => Err(error),
-                Ok(_) => Ok(None),
-                Err(status) if ignored(&status) => Ok(None),
-                Err(status) => Err(status),
-            };
-        }
+        Err(error) => match fs::metadata(path) {
+            Ok(status) if status.is_file() && error.raw_os_error() == Some(libc::EWOULDBLOCK) => {
+                open(0)?
+            }
+            Ok(status) if status.is_file() => return Err(error),
+            Ok(_) => return Ok(None),
+            Err(status) if ignored(&status) => return Ok(None),
+            Err(status) => return Err(status),
+        },
     };
     if !file.metadata()?.is_file() {
         return Ok(None);
@@ -101,7 +125,9 @@ fn output(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 /// The caller must pass the canonical path to the run's receipt directory as `receipt`, and trusts that
 /// directory and its entries. `attempt` is the workflow run attempt of [`runner::leg_directory`]. The
-/// returned readings hold the whole artifact and each present attempt output in memory together.
+/// artifact is opened by its resolved name with no check of its kind, so an `artifact.json` that is a
+/// FIFO makes the call wait until a writer opens it and closes it. The returned readings hold the whole
+/// artifact and each present attempt output in memory together.
 ///
 /// # Errors
 ///
@@ -118,11 +144,11 @@ pub fn evidence(
         return Ok(Evidence::Absent);
     };
     let artifact = paths::realpath(Path::new(&announced))?;
-    let directory = artifact.parent().unwrap_or(Path::new("/"));
-    let name = directory.file_name().unwrap_or_default();
-    if artifact.file_name() != Some(OsStr::new("artifact.json"))
-        || directory.parent().unwrap_or(Path::new("/")) != receipt
-        || !own(receipt, attempt, leg, name)
+    let (directory, file) = paths::split(artifact.as_os_str().as_bytes());
+    let (parent, name) = paths::split(&directory);
+    if file != b"artifact.json"
+        || parent != receipt.as_os_str().as_bytes()
+        || !own(receipt, attempt, leg, OsStr::from_bytes(&name))
     {
         return Ok(Evidence::Absent);
     }
@@ -130,12 +156,11 @@ pub fn evidence(
     if let Err(error) = File::open(&artifact).and_then(|mut file| file.read_to_end(&mut data)) {
         return Ok(unreadable(&artifact, error));
     }
-    let mut outputs = Vec::new();
-    for stream in STREAMS {
+    let mut outputs = [None, None];
+    for (stream, slot) in STREAMS.into_iter().zip(&mut outputs) {
         let path = artifact.with_file_name(format!("attempt-1.{stream}"));
         match output(&path) {
-            Ok(Some(bytes)) => outputs.push((stream, bytes)),
-            Ok(None) => {}
+            Ok(bytes) => *slot = bytes,
             Err(error) => return Ok(unreadable(&path, error)),
         }
     }
@@ -148,4 +173,4 @@ pub fn evidence(
 
 #[cfg(test)]
 #[path = "evidence_tests.rs"]
-mod tests;
+pub(crate) mod tests;

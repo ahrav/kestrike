@@ -8,5 +8,3 @@ pub mod reasons;
 pub mod record;
 pub mod runner;
 pub mod tree;
-
-pub use evidence::STREAMS;

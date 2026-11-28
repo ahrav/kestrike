@@ -1,8 +1,11 @@
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::{Leg, Record, record};
 use crate::red_green::evidence::{Evidence, Readings};
 use crate::red_green::options::{DEFAULT_WATCHDOG, Options};
+use crate::red_green::reasons::NO_EVIDENCE;
 use crate::red_green::reasons::tests::options;
 use crate::text::Text;
 
@@ -78,7 +81,7 @@ const WITHOUT_THE_TEXT: &str = r#"{
       "path": "caf\u00e9.rs"
     }
   ],
-  "command": "bash scripts/tool.sh red-green --package=p --target=lib --test=storage::device::table_tests::a_poll_reports_each_completion_once '--expect=a poll counts that completion as delivered' --carry=t.rs --base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --head=cccccccccccccccccccccccccccccccccccccccc --watchdog=30.0 --artifacts=/r",
+  "command": "bash scripts/tool.sh red-green --package=p --target=lib --test=storage::device::table_tests::a_poll_reports_each_completion_once '--expect=a poll counts that completion as delivered' --carry=t.rs --base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --head=cccccccccccccccccccccccccccccccccccccccc --watchdog=30.0 --release --artifacts=/r",
   "expect": "a poll counts that completion as delivered",
   "head": "cccccccccccccccccccccccccccccccccccccccc",
   "legs": {
@@ -96,7 +99,7 @@ const WITHOUT_THE_TEXT: &str = r#"{
     }
   },
   "package": "p",
-  "release": false,
+  "release": true,
   "result": "refused: the test failed on the base without the expected text",
   "scripts": {
     "reproduce-test.py": "1111111111111111111111111111111111111111111111111111111111111111",
@@ -229,6 +232,50 @@ const NO_LEG: &str = r#"{
 }
 "#;
 
+const PARTIAL: &str = r#"{
+  "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "cargo_target_dir": "/t/red-green/build",
+  "carried": [
+    {
+      "blob": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "path": "t.rs"
+    },
+    {
+      "blob": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "path": "caf\u00e9.rs"
+    }
+  ],
+  "command": "bash scripts/tool.sh red-green --package=p --target=lib --test=storage::device::table_tests::a_poll_reports_each_completion_once '--expect=a poll counts that completion as delivered' --carry=t.rs --base=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb --head=cccccccccccccccccccccccccccccccccccccccc --watchdog=30.0 --artifacts=/r",
+  "expect": "a poll counts that completion as delivered",
+  "head": "cccccccccccccccccccccccccccccccccccccccc",
+  "legs": {
+    "base": {
+      "artifact": "/r/local-1-1/local-1-1-1-base.\udcff/artifact.json",
+      "attempt_sha256": {
+        "stdout": "95aebb28195b8d737effe0df18d71d39c8d8ba6569286fd3930fbc9f9767181e"
+      },
+      "exit": 1,
+      "seconds": 4.0,
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "verdict": "reproduced: on attempt 1"
+    }
+  },
+  "package": "p",
+  "release": false,
+  "result": "refused: the base leg failed but left no readable artifact.json or attempt output of its own in the receipt: reproduced: on attempt 1",
+  "scripts": {
+    "reproduce-test.py": "1111111111111111111111111111111111111111111111111111111111111111",
+    "select-tests.py": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "target": "lib",
+  "test": "storage::device::table_tests::a_poll_reports_each_completion_once",
+  "tool": {
+    "executable": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "watchdog_seconds": 30.0
+}
+"#;
+
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
 const EXPECT: &str = "a poll counts that completion as delivered";
 const COMMAND: &str = "bash scripts/tool.sh red-green --package=p --target=lib \
@@ -248,7 +295,8 @@ fn leg(exit: i32, verdict: &str, seconds: f64, evidence: Evidence) -> Leg {
 }
 
 /// Seconds round to three places, half to even on the binary value: 0.0005 lies above the half and
-/// 2.0625 on it. The proven run is a release run; each refused run is a debug run.
+/// 2.0625 on it. The proven run and the run refused without the expected text are release runs, the
+/// others debug runs. The head leg enters with `expect_streams` set and its entry holds no such member.
 #[test]
 fn record_writes_each_state_of_the_receipt() {
     let options = Options {
@@ -279,25 +327,25 @@ fn record_writes_each_state_of_the_receipt() {
     let read = Evidence::Read(Readings {
         artifact: PathBuf::from("/r/local-1-1/local-1-1-1-base/artifact.json"),
         data: b"{}\n".to_vec(),
-        outputs: vec![
-            ("stdout", EXPECT.as_bytes().to_vec()),
-            ("stderr", Vec::new()),
-        ],
+        outputs: [Some(EXPECT.as_bytes().to_vec()), Some(Vec::new())],
     });
     let red = Leg {
         expect_streams: Some(vec!["stdout"]),
         ..leg(1, "reproduced: on attempt 1", 12.34567, read)
     };
-    let green = leg(
-        0,
-        "not reproduced in 1 attempts",
-        0.0005,
-        Evidence::Read(Readings {
-            artifact: PathBuf::from("/r/local-1-1/local-1-1-1-head/artifact.json"),
-            data: b"{}\n".to_vec(),
-            outputs: vec![("stdout", b"ok\n".to_vec()), ("stderr", Vec::new())],
-        }),
-    );
+    let green = Leg {
+        expect_streams: Some(vec!["stdout"]),
+        ..leg(
+            0,
+            "not reproduced in 1 attempts",
+            0.0005,
+            Evidence::Read(Readings {
+                artifact: PathBuf::from("/r/local-1-1/local-1-1-1-head/artifact.json"),
+                data: b"{}\n".to_vec(),
+                outputs: [Some(b"ok\n".to_vec()), Some(Vec::new())],
+            }),
+        )
+    };
     let textless = Leg {
         expect_streams: Some(vec![]),
         ..leg(
@@ -307,7 +355,7 @@ fn record_writes_each_state_of_the_receipt() {
             Evidence::Read(Readings {
                 artifact: PathBuf::from("/r/local-1-1/local-1-1-1-base/artifact.json"),
                 data: b"{}\n".to_vec(),
-                outputs: vec![("stdout", b"x\n".to_vec()), ("stderr", Vec::new())],
+                outputs: [Some(b"x\n".to_vec()), Some(Vec::new())],
             }),
         )
     };
@@ -318,39 +366,68 @@ fn record_writes_each_state_of_the_receipt() {
         Evidence::Unreadable(Text::from("an error")),
     );
     let signal = leg(-9, "", 1.5, Evidence::Absent);
-    type Row<'a> = (&'a str, Vec<(&'a str, Leg)>, Option<&'a str>, &'a str);
-    let rows: [Row; 5] = [
-        ("proven", vec![("base", red), ("head", green)], None, PROVEN),
+    let partial = leg(
+        1,
+        "reproduced: on attempt 1",
+        4.0,
+        Evidence::Read(Readings {
+            artifact: PathBuf::from(OsStr::from_bytes(
+                b"/r/local-1-1/local-1-1-1-base.\xff/artifact.json",
+            )),
+            data: b"{}\n".to_vec(),
+            outputs: [Some(b"partial\n".to_vec()), None],
+        }),
+    );
+    let no_evidence = format!("the base leg failed but {NO_EVIDENCE}: reproduced: on attempt 1");
+    type Row<'a> = (&'a str, Vec<(&'a str, Leg)>, Option<&'a str>, bool, &'a str);
+    let rows: [Row; 6] = [
+        (
+            "proven",
+            vec![("base", red), ("head", green)],
+            None,
+            true,
+            PROVEN,
+        ),
         (
             "refused without the expected text",
             vec![("base", textless)],
             Some("the test failed on the base without the expected text"),
+            true,
             WITHOUT_THE_TEXT,
         ),
         (
             "refused at the base",
             vec![("base", unreadable)],
             Some("the base leg failed but x"),
+            false,
             REFUSED_AT_THE_BASE,
+        ),
+        (
+            "refused with standard output alone",
+            vec![("base", partial)],
+            Some(&no_evidence),
+            false,
+            PARTIAL,
         ),
         (
             "refused by a signal death",
             vec![("base", signal)],
             Some("exit -9"),
+            false,
             SIGNAL_DEATH,
         ),
         (
             "no leg",
             vec![],
             Some("the base leg's tree differs"),
+            false,
             NO_LEG,
         ),
     ];
-    for (name, legs, reason, expected) in rows {
+    for (name, legs, reason, release, expected) in rows {
         let reason = reason.map(Text::from);
-        let proven = reason.is_none();
         let written = record(&Record {
-            options: if proven { &released } else { &options },
+            options: if release { &released } else { &options },
             base: &base,
             head: &head,
             carried: &carried,
@@ -360,7 +437,7 @@ fn record_writes_each_state_of_the_receipt() {
                 .then_some(executable.as_str()),
             legs: &legs,
             reason: reason.as_ref(),
-            command: if proven { &released_command } else { &command },
+            command: if release { &released_command } else { &command },
         });
         assert_eq!(written.as_deref(), Ok(expected), "{name}");
     }

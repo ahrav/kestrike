@@ -1,13 +1,14 @@
 //! `red-green` accepts unique prefixes for all eleven long options.
 //!
-//! `--watchdog` trims the white space Python's `float` trims, the ASCII space, tab, line feed, vertical
-//! tab, form feed and carriage return and each non-ASCII `White_Space` code point, before parsing its value
-//! as `f64`.
+//! `--watchdog` trims the white space Python's `float` trims, the code points of [`python::int_space`],
+//! before parsing its value as `f64`.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
+use crate::paths;
 use crate::python;
 use crate::shell;
 use crate::text::{self, Text, text};
@@ -79,11 +80,11 @@ pub struct Options {
 }
 
 fn parsed_float(value: &Text) -> Option<f64> {
-    let trimmed = |c: char| {
-        matches!(c, ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r')
-            || (!c.is_ascii() && text::is_space(u32::from(c)))
-    };
-    value.to_str()?.trim_matches(trimmed).parse().ok()
+    value
+        .to_str()?
+        .trim_matches(|c: char| python::int_space(u32::from(c)))
+        .parse()
+        .ok()
 }
 
 fn float(value: &Text) -> Result<(), String> {
@@ -147,12 +148,14 @@ pub fn check_given(options: &Options) -> Result<(), Text> {
 
 /// `check_expect` refuses an expected text of white space alone and one that is part of the test ID,
 /// which libtest's own lines around a failure hold. It refuses a text that holds a NUL, the mark that
-/// stands for a framing line in the searched output, as an empty one; a command-line argument holds
-/// none.
+/// stands for a framing line in the searched output; a command-line argument holds none.
 pub fn check_expect(options: &Options) -> Result<(), Text> {
     let (expect, test) = (&options.expect, &options.test);
-    if expect.strip().is_empty() || expect.as_bytes().contains(&0) {
+    if expect.strip().is_empty() {
         return Err(Text::from("--expect is empty"));
+    }
+    if expect.as_bytes().contains(&0) {
+        return Err(Text::from("--expect holds a NUL"));
     }
     if test.contains(expect) {
         return Err(text!("--expect ", expect.repr(), " is part of the test ID"));
@@ -171,8 +174,9 @@ pub fn check_watchdog(watchdog: f64) -> Result<(), Text> {
     ))
 }
 
-/// The runner prints the receipt directory path in a single-line UTF-8 announcement, so the entire path
-/// must be UTF-8 text that holds none of the code points at which `str.splitlines()` ends a line.
+/// `parent` is the resolved directory that holds the run's receipt directory. The runner prints the receipt
+/// directory path in a single-line UTF-8 announcement, so the entire path must be UTF-8 text that holds
+/// none of the code points at which `str.splitlines()` ends a line.
 pub fn check_receipt_directory(parent: &Path) -> Result<(), Text> {
     let shown = Text::from_os(parent.as_os_str());
     let broken = shown
@@ -189,9 +193,8 @@ pub fn check_receipt_directory(parent: &Path) -> Result<(), Text> {
 }
 
 /// `repeat` builds a shell command to rerun the tool from the repository root. It joins each flag and
-/// value with `=`, so a value that starts with `-` reads back as that value. The parent of `receipt`
-/// stands as `--artifacts` where the run named a nonempty one: `.` for a receipt of one relative
-/// component and the root for the root.
+/// value with `=`, so a value that starts with `-` reads back as that value. The parent of `receipt`, read
+/// as [`paths::parent_os`] reads it, stands as `--artifacts` where the run named a nonempty one.
 ///
 /// `repeat` writes the values it is given. The command repeats the run where the caller passes the full
 /// commit IDs the legs ran as `base` and `head`, the run's receipt directory under the resolved
@@ -219,12 +222,11 @@ pub fn repeat(options: &Options, base: &Text, head: &Text, receipt: &Path) -> Te
         .as_ref()
         .is_some_and(|given| !given.is_empty())
     {
-        let parent = match receipt.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            None if receipt.has_root() => receipt,
-            _ => Path::new("."),
-        };
-        words.push(flag("artifacts", &Text::from_os(parent.as_os_str())));
+        let parent = paths::parent_os(receipt.as_os_str().as_bytes());
+        words.push(flag(
+            "artifacts",
+            &Text::from_os(OsStr::from_bytes(&parent)),
+        ));
     }
     if options.cargo != "cargo" {
         words.push(flag("cargo", &options.cargo));

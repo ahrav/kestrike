@@ -1,15 +1,20 @@
 //! The entries a commit names, read from the records of `git ls-tree -z --full-tree`, and the comparison
-//! of a worktree with them.
+//! of a worktree with them. [`named_entries`] and [`carried_blob`] each name the listing they read.
 //!
 //! A record is `MODE TYPE ID`, a tab, the path and a NUL. The caller runs Git, checks its exit status and
-//! passes its standard output as written. Each path is relative to the repository root. The comparison treats symbolic links as leaf
-//! entries. It counts every nondirectory entry, including FIFOs and links to directories, and each
-//! directory that holds no entry or cannot be listed. The worktree's own `.git` at the top and each path
-//! the commit names with mode 160000 stand outside the comparison. Paths compare in code point order of
-//! the names as [`Text`] decodes them, and the first that differs is the result: a path on one side alone,
-//! a named mode other than 100644, 100755 and 120000, a kind or an executable bit that differs from the
-//! mode, or bytes whose Git blob ID differs from the named ID. A file's bytes and a link's target hash as
-//! a blob, with SHA-1 for an ID of 40 digits and SHA-256 for any other.
+//! passes its standard output as written; each path is relative to the repository root. The caller lists
+//! the commit and checks out the worktree with replace objects disabled, as [`crate::git`] starts Git,
+//! and lists a carried path with inherited pathspec modes cleared, so the records and the checkout name
+//! the commit's own objects and the path as written.
+//!
+//! The comparison treats symbolic links as leaf entries. It counts every nondirectory entry, including
+//! FIFOs and links to directories, and each directory that holds no entry or cannot be listed. The
+//! worktree's own `.git` at the top and each path the commit names with mode 160000 stand outside the
+//! comparison, a directory at such a path that cannot be listed included. Paths compare in code point
+//! order of the names as [`Text`] decodes them, and the first that differs is the result: a path on one
+//! side alone, a named mode other than 100644, 100755 and 120000, a kind or an executable bit that differs
+//! from the mode, or bytes whose Git blob ID differs from the named ID. A file's bytes and a link's target
+//! hash as a blob, with SHA-1 for an ID of 40 digits and SHA-256 for any other.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -88,7 +93,8 @@ pub fn named_entries(stdout: &[u8]) -> Result<Entries, Malformed> {
 /// # Errors
 ///
 /// `carried_blob` requires three metadata fields, mode 100644 or 100755, and a decoded name equal to
-/// `path` followed by NUL. On mismatch, the error identifies `head` and `path`.
+/// `path` followed by NUL. On mismatch, the error names the first 12 characters of `head`, the full
+/// commit ID of the listing, and `path`.
 pub fn carried_blob(head: &str, path: &Text, stdout: &[u8]) -> Result<Text, Text> {
     match fields(stdout) {
         Some(([mode, _, id], name))
@@ -172,7 +178,9 @@ fn present(tree: &Path) -> BTreeSet<Text> {
 
 /// `named_bytes` returns the bytes to hash: the link target or the regular file contents, read through the
 /// descriptor whose type and owner execute bit it checks against the mode. `None` means the kind or the
-/// execute bit differs.
+/// execute bit differs. The first open does not wait, so a FIFO is never waited on; where it fails with
+/// `EWOULDBLOCK` on an entry whose status shows the named kind, as under another process's write lease,
+/// a second open waits for the lease to break.
 fn named_bytes(full: &Path, entry: &Entry) -> io::Result<Option<Vec<u8>>> {
     if entry.mode == LINK {
         return match fs::read_link(full) {
@@ -185,15 +193,19 @@ fn named_bytes(full: &Path, entry: &Entry) -> io::Result<Option<Vec<u8>>> {
     let differs = |status: &fs::Metadata| {
         !status.file_type().is_file() || (status.permissions().mode() & 0o100 != 0) != named
     };
-    let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY;
-    let mut file = match OpenOptions::new().read(true).custom_flags(flags).open(full) {
+    let open = |flags| {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(flags | libc::O_NOFOLLOW | libc::O_NOCTTY)
+            .open(full)
+    };
+    let mut file = match open(libc::O_NONBLOCK) {
         Ok(file) => file,
-        Err(error) => {
-            return match fs::symlink_metadata(full) {
-                Ok(status) if differs(&status) => Ok(None),
-                _ => Err(error),
-            };
-        }
+        Err(error) => match fs::symlink_metadata(full) {
+            Ok(status) if differs(&status) => return Ok(None),
+            Ok(_) if error.raw_os_error() == Some(libc::EWOULDBLOCK) => open(0)?,
+            _ => return Err(error),
+        },
     };
     if differs(&file.metadata()?) {
         return Ok(None);

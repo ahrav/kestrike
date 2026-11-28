@@ -10,27 +10,37 @@ use crate::json::{self, Integer, NonFinite, Object, Value};
 use crate::python;
 use crate::text::{Text, text};
 
+/// One run of the runner for a leg: its exit, the last line of its standard output, its wall time and
+/// its evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Leg {
     pub exit: i32,
     pub verdict: Text,
     pub seconds: f64,
     pub evidence: Evidence,
+    /// The streams whose output holds the expected text, set by
+    /// [`base_reason`](super::reasons::base_reason): `Some` after it searched a reported failure with both
+    /// attempt outputs read, empty where no stream holds the text, and `None` for every other outcome.
+    /// `record` writes the member for the leg named `base` alone.
     pub expect_streams: Option<Vec<&'static str>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record<'a> {
     pub options: &'a Options,
+    /// The full commit ID the base leg ran.
     pub base: &'a Text,
+    /// The full commit ID the head leg ran.
     pub head: &'a Text,
     /// Each carried path with its blob ID at the head.
     pub carried: &'a [(Text, Text)],
+    /// The resolved directory both legs build in.
     pub cargo_target_dir: &'a Path,
     /// Each script the legs run, by file name, with the SHA-256 of its bytes.
     pub scripts: &'a [(&'a str, String)],
     /// The tool executable's SHA-256 digest.
     pub executable: Option<&'a str>,
+    /// Each leg run, by its name, `base` or `head`.
     pub legs: &'a [(&'a str, Leg)],
     /// `None` for a proven run.
     pub reason: Option<&'a Text>,
@@ -58,7 +68,7 @@ fn digest(data: &[u8]) -> Value {
     Value::String(Text::from(python::hexdigest(data)))
 }
 
-fn leg(leg: &Leg) -> Value {
+fn leg(name: &str, leg: &Leg) -> Value {
     let seconds = python::round(&Value::Float(leg.seconds), 3).expect("a float rounds");
     let (artifact, sha256, outputs, error) = match &leg.evidence {
         Evidence::Absent => (Value::Null, Value::Null, object([]), None),
@@ -66,12 +76,7 @@ fn leg(leg: &Leg) -> Value {
         Evidence::Read(readings) => (
             string(&Text::from_os(readings.artifact.as_os_str())),
             digest(&readings.data),
-            object(
-                readings
-                    .outputs
-                    .iter()
-                    .map(|(stream, data)| (*stream, digest(data))),
-            ),
+            object(readings.read().map(|(stream, data)| (stream, digest(data)))),
             None,
         ),
     };
@@ -84,7 +89,7 @@ fn leg(leg: &Leg) -> Value {
         ("attempt_sha256", outputs),
     ];
     entry.extend(error.map(|error| ("evidence_error", error)));
-    if let Some(streams) = &leg.expect_streams {
+    if let Some(streams) = leg.expect_streams.as_ref().filter(|_| name == "base") {
         let streams = streams
             .iter()
             .map(|stream| Value::String(Text::from(*stream)));
@@ -109,7 +114,10 @@ pub fn record(record: &Record) -> Result<String, NonFinite> {
     let executable = record
         .executable
         .map_or(Value::Null, |digest| Value::String(Text::from(digest)));
-    let legs = record.legs.iter().map(|(name, entry)| (*name, leg(entry)));
+    let legs = record
+        .legs
+        .iter()
+        .map(|(name, entry)| (*name, leg(name, entry)));
     let result = match record.reason {
         None => Text::from("proven"),
         Some(reason) => text!("refused: ", reason),

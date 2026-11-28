@@ -8,14 +8,16 @@
 //! so a match of the expected text lies within one run of adjacent kept lines.
 //!
 //! Attempt output decodes as UTF-8 with each byte outside it kept as a lone surrogate, the decoding of
-//! option values and paths on a host whose filesystem encoding is UTF-8. The search holds the unframed
-//! copy of one stream in memory beside the stream's bytes.
+//! option values and paths on a host whose filesystem encoding is UTF-8. While one stream is unframed,
+//! its bytes, one decoded text for each of its lines and the joined copy stand in memory together, beside
+//! the leg's artifact and its other stream.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
 use regex::bytes::{Regex, RegexBuilder};
 
+use super::evidence::Readings;
 use super::options::Options;
 use crate::classes;
 use crate::text::Text;
@@ -42,8 +44,9 @@ fn literal(text: &[u8]) -> String {
 }
 
 /// Every shape runs with `.` as any byte of a [`Text`]'s encoding; `\d` and `\s` keep their Unicode
-/// classes. The compiled program grows with the length of `test` and has no size limit, so a test ID of
-/// any length compiles.
+/// classes. The compiled program grows with the length of `test`. Its size limit is lifted, so a test ID
+/// as long as one command-line argument compiles; the count of states the engine can number still bounds
+/// the pattern.
 fn framing(test: &Text) -> Regex {
     let test = literal(test.as_bytes());
     let shapes: Vec<String> = FRAMING
@@ -83,17 +86,14 @@ pub fn unframed(output: &[u8], test: &Text) -> Text {
     unframed_by(&framing(test), output)
 }
 
-/// The streams whose output, unframed for `options.test`, holds `options.expect`, in the order of
-/// `outputs`.
-pub(super) fn expect_streams<'a>(
-    outputs: &[(&'a str, Vec<u8>)],
-    options: &Options,
-) -> Vec<&'a str> {
+/// The streams read whose output, unframed for `options.test`, holds `options.expect`, in the order of
+/// [`STREAMS`](super::evidence::STREAMS).
+pub(super) fn expect_streams(readings: &Readings, options: &Options) -> Vec<&'static str> {
     let framing = framing(&options.test);
-    outputs
-        .iter()
+    readings
+        .read()
         .filter(|(_, data)| unframed_by(&framing, data).contains(&options.expect))
-        .map(|(stream, _)| *stream)
+        .map(|(stream, _)| stream)
         .collect()
 }
 

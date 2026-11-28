@@ -1,7 +1,9 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
 
 use super::{expect_streams, unframed};
+use crate::red_green::evidence::{Readings, STREAMS};
 use crate::red_green::options::Options;
 use crate::red_green::reasons::tests::options;
 use crate::text::Text;
@@ -9,6 +11,20 @@ use crate::text::Text;
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
 const EXPECT: &str = "a poll counts that completion as delivered";
 const TWO_LINES: &str = "first payload line\nsecond payload line";
+
+fn readings(outputs: Vec<(&str, Vec<u8>)>) -> Readings {
+    let output = |stream: &str| {
+        outputs
+            .iter()
+            .find(|(name, _)| *name == stream)
+            .map(|(_, data)| data.clone())
+    };
+    Readings {
+        artifact: PathBuf::from("/r/a/artifact.json"),
+        data: b"{}\n".to_vec(),
+        outputs: STREAMS.map(output),
+    }
+}
 
 fn framed(line: &str) -> (String, String) {
     (format!("{line}\n"), "\0\n".to_owned())
@@ -84,6 +100,14 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
             "stack backtrace:\r\n   0: f\r\nafter\r\n".to_owned(),
             "\0\n\0\nafter\r\n".to_owned(),
         ),
+        (
+            "stack backtrace: tail\n   0: f\npayload\n".to_owned(),
+            "\0\n\0\npayload\n".to_owned(),
+        ),
+        (
+            "stack backtrace:\n\tpayload line\n".to_owned(),
+            "\0\n\tpayload line\n".to_owned(),
+        ),
         (format!("failures:\n{EXPECT}"), format!("\0\n{EXPECT}")),
         (
             format!("x\n{TWO_LINES}\ny\n"),
@@ -129,7 +153,8 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
     );
 }
 
-/// A test ID as long as the longest argument Linux passes frames its own lines.
+/// A test ID of 120,000 bytes, longer than the regex crate's default size limit admits, frames its own
+/// lines.
 #[test]
 fn a_test_id_of_120_000_bytes_frames_its_lines() {
     let long = "m".repeat(120_000);
@@ -138,13 +163,14 @@ fn a_test_id_of_120_000_bytes_frames_its_lines() {
     assert_eq!(found, Text::from(format!("\0\n{EXPECT}\n\0\n")));
     let outputs = vec![("stdout", output.into_bytes()), ("stderr", Vec::new())];
     assert_eq!(
-        expect_streams(&outputs, &options(&long, EXPECT)),
+        expect_streams(&readings(outputs), &options(&long, EXPECT)),
         ["stdout"]
     );
 }
 
 /// The search compares code points: an expected text that ends inside a UTF-8 sequence of the output
-/// misses it, and a byte outside UTF-8 matches the same byte.
+/// misses it, and a byte outside UTF-8 matches the same byte. An expected text that holds a NUL matches
+/// the NUL a framing line leaves.
 #[test]
 fn expect_streams_lists_the_streams_whose_kept_lines_hold_the_text() {
     let stdout = |data: &str| vec![("stdout", data.as_bytes().to_vec()), ("stderr", Vec::new())];
@@ -209,11 +235,17 @@ fn expect_streams_lists_the_streams_whose_kept_lines_hold_the_text() {
             &["stdout"],
         ),
         ("an empty text", stdout("x"), b"", &["stdout", "stderr"]),
+        (
+            "a NUL for the text over a framing line",
+            stdout("FAILED\n"),
+            b"\0",
+            &["stdout"],
+        ),
     ];
     for (name, outputs, expect, expected) in rows {
         assert_eq!(
             expect_streams(
-                &outputs,
+                &readings(outputs),
                 &Options {
                     expect: Text::from_os(OsStr::from_bytes(expect)),
                     ..options(TEST, "")

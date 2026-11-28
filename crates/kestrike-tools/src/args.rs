@@ -223,8 +223,11 @@ impl<'t> Reader<'t> {
     }
 
     /// `parse` classifies every argument before it reads any value, so a classification error takes
-    /// precedence over help and value errors. A value-taking option consumes the next argument only when it
-    /// lacks an explicit value and the next argument has kind `Arg::Value`. `parse` calls the option's
+    /// precedence over help and value errors. An occurrence of [`Kind::Value`] or [`Kind::Repeated`] consumes
+    /// the next argument only when it lacks an explicit value and the next argument has kind `Arg::Value`.
+    /// An occurrence of [`Kind::Many`] with an explicit value takes that value alone; without one it takes
+    /// each next argument of kind `Arg::Value` up to the first that is not, and is refused where it takes
+    /// none. `parse` calls the option's
     /// `check` for every supplied value; a later occurrence replaces an earlier one, except under
     /// [`Kind::Repeated`] and [`Kind::Many`], which keep each. `parse` returns
     /// `Parsed::Help` immediately upon accepting help. Missing required options take precedence over

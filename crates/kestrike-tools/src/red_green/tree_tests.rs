@@ -13,6 +13,7 @@ use super::{
 };
 use crate::paths::tests::Scratch;
 use crate::python;
+use crate::red_green::evidence::tests::{Lease, mkfifo};
 use crate::text::Text;
 
 fn bytes(text: &[u8]) -> Text {
@@ -73,12 +74,7 @@ fn named(sha256: bool) -> Entries {
     named
 }
 
-fn mkfifo(path: &Path) {
-    let made = std::process::Command::new("mkfifo").arg(path).status();
-    assert!(made.expect("mkfifo starts").success(), "the FIFO is made");
-}
-
-fn relink(root: &Path, path: &str, target: &str) {
+fn relink(root: &Path, path: &str, target: impl AsRef<Path>) {
     let full = root.join(path);
     fs::remove_file(&full).expect("the entry is removed");
     symlink(target, full).expect("the link is made");
@@ -95,6 +91,8 @@ fn submodule(mut named: Entries) -> Entries {
 
 type Setup = fn(&Path);
 type Named = fn(Entries) -> Entries;
+/// A row's name, the entry it locks, its setup, its adjustment of the named entries and its result.
+type TreeRow = (&'static str, Locked, Setup, Named, Option<&'static [u8]>);
 
 /// The entry a row locks against its own user, restored to mode 0700 once the row has run.
 #[derive(Clone, Copy)]
@@ -123,8 +121,7 @@ impl Locked {
 }
 
 fn raw_link(root: &Path) {
-    fs::remove_file(root.join("link")).expect("the entry is removed");
-    symlink(OsStr::from_bytes(b"n\xff"), root.join("link")).expect("the link is made");
+    relink(root, "link", OsStr::from_bytes(b"n\xff"));
 }
 
 /// The Git blob IDs of the two bytes `n` and FF and of `n` with U+FFFD, from `git hash-object`.
@@ -139,115 +136,110 @@ fn relinked(id: &'static str) -> impl Fn(Entries) -> Entries {
 }
 
 #[rustfmt::skip]
-const TREE_ROWS: &[(&str, Setup, Named, Option<&[u8]>)] = &[
-    ("the same tree", |_| {}, same, None),
-    ("a file the commit lacks", |r| write(r, "z.txt", b"z\n", 0o644), same, Some(b"z.txt")),
-    ("an empty directory", |r| fs::create_dir(r.join("e")).expect("made"), same, Some(b"e")),
-    ("a directory that cannot be listed", |r| {
+const TREE_ROWS: &[TreeRow] = &[
+    ("the same tree", Locked::Nothing, |_| {}, same, None),
+    ("a file the commit lacks", Locked::Nothing, |r| write(r, "z.txt", b"z\n", 0o644), same, Some(b"z.txt")),
+    ("an empty directory", Locked::Nothing, |r| fs::create_dir(r.join("e")).expect("made"), same, Some(b"e")),
+    ("a directory that cannot be listed", Locked::Directory("d"), |r| {
         write(r, "d/x", b"x\n", 0o644);
         fs::set_permissions(r.join("d"), fs::Permissions::from_mode(0o000)).expect("locked");
     }, |mut n| { n.insert(Text::from("d/x"), entry("100644", &blob_id::<Sha1>(b"x\n"))); n }, Some(b"d")),
-    ("a named file the tree lacks, which leaves its directory empty",
+    ("a named file the tree lacks, which leaves its directory empty", Locked::Nothing,
      |r| fs::remove_file(r.join("src/lib.rs")).expect("removed"), same, Some(b"src")),
-    ("a named file the tree lacks beside others", |r| fs::remove_file(r.join("a.txt")).expect("removed"), same,
+    ("a named file the tree lacks beside others", Locked::Nothing, |r| fs::remove_file(r.join("a.txt")).expect("removed"), same,
      Some(b"a.txt")),
-    ("a named link the tree lacks", |r| fs::remove_file(r.join("link")).expect("removed"), same, Some(b"link")),
-    ("a link the commit lacks", |r| symlink("a.txt", r.join("x")).expect("made"), same, Some(b"x")),
-    ("a file for a named link", |r| {
+    ("a named link the tree lacks", Locked::Nothing, |r| fs::remove_file(r.join("link")).expect("removed"), same, Some(b"link")),
+    ("a link the commit lacks", Locked::Nothing, |r| symlink("a.txt", r.join("x")).expect("made"), same, Some(b"x")),
+    ("a file for a named link", Locked::Nothing, |r| {
         fs::remove_file(r.join("link")).expect("removed");
         write(r, "link", b"a.txt", 0o644);
     }, same, Some(b"link")),
-    ("a link for a named file", |r| relink(r, "a.txt", "src/lib.rs"), same, Some(b"a.txt")),
-    ("a link to a file of the same bytes for a named file", |r| {
+    ("a link for a named file", Locked::Nothing, |r| relink(r, "a.txt", "src/lib.rs"), same, Some(b"a.txt")),
+    ("a link to a file of the same bytes for a named file", Locked::Nothing, |r| {
         let outside = r.parent().expect("the tree has a parent").join("outside-a.txt");
         fs::write(&outside, b"a\n").expect("written");
         fs::remove_file(r.join("a.txt")).expect("removed");
         symlink(outside, r.join("a.txt")).expect("linked");
     }, same, Some(b"a.txt")),
-    ("a named link to a directory", |r| symlink("src", r.join("ld")).expect("linked"), |mut n| {
+    ("a named link to a directory", Locked::Nothing, |r| symlink("src", r.join("ld")).expect("linked"), |mut n| {
         n.insert(Text::from("ld"), entry("120000", &blob_id::<Sha1>(b"src")));
         n
     }, None),
-    ("a link to a directory the commit lacks", |r| symlink("src", r.join("ld")).expect("linked"), same,
+    ("a link to a directory the commit lacks", Locked::Nothing, |r| symlink("src", r.join("ld")).expect("linked"), same,
      Some(b"ld")),
-    ("an execute bit on a file that cannot be read", |r| {
+    ("an execute bit on a file that cannot be read", Locked::File("a.txt"), |r| {
         fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o100)).expect("set");
     }, same, Some(b"a.txt")),
-    ("a directory for a named file", |r| {
+    ("a directory for a named file", Locked::Nothing, |r| {
         fs::remove_file(r.join("src/lib.rs")).expect("removed");
         fs::create_dir(r.join("src/lib.rs")).expect("made");
     }, same, Some(b"src/lib.rs")),
-    ("an execute bit cleared", |r| {
+    ("an execute bit cleared", Locked::Nothing, |r| {
         fs::set_permissions(r.join("bin/run"), fs::Permissions::from_mode(0o644)).expect("set");
     }, same, Some(b"bin/run")),
-    ("an execute bit set", |r| {
+    ("an execute bit set", Locked::Nothing, |r| {
         fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o755)).expect("set");
     }, same, Some(b"a.txt")),
-    ("a changed link target", |r| relink(r, "link", "b.txt"), same, Some(b"link")),
-    ("CRLF for LF", |r| write(r, "a.txt", b"a\r\n", 0o644), same, Some(b"a.txt")),
-    ("changed bytes of one size", |r| write(r, "a.txt", b"b\n", 0o644), same, Some(b"a.txt")),
-    ("a FIFO the commit lacks", |r| mkfifo(&r.join("f")), same, Some(b"f")),
-    ("a FIFO for a named file", |r| {
+    ("a changed link target", Locked::Nothing, |r| relink(r, "link", "b.txt"), same, Some(b"link")),
+    ("CRLF for LF", Locked::Nothing, |r| write(r, "a.txt", b"a\r\n", 0o644), same, Some(b"a.txt")),
+    ("changed bytes of one size", Locked::Nothing, |r| write(r, "a.txt", b"b\n", 0o644), same, Some(b"a.txt")),
+    ("a FIFO the commit lacks", Locked::Nothing, |r| mkfifo(&r.join("f")), same, Some(b"f")),
+    ("a FIFO for a named file", Locked::Nothing, |r| {
         fs::remove_file(r.join("src/lib.rs")).expect("removed");
         mkfifo(&r.join("src/lib.rs"));
     }, same, Some(b"src/lib.rs")),
-    ("a name with a byte outside UTF-8", |r| write(r, OsStr::from_bytes(b"n\xff"), b"n\n", 0o644), same,
+    ("a name with a byte outside UTF-8", Locked::Nothing, |r| write(r, OsStr::from_bytes(b"n\xff"), b"n\n", 0o644), same,
      Some(b"n\xff")),
-    ("code point order before byte order", |r| {
+    ("code point order before byte order", Locked::Nothing, |r| {
         write(r, OsStr::from_bytes(b"\xf0\x90\x80\x80"), b"1\n", 0o644);
         write(r, OsStr::from_bytes(b"\xff"), b"2\n", 0o644);
     }, same, Some(b"\xff")),
-    ("two differences", |r| {
+    ("two differences", Locked::Nothing, |r| {
         write(r, "z.txt", b"z\n", 0o644);
         write(r, "b.txt", b"b\n", 0o644);
     }, same, Some(b"b.txt")),
-    ("a named mode outside the three", |_| {}, |mut n| {
+    ("a named mode outside the three", Locked::Nothing, |_| {}, |mut n| {
         let id = n[&Text::from("a.txt")].id.clone();
         n.insert(Text::from("a.txt"), Entry { mode: Text::from("100664"), id });
         n
     }, Some(b"a.txt")),
-    ("a named submodule", |r| fs::create_dir(r.join("sub")).expect("made"), submodule, None),
-    ("a file below a named submodule", |r| write(r, "sub/x", b"x\n", 0o644), submodule, Some(b"sub/x")),
-    ("the worktree's .git", |r| write(r, ".git", b"gitdir: elsewhere\n", 0o644), same, None),
-    ("a .git below the top", |r| write(r, "src/.git", b"gitdir: elsewhere\n", 0o644), same, Some(b"src/.git")),
-    ("an owner execute bit cleared beside the others", |r| {
+    ("a named submodule", Locked::Nothing, |r| fs::create_dir(r.join("sub")).expect("made"), submodule, None),
+    ("a file below a named submodule", Locked::Nothing, |r| write(r, "sub/x", b"x\n", 0o644), submodule, Some(b"sub/x")),
+    ("the worktree's .git", Locked::Nothing, |r| write(r, ".git", b"gitdir: elsewhere\n", 0o644), same, None),
+    ("a .git below the top", Locked::Nothing, |r| write(r, "src/.git", b"gitdir: elsewhere\n", 0o644), same, Some(b"src/.git")),
+    ("an owner execute bit cleared beside the others", Locked::Nothing, |r| {
         fs::set_permissions(r.join("bin/run"), fs::Permissions::from_mode(0o655)).expect("set");
     }, same, Some(b"bin/run")),
-    ("execute bits for the group and the others alone", |r| {
-        fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o654)).expect("set");
+    ("execute bits for the group and the others alone", Locked::Nothing, |r| {
+        fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o655)).expect("set");
     }, same, None),
-    ("a link target with a byte outside UTF-8", raw_link, |n| relinked(RAW_TARGET)(n), None),
-    ("a link target named by its replacement character", raw_link, |n| relinked(LOSSY_TARGET)(n), Some(b"link")),
-    ("a .gitattributes the commit lacks", |r| write(r, ".gitattributes", b"* text\n", 0o644), same,
+    ("a link target with a byte outside UTF-8", Locked::Nothing, raw_link, |n| relinked(RAW_TARGET)(n), None),
+    ("a link target named by its replacement character", Locked::Nothing, raw_link, |n| relinked(LOSSY_TARGET)(n), Some(b"link")),
+    ("a .gitattributes the commit lacks", Locked::Nothing, |r| write(r, ".gitattributes", b"* text\n", 0o644), same,
      Some(b".gitattributes")),
-    ("a file in a .git directory at the top", |r| write(r, ".git/x", b"x\n", 0o644), same, Some(b".git/x")),
-    ("a named file whose name holds a byte outside UTF-8",
+    ("a file in a .git directory at the top", Locked::Nothing, |r| write(r, ".git/x", b"x\n", 0o644), same, Some(b".git/x")),
+    ("a .git directory at the top that cannot be listed", Locked::Directory(".git"), |r| {
+        write(r, ".git/x", b"x\n", 0o644);
+        fs::set_permissions(r.join(".git"), fs::Permissions::from_mode(0o000)).expect("locked");
+    }, same, None),
+    ("a named file whose name holds a byte outside UTF-8", Locked::Nothing,
      |r| write(r, OsStr::from_bytes(b"n\xff"), b"n\n", 0o644), |mut n| {
         n.insert(bytes(b"n\xff"), entry("100644", &blob_id::<Sha1>(b"n\n")));
         n
     }, None),
-    ("a named submodule that cannot be listed", |r| {
+    ("a named submodule that cannot be listed", Locked::Directory("sub"), |r| {
         write(r, "sub/x", b"x\n", 0o644);
         fs::set_permissions(r.join("sub"), fs::Permissions::from_mode(0o000)).expect("locked");
     }, submodule, None),
-    ("SHA-256 IDs", |_| {}, |_| named(true), None),
-    ("a SHA-256 ID that differs", |r| write(r, "a.txt", b"b\n", 0o644), |_| named(true), Some(b"a.txt")),
+    ("SHA-256 IDs", Locked::Nothing, |_| {}, |_| named(true), None),
+    ("a SHA-256 ID that differs", Locked::Nothing, |r| write(r, "a.txt", b"b\n", 0o644), |_| named(true), Some(b"a.txt")),
 ];
 
-fn locked(name: &str) -> Locked {
-    match name {
-        "a directory that cannot be listed" => Locked::Directory("d"),
-        "a named submodule that cannot be listed" => Locked::Directory("sub"),
-        "an execute bit on a file that cannot be read" => Locked::File("a.txt"),
-        _ => Locked::Nothing,
-    }
-}
-
-/// A named submodule's directory stands outside the comparison even where it cannot be listed, so the
-/// entries below it go uncompared.
+/// A named submodule's directory, and the worktree's `.git` at the top, stand outside the comparison even
+/// where they cannot be listed, so the entries below them go uncompared.
 #[test]
 fn tree_difference_names_the_first_differing_path_of_each_kind() {
-    for (name, setup, adjust, expected) in TREE_ROWS {
+    for (name, locked, setup, adjust, expected) in TREE_ROWS {
         let scratch = Scratch::new("red-green-tree");
         let root = scratch.0.join("tree");
         DirBuilder::new()
@@ -256,7 +248,6 @@ fn tree_difference_names_the_first_differing_path_of_each_kind() {
             .expect("the tree is made");
         layout(&root);
         setup(&root);
-        let locked = locked(name);
         if locked.opens(&root) {
             eprintln!("{name}: the locked entry opens for this user, so the row is not run");
             locked.unlock(&root);
@@ -269,11 +260,16 @@ fn tree_difference_names_the_first_differing_path_of_each_kind() {
     }
 }
 
+/// A record of mode 160000 named `.` takes the top that cannot be listed out of the comparison.
 #[test]
 fn tree_difference_names_a_top_that_cannot_be_listed_as_a_dot() {
     let scratch = Scratch::new("red-green-tree");
     let absent = tree_difference(&scratch.0.join("absent"), &Entries::new());
     assert_eq!(absent.expect("the top is judged"), Some(Text::from(".")));
+    let record = format!("160000 commit {}\t.\0", "6".repeat(40));
+    let dot = named_entries(record.as_bytes()).expect("the record has three fields");
+    let hidden = tree_difference(&scratch.0.join("absent"), &dot);
+    assert_eq!(hidden.expect("the top is judged"), None);
     let empty = scratch.0.join("empty");
     fs::create_dir(&empty).expect("made");
     let found = tree_difference(&empty, &Entries::new());
@@ -455,13 +451,36 @@ fn a_record_with_a_submodule_mode_takes_its_path_out_of_the_comparison() {
         .create(&root)
         .expect("the tree is made");
     write(&root, "a.txt", b"changed\n", 0o644);
-    let listed = |mode: &str| {
-        let record = format!("{mode} blob {}\ta.txt\0", blob_id::<Sha1>(b"a\n"));
-        named_entries(record.as_bytes()).expect("the record has three fields")
+    let id = blob_id::<Sha1>(b"a\n");
+    let found = |record: String| {
+        let named = named_entries(record.as_bytes()).expect("the record has three fields");
+        tree_difference(&root, &named).expect("the tree reads")
     };
-    let found = |mode: &str| tree_difference(&root, &listed(mode)).expect("the tree reads");
-    assert_eq!(found("160000"), None);
-    assert_eq!(found("100644"), Some(Text::from("a.txt")));
+    assert_eq!(found(format!("160000 blob {id}\ta.txt\0")), None);
+    assert_eq!(found("160000 commit xyz\ta.txt\0".to_owned()), None);
+    assert_eq!(
+        found(format!("100644 blob {id}\ta.txt\0")),
+        Some(Text::from("a.txt"))
+    );
+}
+
+/// A named file under another process's write lease is read and compared once the lease breaks.
+#[test]
+fn a_named_file_under_a_write_lease_is_read_once_the_lease_breaks() {
+    let scratch = Scratch::new("red-green-tree");
+    let root = scratch.0.join("tree");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("the tree is made");
+    layout(&root);
+    let Some(lease) = Lease::take(&root.join("a.txt")) else {
+        eprintln!("the filesystem refuses a write lease, so the property is not exercised");
+        return;
+    };
+    let found = tree_difference(&root, &named(false));
+    assert!(lease.broken(), "the comparison opens the leased file");
+    assert_eq!(found.expect("the leased file reads"), None);
 }
 
 /// A record without a tab, with fewer than three fields before it or with more is malformed.

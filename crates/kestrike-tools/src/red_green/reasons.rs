@@ -1,6 +1,7 @@
 //! The judgment of a leg: a red base, a green head, or the reason of the refusal. Accepting a base failure
 //! or head pass requires complete evidence from that leg, including both attempt output streams.
 
+use super::evidence::Readings;
 use super::expected;
 use super::options::Options;
 use super::record::Leg;
@@ -14,10 +15,11 @@ fn quoted(code: i32, verdict: &Text) -> Text {
     text!("exit ", code.to_string(), ", verdict ", verdict.repr())
 }
 
-fn complete(leg: &Leg) -> bool {
+/// The leg's readings where both attempt outputs were read.
+fn complete(leg: &Leg) -> Option<&Readings> {
     leg.evidence
         .readings()
-        .is_some_and(|readings| readings.complete())
+        .filter(|readings| readings.complete())
 }
 
 /// A red base requires a match of `options.expect` in attempt output outside the framing and backtrace
@@ -34,11 +36,7 @@ pub fn base_reason(leg: &mut Leg, options: &Options) -> Option<Text> {
     let reported = runner::reported(code, verdict);
     let reason = match code {
         REPRODUCED if reported => {
-            let Some(readings) = leg
-                .evidence
-                .readings()
-                .filter(|readings| readings.complete())
-            else {
+            let Some(readings) = complete(leg) else {
                 return Some(text!(
                     "the base leg failed but ",
                     NO_EVIDENCE,
@@ -46,7 +44,7 @@ pub fn base_reason(leg: &mut Leg, options: &Options) -> Option<Text> {
                     verdict
                 ));
             };
-            let matched = expected::expect_streams(&readings.outputs, options);
+            let matched = expected::expect_streams(readings, options);
             let found = !matched.is_empty();
             leg.expect_streams = Some(matched);
             if found {
@@ -86,7 +84,7 @@ pub fn head_reason(leg: &Leg) -> Option<Text> {
     if !(code == NOT_REPRODUCED && runner::reported(code, verdict)) {
         return Some(text!("the head leg did not pass: ", quoted(code, verdict)));
     }
-    if !complete(leg) {
+    if complete(leg).is_none() {
         return Some(text!(
             "the head leg passed but ",
             NO_EVIDENCE,

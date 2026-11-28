@@ -7,6 +7,7 @@ use super::{
     check_watchdog, repeat,
 };
 use crate::args::Parsed;
+use crate::red_green::reasons;
 use crate::shell;
 use crate::text::Text;
 
@@ -66,8 +67,9 @@ fn with(extra: &[&str]) -> Vec<OsString> {
 }
 
 /// `read` treats `=--` as the literal value `--`. `--watchdog` uses `f64` syntax, so `1_0` and a digit
-/// outside ASCII are invalid floats. A word of `-` and decimal digits outside ASCII reads as an option, so
-/// it is a value only where `=` joins it to its option. `-h=` is refused.
+/// outside ASCII are invalid floats. A word of `-` and a number, an integer or a fraction, that holds a
+/// decimal digit outside ASCII reads as an option, so it is a value only where `=` joins it to its option.
+/// `-h=` is refused, and `-h=h` asks for help.
 #[test]
 fn read_takes_the_eleven_options_by_unique_prefix() {
     let carry = |paths: &[&str]| {
@@ -152,15 +154,33 @@ fn read_takes_the_eleven_options_by_unique_prefix() {
          Err("argument --watchdog: expected one argument")),
         ("--carry= with a negative number in other digits", with(&["--carry=-\u{661}"]),
          Ok(Options { carry: carry(&["-\u{661}"]), ..options() })),
+        ("--carry before a negative fraction in other digits", with(&["--carry", "-.\u{661}"]),
+         Err("argument --carry: expected at least one argument")),
+        ("--carry a before a negative fraction in other digits", with(&["--carry", "a", "-.\u{661}"]),
+         Err("unrecognized arguments: -.\u{661}")),
+        ("--carry before a negative number with other digits after the point", with(&["--carry", "-1.\u{661}"]),
+         Err("argument --carry: expected at least one argument")),
+        ("--carry before a negative number with other digits before the point", with(&["--carry", "-\u{661}.5"]),
+         Err("argument --carry: expected at least one argument")),
+        ("--carry= with a negative fraction in other digits", with(&["--carry=-.\u{661}"]),
+         Ok(Options { carry: carry(&["-.\u{661}"]), ..options() })),
+        ("--watchdog padded with LF, VT, FF and CR", with(&["--carry", "a", "--watchdog", "\n\u{b}\u{c}\r5\r\u{c}\u{b}\n"]),
+         Ok(Options { watchdog: 5.0, ..options() })),
+        ("-hx", with(&["--carry", "a", "-hx"]), Err("argument -h/--help: ignored explicit argument 'x'")),
+        ("-hhx", with(&["--carry", "a", "-hhx"]), Err("argument -h/--help: ignored explicit argument 'x'")),
+        ("-hh=x", with(&["--carry", "a", "-hh=x"]), Err("argument -h/--help: ignored explicit argument '=x'")),
     ];
     for (name, words, expected) in rows {
         let expected = expected.map_or_else(refused, Parsed::Run);
         assert_eq!(read(&words, "help\n"), expected, "{name}");
     }
-    assert_eq!(
-        read(&args(&["--help"]), "help\n"),
-        Parsed::Help("help\n".to_owned())
-    );
+    for help in ["--help", "-h=h"] {
+        assert_eq!(
+            read(&with(&["--carry", "a", help]), "help\n"),
+            Parsed::Help("help\n".to_owned()),
+            "{help}"
+        );
+    }
     for nan in ["nan", "-nan"] {
         let Parsed::Run(read) = read(&with(&["--carry", "a", &format!("--watchdog={nan}")]), "")
         else {
@@ -201,7 +221,7 @@ fn check_given_refuses_an_empty_or_double_dash_value() {
     }
 }
 
-/// A text that holds a NUL is refused as an empty one.
+/// A text that holds a NUL is refused.
 #[test]
 fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
     let rows: [(&str, Text, Text, Option<&str>); 11] = [
@@ -227,13 +247,13 @@ fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
             "a NUL",
             Text::from("\0"),
             Text::from(TEST),
-            Some("--expect is empty"),
+            Some("--expect holds a NUL"),
         ),
         (
             "a NUL inside a text",
             Text::from("lost\0a completion"),
             Text::from(TEST),
-            Some("--expect is empty"),
+            Some("--expect holds a NUL"),
         ),
         (
             "part of the test ID",
@@ -349,11 +369,8 @@ const HEAD: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
 fn run() -> Options {
     Options {
-        test: Text::from(TEST),
-        expect: Text::from("a poll counts that completion as delivered"),
-        carry: vec![Text::from("t.rs")],
         watchdog: 30.0,
-        ..options()
+        ..reasons::tests::options(TEST, "a poll counts that completion as delivered")
     }
 }
 
@@ -402,8 +419,16 @@ fn repeat_names_the_parent_of_the_receipt_where_the_run_named_artifacts() {
         artifacts: Some(Text::new()),
         ..run()
     };
-    let rows: [(&str, &Options, &str, Option<&str>); 5] = [
+    let rows: [(&str, &Options, &str, Option<&str>); 8] = [
         ("a nested receipt", &named, "/r/local-1-1", Some("/r")),
+        (
+            "a repeated separator",
+            &named,
+            "/r//nested/local-1-1",
+            Some("/r/nested"),
+        ),
+        ("a root of three slashes", &named, "///", Some("/")),
+        ("a root of two slashes", &named, "//local-1-1", Some("//")),
         (
             "a receipt of one relative component",
             &named,
