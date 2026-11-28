@@ -6,6 +6,7 @@
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::fs::symlink;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 
@@ -240,10 +241,11 @@ fn a_git_that_cannot_start_exits_1_before_any_check() {
     let empty = fx.temp.join("empty");
     fs::create_dir(&empty).expect("the directory is made");
     for ignored in [false, true] {
-        let mut command = fx.command("/bin/sh");
-        let trap = if ignored { "trap '' CHLD; " } else { "" };
+        let mut command = fx.command(BINARY);
+        if ignored {
+            ignoring_sigchld(&mut command);
+        }
         command
-            .args(["-c", &format!("{trap}exec \"$0\" \"$@\""), BINARY])
             .arg(top())
             .args(["pre-push-checks", "origin", "url"])
             .env("PATH", &empty);
@@ -267,9 +269,9 @@ fn a_tool_started_with_sigchld_ignored_reads_each_child_s_status() {
     let head = fx.commit(&[INVENTORY]);
     for code in [0, 1] {
         fx.clear();
-        let mut command = fx.command("/bin/sh");
+        let mut command = fx.command(BINARY);
+        ignoring_sigchld(&mut command);
         command
-            .args(["-c", "trap '' CHLD; exec \"$0\" \"$@\"", BINARY])
             .arg(top())
             .args(["pre-push-checks", "origin", "url"])
             .env("STUB_TEST_SELECT_TESTS", code.to_string());
@@ -406,4 +408,18 @@ fn a_nul_byte_in_a_ref_field_exits_2() {
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     assert!(run.stderr.starts_with("pre-push: "), "{}", run.stderr);
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+}
+
+/// `ignoring_sigchld` starts `command` with SIGCHLD ignored, set in the child just before `exec`.
+fn ignoring_sigchld(command: &mut std::process::Command) {
+    // SAFETY: the closure calls `signal`, which is async-signal-safe, and reads `errno` through
+    // `last_os_error`; it allocates nothing and takes no lock.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::signal(libc::SIGCHLD, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 }

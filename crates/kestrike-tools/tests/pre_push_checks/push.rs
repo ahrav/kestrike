@@ -489,6 +489,13 @@ pub fn finished(mut child: Child) -> Run {
         }
         std::thread::sleep(Duration::from_millis(5));
     };
+    while !(stdout.is_finished() && stderr.is_finished()) {
+        assert!(
+            start.elapsed() < RUN_LIMIT,
+            "a process the tool started holds its output streams past {RUN_LIMIT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let stdout = stdout.join().expect("standard output is read");
     let stderr = stderr.join().expect("standard error is read");
     let status = status.unwrap_or_else(|| panic!("the tool ran past {RUN_LIMIT:?}: {stderr}"));
