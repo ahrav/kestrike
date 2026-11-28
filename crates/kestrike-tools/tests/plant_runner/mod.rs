@@ -14,6 +14,7 @@
 //! reader's text in this crate.
 #![cfg(target_os = "linux")]
 
+mod checkout;
 mod exits;
 mod fixture;
 mod git_call;
@@ -27,5 +28,6 @@ mod plants;
 mod proofs;
 mod repository;
 mod scores;
+mod signals;
 mod standins;
 mod store;
