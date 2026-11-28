@@ -1,5 +1,9 @@
-//! Python-style `len`, `int` and `round` for JSON values, `repr` for floats, [`hexdigest`] for the SHA-256
-//! hex of bytes, and [`say`], which writes one line with its control characters and surrogates escaped.
+//! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` for floats,
+//! [`hexdigest`] for the SHA-256 hex of bytes, and [`say`], which writes one line with its control
+//! characters and surrogates escaped.
+//!
+//! A JSON value stands for the Python value `json.loads` gives for it: an object is a `dict`, an array a
+//! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
 
 use std::io::{self, Write};
 
@@ -137,6 +141,71 @@ pub fn repr_float(value: f64) -> String {
         return format!("{sign}{digits}{zeros}.0");
     }
     format!("{sign}{}.{}", &digits[..before], &digits[before..])
+}
+
+/// `repr` follows Python's `repr` of the value: `None`, `True` and `False`, an integer's digits, a float
+/// as [`repr_float`] writes it, a string as [`Text::repr`] writes it, a list as `[a, b]` and an object as
+/// `{'k': v}`, members in document order.
+pub fn repr(value: &Value) -> String {
+    let mut out = String::new();
+    push_value_repr(value, &mut out);
+    out
+}
+
+fn push_value_repr(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => out.push_str("None"),
+        Value::Bool(true) => out.push_str("True"),
+        Value::Bool(false) => out.push_str("False"),
+        Value::Integer(integer) => out.push_str(&integer.to_string()),
+        Value::Float(value) => out.push_str(&repr_float(*value)),
+        Value::String(text) => out.push_str(&text.repr()),
+        Value::Array(items) => {
+            out.push('[');
+            for (at, item) in items.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                push_value_repr(item, out);
+            }
+            out.push(']');
+        }
+        Value::Object(object) => {
+            out.push('{');
+            for (at, (key, member)) in object.iter().enumerate() {
+                if at > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&key.repr());
+                out.push_str(": ");
+                push_value_repr(member, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// `str_of` follows Python's `str` of the value: a string is itself, and every other value is its
+/// [`repr`].
+pub fn str_of(value: &Value) -> Text {
+    match value {
+        Value::String(text) => text.clone(),
+        _ => Text::from(repr(value)),
+    }
+}
+
+/// `truthy` follows Python's truth of the value: `None`, `False`, a zero integer, a zero float of either
+/// sign, and an empty string, list or object are false, and every other value is true, `NaN` included.
+pub fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Integer(integer) => *integer != Integer::from(0u64),
+        Value::Float(value) => *value != 0.0,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(object) => !object.is_empty(),
+    }
 }
 
 /// `round` rounds the exact binary value of a finite float to `digits` decimal places, breaking ties to
