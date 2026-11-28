@@ -1,4 +1,4 @@
-//! The host stop controller's `run` command over the library of [`host_stop`](crate::host_stop).
+//! The `run`, `restore`, and `seal` commands use [`host_stop`](crate::host_stop).
 //!
 //! [`entry`] reads the game-day catalog and the operator file, then [`Controller::run`] takes the
 //! run's seven steps through one [`Context`]: the call, the two clocks and the sleep, the file steps,
@@ -38,14 +38,15 @@
 //! in the evidence directory and trusts that directory, every directory above it, and the package
 //! file it names: it reaches the evidence root and `injection/` by name at each step, and the lock
 //! of `injection/` excludes another run, restore or seal of the directory it opened, and keeps no
-//! directory under its name. The process that starts the run sets `SIGXFSZ` to be ignored, as
-//! Python's start does, so a write past the file size limit returns an error to the step.
+//! directory under its name. The process that starts a command ignores `SIGXFSZ` so a write past
+//! the file size limit returns an error to the step.
 
 #[cfg(not(panic = "unwind"))]
 ::core::compile_error!(
     "the host stop controller's abort path after a panic needs panic = \"unwind\""
 );
 
+mod checks;
 mod context;
 mod controller;
 mod fault;

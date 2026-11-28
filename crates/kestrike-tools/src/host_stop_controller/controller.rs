@@ -528,8 +528,13 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             conform(value, schema, &what, names)
                 .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
         }
-        let data = encoded(value, &what, self.cx.mark_limit)
+        let data = encoded(value, &what, self.cx.mark_bound())
             .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
+        self.publish_mark(name, &data)
+    }
+
+    /// Writes `data` as the mark `name` once, with a signal held to the write's end.
+    pub(super) fn publish_mark(&mut self, name: &'static str, data: &[u8]) -> Result<(), Halt> {
         let Some(injection) = self.injection.clone() else {
             return Err(Halt::order(&format!(
                 "the mark {name} has no injection directory to stand in"
@@ -540,7 +545,7 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         let files = self.cx.files;
         let written = &mut *self.written;
         let outcome = self.cx.record.holding(|| {
-            match publish(files, &injection, OsStr::new(&file), &data) {
+            match publish(files, &injection, OsStr::new(&file), data) {
                 Ok(()) => {
                     written.push(name);
                     Ok(())
