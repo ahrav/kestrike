@@ -269,6 +269,24 @@ fn int_refuses_a_surrogate_at_an_edge_and_a_string_of_spaces_naming_the_whole_te
     }
 }
 
+#[test]
+fn repr_writes_nested_values_quotes_and_escapes_as_python_does() {
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("repr(json.loads('-12'))", "-12", "-12"),
+        ("repr(json.loads('0.1'))", "0.1", "0.1"),
+        (r#"repr(json.loads('"it\'s"'))"#, r#""it's""#, r#""it's""#),
+        (r#"repr(json.loads('"a\\\\b\\n"'))"#, r#""a\\b\n""#, r"'a\\b\n'"),
+        (r#"repr(json.loads('"\\ud800"'))"#, r#""\ud800""#, r"'\ud800'"),
+        ("repr(json.loads('[1, [2.5, null]]'))", "[1, [2.5, null]]", "[1, [2.5, None]]"),
+        (r#"repr(json.loads('{"b": {"a": []}, "a": "x"}'))"#, r#"{"b": {"a": []}, "a": "x"}"#, "{'b': {'a': []}, 'a': 'x'}"),
+    ];
+    for &(expression, text, python) in rows {
+        let value = parse(text).expect("the row is JSON");
+        assert_eq!(python::repr(&value), python, "{expression}");
+    }
+}
+
 /// `repr` of the value `json.loads` gives for each JSON text, recorded from Python 3.9.25. An unassigned
 /// code point, U+0378, is written as it is, where Python escapes it.
 #[test]
