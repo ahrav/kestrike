@@ -1,7 +1,8 @@
 use super::posix_seconds;
 
 /// Each calendar second reads as its POSIX seconds, and a second `time.strptime` refuses reads as
-/// none: values recorded from `calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%S"))`.
+/// none: values recorded from `calendar.timegm(time.strptime(text, format))`, `format` being
+/// `"%Y-%m-%dT%H:%M:%S"` for a text with `T` and `"%Y-%m-%d %H:%M:%S"` for one with a space.
 #[test]
 fn a_calendar_second_is_its_posix_seconds_and_a_missing_day_is_none() {
     let cases = [

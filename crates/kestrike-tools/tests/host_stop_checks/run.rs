@@ -17,6 +17,11 @@ use crate::host_stop_support::{
     rewrite, set, value,
 };
 
+/// A change of a JSON value.
+type Edit = fn(&mut Value);
+/// A change of a JSON value that holds what it was made from.
+type Boxed = Box<dyn Fn(&mut Value)>;
+
 /// The outcome of the readers of a run's first step for a row's change: GD-2's entry, the operator
 /// file and the package's check, or the package's read past the limit, read in a scratch directory
 /// that holds the operator file beside a copy of the snapshot.
@@ -66,11 +71,11 @@ fn read_row(change: Change) -> Result<(), Refusal> {
 }
 
 /// Each row a reader decides is refused by that reader with the sentence the row records, which holds
-/// the part of the line the self-test checks; each catalog row the run decides passes the readers, so
-/// they refuse nothing more than the script's readers do.
+/// the row's reason; each catalog row the run decides passes the readers, so the readers refuse none
+/// of the inputs those rows leave to the run.
 #[test]
 fn each_refusal_of_step_1_a_reader_decides_is_the_readers_sentence() {
-    assert_eq!(ROWS.len(), 48, "the self-test's rows");
+    assert_eq!(ROWS.len(), 48, "the first step's rows");
     let mut read = 0;
     for row in ROWS.iter().filter(|row| row.reader != Reader::Run) {
         let refusal = read_row(row.change).expect_err(row.name).message().clone();
@@ -92,12 +97,12 @@ fn each_refusal_of_step_1_a_reader_decides_is_the_readers_sentence() {
     assert_eq!(passed, 3, "the prerequisite rows");
 }
 
-/// The fixture operator file as the controller's read returned it, its snapshot path standing for the
-/// fixture's own directory.
+/// The fixture operator file as the reader returns it, its snapshot path standing for the fixture's
+/// own directory.
 const FIXTURE_OPERATOR: &str = r#"{"region":"us-west-2","identity":"arn:aws:sts::account:assumed-role/gameday-operator/gd2-run","approval":{"approver":"synthetic fixture of scripts/test-host-stop-controller.py: no owner approved a run","package_sha256":"30759c81708af91aa8ad1e953f902fb6001cb6465e84e2231726463af9292056","instance":"i-h1","not_after":"1970-01-01T01:00:00Z"},"instances":["i-h1","i-h2","i-h3","i-h4"],"snapshot":"SNAPSHOT","snapshot_max_age_seconds":60,"alarms":{"any generation change":"gd2-guardrail-1","any CreateVolume by the reconciler principal":"gd2-guardrail-2","any replacement receipt written by the reconciler principal":"gd2-guardrail-3","a takeover of a shard with no role on the stopped host":"gd2-guardrail-4","a shard that changes hands twice":"gd2-guardrail-5","the zone's origin request rate above its baseline past the origin-load budget":"gd2-guardrail-6","a shard without a standby or a named blocker past the re-enrollment drain":"gd2-guardrail-7","two hosts activating one tenure of a shard":"gd2-guardrail-8"},"effect_timeout_seconds":60,"observe_seconds":45,"deadline_seconds":290}"#;
 
-/// The committed operator file says it is a synthetic fixture, and it reads as the controller's read
-/// returned it: every field, each bound of its kind, and the snapshot beside the file. The held package
+/// The committed operator file says it is a synthetic fixture, and it reads as [`FIXTURE_OPERATOR`]
+/// holds it: every field, each bound of its kind, and the snapshot beside the file. The held package
 /// is admitted at the run's start with its digest, its target and the names the package check gives.
 #[test]
 fn the_committed_fixtures_say_they_are_synthetic() {
@@ -360,8 +365,8 @@ fn a_relative_operator_path_names_the_snapshot_beside_it() {
     assert_eq!(o.snapshot(), beside.as_path());
 }
 
-/// The operator file's names at their edges, each through the readers with the outcome the
-/// controller's read gave: an instance ID of 17 characters after `i-` is admitted and one of 18, none
+/// The operator file's names at their edges, each through the readers with the row's outcome: an
+/// instance ID of 17 characters after `i-` is admitted and one of 18, none
 /// or a capital is refused; an approval instance is an ID; an alarm name with outer white space as
 /// Python's `str.strip` removes it is refused; a DEL is a control character; and an alarm name's length
 /// counts code points.
@@ -466,7 +471,7 @@ fn values_exactly_at_their_bounds_are_admitted_and_one_past_each_is_refused() {
 
 /// The roles mark names each standby of a shard the target owns whose instance the statuses hold,
 /// with that status's state and its host's report word, `no report` for a null report; a standby whose
-/// instance the statuses lack is left out, and so is the standby of a shard another host owns. The values are the controller's for the same snapshot.
+/// instance the statuses lack is left out, and so is the standby of a shard another host owns.
 #[test]
 fn too_few_roles_or_an_unhealthy_or_unread_standby_aborts_on_reach_with_no_stop() {
     let scratch = Scratch::new("standbys");
@@ -526,6 +531,290 @@ fn too_few_roles_or_an_unhealthy_or_unread_standby_aborts_on_reach_with_no_stop(
             json(roles.get("standbys").expect("standbys")),
             expected,
             "{held:?}"
+        );
+    }
+}
+
+/// Refusals of the readers that the first step's table holds no row for, each through the readers
+/// with the controller's sentence: a package target instance that is a host name and no instance ID,
+/// with the approval naming the package's new digest; GD-2's restoration steps that are blank or no
+/// text; a region or a declared instance with text before a valid value; and two faults at once, the
+/// first check's sentence winning.
+#[test]
+fn further_refusals_of_the_readers_are_their_sentences() {
+    let steps = "GD-2's restoration is not of class persistent-manual with its steps";
+    let rows: [(&str, Change, &str); 7] = [
+        (
+            "a target instance that is no instance ID",
+            Change::Package(|p| set(p, &["target", "instance"], value(r#""h1""#))),
+            "the package's target instance is no instance ID: 'h1'",
+        ),
+        (
+            "blank restoration steps",
+            Change::Catalog(|gd2| {
+                let mut restoration = gd2.remove("restoration").expect("restoration");
+                set(&mut restoration, &["steps"], value(r#""   \n""#));
+                gd2.insert("restoration", restoration);
+            }),
+            steps,
+        ),
+        (
+            "restoration steps that are no text",
+            Change::Catalog(|gd2| {
+                let mut restoration = gd2.remove("restoration").expect("restoration");
+                set(&mut restoration, &["steps"], value("7"));
+                gd2.insert("restoration", restoration);
+            }),
+            steps,
+        ),
+        (
+            "text before a region",
+            Change::Operator(|o| set(o, &["region"], value(r#""--debug us-west-2""#))),
+            "region '--debug us-west-2' is no AWS region name",
+        ),
+        (
+            "text before an instance ID",
+            Change::Operator(|o| set(o, &["instances"], value(r#"["i-h1", "--force i-h2"]"#))),
+            "instances[1] is no instance ID: '--force i-h2'",
+        ),
+        (
+            "a bad region and a bad instance ID",
+            Change::Operator(|o| {
+                set(o, &["region"], value(r#""--x""#));
+                set(o, &["instances"], value(r#"["i-h1", "bad"]"#));
+            }),
+            "region '--x' is no AWS region name",
+        ),
+        (
+            "another digest and another instance",
+            Change::Operator(|o| {
+                set(
+                    o,
+                    &["approval", "package_sha256"],
+                    Value::String(Text::from("0".repeat(64))),
+                );
+                set(o, &["approval", "instance"], value(r#""i-h2""#));
+            }),
+            "the approval names another package digest",
+        ),
+    ];
+    for (name, change, sentence) in rows {
+        let refusal = read_row(change).expect_err(name);
+        assert_eq!(*refusal.message(), sentence, "{name}");
+    }
+}
+
+/// The operator file's bounds at their edges: a lapse exactly the skew past the run's deadline, a
+/// bound of exactly 86,400 s and a deadline equal to the effect timeout and the observation together
+/// are admitted; a lapse one second earlier, a deadline one second short and each bound of 86,401 s
+/// are refused with their sentences.
+#[test]
+fn the_operator_bounds_are_admitted_at_their_edges_and_refused_past_them() {
+    let edges = |o: &mut Value| {
+        for (bound, seconds) in [
+            ("snapshot_max_age_seconds", "86400"),
+            ("effect_timeout_seconds", "245"),
+            ("observe_seconds", "45"),
+            ("deadline_seconds", "290"),
+        ] {
+            set(o, &[bound], value(seconds));
+        }
+        set(
+            o,
+            &["approval", "not_after"],
+            value(r#""1970-01-01T00:06:39Z""#),
+        );
+    };
+    let catalog = met();
+    let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
+    let outcome = |change: &dyn Fn(&mut Value)| {
+        let scratch = Scratch::new("bound-edges");
+        let mut o = operator();
+        edges(&mut o);
+        change(&mut o);
+        let path = scratch.write("operator.json", json(&o).as_bytes());
+        read_operator(&path, &gd2, FILE_LIMIT)
+            .and_then(|o| check_run(&package(), &o, Number::from(START), &bounds()))
+    };
+    let run = outcome(&|_| {}).expect("every bound at its edge");
+    assert_eq!(*run.instance(), TARGET);
+    let mut rows: Vec<(String, Boxed, String)> = vec![
+        (
+            "a lapse one second earlier".into(),
+            Box::new(|o| {
+                set(
+                    o,
+                    &["approval", "not_after"],
+                    value(r#""1970-01-01T00:06:38Z""#),
+                )
+            }),
+            "the approval lapses at 1970-01-01T00:06:38Z, less than 5 s after the run's deadline"
+                .into(),
+        ),
+        (
+            "a deadline one second short".into(),
+            Box::new(|o| set(o, &["deadline_seconds"], value("289"))),
+            "deadline_seconds holds less than effect_timeout_seconds and observe_seconds together"
+                .into(),
+        ),
+    ];
+    for bound in kestrike_tools::host_stop::BOUNDS {
+        rows.push((
+            format!("{bound} past its limit"),
+            Box::new(move |o| set(o, &[bound], value("86401"))),
+            format!("{bound} 86401 is past its limit of 86400 s"),
+        ));
+    }
+    for (name, change, sentence) in rows {
+        let refusal = outcome(&*change).expect_err(&name);
+        assert_eq!(*refusal.message(), sentence.as_str(), "{name}");
+    }
+}
+
+/// Four bounds of four values each read as their own key: the deadline holds the effect timeout and
+/// the observation, which the snapshot's age and the observation would pass, and the snapshot's age
+/// admits a time exactly that age before the read and refuses one a second older.
+#[test]
+fn the_operator_bounds_read_as_their_own_keys() {
+    let scratch = Scratch::new("bounds-apart");
+    scratch.snapshot();
+    let mut o = operator();
+    for (bound, seconds) in [
+        ("snapshot_max_age_seconds", "90"),
+        ("effect_timeout_seconds", "60"),
+        ("observe_seconds", "45"),
+        ("deadline_seconds", "105"),
+    ] {
+        set(&mut o, &[bound], value(seconds));
+    }
+    let catalog = met();
+    let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
+    let path = scratch.write("operator.json", json(&o).as_bytes());
+    let o = read_operator(&path, &gd2, FILE_LIMIT).expect("the deadline holds the two");
+    let read = [
+        o.snapshot_max_age_seconds(),
+        o.effect_timeout_seconds(),
+        o.observe_seconds(),
+        o.deadline_seconds(),
+    ]
+    .map(|bound| bound.to_string());
+    assert_eq!(read, ["90", "60", "45", "105"]);
+    let run = check_run(&package(), &o, Number::from(START), &bounds()).expect("admitted");
+    let (package, names) = (run.package(), run.names());
+    let at_age = read_snapshot(&o, package, names, Number::from(190), FILE_LIMIT)
+        .expect("a time exactly the age before the read");
+    assert_eq!(at_age.oldest().to_string(), "100");
+    let refusal = read_snapshot(&o, package, names, Number::from(191), FILE_LIMIT)
+        .expect_err("a time a second older than the age");
+    let sentence =
+        "shards.jsonl line 1 time 100 lies outside [101, 191]: the snapshot is stale or ahead";
+    assert_eq!(*refusal.message(), sentence);
+}
+
+/// The roles mark the controller built for a snapshot whose shard lines are read at 100.25, whose
+/// first shard names the target as its own standby and whose third host reports unhealthy, with every
+/// declared instance running.
+const ROLES: &str = r#"{"package_sha256":"30759c81708af91aa8ad1e953f902fb6001cb6465e84e2231726463af9292056","time":100.25,"shards":{"s1":{"owner":"h1","standby":"h1","generation":7,"volume":"vol-s1","attempts":1},"s2":{"owner":"h1","standby":"h3","generation":4,"volume":"vol-s2","attempts":2},"s3":{"owner":"h1","standby":"h2","generation":9,"volume":"vol-s3","attempts":1},"s4":{"owner":"h2","standby":"h1","generation":3,"volume":"vol-s4","attempts":1},"s5":{"owner":"h3","standby":"h4","generation":5,"volume":"vol-s5","attempts":1}},"standbys":{"h3":{"instance":"i-h3","instance_state":"running","host_report":"unhealthy"},"h2":{"instance":"i-h2","instance_state":"running","host_report":"healthy"}}}"#;
+
+/// The roles mark is the controller's for the same snapshot whole: the package's digest, the cut of
+/// its kind, each version, and a standby entry for each standby of an owned shard with its report's
+/// word, `unhealthy` for a false report, none for the target named as its own standby. Records that
+/// lack a shard or a standby, or hold a version that is no object or a standby that is a list, are
+/// refused as the mark is built.
+#[test]
+fn the_roles_mark_is_the_controllers_for_the_snapshot() {
+    let scratch = Scratch::new("roles");
+    let snapshot = scratch.snapshot();
+    rewrite(&snapshot.join("shards.jsonl"), |rows| {
+        for row in rows.iter_mut() {
+            set(row, &["time"], value("100.25"));
+        }
+        set(&mut rows[0], &["standby"], value(r#""h1""#));
+    });
+    rewrite(&snapshot.join("hosts.jsonl"), |rows| {
+        set(&mut rows[2], &["report", "healthy"], value("false"))
+    });
+    let catalog = met();
+    let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
+    let path = scratch.write("operator.json", json(&operator()).as_bytes());
+    let o = read_operator(&path, &gd2, FILE_LIMIT).expect("the fixture is admitted");
+    let run = check_run(&package(), &o, Number::from(START), &bounds()).expect("admitted");
+    let now = Number::from(START + 0.2);
+    let read = read_snapshot(&o, run.package(), run.names(), now, FILE_LIMIT)
+        .expect("the snapshot is admitted");
+    let h3 = read
+        .reports()
+        .get(&Text::from("h3"))
+        .expect("h3 has a line");
+    assert_eq!(h3.report().map(|report| report.healthy()), Some(false));
+    let reply = object(value(
+        r#"{"InstanceStatuses": [{"InstanceId": "i-h1", "InstanceState": {"Name": "running"}},
+            {"InstanceId": "i-h2", "InstanceState": {"Name": "running"}},
+            {"InstanceId": "i-h3", "InstanceState": {"Name": "running"}},
+            {"InstanceId": "i-h4", "InstanceState": {"Name": "running"}}]}"#,
+    ));
+    let asked: Vec<Text> = ["i-h1", "i-h2", "i-h3", "i-h4"].map(Text::from).to_vec();
+    let states = read_statuses(&reply, &asked).expect("the statuses read");
+    let build = |records: &Object| {
+        build_roles(
+            run.package(),
+            run.names(),
+            run.package_sha256(),
+            records,
+            read.reports(),
+            &states,
+            read.cut(),
+        )
+    };
+    let roles = build(read.records()).expect("the mark is on the layout");
+    assert_eq!(json(&roles), ROLES);
+    let rows: [(&str, Edit, &str); 4] = [
+        (
+            "a standby that is a list",
+            |r| set(r, &["s5", "standby"], value("[]")),
+            "injection/roles.json shards s5 standby is no host of the layout: []",
+        ),
+        (
+            "a version with no standby",
+            |r| drop(crate::host_stop_support::remove(r, &["s1", "standby"])),
+            "injection/roles.json shards s1 holds the keys ['attempts', 'generation', 'owner', 'volume'], \
+             not ['attempts', 'generation', 'owner', 'standby', 'volume']",
+        ),
+        (
+            "records with no line of a shard",
+            |r| drop(crate::host_stop_support::remove(r, &["s4"])),
+            "injection/roles.json shards names ['s1', 's2', 's3', 's5'], not exactly the shards \
+             ['s1', 's2', 's3', 's4', 's5']",
+        ),
+        (
+            "a version that is no object",
+            |r| set(r, &["s4"], value("7")),
+            "injection/roles.json shards s4 is no object",
+        ),
+    ];
+    for (name, change, sentence) in rows {
+        let mut records = Value::Object(read.records().clone());
+        change(&mut records);
+        let refusal = build(&object(records)).expect_err(name);
+        assert_eq!(*refusal.message(), sentence, "{name}");
+    }
+}
+
+/// A plain text holds no control character and has a UTF-8 form: a text with a lone surrogate and
+/// no control character is no plain text, nor is one with a DEL.
+#[test]
+fn a_plain_text_has_no_control_character_and_a_utf8_form() {
+    let surrogate = Text::from_code_points([u32::from('a'), 0xd800]).expect("a text");
+    let rows = [
+        (Text::from("gd2-x \u{e9}"), true),
+        (surrogate, false),
+        (Text::from("gd2\u{7f}x"), false),
+    ];
+    for (text, expected) in rows {
+        assert_eq!(
+            kestrike_tools::host_stop::plain(&text),
+            expected,
+            "{text:?}"
         );
     }
 }

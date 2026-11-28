@@ -138,7 +138,7 @@ fn walk(
 
 /// `split` returns the part of `path` before its last `/`, without trailing slashes unless it is all
 /// slashes, and the part after it.
-fn split(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn split(path: &[u8]) -> (Vec<u8>, Vec<u8>) {
     let at = path
         .iter()
         .rposition(|&byte| byte == b'/')

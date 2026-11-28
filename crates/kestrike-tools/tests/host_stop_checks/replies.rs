@@ -1,12 +1,12 @@
-//! Each AWS reply through its reader, with the values the controller's readers returned for the same
-//! reply: a reply off its request or off its types is a failed call with the controller's sentence,
-//! and an admitted reply reads as the same fields. A `LaunchTime` and an ISO time read as the same
-//! seconds or the same refusal.
+//! Each AWS reply through its reader against the row's literal outcome: a reply off its request or
+//! off its types is a failed call with the row's sentence, and an admitted reply reads as the row's
+//! fields. A `LaunchTime` and an ISO time read as the row's seconds or its refusal.
 
 use std::collections::BTreeMap;
 
 use kestrike_tools::host_stop::{
-    Alarm, FailedCall, iso_time, launch_time, read_alarms, read_record, read_statuses,
+    Alarm, FailedCall, USER_STOP, caller_arn, iso_time, launch_time, read_alarms, read_record,
+    read_statuses,
 };
 use kestrike_tools::json::{Object, Text, Value, text};
 
@@ -56,7 +56,8 @@ fn check<T>(
     }
 }
 
-/// A status reply names exactly the instances asked, each with a state and its two checks or none.
+/// A status reply names exactly the instances asked, each with a state and its two checks or none;
+/// each check reads as its own field of its own instance.
 #[test]
 fn a_declared_instance_not_running_or_an_unread_set_is_a_run_left_open() {
     let asked = texts(&["i-h1", "i-h2"]);
@@ -65,6 +66,60 @@ fn a_declared_instance_not_running_or_an_unread_set_is_a_run_left_open() {
         check(name, got, expected, |map| {
             written(map, |status| status.to_value())
         });
+    }
+    let read = read_statuses(&object(value(BOTH)), &asked).expect("the reply is admitted");
+    let fields: Vec<(&str, Option<&str>, Option<&str>)> = ["i-h1", "i-h2"]
+        .iter()
+        .map(|id| {
+            let status = &read[&Text::from(*id)];
+            (
+                status.state().to_str().expect("ASCII"),
+                status.instance().and_then(Text::to_str),
+                status.system().and_then(Text::to_str),
+            )
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("stopped", Some("initializing"), Some("ok")),
+            ("running", Some("ok"), Some("impaired")),
+        ]
+    );
+}
+
+/// The caller's `Arn` is read as a text; an `Arn` absent or of another type is a failed call.
+#[test]
+fn the_callers_arn_is_a_text() {
+    let rows: [(&str, Result<&str, &str>); 3] = [
+        (
+            r#"{"Arn": "arn:aws:sts::account:assumed-role/gameday-operator/gd2-run", "UserId": "u"}"#,
+            Ok("arn:aws:sts::account:assumed-role/gameday-operator/gd2-run"),
+        ),
+        (r#"{"UserId": "u"}"#, Err("Arn is no str: None")),
+        (r#"{"Arn": 1}"#, Err("Arn is no str: 1")),
+    ];
+    for (reply, expected) in rows {
+        let reply = object(value(reply));
+        match (caller_arn(&reply), expected) {
+            (Ok(arn), Ok(expected)) => assert_eq!(*arn, expected),
+            (Err(FailedCall::Reply(sentence)), Err(expected)) => assert_eq!(sentence, expected),
+            (got, expected) => panic!("{got:?} against {expected:?}"),
+        }
+    }
+}
+
+/// A stop's transition reason matches the whole text `User initiated (<second> GMT)` alone.
+#[test]
+fn a_user_stop_reason_is_the_whole_text() {
+    let rows = [
+        ("User initiated (2026-11-27 10:15:30 GMT)", true),
+        ("xUser initiated (2026-11-27 10:15:30 GMT)", false),
+        ("User initiated (2026-11-27 10:15:30 GMT)x", false),
+        ("User initiated (2026-11-27 10:15:60 GMT)", false),
+    ];
+    for (reason, expected) in rows {
+        assert_eq!(USER_STOP.is_match(reason), expected, "{reason}");
     }
 }
 
@@ -114,12 +169,15 @@ fn an_iso_time_is_a_calendar_second() {
     }
 }
 
+/// A status reply whose instance and system checks differ on each instance.
+const BOTH: &str = r#"{"InstanceStatuses": [{"InstanceId": "i-h2", "InstanceState": {"Code": 16, "Name": "running"}, "InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "impaired"}}, {"InstanceId": "i-h1", "InstanceState": {"Code": 16, "Name": "stopped"}, "InstanceStatus": {"Status": "initializing"}, "SystemStatus": {"Status": "ok"}}]}"#;
+
 const STATUSES: &[(&str, &str, Result<&str, &str>)] = &[
     (
         "both",
-        r#"{"InstanceStatuses": [{"InstanceId": "i-h2", "InstanceState": {"Code": 16, "Name": "running"}, "InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "ok"}}, {"InstanceId": "i-h1", "InstanceState": {"Code": 16, "Name": "stopped"}, "InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "ok"}}]}"#,
+        BOTH,
         Ok(
-            r#"{"i-h1": {"state": "stopped", "instance": "ok", "system": "ok"}, "i-h2": {"state": "running", "instance": "ok", "system": "ok"}}"#,
+            r#"{"i-h1": {"state": "stopped", "instance": "initializing", "system": "ok"}, "i-h2": {"state": "running", "instance": "ok", "system": "impaired"}}"#,
         ),
     ),
     (
@@ -161,6 +219,11 @@ const STATUSES: &[(&str, &str, Result<&str, &str>)] = &[
         "another set",
         r#"{"InstanceStatuses": [{"InstanceId": "i-h1", "InstanceState": {"Code": 16, "Name": "running"}, "InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "ok"}}, {"InstanceId": "i-h3", "InstanceState": {"Code": 16, "Name": "running"}, "InstanceStatus": {"Status": "ok"}, "SystemStatus": {"Status": "ok"}}]}"#,
         Err("describe-instance-status names ['i-h1', 'i-h3'], not ['i-h1', 'i-h2']"),
+    ),
+    (
+        "a strict superset",
+        r#"{"InstanceStatuses": [{"InstanceId": "i-h1", "InstanceState": {"Name": "running"}}, {"InstanceId": "i-h2", "InstanceState": {"Name": "running"}}, {"InstanceId": "i-h9", "InstanceState": {"Name": "running"}}]}"#,
+        Err("describe-instance-status names ['i-h1', 'i-h2', 'i-h9'], not ['i-h1', 'i-h2']"),
     ),
     (
         "one left out",
@@ -463,6 +526,18 @@ const ALARMS: &[(&str, &str, Result<&str, &str>)] = &[
 
 const LAUNCHES: &[(Option<&str>, Result<&str, &str>)] = &[
     (
+        Some("x1970-01-01T00:00:10Z"),
+        Err(
+            "LaunchTime 'x1970-01-01T00:00:10Z' is no UTC time YYYY-MM-DDTHH:MM:SS[.fraction] ending in Z or +00:00",
+        ),
+    ),
+    (
+        Some("1970-01-01T00:00:10Zx"),
+        Err(
+            "LaunchTime '1970-01-01T00:00:10Zx' is no UTC time YYYY-MM-DDTHH:MM:SS[.fraction] ending in Z or +00:00",
+        ),
+    ),
+    (
         None,
         Err("LaunchTime None is no UTC time YYYY-MM-DDTHH:MM:SS[.fraction] ending in Z or +00:00"),
     ),
@@ -546,6 +621,14 @@ const LAUNCHES: &[(Option<&str>, Result<&str, &str>)] = &[
 ];
 
 const ISOS: &[(&str, Result<&str, &str>)] = &[
+    (
+        r#""1970-01-01T01:00:00Z x""#,
+        Err("approval not_after '1970-01-01T01:00:00Z x' is no time YYYY-MM-DDTHH:MM:SSZ"),
+    ),
+    (
+        r#""x1970-01-01T01:00:00Z""#,
+        Err("approval not_after 'x1970-01-01T01:00:00Z' is no time YYYY-MM-DDTHH:MM:SSZ"),
+    ),
     (r#""1970-01-01T01:00:00Z""#, Ok("3600")),
     (r#""1970-01-01T00:00:00Z""#, Ok("0")),
     (r#""1969-12-31T23:59:59Z""#, Ok("-1")),

@@ -15,7 +15,7 @@ use super::preflight::Gd2;
 use super::words::sentence;
 use crate::gameday::{Each, Names, Refusal, Scalar, Schema, conform, need};
 use crate::json::Value;
-use crate::paths::{join, normalize};
+use crate::paths::{join, normalize, split};
 use crate::plants::files::strerror;
 use crate::text::Text;
 
@@ -92,7 +92,10 @@ pub struct Operator {
     instances: Vec<Text>,
     snapshot: PathBuf,
     alarms: Vec<(Text, Text)>,
-    bounds: [Number; 4],
+    snapshot_max_age_seconds: Number,
+    effect_timeout_seconds: Number,
+    observe_seconds: Number,
+    deadline_seconds: Number,
 }
 
 impl Operator {
@@ -134,19 +137,19 @@ impl Operator {
     }
 
     pub fn snapshot_max_age_seconds(&self) -> Number {
-        self.bounds[0]
+        self.snapshot_max_age_seconds
     }
 
     pub fn effect_timeout_seconds(&self) -> Number {
-        self.bounds[1]
+        self.effect_timeout_seconds
     }
 
     pub fn observe_seconds(&self) -> Number {
-        self.bounds[2]
+        self.observe_seconds
     }
 
     pub fn deadline_seconds(&self) -> Number {
-        self.bounds[3]
+        self.deadline_seconds
     }
 }
 
@@ -205,8 +208,8 @@ pub fn read_operator(path: &Path, gd2: &Gd2<'_>, limit: u64) -> Result<Operator,
     need(distinct.len() == instances.len(), || {
         sentence!("instances repeats an instance")
     })?;
-    let bounds = BOUNDS.map(|bound| number(get(o, bound)));
-    for (bound, value) in BOUNDS.iter().zip(bounds) {
+    for bound in BOUNDS {
+        let value = number(get(o, bound));
         need(value <= Number::from(LIMIT_SECONDS), || {
             sentence!(
                 bound,
@@ -218,11 +221,18 @@ pub fn read_operator(path: &Path, gd2: &Gd2<'_>, limit: u64) -> Result<Operator,
             )
         })?;
     }
-    need(bounds[1].plus(bounds[2]) <= bounds[3], || {
-        sentence!(
-            "deadline_seconds holds less than effect_timeout_seconds and observe_seconds together"
-        )
-    })?;
+    let snapshot_max_age_seconds = number(get(o, "snapshot_max_age_seconds"));
+    let effect_timeout_seconds = number(get(o, "effect_timeout_seconds"));
+    let observe_seconds = number(get(o, "observe_seconds"));
+    let deadline_seconds = number(get(o, "deadline_seconds"));
+    need(
+        effect_timeout_seconds.plus(observe_seconds) <= deadline_seconds,
+        || {
+            sentence!(
+                "deadline_seconds holds less than effect_timeout_seconds and observe_seconds together"
+            )
+        },
+    )?;
     let alarms: Vec<(Text, Text)> = object_at(o, "alarms")
         .iter()
         .map(|(key, alarm)| (key.clone(), text(alarm).clone()))
@@ -260,7 +270,7 @@ pub fn read_operator(path: &Path, gd2: &Gd2<'_>, limit: u64) -> Result<Operator,
         })?;
     }
     let snapshot = snapshot.to_str().expect("a plain text has a UTF-8 form");
-    let directory = dirname(&abspath(path.as_os_str().as_bytes())?);
+    let (directory, _) = split(&abspath(path.as_os_str().as_bytes())?);
     Ok(Operator {
         region: region.clone(),
         identity: text_at(o, "identity").clone(),
@@ -273,7 +283,10 @@ pub fn read_operator(path: &Path, gd2: &Gd2<'_>, limit: u64) -> Result<Operator,
         instances,
         snapshot: PathBuf::from(OsStr::from_bytes(&join(&directory, snapshot.as_bytes()))),
         alarms,
-        bounds,
+        snapshot_max_age_seconds,
+        effect_timeout_seconds,
+        observe_seconds,
+        deadline_seconds,
     })
 }
 
@@ -290,20 +303,4 @@ fn abspath(path: &[u8]) -> Result<Vec<u8>, Refusal> {
         ))
     })?;
     Ok(normalize(&join(&cwd.into_os_string().into_vec(), path)))
-}
-
-/// The directory part of `path` up to its last `/`, trailing slashes removed unless it is all
-/// slashes, as `os.path.dirname` gives it.
-fn dirname(path: &[u8]) -> Vec<u8> {
-    let cut = path
-        .iter()
-        .rposition(|&byte| byte == b'/')
-        .map_or(0, |at| at + 1);
-    let mut head = path[..cut].to_vec();
-    if head.iter().any(|&byte| byte != b'/') {
-        while head.ends_with(b"/") {
-            head.pop();
-        }
-    }
-    head
 }

@@ -16,7 +16,7 @@ use crate::python::{hexdigest, repr};
 use crate::text::Text;
 
 /// GD-2's entry of a catalog that [`gd2_of`] admitted: the judge's texts, this controller's injection
-/// action and its restoration class with steps that are a plain text.
+/// action and its restoration class with steps that are a text, not blank, with a UTF-8 form.
 #[derive(Clone, Copy, Debug)]
 pub struct Gd2<'a>(&'a Object);
 
@@ -119,6 +119,11 @@ impl Run {
 /// another package digest; another instance; an approval that lapses within [`SKEW_SECONDS`] after the
 /// deadline; a start inside the baseline window; a run outside the run window; a target outside the
 /// declared set.
+///
+/// # Panics
+///
+/// When an integer `now` plus the deadline and [`SKEW_SECONDS`] passes an `i128`, which no `now` made
+/// from an `i64` or a float reaches.
 pub fn check_run(
     raw: &[u8],
     operator: &Operator,

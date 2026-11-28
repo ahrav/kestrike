@@ -2,12 +2,13 @@
 //! SHA-256 of `abort.json`'s bytes and by the steps digest that ends the abort's detail, and a
 //! `stopped.json` tied to its request by holding `stop.json`'s value whole.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::checked::{number_at, object, object_at, text_at};
 use super::constants::{STEPS_PREFIX, STEPS_TAIL};
 use super::forms::{matches, steps_tail};
-use super::inputs::read_bytes;
+use super::inputs::{NUL, read_bytes};
 use super::number::Number;
 use super::words::sentence;
 use crate::gameday::{Names, REQUEST, Refusal, Scalar, Schema, conform, layout, need, parsed};
@@ -71,7 +72,7 @@ impl Request {
 ///
 /// # Errors
 ///
-/// The first refusal in this order: no `reviewed`; a path that cannot be resolved; a record inside
+/// The first refusal in this order: no `reviewed`; a path with a NUL byte or one that cannot be resolved; a record inside
 /// the evidence directory; each read of the record, then of `abort.json`; the record off its schema;
 /// the abort off the judge's layout; a guardrail named without cause `guardrail` or none with it;
 /// another abort's digest; a detail that does not end with a steps digest; other steps; an abort dated
@@ -130,10 +131,10 @@ pub fn check_reviewed(
         || sentence!("the reviewed record names another abort"),
     )?;
     let detail = match abort.get("detail") {
-        Some(Value::String(detail)) => detail.clone(),
-        _ => Text::new(),
+        Some(Value::String(detail)) => detail,
+        _ => &Text::new(),
     };
-    let tail = last(&detail, STEPS_PREFIX.len() + 64);
+    let tail = last(detail, STEPS_PREFIX.len() + 64);
     need(matches(&STEPS_TAIL, &tail), || {
         sentence!(
             "injection/abort.json's detail does not end with the digest of the restoration steps its \
@@ -212,15 +213,23 @@ fn same_request(one: &Object, stop: &Request) -> bool {
         && number_at(one, "time") == stop.time()
 }
 
-/// `path` resolved with its links and made absolute.
+/// `resolved` follows the links of `path` and returns it absolute. For a path with a NUL byte it
+/// returns `<what> has a path no file can have: <reason>` before any lookup.
 fn resolved(path: &Path, what: &str) -> Result<std::path::PathBuf, Refusal> {
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Err(Refusal::new(sentence!(
+            what,
+            " has a path no file can have: ",
+            NUL
+        )));
+    }
     resolve(path)
         .map_err(|error| Refusal::new(sentence!(what, " cannot be resolved: ", strerror(&error))))
 }
 
 /// The last `count` code points of `text`, or all of them when it holds fewer.
 fn last(text: &Text, count: usize) -> Text {
-    let codes: Vec<u32> = text.code_points().collect();
-    Text::from_code_points(codes[codes.len().saturating_sub(count)..].iter().copied())
+    let skipped = text.len().saturating_sub(count);
+    Text::from_code_points(text.code_points().skip(skipped))
         .expect("code points of a text form a text")
 }

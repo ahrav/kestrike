@@ -1,5 +1,5 @@
-//! A mark's bytes against the bytes the controller wrote for the same value: keys sorted, one space
-//! of indent per level, Python's escapes and number forms, and a final newline.
+//! A mark's bytes against literal expected bytes for the same value: keys sorted, one space of indent
+//! per level, Python's escapes and number forms, and a final newline.
 
 use kestrike_tools::gameday::FILE_LIMIT;
 use kestrike_tools::host_stop::encoded;
@@ -11,7 +11,7 @@ use crate::host_stop_support::value;
 /// lone surrogate, a pair beyond the BMP and the escaped characters, and numbers in Python's forms.
 const NESTED: &str = r#"{"b": [], "a": {}, "c": [1, {"z": null, "y": [true, false]}], "d": "\u00e9\u2028\ud800\ud83d\ude00\"\\\n", "e": 1e16, "f": -0.0, "g": 0.1, "h": 123456789012345678901234567890}"#;
 
-/// Each value's bytes are the bytes the controller wrote for it.
+/// Each value's bytes are the literal bytes its row holds.
 #[test]
 fn a_marks_bytes_are_the_bytes_the_controller_writes() {
     let identity = "arn:aws:sts::account:assumed-role/gameday-operator/gd2-run";

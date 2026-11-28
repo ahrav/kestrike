@@ -10,9 +10,8 @@ use crate::gameday::finite;
 use crate::json::{Integer, Value};
 use crate::python::repr_float;
 
-/// `Number` is an integer or a float, as a JSON number or a clock reading holds it. An integer is made
-/// from an `i64` and held in an `i128`, so a sum or a difference of the integers a command handles
-/// stays exact.
+/// `Number` is an integer or a float, as a JSON number or a clock reading holds it. An integer is held
+/// in an `i128`, so a sum or a difference of integers stays exact while its result fits an `i128`.
 #[derive(Clone, Copy, Debug)]
 pub struct Number(Kind);
 
@@ -40,11 +39,6 @@ impl Number {
         }
     }
 
-    /// Whether the number is an integer, as a file's integer and a sum of integers are.
-    pub fn is_integer(self) -> bool {
-        matches!(self.0, Kind::Integer(_))
-    }
-
     /// `value` is the JSON number of the same kind and value.
     pub fn value(self) -> Value {
         match self.0 {
@@ -62,13 +56,14 @@ impl Number {
     ///
     /// # Panics
     ///
-    /// When the sum of two integers passes an `i128`, which needs more than 2^64 sums of `i64` values.
+    /// When both are integers and their exact sum lies outside the range of an `i128`. An operand may
+    /// already lie outside an `i64`; a float operand makes the sum in floats, which does not panic.
     #[must_use]
     pub fn plus(self, other: Self) -> Self {
         match (self.0, other.0) {
             (Kind::Integer(a), Kind::Integer(b)) => Self(Kind::Integer(
                 a.checked_add(b)
-                    .expect("a sum of i64 integers fits an i128"),
+                    .expect("the exact integer sum fits an i128"),
             )),
             _ => Self(Kind::Float(self.float() + other.float())),
         }
@@ -78,13 +73,13 @@ impl Number {
     ///
     /// # Panics
     ///
-    /// When the difference of two integers passes an `i128`, as [`Number::plus`] states.
+    /// When both are integers and their exact difference lies outside the range of an `i128`.
     #[must_use]
     pub fn minus(self, other: Self) -> Self {
         match (self.0, other.0) {
             (Kind::Integer(a), Kind::Integer(b)) => Self(Kind::Integer(
                 a.checked_sub(b)
-                    .expect("a difference of i64 integers fits an i128"),
+                    .expect("the exact integer difference fits an i128"),
             )),
             _ => Self(Kind::Float(self.float() - other.float())),
         }

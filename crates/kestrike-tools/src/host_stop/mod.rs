@@ -57,7 +57,8 @@ pub use operator::{Approval, Operator, read_operator};
 pub use preflight::{Gd2, Run, check_run, gd2_of};
 pub use record::{DELIVERED, Delivered, Interrupted, Record, SLICE, Signal, install};
 pub use replies::{
-    Alarm, FailedCall, InstanceRecord, Status, launch_time, read_alarms, read_record, read_statuses,
+    Alarm, FailedCall, InstanceRecord, Status, caller_arn, launch_time, read_alarms, read_record,
+    read_statuses,
 };
 pub use review::{Request, check_reviewed, check_stopped};
 pub use seam::{Seam, System, sleep};

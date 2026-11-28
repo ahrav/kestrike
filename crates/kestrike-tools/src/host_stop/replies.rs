@@ -1,8 +1,10 @@
-//! The four read calls' replies, each read by the fields the controller uses and matched to its
+//! The replies of the four read calls, each read by the fields the controller uses: the caller's
+//! `Arn`, and the instance statuses, the instance record and the metric alarms, each matched to its
 //! request. A reply off its request or off its types is a failed call, whose outcome is unknown: a
-//! listing that holds a `NextToken`, an instance or alarm named twice or outside the request, a
-//! composite alarm, and a read field of another JSON type, named with Python's type word (`list`,
-//! `dict`, `str`) and `repr` and cut at 400 characters.
+//! listing that holds a non-null `NextToken`, an instance or alarm named twice or outside the
+//! request, a composite alarm, and a read field of another JSON type, named with Python's type word
+//! (`list`, `dict`, `str`) and `repr` and cut at 400 characters. Each returned map iterates in the
+//! order of its keys; its rows are checked in the reply's order.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -127,6 +129,15 @@ fn text_or<'a>(row: &'a Object, key: &str, default: &'a Text) -> Result<&'a Text
     }
 }
 
+/// `caller_arn` is the `Arn` of a `sts get-caller-identity` reply.
+///
+/// # Errors
+///
+/// `Arn is no str: <repr>` for an `Arn` absent or of another type, cut at 400 characters.
+pub fn caller_arn(reply: &Object) -> Result<&Text, FailedCall> {
+    text(reply.get("Arn"), "Arn")
+}
+
 fn whole(reply: &Object, what: &str) -> Result<(), FailedCall> {
     if matches!(reply.get("NextToken"), None | Some(Value::Null)) {
         Ok(())
@@ -181,9 +192,10 @@ fn optional(text: Option<&Text>) -> Value {
 ///
 /// # Errors
 ///
-/// A failed call, in the reply's order: a `NextToken`; `InstanceStatuses` no list; a row no object, or
-/// an `InstanceId`, `InstanceState.Name`, `InstanceStatus.Status` or `SystemStatus.Status` off its type;
-/// an instance named twice; then another set of instances than `instances`.
+/// A failed call: a non-null `NextToken`; `InstanceStatuses` no list; then for each row in the reply's
+/// order, the row no object, its `InstanceId` no text, an instance named twice, `InstanceState` no
+/// object or its `Name` no text, an `InstanceStatus` or `SystemStatus` present and not null that is no
+/// object or whose `Status` is no text; then another set of instances than `instances`.
 pub fn read_statuses(
     reply: &Object,
     instances: &[Text],
@@ -266,9 +278,10 @@ impl InstanceRecord {
 ///
 /// # Errors
 ///
-/// A failed call: a `NextToken`; `Reservations` no list, or a reservation no object or its `Instances`
-/// no list; other than one instance, or one other than `instance`; then `State.Name`,
-/// `StateReason.Code`, `StateTransitionReason` or `LaunchTime` off its type.
+/// A failed call: a non-null `NextToken`; `Reservations` no list, or a reservation no object or its
+/// `Instances` no list; other than one instance, the one instance no object, or one other than
+/// `instance`; then `State.Name`, `StateReason.Code`, `StateTransitionReason` or `LaunchTime` off its
+/// type.
 pub fn read_record(reply: &Object, instance: &Text) -> Result<InstanceRecord, FailedCall> {
     whole(reply, "describe-instances")?;
     let mut rows = Vec::new();
@@ -400,10 +413,12 @@ fn query_kind(row: &Object) -> Result<Option<&'static str>, FailedCall> {
 ///
 /// # Errors
 ///
-/// A failed call: a `NextToken`; `CompositeAlarms` no list, or one that is not empty; `MetricAlarms`
-/// no list; a row no object or its `AlarmName` no text; a name twice or unasked; then, for that row,
-/// `StateValue`, `TreatMissingData`, `EvaluationState`, `Metrics` and its entries'
-/// `Expression`, `EvaluateLowSampleCountPercentile` and `StateTransitionedTimestamp` off their types.
+/// A failed call: a non-null `NextToken`; `CompositeAlarms` no list, or one that is not empty;
+/// `MetricAlarms` no list; a row no object or its `AlarmName` no text; a name twice or unasked; then,
+/// for that row, `StateValue`, `TreatMissingData` and `EvaluationState` off their types; the fields
+/// [`Alarm::kind`] reads until one gives the kind (`Metrics`, each entry and its `Expression`, then
+/// `EvaluateLowSampleCountPercentile`) off their types, none of them read for a row with an
+/// `EvaluationCriteria`; and `StateTransitionedTimestamp` off its type.
 pub fn read_alarms(reply: &Object, names: &[Text]) -> Result<BTreeMap<Text, Alarm>, FailedCall> {
     whole(reply, "describe-alarms")?;
     if !listed(reply, "CompositeAlarms")?.is_empty() {

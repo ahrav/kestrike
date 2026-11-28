@@ -1,6 +1,6 @@
 //! The snapshot through `read_snapshot`, read at the caller check's return (the run's start and one
-//! call of 0.2 s): each state of a shard line and of a host line, each refused with the sentence the
-//! controller's read gives, and the values an admitted snapshot returns.
+//! call of 0.2 s): each state of a shard line and of a host line, each refused with the row's
+//! sentence, and the values an admitted snapshot returns.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -12,7 +12,8 @@ use kestrike_tools::host_stop::{
 use kestrike_tools::json::Value;
 
 use crate::host_stop_support::{
-    START, Scratch, bounds, json, met, operator, package, rewrite, set, value,
+    START, Scratch, at_mut, bounded, bounds, items_mut, json, met, operator, package, rewrite, set,
+    value,
 };
 
 /// The wall time of the read: the caller's call returns 0.2 s after the run's start.
@@ -76,6 +77,15 @@ const REFUSED: &[(&str, &str, Lines, &str)] = &[
         "a missing shard",
         "shards.jsonl",
         |rows| drop(rows.pop()),
+        "shards.jsonl misses shards ['s5']",
+    ),
+    (
+        "a missing shard and shard lines read at two times",
+        "shards.jsonl",
+        |rows| {
+            rows.pop();
+            set(&mut rows[0], &["time"], value("101"));
+        },
         "shards.jsonl misses shards ['s5']",
     ),
     (
@@ -245,8 +255,9 @@ const REFUSED: &[(&str, &str, Lines, &str)] = &[
     ),
 ];
 
-/// Each stale, malformed or inconsistent snapshot is refused with its sentence, and a cut before the
-/// baseline window starts is refused for a package whose baseline starts after it.
+/// Each stale, malformed or inconsistent snapshot is refused with its sentence; a cut before the
+/// baseline window starts is refused for a package whose baseline starts after it, and a shard line
+/// of a shard outside the package's list for a package that lists one shard fewer than its names.
 #[test]
 fn a_stale_malformed_or_inconsistent_snapshot_is_refused_after_the_caller() {
     for &(name, file, change, sentence) in REFUSED {
@@ -263,6 +274,13 @@ fn a_stale_malformed_or_inconsistent_snapshot_is_refused_after_the_caller() {
     .expect_err("a fresh cut before the baseline window starts");
     let sentence = "shards.jsonl's cut 98 lies before the baseline window starts";
     assert_eq!(*refusal.message(), sentence);
+    let refusal = read(
+        "shards.jsonl",
+        |_| {},
+        |p| items_mut(at_mut(p, &["shards"])).retain(|shard| *shard != value(r#""s5""#)),
+    )
+    .expect_err("a shard line outside the package's list");
+    assert_eq!(*refusal.message(), "shards.jsonl misses shards []");
 }
 
 /// A named pipe is refused as no regular file without waiting for a writer, a link at the last
@@ -274,8 +292,11 @@ fn an_input_that_is_a_named_pipe_or_a_link_is_refused_without_waiting() {
     fs::remove_file(&hosts).expect("the host lines go");
     let made = mkfifo(&hosts);
     assert!(made, "the pipe is made");
-    let refusal = read_at(&scratch, held).expect_err("a pipe is refused");
-    assert_eq!(*refusal.message(), "hosts.jsonl is no regular file");
+    let refusal = bounded("the read of a pipe", move || {
+        let refusal = read_at(&scratch, held).expect_err("a pipe is refused");
+        refusal.message().to_string()
+    });
+    assert_eq!(refusal, "hosts.jsonl is no regular file");
 
     let scratch = Scratch::new("link");
     let shards = scratch.snapshot().join("shards.jsonl");
@@ -307,12 +328,13 @@ fn mkfifo(path: &std::path::Path) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-/// The committed snapshot's versions as the controller's read returned them.
+/// The committed snapshot's versions as the reader returns them.
 const RECORDS: &str = r#"{"s1":{"owner":"h1","standby":"h2","generation":7,"volume":"vol-s1","attempts":1},"s2":{"owner":"h1","standby":"h3","generation":4,"volume":"vol-s2","attempts":2},"s3":{"owner":"h1","standby":"h2","generation":9,"volume":"vol-s3","attempts":1},"s4":{"owner":"h2","standby":"h1","generation":3,"volume":"vol-s4","attempts":1},"s5":{"owner":"h3","standby":"h4","generation":5,"volume":"vol-s5","attempts":1}}"#;
 
 /// The committed snapshot reads as its versions in line order with the layout's keys, its host lines,
 /// the cut and the earliest time; an equal time of another kind keeps the first line's kind, a null
-/// report holds none, and an older report is the earliest time.
+/// report holds none, an older report is the earliest time, and of two equal earliest reports of
+/// two kinds the earlier line's kind stays.
 #[test]
 fn a_snapshot_reads_as_its_versions_lines_cut_and_earliest_time() {
     let got = read("shards.jsonl", |_| {}, held).expect("the committed snapshot is admitted");
@@ -376,4 +398,13 @@ fn a_snapshot_reads_as_its_versions_lines_cut_and_earliest_time() {
         (got.cut().to_string(), got.oldest().to_string()),
         ("100".into(), "50.5".into())
     );
+    for (first, second) in [("99", "99.0"), ("99.0", "99")] {
+        let scratch = Scratch::new("equal-oldest");
+        rewrite(&scratch.snapshot().join("hosts.jsonl"), |rows| {
+            set(&mut rows[1], &["report", "time"], value(first));
+            set(&mut rows[2], &["report", "time"], value(second));
+        });
+        let got = read_at(&scratch, held).expect("two equal earliest reports");
+        assert_eq!(got.oldest().to_string(), first, "{first} then {second}");
+    }
 }

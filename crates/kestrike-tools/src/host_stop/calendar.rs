@@ -4,8 +4,8 @@
 //! and a second to 61.
 
 /// `posix_seconds` is the POSIX seconds of the calendar second that `text` spells as
-/// `YYYY-MM-DD?HH:MM:SS`, any one character standing at `?`, or `None` for a second the calendar
-/// lacks or a text off that layout.
+/// `YYYY-MM-DD?HH:MM:SS`, one ASCII character standing at `?` that the caller's own pattern checks, or
+/// `None` for a second the calendar lacks or a text off that layout.
 pub fn posix_seconds(text: &str) -> Option<i64> {
     let bytes = text.as_bytes();
     let laid_out = bytes.len() == 19

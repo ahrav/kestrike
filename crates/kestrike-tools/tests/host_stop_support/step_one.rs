@@ -1,7 +1,7 @@
-//! The refusals of a run's first step, one row each, in the self-test's order: the operator file, the
-//! package against its approval and windows, GD-2's texts and prerequisites, the package's read and
-//! the evidence directory. A row names the reader that decides it, the part of the refusal's line the
-//! self-test checks, and for a reader's row the whole sentence that reader returns.
+//! The refusals of a run's first step, one row each, grouped by input: the operator file, the package
+//! against its approval and windows, GD-2's texts and prerequisites, the package's read and the
+//! evidence directory. A row names the reader that decides it, the part of the refusal's line a case
+//! checks, and for a reader's row the whole sentence that reader returns.
 
 use kestrike_tools::json::{Object, Text, Value};
 
@@ -61,7 +61,7 @@ pub(crate) struct Row {
     pub(crate) name: &'static str,
     pub(crate) change: Change,
     pub(crate) reader: Reader,
-    /// The part of the refusal's line the self-test checks.
+    /// The part of the refusal's line a case checks.
     pub(crate) reason: &'static str,
     /// The sentence the reader returns; `None` for a row the run decides and for the package past
     /// the limit, whose sentence names the limit. The words after `is not strict JSON: ` are the
@@ -129,7 +129,7 @@ fn prerequisites(gd2: &mut Object) -> &mut Vec<Value> {
     )
 }
 
-/// The rows, in the self-test's order.
+/// The rows of the first step.
 pub(crate) const ROWS: &[Row] = &[
     row(
         "an operator file that is no JSON",
