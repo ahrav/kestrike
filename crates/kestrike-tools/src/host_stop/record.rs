@@ -21,7 +21,12 @@ pub const SLICE: Duration = Duration::from_millis(50);
 /// The time left until `end`, or one [`SLICE`] for an end past the range of [`Instant`], which never
 /// comes, so a loop on it reads the record once a slice without end.
 pub(super) fn left(end: Option<Instant>) -> Duration {
-    end.map_or(SLICE, |end| end.saturating_duration_since(Instant::now()))
+    left_at(end, Instant::now())
+}
+
+/// [`left`] for a clock that reads `now`.
+pub(super) fn left_at(end: Option<Instant>, now: Instant) -> Duration {
+    end.map_or(SLICE, |end| end.saturating_duration_since(now))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -2,9 +2,7 @@
 //! and the stop shown, leaves the marks that stand and makes no call that changes an instance; after
 //! the faulted call the abort path's one status read alone follows.
 
-use std::fs;
 use std::io;
-use std::os::unix::process::ExitStatusExt;
 use std::rc::Rc;
 
 use kestrike_tools::host_stop::{
@@ -16,7 +14,7 @@ use kestrike_tools::json::Value;
 use super::plane::{ALARMS, Action, CALLER, MONOTONIC, RECORD, STATUS, State};
 use super::steps::{Step, errno, links};
 use super::stop_run::{int, operator_seconds, time};
-use super::{CHILD, COPY, Case, child, guardrails, listing, set, tail, text_of};
+use super::{CHILD, COPY, Case, child, guardrails, killed_run, listing, set, tail, text_of};
 use crate::host_stop_support::{START, Scratch, TARGET, free_lock};
 
 const ALL: [&str; 4] = ["roles", "stop", "stopped", "abort"];
@@ -61,7 +59,7 @@ fn near_deadline(case: &Case) {
     }));
 }
 
-fn flip(name: &'static str, to: &'static str) -> Action {
+pub(crate) fn flip(name: &'static str, to: &'static str) -> Action {
     Action::Hook(Box::new(move |state| {
         state.flip(name, to);
         Action::Answer
@@ -344,27 +342,9 @@ const KILLED: &str = "after_stop::a_run_killed_during_the_observation_leaves_no_
 /// parent's, and which names its evidence directory in the file `evidence` there.
 #[test]
 fn a_run_killed_during_the_observation_leaves_no_stopped_mark() {
-    if let Some(place) = std::env::var_os(CHILD) {
-        let mut case = Case::new("killed");
-        let named = std::path::Path::new(&place).join("evidence");
-        fs::write(&named, case.evidence.as_os_str().as_encoded_bytes()).expect("named");
-        case.faulted(
-            Action::Hook(Box::new(|_| {
-                // SAFETY: `kill` of this process with SIGKILL takes no pointer.
-                unsafe { libc::kill(libc::getpid(), libc::SIGKILL) };
-                unreachable!("SIGKILL ends the process")
-            })),
-            false,
-        );
-        let code = case.run();
-        panic!("the run ended with {code}, not by the kill");
-    }
-    let place = Scratch::new("killed-child");
-    let (status, shown) = child(KILLED, &place.0, &[]);
-    assert_eq!(status.signal(), Some(libc::SIGKILL), "{shown}");
-    let evidence = fs::read_to_string(place.0.join("evidence")).expect("the child named it");
-    let marks = listing(&std::path::Path::new(&evidence).join("injection"));
-    assert_eq!(marks, ["roles.json", "stop.json"], "{shown}");
+    let (_place, evidence) = killed_run(KILLED, "killed");
+    let marks = listing(&evidence.join("injection"));
+    assert_eq!(marks, ["roles.json", "stop.json"]);
 }
 
 /// An abort mark that cannot be written leaves no stopped mark: the run exits 1, says the abort

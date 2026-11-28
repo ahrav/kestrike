@@ -1,9 +1,13 @@
 //! The score's file: the run's settings, and the bytes written to a staging file beside
-//! `verification/plants/score.json` and renamed over it.
+//! `verification/plants/score.json` and renamed over it. [`publish_with`] writes another tool's file,
+//! such as `mutants-diff`'s `report.json`, the same way.
 //!
-//! The staging file is `.score.json.` and eight letters, created new with mode 0600 and then given mode
-//! 0666 less the umask the caller read with [`umask`]; the rename replaces a link at the score's path,
-//! whose target stays. A write that fails removes the staging file. The write makes no sync.
+//! The staging file is `.NAME.` and eight letters beside the target. The score's is created new with mode
+//! 0600 and then given mode 0666 less the umask the caller read with [`umask`]; a file published with
+//! [`Creation::Mode`] is created new with that mode, which the kernel lessens by the umask or, in a
+//! directory with a default ACL, sets from that ACL. The rename replaces a link at
+//! the target's path, whose target stays. A write, close or rename that fails leads to an attempt to
+//! remove the staging file. The write makes no sync.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -81,10 +85,22 @@ pub fn umask() -> io::Result<u32> {
         .ok_or_else(|| io::Error::other("it names no umask"))
 }
 
+/// How a published file takes its permission bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Creation {
+    /// Created with mode 0600 and then given mode 0666 less this mask, which the caller read with
+    /// [`umask`].
+    Masked(u32),
+    /// Created with this mode, which the kernel lessens by the umask at creation or, in a directory with
+    /// a default ACL, sets from that ACL, as for any file a process creates there.
+    Mode(u32),
+}
+
 /// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from
 /// `letters`; a name that is taken is left as it is and another is drawn.
 fn staging_with(
     target: &Path,
+    mode: u32,
     letters: impl FnMut(&mut [u8]) -> io::Result<()>,
 ) -> io::Result<(PathBuf, File)> {
     let parent = target.parent().unwrap_or(Path::new("."));
@@ -95,7 +111,7 @@ fn staging_with(
         OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
+            .mode(mode)
             .open(path)
     };
     fresh(&prefix, parent, letters, create).map_err(|error| match error {
@@ -107,27 +123,46 @@ fn staging_with(
     })
 }
 
-/// `publish` replaces `target` with `written` through a staging file it creates beside it, of mode
-/// 0666 less `mask`.
+/// `publish` replaces `target` with `written` as [`publish_with`] does with [`Creation::Masked`] of
+/// `mask`, so the file takes mode 0666 less `mask`.
+///
+/// # Errors
+///
+/// As [`publish_with`].
+pub fn publish(target: &Path, written: &str, mask: u32) -> Result<(), PathError> {
+    publish_with(target, written, Creation::Masked(mask))
+}
+
+/// `publish_with` replaces `target` with `written` through a staging file it creates beside it, whose
+/// permission bits `creation` decides.
 ///
 /// # Errors
 ///
 /// The staging file cannot be created, given its mode, written, closed or renamed, or `written` is
 /// longer than the soft file size limit allows (`EFBIG`, before any byte is written); the text names
-/// the score's path.
-pub fn publish(target: &Path, written: &str, mask: u32) -> Result<(), PathError> {
-    let (staged, mut file) =
-        staging_with(target, random_letters).map_err(|error| PathError::new(target, error))?;
+/// the target's path.
+pub fn publish_with(target: &Path, written: &str, creation: Creation) -> Result<(), PathError> {
+    let at_target = |error| PathError::new(target, error);
+    let created = match creation {
+        Creation::Masked(_) => 0o600,
+        Creation::Mode(mode) => mode,
+    };
+    let (staged, mut file) = staging_with(target, created, random_letters).map_err(at_target)?;
     let written = crate::fixtures::fits(written.len())
-        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o666 & !mask)))
-        .and_then(|()| file.write_all(written.as_bytes()));
-    let closed = crate::fixtures::close(file);
+        .and_then(|()| match creation {
+            Creation::Masked(mask) => {
+                file.set_permissions(fs::Permissions::from_mode(0o666 & !mask))
+            }
+            Creation::Mode(_) => Ok(()),
+        })
+        .and_then(|()| file.write_all(written.as_bytes()))
+        .map_err(at_target);
+    let closed = crate::fixtures::close(file).map_err(at_target);
     let done = written
         .and(closed)
-        .and_then(|()| fs::rename(&staged, target));
-    done.map_err(|error| {
+        .and_then(|()| fs::rename(&staged, target).map_err(at_target));
+    done.inspect_err(|_| {
         let _ = fs::remove_file(&staged);
-        PathError::new(target, error)
     })
 }
 

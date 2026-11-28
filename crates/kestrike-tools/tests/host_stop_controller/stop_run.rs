@@ -43,27 +43,32 @@ pub(crate) fn record_rows(case: &Case, change: fn(&mut Object)) {
         .map(|_| {
             Box::new(move |reply: Value| {
                 let mut reply = reply;
-                let Value::Object(top) = &mut reply else {
-                    panic!("the reply is an object")
-                };
-                let Some(Value::Array(reservations)) = top.get_mut("Reservations") else {
-                    panic!("the reply lists reservations")
-                };
-                let Value::Object(reservation) = &mut reservations[0] else {
-                    panic!("a reservation is an object")
-                };
-                let Some(Value::Array(instances)) = reservation.get_mut("Instances") else {
-                    panic!("a reservation lists instances")
-                };
-                let Value::Object(row) = &mut instances[0] else {
-                    panic!("an instance row is an object")
-                };
-                change(row);
+                change(instance_row(&mut reply));
                 reply
             }) as super::plane::Shape
         })
         .collect();
     case.plane.borrow_mut().shape(RECORD, shapes);
+}
+
+/// The one instance row of a record reply.
+pub(crate) fn instance_row(reply: &mut Value) -> &mut Object {
+    let Value::Object(reply) = reply else {
+        panic!("a reply is an object")
+    };
+    let Some(Value::Array(reservations)) = reply.get_mut("Reservations") else {
+        panic!("a record reply holds its reservations")
+    };
+    let Some(Value::Object(reservation)) = reservations.first_mut() else {
+        panic!("a reservation")
+    };
+    let Some(Value::Array(rows)) = reservation.get_mut("Instances") else {
+        panic!("a reservation holds its instances")
+    };
+    match rows.first_mut() {
+        Some(Value::Object(row)) => row,
+        other => panic!("{other:?} is an instance row"),
+    }
 }
 
 fn names(case: &Case) -> Vec<String> {
@@ -308,6 +313,7 @@ fn window_plant(case: &Case, name: &str) -> (&'static str, Rc<RefCell<Option<Loc
     let holder = Rc::new(RefCell::new(None));
     let reason = match name {
         "a lock another descriptor holds" => {
+            case.contended.set(true);
             let (held, injection) = (Rc::clone(&holder), case.evidence.join("injection"));
             let mut taken = false;
             case.plant(Box::new(move |_, step| {

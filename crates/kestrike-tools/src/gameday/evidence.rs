@@ -36,6 +36,10 @@ impl Evidence {
         &self.package
     }
 
+    pub fn into_package(self) -> Object {
+        self.package
+    }
+
     pub fn package_sha256(&self) -> &str {
         &self.package_sha256
     }

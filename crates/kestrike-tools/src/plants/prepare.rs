@@ -2,7 +2,9 @@
 //! the checked inputs of a run, or the first refusal in the order below with its reason.
 //!
 //! The order: the command line; a set Git repository or index variable ([`REPOSITORY_VARIABLES`]); the
-//! invoking directory, which must lie in a Git checkout; the head commit; the plant store; the
+//! invoking directory, which must be readable; SIGCHLD's disposition in this process, where an ignored
+//! SIGCHLD is a failure outside a plant; the invoking directory again, which must lie in a Git checkout;
+//! the head commit; the plant store; the
 //! checkout's `Cargo.lock`; the `campaign` binary; and last the work directory, which is made, so a
 //! refusal leaves no work directory; only the missing ancestors of `--work`, made just before it, can
 //! stay. Every Git call runs in the given environment with `GIT_NO_REPLACE_OBJECTS=1`.
@@ -23,6 +25,7 @@ use crate::args::Parsed;
 use crate::environ::{Environ, first_of_each, get, set};
 use crate::git::REPOSITORY_VARIABLES;
 use crate::paths;
+use crate::process::refuse_ignored_sigchld;
 use crate::text::{Text, strip_str};
 
 /// The checked inputs of a run, each read once.
@@ -154,6 +157,7 @@ fn checked(options: Options, env: Environ, here: io::Result<PathBuf>) -> Result<
     }
     let here = here
         .map_err(|error| Stop::failed(format!("the invoking directory cannot be read: {error}")))?;
+    refuse_ignored_sigchld().map_err(Stop::failed)?;
     let found = rev_parse(
         &env,
         &here,

@@ -5,7 +5,8 @@
 //! `outcomes` and `at-hang`, with the suffix `-K-N` under `--shard K/N`. A call record is a sequence of fields,
 //! each ended by a NUL byte: `call`, the argument count, the arguments, the working directory, then for each
 //! name of [`RECORDED`] and for the `--in-diff` file's digest, the configuration's digest and the
-//! `Cargo.lock` text, `S` and the value when it is set and `U` when it is not.
+//! `Cargo.lock` text, `S` and the value when it is set and `U` when it is not. While `record_sigign` is in
+//! the state directory, each stand-in appends its `SigIgn:` line to `sigign` as it starts.
 
 /// The variables a call record holds, in its order.
 pub const RECORDED: [&str; 8] = [
@@ -25,6 +26,7 @@ pub const SLEEPER: &str = "600.125";
 pub const CARGO: &str = r#"#!/bin/sh
 state=$FAKE_STATE
 plan=$state/plan
+if [ -e "$state/record_sigign" ]; then grep '^SigIgn:' "/proc/$$/status" >> "$state/sigign"; fi
 sleeper=600.125
 publish() { printf '%s' "$2" > "$state/$1.tmp" && mv "$state/$1.tmp" "$state/$1"; }
 if [ "$#" -eq 1 ] && [ "$1" = -vV ]; then
@@ -114,12 +116,25 @@ if [ "$listing" = yes ]; then
 fi
 code=$(cat "$plan/exit")
 if [ -e "$plan/drop_git" ]; then rm .git; fi
+if [ -e "$plan/locked" ]; then
+  for name in a-locked z-locked; do
+    mkdir "$name" "$name/open" && : > "$name/kept" && : > "$name/open/sentinel" && chmod 0500 "$name"
+  done
+  for name in b-entry m-entry y-entry e1 e2 e3 e4 e5 e6 e7 e8 e9 e10 e11 e12 e13 e14 e15 e16 e17 e18 e19 e20; do
+    : > "$name"
+  done
+  mkdir c-dir && : > c-dir/file
+fi
 if [ -e "$plan/stray" ]; then
   sleep "$sleeper" &
   printf '%s' "$!" > "$state/grandchild.pid"
 fi
 out=$(value --output "$@")/mutants.out
 mkdir -p "$out"
+if [ -e "$plan/report_link" ]; then
+  ln -s "$state/victim" "$(value --output "$@")/../report.json" || exit 97
+  printf '%s\n' "$(value --output "$@")/../report.json" >> "$state/report_linked"
+fi
 if [ -e "$plan/raw_outcomes" ]; then
   cp "$plan/raw_outcomes" "$out/outcomes.json"
   exit "$code"
@@ -133,13 +148,15 @@ exit "$code"
 "#;
 
 /// `GIT` runs the real Git named in place of `__REAL__`, or in the mode `FAKE_GIT_MODE` names: `fail-add`
-/// exits 3 on a worktree add, `fail-remove` refuses a worktree removal with `fatal: refused`, `hang-add`
+/// exits 3 on a worktree add, `plant-diff` links each run directory's `diff.patch` to the fixture's
+/// `victim` and records each link in `planted` before a diff runs, `fail-remove` refuses a worktree removal with `fatal: refused`, `hang-add`
 /// adds a locked worktree, publishes `ready` and sleeps, and `bad-rev` and `bad-base` make a successful
 /// `rev-parse --verify` or `merge-base` print the byte 0xff and a line feed.
 pub const GIT: &str = r#"#!/bin/sh
 real=__REAL__
 state=$FAKE_STATE
 mode=${FAKE_GIT_MODE-}
+if [ -e "$state/record_sigign" ]; then grep '^SigIgn:' "/proc/$$/status" >> "$state/sigign"; fi
 has() {
   want=$1
   shift
@@ -149,6 +166,12 @@ has() {
   return 1
 }
 if has worktree "$@" && has add "$@" && [ "$mode" = fail-add ]; then exit 3; fi
+if has diff "$@" && [ "$mode" = plant-diff ]; then
+  for run in "$state"/artifacts/*/; do
+    ln -s "$state/victim" "${run}diff.patch" || exit 97
+    printf '%s\n' "${run}diff.patch" >> "$state/planted"
+  done
+fi
 if { has rev-parse "$@" && has --verify "$@" && [ "$mode" = bad-rev ]; } ||
   { has merge-base "$@" && [ "$mode" = bad-base ]; }; then
   printf '\377\n'

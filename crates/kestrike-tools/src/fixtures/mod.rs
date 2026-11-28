@@ -22,7 +22,7 @@ pub mod quint;
 mod args_tests;
 #[cfg(test)]
 #[path = "../fixtures_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 mod write;
 
