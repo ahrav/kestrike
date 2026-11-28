@@ -23,8 +23,8 @@ const CUT: usize = 400;
 
 /// A failed call: the launch's own failure, or a reply that is no JSON object of the shape the
 /// request asks for, with its sentence. [`FailedCall::sentence`] is the sentence as a text, which
-/// keeps a lone surrogate of a reply's name for a mark's detail; `Display` writes it as a line does,
-/// each surrogate as `\udXXX`.
+/// keeps a lone surrogate of a reply's name; the abort path writes that surrogate into a mark's
+/// detail as its escape. `Display` writes the sentence as a line does, each surrogate as `\udXXX`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FailedCall {
     Launch(CallFailed),
