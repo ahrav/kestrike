@@ -249,19 +249,31 @@ pub enum Opened {
     File(fs::File),
 }
 
-/// `open_regular` follows symbolic links. The descriptor check and the caller's read use the same open
-/// file. The path can change between [`status`] and the open, so `open_regular` returns
-/// [`Opened::File`] only when `fstat` identifies the open file as regular.
+/// `open_regular` follows symbolic links. [`status`] decides first: a path it reports absent is
+/// [`Opened::Absent`], and an entry it reports as no regular file is [`Opened::Other`] and is not opened.
+/// A path it reports as a regular file is opened, and the descriptor check and the caller's read use
+/// that same open file. The path can change between [`status`] and the open, to a device or a FIFO
+/// included, so `open_regular` returns [`Opened::File`] only when `fstat` identifies the open file as
+/// regular.
 ///
 /// # Errors
 ///
 /// [`open_regular`] propagates errors from [`status`], the open, or the descriptor's `fstat`, so a file
 /// removed between [`status`] and the open is an error that names the path.
 pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
+    open_regular_with(path, opened)
+}
+
+/// `open_regular_with` is [`open_regular`] with `open` opening a path that [`status`] reports as a
+/// regular file.
+fn open_regular_with(
+    path: &Path,
+    open: impl FnOnce(&Path) -> Result<Opened, PathError>,
+) -> Result<Opened, PathError> {
     match status(path)? {
         None => Ok(Opened::Absent),
         Some(found) if !found.is_file() => Ok(Opened::Other),
-        Some(_) => opened(path),
+        Some(_) => open(path),
     }
 }
 

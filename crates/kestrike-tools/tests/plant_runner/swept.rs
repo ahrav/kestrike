@@ -38,10 +38,7 @@ fn each_result_stands_in_the_score_with_its_reason() {
     let (written, plants) = fx.results();
     assert_eq!(text_of(written.get("commit").expect("a commit")), fx.head);
     let sentence = format!("1 of 3 plants at commit {}", fx.head);
-    assert_eq!(
-        text_of(written.get("sentence").expect("a sentence")),
-        sentence
-    );
+    assert_eq!(fx.sentence(), sentence);
     same(
         written.get("results"),
         r#"{"caught": 1, "missed": 2, "no verdict": 6, "does not apply": 1}"#,
@@ -97,18 +94,15 @@ fn each_result_stands_in_the_score_with_its_reason() {
     );
 }
 
+/// Each sweep goes on until every expected profile's `next` reaches the floor. The miss reason of
+/// `p-slow` reads that each expected profile reached 300 runs, the floor its `next` reached, while its
+/// profile `slow` counts 150 runs.
 #[test]
 fn the_sweep_repeats_until_every_profile_reaches_the_floor() {
     let mut fx = Fixture::new();
     fx.run(&["p-miss", "p-slow"], &[]);
     let sweeps = fx.calls(&["sweep"]);
-    let option = |call: &Vec<String>, name: &str| {
-        let at = call
-            .iter()
-            .position(|arg| arg == name)
-            .expect("the option stands");
-        call[at + 1].clone()
-    };
+    let option = |call: &Vec<String>, name: &str| super::standins::option(call, name).to_owned();
     let names: Vec<String> = sweeps
         .iter()
         .map(|call| option(call, "--campaign"))
@@ -155,6 +149,7 @@ fn the_sweep_repeats_until_every_profile_reaches_the_floor() {
         panic!("p-slow holds the runs of slow");
     };
     assert_eq!(shown(slow.get("next")), "300");
+    assert_eq!(shown(slow.get("runs")), "150");
     fx.verdict(
         "p-slow",
         "missed",
@@ -232,7 +227,7 @@ fn a_plant_with_no_expected_profile_is_missed_without_a_sweep() {
         .map(|call| call[..2].to_vec())
         .collect();
     assert_eq!(heads, [["sim", "archive"]]);
-    let (written, plants) = fx.results();
+    let (_, plants) = fx.results();
     let plant = &plants["p-noprofile"];
     assert_eq!(text_of(plant.get("result").expect("a result")), "missed");
     assert_eq!(
@@ -240,9 +235,28 @@ fn a_plant_with_no_expected_profile_is_missed_without_a_sweep() {
         digest("pass")
     );
     assert_eq!(
-        text_of(written.get("sentence").expect("a sentence")),
+        fx.sentence(),
         format!("0 of 1 plants at commit {}", fx.head)
     );
+}
+
+/// An archive directory the run cannot search makes both the open and the status read of its kept
+/// `Cargo.lock` fail: the plant has no verdict that names the error, and no mismatch of the lockfile.
+#[test]
+fn a_kept_lockfile_whose_status_cannot_be_read_names_the_error() {
+    if super::repository::is_root() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-hiddenlock"], &[]);
+    exited(&done, 3);
+    let entry = fx.verdict(
+        "p-hiddenlock",
+        "no verdict",
+        "the run failed: Permission denied",
+    );
+    let reason = text_of(entry.get("reason").expect("a reason"));
+    assert!(!reason.contains("keeps no regular Cargo.lock"), "{reason}");
 }
 
 #[test]
@@ -260,6 +274,10 @@ fn each_malformed_or_contradictory_record_leaves_no_verdict() {
         (
             "p-dirlock",
             "keeps no regular Cargo.lock equal to the run's",
+        ),
+        (
+            "p-longlock",
+            "the archive of the planted tree keeps no regular Cargo.lock equal to the run's",
         ),
         ("p-loneline", "`suspects.jsonl` lists 1 suspects"),
         ("p-disorder", "gives a counts out of order"),

@@ -35,7 +35,7 @@ pub fn line(local: &str, remote: &str) -> OsString {
 
 /// `planned` reads `lines` into a plan of a push to `origin`, failing the row on any error.
 pub fn planned(lines: &[OsString]) -> Plan {
-    let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+    let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
     for line in lines {
         plan.line(line, |_| {}).expect("the line reads");
     }
@@ -77,7 +77,7 @@ fn a_deletion_runs_no_check() {
 #[test]
 fn a_blank_ref_line_is_skipped() {
     if child().is_some() {
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         plan.line(" \t".as_ref(), |_| panic!("a blank line has no note"))
             .expect("a blank line reads");
         assert_eq!((checks(&plan), scans(&plan)), (vec![], vec![]));
@@ -91,7 +91,7 @@ fn a_blank_ref_line_is_skipped() {
 #[test]
 fn a_malformed_ref_line_fails() {
     if child().is_some() {
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let error = plan
             .line("ref-update".as_ref(), |_| {})
             .expect_err("the line is malformed");
@@ -173,7 +173,7 @@ fn an_unknown_remote_commit_compares_against_origin_main() {
 fn a_ref_without_a_comparison_base_prints_the_skipped_scan_and_runs_every_check() {
     if let Some(row) = child() {
         let head = row.get("HEAD");
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let mut note = None;
         plan.line(&line(&head, ZERO), |skipped| note = Some(skipped))
             .expect("the line reads");
@@ -274,7 +274,7 @@ fn one_commit_pushed_to_two_refs_runs_the_union_of_their_checks() {
 fn an_unreadable_origin_main_fails_the_push_with_a_git_error() {
     if let Some(row) = child() {
         let head = row.get("HEAD");
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let error = plan
             .line(&line(&head, ZERO), |_| {
                 panic!("a line whose base read fails has no note")
@@ -383,7 +383,7 @@ pub fn assert_plan(
 fn an_unreadable_history_without_origin_main_still_notes_the_skipped_scan() {
     if let Some(row) = child() {
         let head = row.get("HEAD");
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let mut note = None;
         let error = plan
             .line(&line(&head, ZERO), |skipped| {
@@ -432,7 +432,7 @@ fn an_unreadable_history_without_origin_main_still_notes_the_skipped_scan() {
 #[test]
 fn a_sha256_null_id_is_read_as_a_commit() {
     if let Some(row) = child() {
-        let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+        let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
         let error = plan
             .line(&line(&"0".repeat(64), &row.get("BASE")), |_| {})
             .expect_err("the diff fails");
@@ -460,7 +460,7 @@ fn the_origin_main_probe_and_the_merge_base_read_the_name_differently() {
                 (vec![], vec![(head.clone(), head)])
             );
         } else {
-            let mut plan = Plan::new("origin".as_ref()).expect("the plan starts");
+            let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
             let error = plan
                 .line(&line(&head, ZERO), |_| {})
                 .expect_err("the merge base fails");
@@ -564,4 +564,149 @@ fn a_local_field_shaped_as_an_option_reaches_git_as_one() {
         ],
     );
     assert_eq!(std::fs::read(&victim).expect("the file reads"), b"");
+}
+
+/// The number of probe calls of the running plan, and the call that reports `Err`.
+static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static FAILING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The number of Git commands the trace held when the failing call ran.
+static TRACED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `traced` counts the Git commands that `GIT_TRACE` has logged so far.
+fn traced() -> usize {
+    let trace = std::env::var_os("GIT_TRACE").expect("the row traces Git");
+    std::fs::read_to_string(trace)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("trace: built-in: git"))
+        .count()
+}
+
+/// `counting` reports `Err(143)` on the call [`FAILING`] names and `Ok` on every other call.
+fn counting() -> Result<(), u8> {
+    use std::sync::atomic::Ordering;
+    let call = CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    if call == FAILING.load(Ordering::SeqCst) {
+        TRACED.store(traced(), Ordering::SeqCst);
+        return Err(143);
+    }
+    Ok(())
+}
+
+/// `probed_plan` plans `lines` and then the guard with [`counting`], failing at call `failing`, and
+/// returns the first error, with no note given after the failing call.
+fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
+    use std::sync::atomic::Ordering;
+    CALLS.store(0, Ordering::SeqCst);
+    FAILING.store(failing, Ordering::SeqCst);
+    let mut plan = match Plan::new("origin".as_ref(), counting) {
+        Ok(plan) => plan,
+        Err(failure) => return Some(failure),
+    };
+    for line in lines {
+        let mut late = false;
+        let planned = plan.line(line, |_| {
+            late = failing != 0 && CALLS.load(Ordering::SeqCst) >= failing;
+        });
+        assert!(!late, "the note is given after the failing call");
+        if let Err(failure) = planned {
+            return Some(failure);
+        }
+    }
+    plan.guard().err()
+}
+
+/// A probe that reports `Err` once any read of a plan returns ends the plan as [`Failure::Cancelled`]
+/// with its code and starts no later Git read, for a line with no comparison base, a line whose remote
+/// commit the clone lacks so the merge base is read, a changed Rust file whose ignore spans are read in a
+/// batch, and the guard's batch read of a pushed chaos record.
+#[test]
+fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read() {
+    use std::sync::atomic::Ordering;
+    if let Some(values) = child() {
+        let lines = [
+            line(&values.get("HEAD"), &"1".repeat(40)),
+            line(&values.get("UNBASED"), ZERO),
+        ];
+        assert!(
+            probed_plan(&lines, 0).is_none(),
+            "the plan reads with no failing call"
+        );
+        let reads = CALLS.load(Ordering::SeqCst);
+        assert!(reads > 8, "the plan reads {reads} times");
+        for failing in 1..=reads {
+            let failure = probed_plan(&lines, failing);
+            assert!(
+                matches!(failure, Some(Failure::Cancelled(143))),
+                "call {failing}: {failure:?}"
+            );
+            assert_eq!(
+                traced(),
+                TRACED.load(Ordering::SeqCst),
+                "call {failing} is followed by a Git read"
+            );
+        }
+        return;
+    }
+    let (repository, _) = fixture("probed");
+    let head = repository.commit(&[
+        ("crates/plain.rs", "#[test]\n#[ignore]\nfn t() {}\n"),
+        ("chaos/runs/r.json", "{\"run\": 1}"),
+    ]);
+    let unbased = repository.git(&[
+        "commit-tree",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "-m",
+        "an unrelated root",
+    ]);
+    let trace = repository.top.join("trace");
+    repository.in_child_with(
+        &repository.top,
+        &id(
+            module_path!(),
+            "a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read",
+        ),
+        &[("HEAD", &head), ("UNBASED", &unbased)],
+        &[("GIT_TRACE", trace.as_os_str())],
+    );
+}
+
+/// A signal recorded while the skipped-scan note is given ends the line before its next Git read: the
+/// probe runs once the note returns.
+#[test]
+fn a_probe_after_the_skipped_scan_note_starts_no_later_read() {
+    use std::sync::atomic::Ordering;
+    if let Some(values) = child() {
+        CALLS.store(0, Ordering::SeqCst);
+        FAILING.store(0, Ordering::SeqCst);
+        let mut plan = Plan::new("origin".as_ref(), counting).expect("the plan starts");
+        let mut noted = None;
+        let planned = plan.line(&line(&values.get("UNBASED"), ZERO), |_| {
+            FAILING.store(CALLS.load(Ordering::SeqCst) + 1, Ordering::SeqCst);
+            noted = Some(traced());
+        });
+        assert!(
+            matches!(planned, Err(Failure::Cancelled(143))),
+            "{planned:?}"
+        );
+        assert_eq!(noted, Some(traced()), "a Git read starts after the note");
+        return;
+    }
+    let (repository, _) = fixture("noted");
+    let unbased = repository.git(&[
+        "commit-tree",
+        "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        "-m",
+        "an unrelated root",
+    ]);
+    let trace = repository.top.join("trace");
+    repository.in_child_with(
+        &repository.top,
+        &id(
+            module_path!(),
+            "a_probe_after_the_skipped_scan_note_starts_no_later_read",
+        ),
+        &[("UNBASED", &unbased)],
+        &[("GIT_TRACE", trace.as_os_str())],
+    );
 }

@@ -49,3 +49,49 @@ fn an_output_file_that_exists_fails_the_start_and_stays_as_it_was() {
     assert_eq!(stop.code(), 1);
     assert_eq!(std::fs::read_to_string(&err).expect("read"), "err before");
 }
+
+/// A supervised run's result takes a failed stop first, then a failed wait, then the stop's outcome: a
+/// reap gives the exit code, a leader reaped elsewhere fails as a wait with `ECHILD`, and a leader that
+/// outlived its stop fails as a wait that timed out.
+#[test]
+fn a_supervised_run_concludes_from_its_wait_and_then_its_stop() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    use super::process::concluded;
+    use super::stop::{Fault, Stop};
+    use crate::process::GroupStopped;
+    let failed = |error: std::io::Error| Stop::failed(&Fault::os(&error, None));
+    let reaped = |raw: i32| Ok(GroupStopped::Reaped(ExitStatus::from_raw(raw)));
+    assert_eq!(concluded(Ok(()), reaped(3 << 8)), Ok(3));
+    assert_eq!(concluded(Ok(()), reaped(libc::SIGKILL)), Ok(-libc::SIGKILL));
+    let probe = failed(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "the state reads no state",
+    ));
+    assert_eq!(concluded(Err(probe.clone()), reaped(0)), Err(probe.clone()));
+    let refused = || std::io::Error::from_raw_os_error(libc::EPERM);
+    assert_eq!(
+        concluded(Err(probe), Err(refused())),
+        Err(failed(refused()))
+    );
+    assert_eq!(
+        concluded(Ok(()), Ok(GroupStopped::ReapedElsewhere)),
+        Err(failed(std::io::Error::from_raw_os_error(libc::ECHILD)))
+    );
+    let outlived = concluded(Ok(()), Ok(GroupStopped::Running)).expect_err("a leader still runs");
+    assert_eq!(
+        outlived,
+        failed(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the child outlived its stop"
+        ))
+    );
+    assert_eq!(
+        concluded(
+            Err(Stop::interrupted(libc::SIGTERM)),
+            Ok(GroupStopped::Running)
+        ),
+        Err(Stop::interrupted(libc::SIGTERM))
+    );
+}

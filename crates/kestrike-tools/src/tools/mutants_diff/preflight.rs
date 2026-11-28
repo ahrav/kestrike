@@ -15,7 +15,7 @@ use std::process::Command;
 
 use super::config::{self, pins, stables};
 use super::options::Options;
-use super::process::{INTERRUPT, capture, exit_code};
+use super::process::{INTERRUPT, capture, exit_code, file_size_default};
 use super::stop::{Fault, Stop};
 pub(super) use crate::environ::Environ;
 use crate::environ::{get, set};
@@ -109,7 +109,7 @@ impl GitError {
 /// `git` runs `git -C top ARGS` in `git_env` and returns its standard output.
 pub(super) fn git(git_env: &Environ, top: &OsStr, args: &[&OsStr]) -> Result<Vec<u8>, GitError> {
     let mut command = Command::new("git");
-    command
+    file_size_default(&mut command)
         .arg("-C")
         .arg(top)
         .args(args)
@@ -210,7 +210,10 @@ pub(super) fn read_pins(path: &Path) -> Result<String, Stop> {
 
 fn text_command(program: &OsStr, args: &[&str], env: &Environ) -> Command {
     let mut command = Command::new(program);
-    command.args(args).env_clear().envs(env.iter().cloned());
+    file_size_default(&mut command)
+        .args(args)
+        .env_clear()
+        .envs(env.iter().cloned());
     command
 }
 

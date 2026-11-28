@@ -83,7 +83,10 @@ file that repeats a mutant, an outcome file whose `outcomes` is no array or
 that names a mutant by a value other than a string, an outcome file with a
 phase time that is not a finite nonnegative number, a worktree configuration whose
 `additional_cargo_args` the runner cannot read, and a worktree that remains
-after the removal make the run incomplete.
+after the removal make the run incomplete. When `git worktree remove` fails,
+the runner removes the worktree's directory itself, going past each entry it
+cannot remove and down to 512 levels below the worktree; a directory deeper
+than that stays with everything under it, and so does the worktree.
 
 `report.json` holds `base` and `head` (full commit ids), `diff_sha256` (of
 the bytes the runner wrote to `diff.patch`), `tool_version`, `config_sha256`
@@ -134,7 +137,9 @@ waits up to 10 s for the leader's exit, sends SIGKILL and waits up to 10 s
 again while the leader runs, sends a closing SIGKILL to the group, and then
 waits up to 10 s to reap the leader; each wait reads the leader's state at
 pauses of at most 20 ms. A leader that still runs after the reap's 10 s stays
-unreaped and the run fails. A group whose leader exited by itself gets the
+unreaped, and the run writes an incomplete report and exits 1, with the
+interruption as its reason when a signal started the stop and otherwise
+`the child outlived its stop`. A group whose leader exited by itself gets the
 first SIGTERM and the closing SIGKILL.
 The runner reads the leader's state from `/proc/<pid>/stat` and reaps the
 leader only after the group's last signal, so each signal reaches the group
@@ -170,8 +175,12 @@ regular file the invoking user owns or is held by another run; or more listed
 mutants than `--max-mutants`. Only the last of these reaches the worktree, and
 none starts a build. The limit refusal takes precedence over a worktree that
 remains: it exits 2, writes no report and names that worktree on standard
-error. Exit 120 replaces any other exit code when a write to standard output
-or standard error fails, whether or not a report was written. `--help`
-exits 0 and writes no report; when its write to standard output fails, the
-runner tries to print `mutants-diff: standard output: ERROR` on standard
-error and exits 120.
+error. Exit 120 replaces any other exit code when a write of a run's lines or
+of a refusal to standard output or standard error returns an error, a full
+device or a write past the file size limit for one; it does not say whether a
+report was written. Such a write to a stream that is closed or open read-only
+fails with `EBADF`, which the runner does not detect: the line is lost and
+the exit code stays. `--help` exits 0 and writes no report; when its write to
+standard output fails, one open read-only included, the runner tries to print
+`mutants-diff: standard output: ERROR` on standard error and exits 120. A
+closed standard output is not detected there either.

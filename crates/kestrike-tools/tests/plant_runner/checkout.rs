@@ -48,24 +48,14 @@ fn a_staging_file_or_link_beside_the_score_stays_as_it_was() {
     std::fs::write(&target, "a target\n").expect("written");
     let link = fx.store.join(".score.json.link");
     std::os::unix::fs::symlink(&target, &link).expect("linked");
-    let args = fx.args(&["p-miss"], &[], None);
-    let env = fx.environment(&[]);
-    let output = std::process::Command::new("sh")
-        .args(["-c", "umask 027; exec \"$@\"", "sh", super::fixture::BINARY])
-        .arg(&fx.repo)
-        .arg("plant-runner")
-        .args(&args)
-        .current_dir(&fx.repo)
-        .env_clear()
-        .envs(env)
-        .output()
-        .expect("the tool starts");
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let (code, err) = fx
+        .spawn(
+            &["p-miss"],
+            &["sh", "-c", "umask 027; exec \"$@\"", "sh"],
+            false,
+        )
+        .finish();
+    assert_eq!(code, 0, "{err}");
     assert_eq!(
         std::fs::read_to_string(&sentinel).expect("reads"),
         "a sentinel\n"
@@ -539,38 +529,61 @@ fn a_head_subject_that_is_no_utf_8_gives_every_plant_no_verdict() {
     assert!(fx.calls(&[]).is_empty());
 }
 
-/// Bash measures `ulimit -f` in 1024-byte blocks. Subtracting one byte keeps the soft `RLIMIT_FSIZE`
-/// below the score length even at an exact block boundary.
+/// Bash measures `ulimit -f` in 1024-byte blocks. The second run starts under a soft `RLIMIT_FSIZE` at
+/// least 1 KiB below the first score's length, with the stand-ins' logs emptied, so every other file the
+/// run and its children write stays below it: the run judges each plant as the first run did and stops
+/// at the score's write.
 #[test]
 fn a_score_past_the_file_size_limit_exits_4_and_keeps_the_earlier_score() {
+    const NAMES: [&str; 9] = [
+        "p-catch",
+        "p-miss",
+        "p-nocause",
+        "p-noprofile",
+        "p-stale",
+        "p-nobuild",
+        "p-alarm",
+        "p-other",
+        "p-short",
+    ];
     let mut fx = Fixture::new();
-    let done = fx.run(&["p-miss"], &[]);
-    assert_eq!(done.code, 0, "{}", done.stderr);
+    let first = fx.run(&NAMES, &[]);
+    assert_eq!(first.code, 1, "a miss without its cause: {}", first.stderr);
     let size = std::fs::metadata(&fx.score)
         .expect("the score stands")
         .len();
-    let blocks = (size - 1) / 1024;
-    assert!(blocks >= 1, "a score of {size} bytes");
+    let blocks = size / 1024 - 2;
+    assert!(
+        blocks >= 6,
+        "a score of {size} bytes stands 1 KiB or more past the limit and leaves the run's other files room"
+    );
+    for log in [&fx.log, &fx.proofs] {
+        std::fs::write(log, "").expect("the stand-ins' logs start empty, below the limit");
+    }
     std::fs::write(&fx.score, "earlier\n").expect("written");
-    let args = fx.args(&["p-miss"], &[], Some(&fx.scratch.join("again")));
-    let env = fx.environment(&[]);
-    let output = std::process::Command::new("bash")
-        .args([
-            "-c",
-            &format!("ulimit -S -f {blocks}; exec \"$@\""),
-            "bash",
-            super::fixture::BINARY,
-        ])
-        .arg(&fx.repo)
-        .arg("plant-runner")
-        .args(&args)
-        .current_dir(&fx.repo)
-        .env_clear()
-        .envs(env)
-        .output()
-        .expect("the tool starts");
-    let err = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(4), "{err}");
+    fx.work = fx.scratch.join("again");
+    let limit = format!("ulimit -S -f {blocks}; exec \"$@\"");
+    let (code, err) = fx
+        .spawn(&NAMES, &["bash", "-c", &limit, "bash"], false)
+        .finish();
+    assert_eq!(code, 4, "{err}");
+    let results = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter(|line| {
+                NAMES
+                    .iter()
+                    .any(|name| line.starts_with(&format!("{name}: ")))
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    let judged = results(&first.stderr);
+    let again = results(&err);
+    assert_eq!(
+        again[..judged.len()],
+        judged[..],
+        "the run under the limit judges as the first did and reaches the score: {err}"
+    );
     assert!(err.contains("plant-runner wrote no score: "), "{err}");
     assert_eq!(
         std::fs::read_to_string(&fx.score).expect("reads"),

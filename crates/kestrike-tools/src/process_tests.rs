@@ -139,6 +139,21 @@ fn pid_of(child: &std::process::Child) -> libc::pid_t {
 const WAIT: Duration = Duration::from_secs(30);
 const PAUSE: Duration = Duration::from_millis(20);
 
+/// `stat_fields` is the fields after the command name of a `/proc/<pid>/stat` line whose parent is
+/// `parent`, whose process group is `group` and whose thread count is `threads`.
+fn stat_fields(state: &str, parent: u32, group: u32, threads: u32) -> Vec<String> {
+    let mut fields = vec![state.to_owned(), parent.to_string(), group.to_string()];
+    fields.extend((3..17).map(|_| "0".to_owned()));
+    fields.push(threads.to_string());
+    fields.push("0\n".to_owned());
+    fields
+}
+
+/// `stat_line` is the `/proc/12/stat` line of the command `name` holding `fields`.
+fn stat_line(name: &str, fields: &[String]) -> Vec<u8> {
+    format!("12 ({name}) {}", fields.join(" ")).into_bytes()
+}
+
 /// The fields are read after the last `)`, so a command name that holds `) Z (` reads as the state that
 /// follows it; `Z` is an exited leader only with one thread left, and a stat line of a process that leads
 /// no group of its own is refused.
@@ -147,11 +162,7 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     use super::{Leader, parsed};
     let own = std::process::id();
     let line = |name: &str, state: &str, group: u32, threads: u32| {
-        let mut fields = vec![state.to_owned(), own.to_string(), group.to_string()];
-        fields.extend((3..17).map(|_| "0".to_owned()));
-        fields.push(threads.to_string());
-        fields.push("0\n".to_owned());
-        format!("12 ({name}) {}", fields.join(" ")).into_bytes()
+        stat_line(name, &stat_fields(state, own, group, threads))
     };
     assert_eq!(
         parsed(&line("a) Z (b", "S", 12, 1), 12, own),
@@ -163,28 +174,45 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
         Ok(Leader::Running),
         "a leader whose main thread ended while another runs"
     );
-    assert!(
-        parsed(&line("sh", "S", 7, 1), 12, own).is_err(),
+    assert_eq!(
+        parsed(&line("sh", "S", 7, 1), 12, own),
+        Err("names the process group 7, so the child leads no group of its own".to_owned()),
         "a member of another group"
     );
-    assert!(
-        parsed(&line("sh", "S", 12, 1), 12, own + 1).is_err(),
+    assert_eq!(
+        parsed(&line("sh", "S", 12, 1), 12, own + 1),
+        Err(format!(
+            "names the parent {own}, so the process is no child of the process {}",
+            own + 1
+        )),
         "a process with another parent"
     );
-    assert!(parsed(b"12 (sh)", 12, own).is_err());
-    assert!(parsed(b"12 sh S", 12, own).is_err());
+    let cut = |count: usize| {
+        let mut fields = stat_fields("S", own, 12, 1);
+        fields.truncate(count);
+        stat_line("sh", &fields)
+    };
+    for (stat, refusal) in [
+        (b"12 (sh)".to_vec(), "holds no state field"),
+        (b"12 sh S".to_vec(), "holds no command name"),
+        (
+            stat_line("sh", &stat_fields("SS", own, 12, 1)),
+            "holds no state field",
+        ),
+        (cut(1), "holds no parent"),
+        (cut(2), "holds no process group"),
+        (cut(17), "holds no thread count"),
+    ] {
+        assert_eq!(
+            parsed(&stat, 12, own),
+            Err(refusal.to_owned()),
+            "{}",
+            String::from_utf8_lossy(&stat)
+        );
+    }
     let scratch = crate::paths::tests::Scratch::new("probe-name");
     let program = scratch.0.join("x) Z (y");
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut script = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o700)
-            .open(&program)
-            .expect("the script is made");
-        std::io::Write::write_all(&mut script, b"#!/bin/sh\nread line\n").expect("it is written");
-    }
+    crate::fixtures::tests::script(&program, "#!/bin/sh\nread line\n");
     let mut child = {
         use std::os::unix::process::CommandExt;
         Command::new(&program)
@@ -200,6 +228,59 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     let (comm, state) = (comm.expect("comm reads"), state.expect("the state reads"));
     assert_eq!(comm, "x) Z (y\n");
     assert_eq!(state, Leader::Running);
+}
+
+/// The probe reads a procfs whose `self/status` holds an `NStgid` line of this process's id alone, before
+/// it reads the leader's record: a view that names another id, more than one id or none ends each read
+/// with an error that names `self/status`, whether the leader's record is present or gone; in the
+/// process's own view a gone record is a reaped leader, and a failed read of either file keeps its kind
+/// and names its own path.
+#[test]
+fn a_procfs_of_another_pid_namespace_is_refused_and_each_error_names_its_path() {
+    use super::{Leader, leader_under};
+    use std::io::ErrorKind;
+    let scratch = crate::paths::tests::Scratch::new("procfs");
+    let root = &scratch.0;
+    let own = 40;
+    std::fs::create_dir(root.join("self")).expect("made");
+    std::fs::create_dir(root.join("12")).expect("made");
+    std::fs::write(
+        root.join("12/stat"),
+        stat_line("sh", &stat_fields("S", own, 12, 1)),
+    )
+    .expect("written");
+    let status = root.join("self/status");
+    let view = |text: &str| std::fs::write(&status, text).expect("written");
+    view("Name:\tsh\nNStgid:\t40\nNSpid:\t40\n");
+    assert_eq!(leader_under(root, 12, own).expect("read"), Leader::Running);
+    assert_eq!(leader_under(root, 13, own).expect("read"), Leader::Reaped);
+    for text in [
+        "NStgid:\t41\n",
+        "NStgid:\t7\t40\n",
+        "NStgid:\t40\t7\n",
+        "NStgid:\n",
+        "Name:\tsh\n",
+    ] {
+        view(text);
+        for pid in [12, 13] {
+            let error = leader_under(root, pid, own).expect_err(text);
+            assert_eq!(error.kind(), ErrorKind::InvalidData, "{text}");
+            assert!(error.to_string().contains("self/status"), "{error}");
+        }
+    }
+    std::fs::remove_file(&status).expect("removed");
+    let error = leader_under(root, 13, own).expect_err("no view");
+    assert_eq!(error.kind(), ErrorKind::NotFound);
+    assert!(error.to_string().contains("self/status"), "{error}");
+    view("NStgid:\t40\n");
+    std::fs::create_dir_all(root.join("14/stat")).expect("made");
+    let error = leader_under(root, 14, own).expect_err("a directory reads as no record");
+    assert_eq!(error.kind(), ErrorKind::IsADirectory);
+    let text = error.to_string();
+    assert!(
+        text.contains("14/stat") && !text.contains("self/status"),
+        "{text}"
+    );
 }
 
 /// A leader that exits reads as exited and stays unreaped: each signal of the stop is sent while the
@@ -320,15 +401,122 @@ fn a_failed_signal_an_empty_group_and_a_reap_past_its_bound() {
     assert!(matches!(stopped, super::GroupStopped::Reaped(status) if status.code() == Some(3)));
 
     let mut child = ignoring_term();
-    let mut ignored = |_: libc::pid_t, _: i32| Ok(true);
-    let brief = Duration::from_millis(50);
-    let stop = super::GroupStop::new(brief, None, Some(brief), PAUSE);
-    let stopped = super::stop_with(&mut child, &stop, &mut ignored).expect("the stop runs");
-    let running = super::leader(child.id()).expect("the state reads");
+    let mut times = Vec::new();
+    let mut ignored = |_: libc::pid_t, signal: i32| {
+        times.push((signal, Instant::now()));
+        Ok(true)
+    };
+    let (grace, bound) = (Duration::from_millis(200), Duration::from_millis(400));
+    let stop = super::GroupStop::new(grace, None, Some(bound), PAUSE).with_second_grace();
+    let stopped = super::stop_with(&mut child, &stop, &mut ignored);
+    let returned = Instant::now();
+    let running = super::leader(child.id());
     child.kill().expect("the child is killed");
     child.wait().expect("the child is reaped");
-    assert_eq!(stopped, super::GroupStopped::Running);
-    assert_eq!(running, super::Leader::Running);
+    assert_eq!(
+        stopped.expect("the stop runs"),
+        super::GroupStopped::Running
+    );
+    assert_eq!(running.expect("the state reads"), super::Leader::Running);
+    let signals: Vec<i32> = times.iter().map(|&(signal, _)| signal).collect();
+    assert_eq!(signals, [libc::SIGTERM, libc::SIGKILL, libc::SIGKILL]);
+    let second = times[2].1.saturating_duration_since(times[1].1);
+    assert!(second >= grace, "the second grace lasted {second:?}");
+    let reap = returned.saturating_duration_since(times[2].1);
+    assert!(reap >= bound, "the reap waited {reap:?}");
+}
+
+/// A signal that fails after a wait outside the stop reaped the leader ends the stop with that error and
+/// no further signal: the leader's id may by then name another group.
+#[test]
+fn a_failed_signal_after_a_reap_elsewhere_sends_no_further_signal() {
+    let mut child = group_leader("exit 0");
+    let pid = pid_of(&child);
+    let state = super::leader_left_within(child.id(), WAIT, PAUSE, &|| false);
+    assert_eq!(state.expect("the state reads"), super::Leader::Exited);
+    let mut sent = Vec::new();
+    let mut send = |_: libc::pid_t, signal: i32| {
+        sent.push(signal);
+        if signal == libc::SIGTERM {
+            reap_outside(pid);
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        Ok(true)
+    };
+    let stop = super::GroupStop::new(WAIT, None, Some(WAIT), PAUSE);
+    let error = super::stop_with(&mut child, &stop, &mut send).expect_err("the signal fails");
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    assert_eq!(sent, [libc::SIGTERM]);
+}
+
+/// A signal that fails while the exited leader is held unreaped still sends SIGKILL to its group before
+/// any wait, so a member that ignores SIGTERM is killed by the time the stop returns.
+#[test]
+fn a_failed_signal_while_the_leader_is_a_zombie_still_kills_its_group() {
+    let scratch = crate::paths::tests::Scratch::new("zombie-group");
+    let marker = scratch.0.join("member");
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        Command::new("sh")
+            .args([
+                "-c",
+                "trap '' TERM; sleep 600 & echo $! > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"",
+                "sh",
+            ])
+            .arg(&marker)
+            .process_group(0)
+            .spawn()
+            .expect("the leader starts")
+    };
+    let pid = child.id();
+    let state = super::leader_left_within(pid, WAIT, PAUSE, &|| false);
+    assert_eq!(state.expect("the state reads"), super::Leader::Exited);
+    let member: libc::pid_t = std::fs::read_to_string(&marker)
+        .expect("the leader wrote its member")
+        .trim()
+        .parse()
+        .expect("a process id");
+    let mut sent = Vec::new();
+    let mut send = |group: libc::pid_t, signal: i32| {
+        sent.push((signal, super::leader(pid).expect("the state reads")));
+        if signal == libc::SIGTERM {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        super::signal_group(group, signal)
+    };
+    let stop = super::GroupStop::new(WAIT, None, Some(WAIT), PAUSE);
+    let error = super::stop_with(&mut child, &stop, &mut send).expect_err("the signal fails");
+    let ended = || {
+        std::fs::read(format!("/proc/{member}/stat")).map_or(true, |stat| {
+            let state = stat
+                .iter()
+                .rposition(|&byte| byte == b')')
+                .map(|at| stat.get(at + 2));
+            state == Some(Some(&b'Z'))
+        })
+    };
+    let start = Instant::now();
+    while !ended() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let killed = ended();
+    if !killed {
+        // SAFETY: `kill` takes two integers and touches no memory of the caller.
+        unsafe { libc::kill(member, libc::SIGKILL) };
+    }
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    assert_eq!(
+        sent,
+        [
+            (libc::SIGTERM, super::Leader::Exited),
+            (libc::SIGKILL, super::Leader::Exited)
+        ]
+    );
+    assert!(killed, "the member {member} is killed");
+    assert!(
+        matches!(child.try_wait(), Ok(Some(status)) if status.code() == Some(0)),
+        "the stop reaped the leader"
+    );
 }
 
 #[test]
@@ -392,6 +580,7 @@ fn a_failed_read_of_the_state_kills_and_reaps_the_child_itself() {
     };
     let stop = super::GroupStop::new(WAIT, None, Some(WAIT), PAUSE);
     let stopped = super::stop_with(&mut child, &stop, &mut undelivered);
+    let reaped = !Path::new(&format!("/proc/{pid}")).exists();
     let status = child.try_wait();
     if !matches!(status, Ok(Some(_))) {
         let _ = child.kill();
@@ -400,6 +589,7 @@ fn a_failed_read_of_the_state_kills_and_reaps_the_child_itself() {
     let error = stopped.expect_err("the child leads no group, so its state is refused");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(sent, [(pid, libc::SIGKILL)]);
+    assert!(reaped, "the stop reaped the child before it returned");
     let status = status
         .expect("the wait runs")
         .expect("the stop reaped the child");

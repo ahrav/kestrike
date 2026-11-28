@@ -9,11 +9,7 @@ use super::fixture::{Fixture, shown, text_of, write_plant};
 use super::swept::{digest, exited, same, suspect};
 
 fn archive_of(run: &[String]) -> String {
-    let at = run
-        .iter()
-        .position(|arg| arg == "--archive")
-        .expect("--archive");
-    run[at + 1].clone()
+    super::standins::option(run, "--archive").to_owned()
 }
 
 /// `failures` are the run, seed and head result of each of the entry's head failures.
@@ -378,4 +374,29 @@ fn a_base_worktree_add_that_prints_no_text_is_tried_again_at_the_next_seed_check
     );
     fx.verdict("p-twopass", "caught", "violation: a rule in run");
     assert_eq!(fx.calls(&["sim", "run"]).len(), 1);
+}
+
+/// A base archive whose kept `Cargo.lock` cannot be read gives the first seed check `did not run:` with
+/// the path and the system's text, and the next seed check prepares the base again. That attempt adds
+/// the worktree at the path the first attempt filled, so Git refuses it, the refusal is kept in
+/// `base/git.err`, and no second base archive builds.
+#[test]
+fn an_unreadable_base_lockfile_is_tried_again_and_the_retry_meets_the_first_worktree() {
+    if super::repository::is_root() {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-twopass"], &[("STANDIN_BASE_LOCK_UNREADABLE", "1")]);
+    exited(&done, 3);
+    fx.verdict(
+        "p-twopass",
+        "no verdict",
+        "the seed check of violation: a rule in run 7 of a did not run: \
+         <work>/base/archive/Cargo.lock: Permission denied (os error 13)",
+    );
+    let kept = fs::read_to_string(fx.work.join("base/git.err")).expect("the retry's error is kept");
+    assert!(kept.starts_with("git worktree exited 128:\n"), "{kept}");
+    assert!(kept.contains("already exists"), "{kept}");
+    assert_eq!(fx.calls(&["sim", "archive"]).len(), 2);
+    assert!(fx.calls(&["sim", "run"]).is_empty());
 }

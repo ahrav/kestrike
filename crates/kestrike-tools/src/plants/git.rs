@@ -12,8 +12,9 @@
 //! and a name holding `=` after its first byte stops the call before Git starts. Git inherits every
 //! descriptor of this process that is open without close-on-exec, beside the three streams.
 //!
-//! [`text_until`] is the text call that reads a signal record: a signal recorded before Git ends kills
-//! Git with SIGKILL, waits up to ten seconds for it and returns [`CallError::Interrupted`].
+//! [`text_until`] is the text call that reads a signal record: a signal recorded before the call starts
+//! no Git, and one recorded while Git runs kills Git with SIGKILL and waits up to ten seconds for it;
+//! both return [`CallError::Interrupted`].
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -64,7 +65,8 @@ pub enum CallError {
     NotUtf8 { step: Text },
     /// A checked call that exited with a code other than 0; `stderr` is its error output.
     Failed { step: Text, code: i32, stderr: Text },
-    /// A signal recorded before Git ended; Git was killed.
+    /// A signal recorded before Git ended: before the call, when no Git started, or while Git ran, when
+    /// Git was killed.
     Interrupted(Interrupted),
 }
 
@@ -175,11 +177,14 @@ fn decoded(step: Text, output: std::process::Output) -> Result<Done<String>, Cal
     })
 }
 
-/// `text_until` runs `git FIXED -C dir ARGS` as [`text`] does, reading `interrupt` while Git runs.
+/// `text_until` runs `git FIXED -C dir ARGS` as [`text`] does, reading `interrupt` before it starts Git
+/// and while Git runs. A signal recorded before the call starts no Git; one recorded while Git runs
+/// kills Git with SIGKILL and waits up to ten seconds for it.
 ///
 /// # Errors
 ///
-/// As [`text`], and [`CallError::Interrupted`] for a signal recorded before Git ended.
+/// As [`text`], and [`CallError::Interrupted`] for a signal recorded before Git ended. A wait that
+/// fails leaves Git as [`crate::process::capture`] states.
 pub fn text_until(
     env: &Environ,
     dir: &Path,

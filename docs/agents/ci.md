@@ -1363,8 +1363,8 @@ snapshot's two file shapes, the five AWS calls and the reply fields it reads.
 over an in-process fake control plane and judges what it wrote on a copy of
 the held fixture; no test calls a real control plane. The pre-push hook runs
 it for a push that changes the controller, its self-test, its fixtures, the
-held fixture or a file it loads or reads, as the header of
-`scripts/pre-push-checks.py` lists.
+held fixture or a file it loads or reads, as [the pre-push checks](#pre-push-checks)
+list.
 
 ## Lane admission
 
@@ -1394,51 +1394,245 @@ change. A skipped proof lane is not proof credit.
 ## Pre-push checks
 
 With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` runs
-`scripts/pre-push-checks.py`, then the user-wide hook. It runs the checks
-`AGENTS.md` requires before a push, in a temporary worktree of each pushed tip,
-when the push changes a trigger the script header lists. The
-worktree checks run the pushed tip's own scripts. A failed check blocks the
-push. CI runs the selection and reconciliation checks on every PR; the model
-links check and its self-test run in the hook. The chaos contract check, the
-pinned validator `chaos/tools/validate_contract.py` with
-`--check-claim chaos/READINESS.md`, and the judges' test
-`chaos/tests/test_judges.py` run in the hook and by hand; no CI job runs them.
-The game-day judge's self-test `scripts/test-gameday-judge.py` runs in the
-hook, for a change to a file it reads, and by hand; no CI job runs it yet.
-The hook starts `scripts/pre-push-checks.py`, each chaos check and the
-game-day self-test as
-`python3 -I`, so a file beside the program and the `PYTHON*` variables have
-no effect on its imports.
-The hook runs the contract check for a push that changes `chaos` or a path
-under `chaos/`, and at a tip that holds `scripts/chaos-receipt-replay.py` that
-script, which runs each run receipt's judge again on its evidence and fails a
-receipt that differs from the one the judge writes, in the verdict or in any
-other field but the time and the interpreter of the judging; its header lists
-its other refusals. The hook runs the judges' test for a change to a file that test reads or,
-at a tip that holds the test, to
-`crates/campaign-supervisor/src/campaign/calibration/controls.rs`,
-`crates/campaign-supervisor/src/campaign/seeds/required.rs`,
-`crates/campaign-supervisor/src/campaign/seeds.rs` or
-`crates/campaign-supervisor/src/protocol/summary.rs`. That last
-run checks each of those files only where a test under `chaos/tests/` reads
-it; where none does, a pass says nothing about it. At a tip
-with no comparison base it runs the contract check when the tip holds
-`chaos/ledger.json`, and the judges' test when the tip holds
-`chaos/tests/test_judges.py`. The hook also refuses a push whose chaos
-receipts or run records hold what may be an AWS account number, in the tip or
-in a pushed commit, or are not JSON, or whose `chaos/`
-tree holds a link, or where a pushed commit makes a record path a link or a
-submodule. A pushed commit is one the tip reaches that neither the ref
-line's remote commit nor a remote-tracking ref of the pushed-to remote
-reaches, so a refused record in a commit the destination holds refuses no
-later push. The header of `scripts/pre-push-checks.py` lists
-the exact inputs, records and number forms.
+`bash scripts/tool.sh pre-push-checks REMOTE` with Git's ref lines on standard
+input, then the user-wide hook. The tool `pre-push-checks` runs the checks
+`AGENTS.md` requires before a push, each in a worktree of the pushed tip that
+it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
+at the end. The worktree checks run the pushed tip's own scripts, a fetched
+commit pushed under a new name included. A failed check blocks the push. The
+tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
+as the pushing user's: where another user can rename entries in it, as in a
+directory writable by others without the sticky bit, that user can swap
+either between the steps that name it. The default `/tmp` is sticky. CI
+runs the selection and reconciliation checks on every PR; the model links check
+and its self-test run in the hook. The chaos contract check, the receipt
+replay, the judges' test and the game-day judge's and the host stop
+controller's self-tests run in the hook and by hand; no CI job runs them.
 
-Before the worktree checks, the hook runs
-`bash scripts/tool.sh scan-weakened-tests` over the pushed commits. The scan
-reads Git objects and has no worktree, so the hook
-runs the launcher beside `scripts/pre-push-checks.py`, which builds the tool of
-the invoking checkout. CI runs the same scanner in the `Weakened-test scan` step of
+Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`.
+For each pushed tip the tool lists the files the push changes against the
+remote commit, or against the tip's merge base with `origin/main` for a new
+branch or a remote commit this clone lacks, and runs the checks those files
+require:
+
+- `python3 scripts/test-select-tests.py` and
+  `python3 scripts/verify-receipts.py admit` for a change to the test inventory
+  or registry, the selection and receipt scripts and their judges
+  (`scripts/judge-*.py`), the obligation catalog and
+  `verification/control-less.json`, a checker's `expected.json`, a file under
+  `verification/intake/`, the atomic census and its classifier, the TLC and
+  Quint runners, the Verus inventory, `.github/workflows/agent-checks.yml`, or
+  a Rust change to an `#[ignore]` or `cfg_attr(.., ignore)` attribute or to the
+  name of the fn it marks;
+- `python3 scripts/judge-verus.py reconcile` for a change under
+  `verification/verus/` or to a source its inventory names;
+- at a tip that holds `verification/models/links.json`,
+  `python3 scripts/model-links.py check` for a change to the registry, a model
+  it enrolls, a file one of its rows cites, `tla/check.py`, the Verus or RC11
+  judge, or the links check or its self-test, and for a change to one of those
+  scripts also `python3 scripts/test-model-links.py`. A push that removes the
+  registry from a tip that keeps the links check runs the check, which refuses
+  the tree;
+- for `chaos` itself or a path under `chaos/`, the contract check
+  `python3 -I chaos/tools/validate_contract.py chaos/ledger.json --root . --project chaos/project.yaml --receipts chaos/receipts --check-claim chaos/READINESS.md`,
+  then, at a tip that holds it, `python3 -I scripts/chaos-receipt-replay.py`,
+  which runs each run receipt's judge again on its evidence and fails a receipt
+  that differs from the one the judge writes, in the verdict or in any other
+  field but the time and the interpreter of the judging; its header lists its
+  other refusals. A change to the replay runs it at any tip, so a push that
+  removes it fails on the missing file. A change at or under `chaos/harness`,
+  `chaos/judges`, `chaos/tests`, `chaos/tools` or `chaos/receipts`, or to
+  `chaos/ledger.json`, `chaos/project.yaml` or `chaos/approval-policy.md`,
+  also runs the judges' test, `python3 -I chaos/tests/test_judges.py`, which
+  reads each of them;
+- the judges' test, at a tip that holds it, for a change to
+  `crates/campaign-supervisor/src/campaign/calibration/controls.rs`,
+  `crates/campaign-supervisor/src/campaign/seeds/required.rs`,
+  `crates/campaign-supervisor/src/campaign/seeds.rs` or
+  `crates/campaign-supervisor/src/protocol/summary.rs`. That run checks each
+  of those files only where a test under `chaos/tests/` reads it; where none
+  does, a pass says nothing about it;
+- `python3 -I scripts/test-gameday-judge.py`, at a tip that holds it, for a
+  change to `scripts/gameday-judge.py`, its self-test, a path under
+  `scripts/gameday-fixtures/`, `scripts/readiness.py`, a script of its
+  `OWNING` tuple (which it loads or hashes at import),
+  `scripts/fis-profiles.json`, `verification/readiness/gamedays.json`, a file
+  that declares one of the judge's `FLEET_BOUNDS`
+  (`crates/kestrike/src/failover/zone_loop/directory.rs`,
+  `crates/kestrike/src/failover/standbys.rs`) or
+  `verification/readiness/failover.json`. A change to the judge or its
+  self-test runs it at any tip, so a push that removes the self-test fails on
+  the missing file;
+- `python3 -I scripts/test-host-stop-controller.py`, at a tip that holds it,
+  for a change to `scripts/host-stop-controller.py`, its self-test, a path
+  under `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`,
+  `scripts/fis-controller.py`, or a file the game-day judge reads
+  (`scripts/gameday-judge.py`, `scripts/readiness.py`, a script of its `OWNING`
+  tuple, `scripts/fis-profiles.json`, `verification/readiness/gamedays.json` or
+  a file that declares one of its `FLEET_BOUNDS`). A change to the controller
+  or its self-test runs it at any tip, so a push that removes the self-test
+  fails on the missing file.
+
+The five checks above that start as `python3 -I` take their imports from the
+interpreter's installation, so a file beside the program at the pushed tip and
+the `PYTHON*` variables have no effect on them. Each check starts with the
+push's environment, the tool's three streams and the worktree as its working
+directory.
+
+Before the worktree checks, the tool guards the chaos records: the receipts
+(each `.json` path under `chaos/receipts/` or `chaos/tests/receipts/`) and the
+run records (`run.json` of each run directory under `chaos/runs/` or
+`chaos/tests/runs/`), which carry the harness's own paths, commands and
+output. At a tip with a change under `chaos/` or with no comparison base, it
+refuses the tip when an entry at or under `chaos/` is a link or a submodule,
+when `chaos`, `chaos/tests` or a record directory is not a directory, when a
+record path is not a regular file, and when a record holds what may be an AWS
+account number. For every ref it also reads each record that a pushed commit
+adds or changes, merges' side branches included. A pushed commit is one the
+tip reaches and the destination is not known to hold. The destination holds
+the remote commit of the ref line and each commit that a remote-tracking ref
+of REMOTE reaches, as of this clone's last fetch or push. REMOTE is the hook's
+first argument, the name of the remote the push goes to; a URL or a missing
+name selects no remote-tracking ref, and the remote commit alone bounds the
+history. The refs of another remote whose name starts with `REMOTE/` are left
+out, and a REMOTE whose own name starts with another remote's name and `/`
+selects no remote-tracking ref either. A refused record in a commit the
+destination holds therefore refuses no later push. The tool refuses the push
+when a pushed commit's record holds such a number, or when a pushed commit
+makes a record path a link or a submodule, naming that commit. It decodes a
+record as JSON and matches each key, string and integer in it; a record that
+is not JSON, or that Git cannot read, refuses the push. A match is 12 digits
+with no ASCII letter or digit beside them, so a digit run inside a SHA-256
+digest is no match, or three groups of 4 joined by `-` with no ASCII letter,
+digit or `-` beside them. Every Git command of the tool reads the original
+objects and ignores `refs/replace/`, since a push sends the originals, and
+reads pathspecs with their magic whatever pathspec mode
+(`GIT_LITERAL_PATHSPECS` and its kin) the push set; the checks and the scan
+start in that environment too.
+
+Any other Rust change runs no worktree check here, with three exceptions: a
+tip whose Verus inventory `git show` returns as bytes that are no UTF-8 JSON
+object, or whose `sources` is a number, a Boolean, `null` or a list holding a
+list or an object, runs reconciliation on any change; a tip whose links
+registry `git show` returns as bytes that are no UTF-8 JSON object, that lack
+`models` or `rows`, or whose models, rows or anchors cannot be iterated or
+hold an item of another shape than the selector reads, runs the links check
+on any change; and a
+changed Rust path that holds a line feed runs the selection and admission
+checks. The first two apply on any nonempty diff from the comparison base,
+whatever path changed, and the third to `.rs` paths alone. A `git show` that
+runs and exits nonzero reads as an absent file, while Git that cannot start,
+output that cannot be read and a recorded signal end the plan: an absent inventory names no
+source, and an absent registry names the registry alone at a tip that holds
+the links check and nothing at another. The selector reads no further schema:
+an inventory with no `sources`, or whose `sources` is an object or a string,
+names the keys or the code points it iterates to, and a number, a Boolean or
+`null` among its items names nothing. The census and
+witness checks read production source and the intake checks of `admit` read
+the regression files, their crates' `Cargo.toml` and the module files on their
+paths, `narrate/rules.rs`, the history sources, the `site.path` file of each
+escape whose fix is not delivered, and, for a model reference, the `tla/` and
+`quint/` models, the TLC configurations and the Quint case modules. After
+moving or renaming such a file, run `python3 scripts/verify-receipts.py admit`
+yourself; CI runs the selection and reconciliation checks on every PR.
+
+Before the guard, each ref line with a comparison base runs the weakened-test
+scan of `scan-weakened-tests` over BASE..TIP inside the tool, with the push's
+environment and the tool's standard error as its report stream, and prints
+`pre-push: TIP: tool.sh scan-weakened-tests --base BASE` before it. Every
+nonzero scan exit is a failed check, named
+`scripts/tool.sh scan-weakened-tests --base BASE --head TIP`, and the
+worktree checks still run after it. A ref line with no comparison base prints
+that its scan was skipped and runs every worktree check: the links checks only
+at a tip that holds the registry or the links check, the contract check only
+at a tip that holds `chaos/ledger.json`, the replay only beside it, and the
+judges' test and the two self-tests each only at a tip that holds it; it also
+guards that tip's chaos records. A deleted ref needs no check, and a blank
+line is skipped.
+
+The tool prints each failure as `pre-push: failed: FAILURE` at the end. Exit 0
+passes; 1 is a failed check or a failed step of the tool's own (reading
+standard input, making or removing the worktree's directory, starting or
+waiting for a check or for `git worktree add`, starting Git, or reading or
+writing the batch read's Git child), named by a `pre-push-checks: ` line or,
+for Git that cannot start for the worktree's removal, by the line that names
+the worktree; 2 is every other refusal before the checks, printed as
+`pre-push: ` and its text: a malformed ref line, a Git read that exits
+nonzero where the read is not a presence test (Git's own text), Git output
+that is not UTF-8, a tree entry or a raw diff record of a form Git's manual
+does not give, and a Git argument the standard library refuses (the tool's
+text), and a `git worktree add` that exits nonzero, which exits 1 where Git
+cannot start for the removal; 2 is also signal handlers that cannot be
+installed, named by a `pre-push-checks: ` line. A guarded chaos record that is
+missing or not JSON is a failure listed at the end, and exits 1 with the
+failed checks. A presence read, and a read of the inventory or the registry,
+whose Git command exits nonzero reads as an absent file, and a removal that
+Git refuses is a warning. 120 is a failed write to standard error. A panic in
+the scan ends the tool with 101.
+
+The tool records the first of SIGTERM, SIGHUP, SIGINT and SIGQUIT that
+reaches it, whatever disposition or mask it inherited: it blocks the four
+while it
+installs their handlers, then unblocks them, and it sets SIGCHLD to its
+default disposition before it starts any child. It reads the record after
+reading standard input, after each Git read of a ref line's plan and of the
+guard, after each scan, after each line it prints, and while it waits for
+`git worktree add` or a check; once it reads a record it starts no further
+Git read, scan or check. Each check,
+`git worktree add` and `git worktree remove` leads a process group of its own.
+On a record the tool sends SIGKILL to the group of the running check or add
+while its leader is the tool's own child that it has not reaped, a leader that
+ended and waits for its reap included, then reaps the leader; a leader already
+reaped gets no signal. On Apple's systems a `killpg` that fails with `EPERM`
+beside a leader that has ended reads as a group already ended, also where the
+group's only live members are processes the tool may not signal, which then
+run on; Linux reports success in both cases. It removes the worktree once, and the removal runs to
+its end, since a signal to the tool's process group does not reach it. It
+prints only a failed removal and a check whose SIGKILL or reap failed, and
+exits `128 + n`. The read of standard input, each Git read of a plan or of
+the guard, and the scan are not interrupted; the record is acted on when each
+returns, also when it failed, before its result is used or a skipped scan's
+note is printed, so a tool started by hand with a
+pipe or a terminal on standard input waits for that input to end. No check
+has a time limit. On Linux the group's SIGKILL also reaches a process that a
+member of the group forks while it is delivered; on other systems such a
+process can run on.
+A `git worktree add` that ends after registering a locked worktree whose
+directory lacks its `.git` file leaves that registration: the removal fails,
+the tool prints `pre-push: could not remove worktree <tree>: <reason>`, and
+`git worktree unlock` and then `git worktree prune`, or a doubly forced
+`git worktree remove`, clear the entry, which `git worktree list` shows. An
+add stopped earlier can leave an entry under the repository's common
+`.git/worktrees` directory that holds only its `locked` file: Git lists no
+such worktree, the tool's removal names a tree Git does not know, and the
+entry's directory under `.git/worktrees` is deleted by hand. A line to
+standard error is written in slices of at most 512 bytes, and before each
+slice the tool waits while the stream cannot take a write; a recorded signal
+ends that wait with `128 + n`. Another writer that fills the stream between
+the poll and the write can still hold a slice's write until the stream's
+reader drains it.
+A removal that Git refuses prints the same line, the worktree stays
+registered, and the checks' results decide the exit. A check, or `git worktree add` and what it starts, that
+reads the terminal or changes its modes stops by SIGTTIN or SIGTTOU in its
+background group, and the tool waits for it. SIGKILL cannot be caught: a
+SIGKILL to Git's process group ends the tool, while the running check or add
+runs on in its own group and its worktree stays registered.
+
+No handler covers a signal that never reaches the tool. Git starts the hook
+in Git's own process group and signals no group. At a terminal, the
+terminal's signals reach Git, the hook's bash, the tool and the tool's Git
+reads, and not a check or the worktree's add or removal, each of which leads a
+group of its own: the terminal's SIGINT and SIGQUIT reach the tool, which
+stops the check as above, while its SIGTSTP stops the tool and not the check,
+and under `stty tostop` a check that writes to the terminal stops and the tool
+waits for it. Dying of a signal, Git
+2.50.1 to 2.53 signals no hook process (run on 2.50.1), and Git 2.54.0 to
+2.56.1 signals the hook's own process id alone (read in Git's
+`run-command.c`). The hook's bash then dies, or waits on SIGINT, and the tool
+with its check runs to its end. While the launcher builds the tool at line 6
+of the hook, the same holds for Cargo (read, not run).
+
+CI runs the same scanner in the `Weakened-test scan` step of
 the `comment-policy` job, after `Obligation catalog admission`. On a pull
 request that step scans from the first parent of the test merge, so its range
 holds the pull request's commits alone. The hook's range starts at the remote

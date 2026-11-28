@@ -281,9 +281,10 @@ fn half() -> Value {
     Value::Float(0.5)
 }
 
-/// A record whose summary is no string earns no verdict and leaves the file readable, so an unlisted
+/// A mutant record whose summary is `null` earns no verdict and leaves the file readable, so an unlisted
 /// mutant with a null summary beside a listed one the tool caught gives a complete run with that one
-/// caught.
+/// caught. A boolean or a number as a summary reads the same way; an array or an object makes the file
+/// unreadable.
 #[test]
 fn an_unlisted_mutant_with_a_null_summary_leaves_the_run_complete() {
     let fx = Fixture::new("null-summary");
@@ -1102,6 +1103,117 @@ fn a_failed_write_of_the_help_exits_120_with_one_line() {
     );
 }
 
+/// A help written to a standard output at the soft file size limit fails with `EFBIG`, which ends no
+/// process: one line on standard error and exit 120.
+#[test]
+fn a_help_past_the_file_size_limit_exits_120_with_one_line() {
+    let scratch = kestrike_tools::temp_dir::make_temp_dir(
+        "help-limit-",
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+    )
+    .expect("the scratch is made");
+    let sink = scratch.join("full.out");
+    let limit = 64 * 1024;
+    fs::write(&sink, vec![b'x'; limit]).expect("written");
+    let out = fs::OpenOptions::new()
+        .append(true)
+        .open(&sink)
+        .expect("opens");
+    let mut command = std::process::Command::new(fixture::BINARY);
+    command
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["mutants-diff", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(out);
+    fixture::limit_file_size(&mut command, u64::try_from(limit).expect("fits"));
+    let out = command.output().expect("the tool runs");
+    fs::remove_dir_all(&scratch).expect("the scratch is removed");
+    assert_eq!(
+        (out.status.code(), String::from_utf8_lossy(&out.stderr)),
+        (
+            Some(120),
+            "mutants-diff: standard output: File too large (os error 27)\n".into()
+        ),
+        "{:?}",
+        out.status
+    );
+}
+
+/// A write past the soft file size limit fails with `EFBIG`, which ends no process: a diff longer than
+/// the limit fails the run with an incomplete report that names `diff.patch` and holds no digest, and an
+/// untracked `Cargo.lock` longer than it fails the copy with an incomplete report that names the
+/// worktree's `Cargo.lock`; either way no worktree stays.
+#[test]
+fn a_write_past_the_file_size_limit_fails_the_run_with_a_report() {
+    const LIMIT: u64 = 64 * 1024;
+    let filler = "// filler\n".repeat(30_000);
+    let fx = Fixture::new("diff-past-limit");
+    fx.write(
+        &lib_rs(),
+        &format!("pub fn one() -> u32 {{ 1 }}\npub fn two() -> u32 {{ 2 }}\n{filler}"),
+    );
+    let head = fx.commit("long head");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().head(&head).file_limit(LIMIT).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(
+        found.contains("diff.patch") && found.contains("os error 27"),
+        "{found}"
+    );
+    assert_eq!(get(&report, "diff_sha256"), &Value::Null);
+    assert!(fx.calls().is_empty(), "no listing runs");
+    assert_eq!(registered(&fx), 1);
+
+    let fx = Fixture::new("lock-past-limit");
+    fs::write(fx.repo.join("Cargo.lock"), &filler).expect("the lock is written");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().file_limit(LIMIT).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(
+        found.contains("Cargo.lock") && found.contains("os error 27"),
+        "{found}"
+    );
+    assert!(fx.calls().is_empty(), "no listing runs");
+    assert_eq!(registered(&fx), 1);
+    let run = only(fx.reports());
+    let run = run.parent().expect("the report has a run directory");
+    let trees: Vec<_> = fs::read_dir(run)
+        .expect("the run directory lists")
+        .map(|entry| entry.expect("an entry reads").path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert!(trees.is_empty(), "no worktree stays: {trees:?}");
+}
+
+/// The run ignores SIGXFSZ and each child it starts, captured or supervised, Git and Cargo alike, starts
+/// with SIGXFSZ at its default action.
+#[test]
+fn every_child_starts_with_sigxfsz_at_its_default() {
+    let fx = Fixture::new("sigxfsz-default");
+    fs::write(fx.state.join("record_sigign"), "").expect("written");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().env(fx.git_wrapper("")).run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    let lines = fs::read_to_string(fx.state.join("sigign")).expect("the stand-ins recorded");
+    let masks: Vec<u64> = lines
+        .lines()
+        .map(|line| {
+            let mask = line.strip_prefix("SigIgn:").expect("a SigIgn line");
+            u64::from_str_radix(mask.trim(), 16).expect("a mask")
+        })
+        .collect();
+    assert!(masks.len() >= 8, "{lines}");
+    for mask in masks {
+        assert_eq!(mask & (1 << (libc::SIGXFSZ - 1)), 0, "{lines}");
+    }
+}
+
 /// The diff is created as a new file: a link a child of the run left at `diff.patch` before the write
 /// fails the run with an incomplete report that names the path and holds no digest, the file the link
 /// names stays as it was, and no listing runs.
@@ -1122,6 +1234,10 @@ fn a_link_at_the_diff_s_path_fails_the_run_and_its_target_stays() {
     assert!(found.contains("diff.patch"), "{found}");
     assert_eq!(get(&report, "diff_sha256"), &Value::Null);
     assert_eq!(fs::read_to_string(&victim).expect("UTF-8"), "victim before");
+    assert_eq!(
+        fs::read_link(planted.trim_end()).expect("the planted link stays"),
+        victim
+    );
     assert!(fx.calls().is_empty(), "no listing runs");
 }
 
@@ -1143,6 +1259,26 @@ fn the_report_replaces_an_entry_at_its_path_and_writes_through_no_link() {
         "victim before"
     );
     let report = only(fx.reports());
+    let linked = fs::read_to_string(fx.state.join("report_linked")).expect("the link was planted");
+    let [linked] = linked.lines().collect::<Vec<_>>()[..] else {
+        panic!("one link was planted: {linked}");
+    };
+    let linked = std::path::Path::new(linked);
+    assert_eq!(
+        (
+            linked.file_name(),
+            linked.parent().map(|parent| parent
+                .canonicalize()
+                .expect("the link's directory resolves"))
+        ),
+        (
+            report.file_name(),
+            report.parent().map(|parent| parent
+                .canonicalize()
+                .expect("the report's directory resolves"))
+        ),
+        "the link stood at the report's path"
+    );
     assert!(
         fs::symlink_metadata(&report).is_ok_and(|status| status.is_file()),
         "the report is a regular file"

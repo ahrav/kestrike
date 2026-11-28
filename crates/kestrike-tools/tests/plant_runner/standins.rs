@@ -4,8 +4,8 @@
 //! `/dev/null`.
 //!
 //! The `campaign` stand-in reads the mode of the tree it archives, or of the archive it sweeps, to act out
-//! one outcome; it logs each call's arguments as a JSON array in `STANDIN_LOG`. A sweep adds 200 runs to
-//! each profile, and 100 to `slow`; a seed check passes only on the archive of mode `base` and only for a
+//! one outcome; it logs each call's arguments as a JSON array in `STANDIN_LOG`. A sweep adds 200 to each
+//! profile's `next`, and 100 to that of `slow`, and 50 fewer to its counted `runs` and passes; a seed check passes only on the archive of mode `base` and only for a
 //! seed other than 665, 666, 777 and 555. The `python3` stand-in either runs the head's staged helper,
 //! reading the tree's mode, or answers the question to it from the staged file's text: the verdict texts
 //! of its `RESULTS` line, and `reported` where the file defines it.
@@ -13,6 +13,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::FromRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -108,7 +109,8 @@ fn digest(mode: &str) -> String {
     hexdigest(mode.as_bytes())
 }
 
-fn option<'a>(args: &'a [String], name: &str) -> &'a str {
+/// `option` is the value after `name` in `args`.
+pub fn option<'a>(args: &'a [String], name: &str) -> &'a str {
     let at = args
         .iter()
         .position(|arg| arg == name)
@@ -310,8 +312,8 @@ fn campaign(args: &[String], out: &mut File) -> i32 {
         }
         Some("sweep") => sweep(args, &log),
         Some("sweep-status") => status(args, out),
-        Some("confirm") => confirm(args, out),
-        Some("sim") if args.get(1).is_some_and(|arg| arg == "run") => seed(args, out),
+        Some("confirm") => confirm(args, &log, out),
+        Some("sim") if args.get(1).is_some_and(|arg| arg == "run") => seed(args, &log, out),
         _ => 2,
     }
 }
@@ -349,8 +351,16 @@ fn archive(args: &[String], place: &Path, log: &Path, out: &mut File) -> i32 {
         std::os::unix::fs::symlink("kept.lock", output.join("Cargo.lock")).expect("linked");
     } else if mode == "dirlock" {
         fs::create_dir(output.join("Cargo.lock")).expect("the directory is made");
+    } else if mode == "longlock" {
+        let mut longer = fs::read("Cargo.lock").expect("the lockfile reads");
+        longer.push(b'\n');
+        fs::write(output.join("Cargo.lock"), longer).expect("the lockfile is kept");
     } else if mode != "nolock" && mode != "nolockarchive" {
         fs::copy("Cargo.lock", output.join("Cargo.lock")).expect("the lockfile is kept");
+        if mode == "base" && var("STANDIN_BASE_LOCK_UNREADABLE").is_some() {
+            fs::set_permissions(output.join("Cargo.lock"), fs::Permissions::from_mode(0o000))
+                .expect("the kept lockfile is made unreadable");
+        }
     }
     let mut seen = Object::new();
     for name in [
@@ -382,6 +392,10 @@ fn archive(args: &[String], place: &Path, log: &Path, out: &mut File) -> i32 {
     pins.insert("platform", string(&format!("p-{mode}")));
     pins.insert("toolchain", string(&format!("t-{mode}")));
     say(out, &json_line(&pins));
+    if mode == "hiddenlock" {
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o600))
+            .expect("the archive is made unsearchable");
+    }
     0
 }
 
@@ -476,15 +490,12 @@ fn sweep(args: &[String], log: &Path) -> i32 {
         .collect();
     if !root.exists() {
         fs::create_dir(&root).expect("the root is made");
-        kestrike_tools_chmod(&root, 0o700);
+        super::repository::chmod(&root, 0o700);
     }
     let _ = fs::create_dir(root.join("manifests"));
     let path = root.join("state.json");
     let mut state = if path.exists() {
-        match json::parse(&read(&path)).expect("the state is JSON") {
-            Value::Object(state) => state,
-            other => panic!("{other:?}"),
-        }
+        load(&path)
     } else {
         let mut state = Object::new();
         state.insert("profiles", Value::Object(Object::new()));
@@ -597,11 +608,6 @@ fn sweep(args: &[String], log: &Path) -> i32 {
     }
 }
 
-fn kestrike_tools_chmod(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("the mode is set");
-}
-
 fn load(path: &Path) -> Object {
     match json::parse(&read(path)).expect("the stand-in's state is JSON") {
         Value::Object(state) => state,
@@ -676,13 +682,11 @@ fn big(number: u128) -> Value {
     Value::Integer(Integer::from_digits(false, &number.to_string()).expect("digits"))
 }
 
-fn confirm(args: &[String], out: &mut File) -> i32 {
+fn confirm(args: &[String], log: &Path, out: &mut File) -> i32 {
     let root = PathBuf::from(option(args, "--root"));
     let mode = mode_of(Path::new(option(args, "--archive")));
     if mode == "hangconfirm" {
-        hold_until_released(&PathBuf::from(
-            var("STANDIN_LOG").expect("the call log is named"),
-        ));
+        hold_until_released(log);
     }
     if mode == "deepconfirm" {
         say(out, &"[".repeat(100_000));
@@ -826,12 +830,10 @@ fn result(out: &mut File, class: &str, reason: &str, artifact: Option<&str>) {
     say(out, &json_line(&printed));
 }
 
-fn seed(args: &[String], out: &mut File) -> i32 {
+fn seed(args: &[String], log: &Path, out: &mut File) -> i32 {
     let mode = mode_of(Path::new(option(args, "--archive")));
     if option(args, "--manifest").contains("/plants/p-hangseed/") {
-        hold_until_released(&PathBuf::from(
-            var("STANDIN_LOG").expect("the call log is named"),
-        ));
+        hold_until_released(log);
     }
     let text = read(Path::new(option(args, "--manifest")));
     let manifest: Vec<(&str, &str)> = text
@@ -880,6 +882,10 @@ fn seed(args: &[String], out: &mut File) -> i32 {
 pub const COUNTS_EVERY: &str = "# reported counts every rerun\n";
 pub const RAISES: &str = "# reported raises on a rerun\n";
 pub const HOLDS: &str = "# the question holds\n";
+/// A helper line that makes the question of a rerun that exited 1, a planted rerun's, raise.
+pub const RAISES_PLANTED: &str = "# reported raises on a rerun that exited 1\n";
+/// A helper line that makes the question of a rerun that exited 1 wait for its release.
+pub const HOLDS_PLANTED: &str = "# the question of a rerun that exited 1 holds\n";
 
 /// `results` reads the verdict texts of the staged helper's `RESULTS` line: `CODE: "TEXT"` items.
 fn results(helper: &str) -> Vec<(i32, String)> {
@@ -932,18 +938,14 @@ fn question(args: &[String], out: &mut File) -> i32 {
     let rest = &given[at + 1..];
     let helper = String::from_utf8(rest[..size].to_vec()).expect("the helper is text");
     let given_line = String::from_utf8(rest[size..].to_vec()).expect("the line is text");
-    if let Some(log) = var("STANDIN_LOG") {
-        let place = Path::new(&log)
-            .parent()
-            .expect("the log lies in the scratch directory");
-        seen_replacement(place, "question");
-    }
     let place = PathBuf::from(var("STANDIN_LOG").expect("the call log is named"))
         .parent()
         .expect("the log lies in the scratch directory")
         .to_path_buf();
+    seen_replacement(&place, "question");
     append(&place.join("helpers"), &format!("question {}\n", args[0]));
-    if helper.contains(HOLDS) {
+    let planted = args.get(1).is_some_and(|code| code == "1");
+    if helper.contains(HOLDS) || (planted && helper.contains(HOLDS_PLANTED)) {
         write(&place.join("question-ready"), "");
         let release = place.join("question-release");
         for _ in 0..600 {
@@ -971,7 +973,7 @@ fn question(args: &[String], out: &mut File) -> i32 {
         Some(code) => {
             let code: i32 = code.parse().expect("the question names an exit");
             let line = given_line;
-            if helper.contains(RAISES) {
+            if helper.contains(RAISES) || (planted && helper.contains(RAISES_PLANTED)) {
                 eprintln!("Traceback (most recent call last):");
                 eprintln!("ValueError: no count");
                 return 1;
@@ -1050,6 +1052,11 @@ fn helper(args: &[String], out: &mut File) -> i32 {
     if mode == "unlock" {
         fs::remove_file("Cargo.lock").expect("the lockfile is removed");
     }
+    if mode == "growlock" {
+        let mut longer = fs::read("Cargo.lock").expect("the lockfile reads");
+        longer.push(b'\n');
+        fs::write("Cargo.lock", longer).expect("the lockfile is written");
+    }
     if var("STANDIN_COMMIT_IN").is_some_and(|wanted| wanted == mode) {
         let committed = Command::new("git")
             .args([
@@ -1079,7 +1086,7 @@ fn helper(args: &[String], out: &mut File) -> i32 {
         let pinned = Path::new(target).join("pinned");
         fs::create_dir(&pinned).expect("the pinned directory is made");
         write(&pinned.join("file"), "held");
-        kestrike_tools_chmod(&pinned, 0o500);
+        super::repository::chmod(&pinned, 0o500);
     }
     if let Some(rewrite) = var("STANDIN_REWRITE")
         && mode == var("STANDIN_REWRITE_IN").unwrap_or_else(|| "pass".to_owned())

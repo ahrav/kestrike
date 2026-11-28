@@ -1055,6 +1055,21 @@ class Built(unittest.TestCase):
         self.assertIn("cluster-order-3 1 runs of 1 required", output)
 
 
+def decoded_values(text: str) -> list[str]:
+    """Each key, string and integer of the JSON document text as text; a Boolean, a float and null are skipped."""
+    pending: list[Any] = [json.loads(text, object_pairs_hook=lambda pairs: [part for pair in pairs for part in pair])]
+    found = []
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str):
+            found.append(value)
+        elif isinstance(value, int) and not isinstance(value, bool):
+            found.append(str(value))
+    return found
+
+
 class Figure(unittest.TestCase):
     """The lower bound's arithmetic and the row's numbers against their sources."""
 
@@ -1141,11 +1156,16 @@ class Figure(unittest.TestCase):
                 self.assertLessEqual(figure.written(value, down=True), value)
 
     def test_no_string_of_a_receipt_holds_what_the_hook_reads_as_an_account_number(self) -> None:
-        spec = importlib.util.spec_from_file_location("chaos_pre_push", ROOT / "scripts" / "pre-push-checks.py")
-        assert spec is not None and spec.loader is not None
-        hook = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(hook)
-        self.assertTrue(hook.ACCOUNT_NUMBER.search("a 123456789012 b"))
+        # What the pre-push hook refuses in a chaos record as a possible AWS account number: 12 ASCII digits
+        # with no ASCII letter or digit beside them, or three groups of 4 joined by `-` with no ASCII
+        # letter, digit or `-` beside them, matched in each key, string and integer the record decodes to.
+        account_number = re.compile(r"(?<![0-9A-Za-z])[0-9]{12}(?![0-9A-Za-z])"
+                                    r"|(?<![0-9A-Za-z-])[0-9]{4}-[0-9]{4}-[0-9]{4}(?![0-9A-Za-z-])")
+        self.assertTrue(account_number.search("a 123456789012 b"))
+        self.assertTrue(account_number.search("account 1234-5678-9012"))
+        sample = '{"123456789012": ["role 1234-5678-9012", 123456789012, -7, 0.5, true, null], "k": "a", "k": "b"}'
+        self.assertEqual(sorted(decoded_values(sample)),
+                         ["-7", "123456789012", "123456789012", "a", "b", "k", "k", "role 1234-5678-9012"])
         for run_id in (LIVE, UNMET):
             tree = Tree(confidence=0.95123456789012)
             try:
@@ -1155,9 +1175,8 @@ class Figure(unittest.TestCase):
                     self.assertIn(code, (HELD, BROKEN), output)
                     key = json.loads(receipt.read_text(encoding="utf-8"))["key"]
                     text = json.dumps({name: key[name] for name in ("detail", "scope", "figure", "figure_rounding")})
-                    values = hook.record_values(text)
-                    self.assertIsNotNone(values)
-                    self.assertEqual([value for value in values if hook.ACCOUNT_NUMBER.search(value)], [])
+                    values = decoded_values(text)
+                    self.assertEqual([value for value in values if account_number.search(value)], [])
                     self.assertIn("95.1234567%", output)
             finally:
                 shutil.rmtree(tree.scratch, ignore_errors=True)

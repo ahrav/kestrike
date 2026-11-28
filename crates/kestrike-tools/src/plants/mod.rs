@@ -46,6 +46,7 @@ mod prepare;
 mod proof;
 mod publish;
 mod record;
+mod removal;
 mod rerun;
 mod run;
 pub mod score;
@@ -60,19 +61,22 @@ mod verdict;
 mod work;
 
 pub use child::{Logged, logged};
-pub use ending::{GitFailed, Halt, Step, Stopped};
+pub use ending::{Halt, Stopped};
 pub use entry::{Entry, Finished};
 pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
+pub(crate) use publish::UNANNOUNCED;
 pub use publish::{
-    Creation, Staging, UNANNOUNCED, conclude, publish, publish_staged, publish_with,
+    Creation, Staging, THREAD_STATUS, conclude, publish, publish_staged, publish_with, umask,
 };
 pub use record::{FIELDS, Plant, RECORD_BOUND};
+pub(crate) use removal::remove;
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
 pub(crate) use run::said;
-pub use run::{Remained, Run, remove};
+pub(crate) use run::stands;
+pub use run::{Remained, Run};
 pub use seed::Manifest;
 pub use status::{Runs, profile_runs};
 pub use store::{SCORE, STORE};
