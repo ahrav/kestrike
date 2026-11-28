@@ -249,32 +249,36 @@ pub enum Opened {
     File(fs::File),
 }
 
-/// `open_regular` opens the regular file `path` names, following links, and checks the opened file, so a
-/// check and the read that follows it name the same file. [`status`] decides first, so an entry that is
-/// no regular file, a device or a socket a link names included, is never opened; the open does not wait
-/// on a FIFO and takes no controlling terminal, and an opened file that is no regular file is
-/// [`Opened::Other`].
+/// `open_regular` follows symbolic links. The descriptor check and the caller's read use the same open
+/// file. The path can change between [`status`] and the open, so `open_regular` returns
+/// [`Opened::File`] only when `fstat` identifies the open file as regular.
 ///
 /// # Errors
 ///
-/// [`status`] fails, the open fails with an error outside [`ignored`], or the opened file's `fstat`
-/// fails.
+/// [`open_regular`] propagates errors from [`status`], the open, or the descriptor's `fstat`, so a file
+/// removed between [`status`] and the open is an error that names the path.
 pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
-    use std::os::unix::fs::OpenOptionsExt;
     match status(path)? {
-        None => return Ok(Opened::Absent),
-        Some(found) if !found.is_file() => return Ok(Opened::Other),
-        Some(_) => {}
+        None => Ok(Opened::Absent),
+        Some(found) if !found.is_file() => Ok(Opened::Other),
+        Some(_) => opened(path),
     }
-    let file = match fs::OpenOptions::new()
+}
+
+/// `opened` uses `fstat` to classify the open descriptor. `O_NONBLOCK` makes the open of a FIFO return
+/// at once, and `O_NOCTTY` preserves the process's controlling-terminal state when `path` resolves to a
+/// terminal.
+///
+/// # Errors
+///
+/// The open or the `fstat` fails; the error names `path`.
+fn opened(path: &Path) -> Result<Opened, PathError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if ignored(&error) => return Ok(Opened::Absent),
-        Err(error) => return Err(PathError::new(path, error)),
-    };
+        .map_err(|error| PathError::new(path, error))?;
     let status = file
         .metadata()
         .map_err(|error| PathError::new(path, error))?;
@@ -417,3 +421,7 @@ impl fmt::Display for PathError {
 /// The `Display` text holds the path and the I/O error's text, so the error reports no `source`;
 /// [`PathError::error`] gives the I/O error itself.
 impl std::error::Error for PathError {}
+
+#[cfg(test)]
+#[path = "ownership_tests.rs"]
+mod tests;
