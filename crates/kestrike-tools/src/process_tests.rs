@@ -781,8 +781,8 @@ fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
     let mut role = Command::new(std::env::current_exe().expect("the test executable"));
     role.args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
         .env(BLOCKED_ROLE, "1");
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal` and
-    // `pthread_sigmask`, which are async-signal-safe, on a local set.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, `sigemptyset`,
+    // `sigaddset` and `pthread_sigmask`, which are async-signal-safe, on a local set.
     unsafe {
         use std::os::unix::process::CommandExt;
         role.pre_exec(|| {

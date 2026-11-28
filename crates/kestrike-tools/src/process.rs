@@ -1,4 +1,4 @@
-//! Signals and child processes that two tools share: the record of the handled signals and its
+//! Signals and child processes that the tools share: the record of the handled signals and its
 //! handlers, the hold and the block of those signals, the refusal of a run with SIGCHLD ignored, the
 //! reading of a child's exit, the wait for a child that sees a recorded signal, the captured child, and
 //! the stop of a process group that a child leads.
@@ -332,7 +332,7 @@ pub(crate) const SIGCHLD_IGNORED: &str = "SIGCHLD is ignored, so the child's exi
 
 /// `refuse_ignored_sigchld` is the refusal of a start with SIGCHLD ignored. A tool that starts children
 /// through this module calls it before its first child starts and ends the run with the returned sentence
-/// as it ends a run whose child failed to start.
+/// by its own refusal.
 ///
 /// # Errors
 ///

@@ -19,6 +19,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
+use super::child::suffixed;
 use super::entry::Finished;
 use super::prepare::Inputs;
 use super::run::Run;
@@ -146,13 +147,6 @@ impl<'a> Staging<'a> {
         self.modified = Some(nanoseconds);
         self
     }
-}
-
-/// `suffixed` is `path` with `suffix` after its last component's name.
-fn suffixed(path: &Path, suffix: &str) -> PathBuf {
-    let mut named = path.as_os_str().to_owned();
-    named.push(suffix);
-    PathBuf::from(named)
 }
 
 /// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from

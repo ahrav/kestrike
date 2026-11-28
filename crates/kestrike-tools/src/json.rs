@@ -1,4 +1,4 @@
-//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`],
+//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`line`], [`indented`],
 //! [`indented_in_order`] and [`indented_by`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits,
 //! which adds, steps down by one and sums without passing that bound.
 //!

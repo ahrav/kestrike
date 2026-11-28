@@ -110,7 +110,8 @@ pub struct Logged<'a> {
     pub work: &'a Path,
 }
 
-fn suffixed(log: &Path, suffix: &str) -> PathBuf {
+/// `suffixed` is `log` with `suffix` after its last component's name.
+pub(super) fn suffixed(log: &Path, suffix: &str) -> PathBuf {
     let mut name = log.as_os_str().to_os_string();
     name.push(suffix);
     PathBuf::from(name)

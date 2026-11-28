@@ -1,5 +1,6 @@
-//! [`Reader::parse`] parses command-line arguments against an [`Opt`] table. Missing required options take
-//! precedence over leftover arguments.
+//! [`Reader::parse`] parses command-line arguments against an [`Opt`] table, and [`Commands::parse`] reads a
+//! command word before the options of that word's reader. Missing required options take precedence over
+//! leftover arguments.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
