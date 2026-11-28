@@ -13,8 +13,9 @@
 //! last signal, so while the stop signals the group the leader's id names that group alone. That holds
 //! while the caller is the leader's only waiter from its start until the stop returns: no other code of
 //! the process waits for that child or for any child, and SIGCHLD is neither ignored nor set with
-//! `SA_NOCLDWAIT`. A missing state file, `ECHILD` and [`GroupStopped::ReapedElsewhere`] report a reap
-//! outside the stop after it happened; they do not prevent one.
+//! `SA_NOCLDWAIT`. A missing state file, a record that names another parent, `ECHILD` and
+//! [`GroupStopped::ReapedElsewhere`] report a reap outside the stop after it happened; they do not
+//! prevent one.
 
 use std::fs;
 use std::io::{self, Read};
@@ -449,7 +450,7 @@ fn own_view(root: &Path, own: u32) -> io::Result<()> {
 
 /// `leader` reads the state of the group leader `pid`, a child of this process, from
 /// `/proc/<pid>/stat` after [`own_view`] confirms that `/proc` is this process's view. A missing state
-/// file is [`Leader::Reaped`].
+/// file, or a record that names another parent, is [`Leader::Reaped`].
 ///
 /// # Errors
 ///
@@ -627,7 +628,8 @@ pub(crate) enum GroupStopped {
 enum Signalled {
     /// The leader is held unreaped and the reap follows.
     Reap,
-    /// The leader's state file is gone.
+    /// A read of the leader's state found [`Leader::Reaped`]: its state file is gone, or its record names
+    /// another parent.
     Gone,
 }
 
@@ -640,19 +642,20 @@ enum Signalled {
 /// returns: no other code of the process waits for `child` or for any child, and SIGCHLD is neither
 /// ignored nor set with `SA_NOCLDWAIT`. An exited leader held unreaped meets that. If a signal finds the
 /// group empty, `stop_group` proceeds to the reap. The stop detects a wait elsewhere only after that wait
-/// has reaped the leader, and does not prevent it. A missing state file stops the signals and prompts a
-/// wait for the child: `ECHILD` from that wait or from the reap is [`GroupStopped::ReapedElsewhere`].
+/// has reaped the leader, and does not prevent it. A missing state file, or a record that names another
+/// parent, stops the signals and prompts a wait for the child: `ECHILD` from that wait or from the reap
+/// is [`GroupStopped::ReapedElsewhere`].
 ///
 /// # Errors
 ///
 /// A read of the leader's state, a signal other than to an empty group, or the reap fails, or the state
-/// file is gone while the child still runs. `stop_group` then reads the leader's state once more: a
+/// file is gone, or the record names another parent, while the child still runs. `stop_group` then reads the leader's state once more: a
 /// leader that reads running or exited, or whose read fails, gets SIGKILL to its group before any wait,
 /// since the sole-waiter precondition holds it unreaped; a caller that breaks that precondition while the
 /// read fails gets one SIGKILL to a group id that may have been taken again. A leader whose state file is
 /// gone, or whose record names another parent, gets that SIGKILL only where `child.try_wait()` then finds
-/// it running. A running child
-/// also gets SIGKILL to itself, and the reap runs again. `stop_group` returns the first error.
+/// it running. A running child also gets SIGKILL to itself, and the reap runs again. `stop_group` returns
+/// the first error.
 pub(crate) fn stop_group(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
     stop_with(child, stop, &mut signal_group)
 }
@@ -674,7 +677,7 @@ fn stop_with(
             Ok(Some(status)) => Ok(GroupStopped::Reaped(status)),
             Ok(None) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "the state file of a running child is gone",
+                "the state record of a running child is gone or names another parent",
             )),
         },
     });
@@ -693,8 +696,8 @@ fn stop_with(
     })
 }
 
-/// `signals` sends the stop's signals. Once a read of the leader's state finds its state file gone it
-/// sends no further signal.
+/// `signals` sends the stop's signals. Once a read of the leader's state finds [`Leader::Reaped`], its
+/// state file gone or its record naming another parent, it sends no further signal.
 fn signals(
     pid: u32,
     group: libc::pid_t,
