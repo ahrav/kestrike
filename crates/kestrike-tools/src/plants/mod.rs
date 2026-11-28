@@ -39,6 +39,7 @@ mod lock;
 mod options;
 mod output;
 mod prepare;
+mod proof;
 mod record;
 mod rerun;
 mod run;
