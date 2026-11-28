@@ -16,7 +16,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::process::{
-    GroupStop, Interrupted, Leader, POLL, Stopped, child_defaults, handled_set, leader_left_within,
+    GroupStop, GroupStopped, Interrupted, Leader, POLL, child_defaults, handled_set, leader_left_within,
     stop_group,
 };
 pub use crate::process::{INTERRUPT, Interrupt, SIGNALS, install_handlers};
@@ -55,7 +55,12 @@ pub fn ignore_signals() -> io::Result<()> {
 /// The stop of a supervised child's group: two graces of 10 s, a reap of up to 10 s and pauses of up to
 /// [`POLL`] between two reads of the leader's state.
 const STOP: GroupStop<'static> =
-    GroupStop::new(Duration::from_secs(10), Some(Duration::from_secs(10)), POLL)
+    GroupStop::new(
+        Duration::from_secs(10),
+        None,
+        Some(Duration::from_secs(10)),
+        POLL,
+    )
         .with_second_grace();
 
 /// `lead_new_session` makes the child started by `command` lead a new session, return each of [`SIGNALS`]
@@ -151,12 +156,12 @@ pub fn supervise(
         stop_group(&mut child, &STOP).map_err(|error| Stop::failed(&Fault::os(&error, None)))?;
     ended?;
     match stopped {
-        Stopped::Reaped(status) => Ok(exit_code(status)),
-        Stopped::ReapedElsewhere => {
+        GroupStopped::Reaped(status) => Ok(exit_code(status)),
+        GroupStopped::ReapedElsewhere => {
             let error = io::Error::from_raw_os_error(libc::ECHILD);
             Err(Stop::failed(&Fault::os(&error, None)))
         }
-        Stopped::Running => {
+        GroupStopped::Running => {
             let error = io::Error::new(io::ErrorKind::TimedOut, "the child outlived its stop");
             Err(Stop::failed(&Fault::os(&error, None)))
         }
