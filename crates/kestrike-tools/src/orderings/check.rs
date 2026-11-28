@@ -974,7 +974,8 @@ fn inputs(read: Reader<'_>, root: &Path) -> Result<Inputs, String> {
 /// The report and the exit code of the catalog check: the catalog, the declarations and the scoped
 /// files come from `read`, the kernel package is walked under the checkout `root`, and the crate
 /// sources that can declare an included file are found under `tree`. `package_walk` lists the sources
-/// the scope rule classifies; the kernel texts and the include defects are read on disk under `root`. A strength constant with no `S::NAME` mention in its file takes its op from its pin in `pins`.
+/// the scope rule classifies; the kernel texts and the include defects are read on disk under `root`.
+/// A strength constant with no `S::NAME` mention in its file takes its op from its pin in `pins`.
 ///
 /// The check acts with the authority of its caller and trusts the directories it is given; it reads
 /// each input whole.

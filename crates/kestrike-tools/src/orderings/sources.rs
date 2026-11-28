@@ -972,8 +972,8 @@ impl Classifier<'_> {
 ///
 /// # Errors
 ///
-/// `scope_files` returns an error of `package_walk`, of the walk of the crate's sources, of [`resolve`] for a
-/// source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
+/// `scope_files` returns an error of `package_walk`, of the walk of the crate's sources, of [`resolve`]
+/// for a source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
 /// UTF-8, and an error for an included file at the top of the checkout whose standing depends on a
 /// sibling named after the top's own empty name.
 pub fn scope_files(

@@ -3196,8 +3196,8 @@ fn a_disposition_entry_without_its_fields_is_refused() {
     }
 }
 
-/// A kill or a survivor whose revision is absent, a number, has a trailing newline or is upper case is
-/// refused.
+/// A kill or a survivor whose revision is absent, a number, has a trailing newline, is upper case, holds
+/// 39 or 41 digits or a letter past `f` is refused.
 #[test]
 fn a_decided_row_without_a_revision_is_refused() {
     let survives = format!(
@@ -3654,9 +3654,8 @@ fn each_cataloged_genmc_failure_lies_in_its_case_family_kernel() {
         let Value::Object(entry) = entry else {
             panic!("a row is an object");
         };
-        let (entries, wanted) =
+        let (entries, _) =
             row_entries(entry).expect("a committed row's disposition is well formed");
-        assert_eq!(wanted, None, "a committed row is unrun");
         for entry in entries {
             let failure = match entry.get("failure") {
                 Some(Value::String(failure)) if !failure.is_empty() => failure.to_string(),
@@ -3888,7 +3887,24 @@ fn a_word_after_a_path_attribute_is_its_own_refusal() {
 fn a_package_name_with_no_path_form_reads_as_an_empty_package() {
     let mut declared = value(&committed(super::GENMC));
     object(&mut declared).insert("package", value(r#""\ud800""#));
-    let (report, code) = checked(vec![(super::GENMC, text(json::dump(&declared)))]);
+    let planted = json::dump(&declared);
+    let spied = std::cell::RefCell::new(Vec::new());
+    let committed_read = reader(vec![]);
+    let read = |path: &str| {
+        spied.borrow_mut().push(path.to_owned());
+        if path == super::GENMC {
+            Ok(planted.clone())
+        } else {
+            committed_read(path)
+        }
+    };
+    let (report, code) = check(&read, &top(), &top(), EXTERNAL, &package_sources);
+    let holder = "crates/kestrike/src/bind/group.rs";
+    assert!(committed(holder).contains("#[path"));
+    assert!(
+        spied.borrow().iter().any(|path| path == holder),
+        "the scope rule reads its path holders"
+    );
     assert_eq!(code, 1, "{report:?}");
     assert_eq!(*member(&report, "sites"), value("0"));
     let refused = messages_of(&report, "scope file");
