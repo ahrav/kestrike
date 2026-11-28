@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{self, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -89,7 +89,9 @@ pub fn mappings_facts(path: &OsStr) -> Option<Object> {
         .custom_flags(libc::O_NONBLOCK)
         .open(path)
         .ok()?;
-    regular(&file)?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut data = Vec::new();
     file.read_to_end(&mut data).ok()?;
     let lines = Text::from(String::from_utf8_lossy(&data).into_owned()).splitlines();
@@ -117,22 +119,18 @@ pub fn mappings_facts(path: &OsStr) -> Option<Object> {
             .find(|(key, _)| *key == name)
             .map(|(_, value)| Text::from(*value))
     };
-    let text = |value: Option<Text>| value.map_or(Value::Null, Value::String);
+    let or_null = |value: Option<Text>| value.map_or(Value::Null, Value::String);
     let mut facts = Object::new();
     facts.insert("path", Value::String(Text::from_os(path)));
     facts.insert("sha256", Value::String(Text::from(hexdigest(&data))));
-    facts.insert("format", text(version));
+    facts.insert("format", or_null(version));
     facts.insert(
         "functions",
         Value::Array(functions.into_iter().map(Value::String).collect()),
     );
-    facts.insert("volume", text(first("nvme.volume")));
-    facts.insert("address", text(first("eni.ipv4")));
+    facts.insert("volume", or_null(first("nvme.volume")));
+    facts.insert("address", or_null(first("eni.ipv4")));
     Some(facts)
-}
-
-fn regular(file: &File) -> Option<()> {
-    file.metadata().ok()?.is_file().then_some(())
 }
 
 #[cfg(test)]

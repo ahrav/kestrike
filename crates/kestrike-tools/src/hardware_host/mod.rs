@@ -15,6 +15,10 @@
 //! - [`held_custody`] removes a marker only when it names another boot, or a group none of whose
 //!   processes still holds memory.
 //!
+//! The locks are `flock` locks of an open file description, which exclude each other across processes and
+//! threads on a local filesystem; where a filesystem emulates `flock` with POSIX record locks, as NFS
+//! does, they exclude processes alone, so a caller then appends from one thread of a process at a time.
+//!
 //! Each function returns a value or a typed error and prints nothing. The clocks and the sleep are one
 //! [`Clocks`] value; `/proc` and the boot identity's path are arguments.
 //!

@@ -1,9 +1,9 @@
-//! The expected revisions, sentences and facts were recorded from the hardware lane's functions with
-//! the same stand-in programs on `PATH` and the same bytes.
+//! Each stand-in `git` stands alone on a `PATH` of its own directory, and each case writes its bytes in
+//! a scratch directory of its own.
 
-use std::ffi::{CString, OsString};
+use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::thread;
@@ -42,14 +42,15 @@ fn revision(top: &Path, environ: &Environ) -> Result<String, RevisionError> {
 }
 
 /// The revision is git's output stripped; git starts in `<top>/scripts` with `rev-parse HEAD` and the
-/// environment given, which here lacks `GIT_NO_REPLACE_OBJECTS`, while an environment that holds it
-/// passes it on.
+/// environment given alone: `GIT_NO_REPLACE_OBJECTS` reaches git only when the given environment holds
+/// it, and `CARGO_MANIFEST_DIR`, which the test process holds, never does.
 #[test]
 fn the_revision_is_the_stripped_output_of_rev_parse() {
     let scratch = Scratch::new("launch-revision");
     let calls = scratch.0.join("calls");
     let body = format!(
-        "printf '%s|%s\\n' \"$*\" \"${{GIT_NO_REPLACE_OBJECTS-unset}}\" >> '{}'; printf '  abc123\\r\\n\\n'",
+        "printf '%s|%s|%s\\n' \"$*\" \"${{GIT_NO_REPLACE_OBJECTS-unset}}\" \"${{CARGO_MANIFEST_DIR-unset}}\" \
+         >> '{}'; printf '  abc123\\r\\n\\n'",
         calls.display()
     );
     let mut environ = stand_in(&scratch, "ok", &body);
@@ -62,14 +63,14 @@ fn the_revision_is_the_stripped_output_of_rev_parse() {
     revision(top, &environ).expect("a revision");
     assert_eq!(
         fs::read_to_string(&calls).expect("the calls were written"),
-        "-C /checkout/top/scripts rev-parse HEAD|unset\n-C /checkout/top/scripts rev-parse HEAD|1\n"
+        "-C /checkout/top/scripts rev-parse HEAD|unset|unset\n-C /checkout/top/scripts rev-parse HEAD|1|unset\n"
     );
 }
 
-/// An exit other than 0 gives the lane's sentence with the code, a signal's number negated, and the
-/// standard error with `\r\n` read as `\n` and stripped.
+/// An exit other than 0 gives a sentence with the code, a signal's number negated, and the standard
+/// error with `\r\n` read as `\n` and stripped.
 #[test]
-fn a_failed_rev_parse_gives_the_lane_sentence() {
+fn a_failed_rev_parse_names_its_code_and_its_error() {
     let scratch = Scratch::new("launch-failed");
     let fails = stand_in(
         &scratch,
@@ -95,15 +96,16 @@ fn a_git_that_cannot_start_is_its_own_error() {
 }
 
 /// The facts come from one read of the bytes: the first `format=` line's value, the sorted functions,
-/// the first volume, an absent address as null, a `\x1c` as a line boundary, and undecodable bytes
-/// replaced; an empty file holds no facts but its digest.
+/// the first volume and address, a `\x1c` as a line boundary, and each undecodable byte replaced by
+/// U+FFFD; an empty file holds no facts but its digest, and nulls.
 #[test]
-fn the_mappings_facts_follow_the_lane() {
+fn the_mappings_facts_come_from_one_read() {
     let scratch = Scratch::new("launch-mappings");
     let path = scratch.0.join("m");
     fs::write(
         &path,
-        b"format=3\r\nnvme.bdf=b\neni.bdf=a\x1cnvme.volume=v=1\nnvme.volume=v2\nformat=9\n\xff\xfe=x\n",
+        b"format=3\r\nnvme.bdf=b\neni.bdf=a\x1cnvme.volume=v=1\nnvme.volume=v2\nformat=9\n\xff\xfe=x\n\
+          eni.ipv4=\xff1\neni.ipv4=z\n",
     )
     .expect("written");
     let facts = |path: &Path| {
@@ -112,7 +114,7 @@ fn the_mappings_facts_follow_the_lane() {
     assert_eq!(
         facts(&path).expect("facts"),
         format!(
-            r#"{{"path":"{}","sha256":"5e45c66f100c814a9dbf3a0ff2f1c030ad413bcb3fbcd025545c1e94e20cd23c","format":"3","functions":["a","b"],"volume":"v=1","address":null}}"#,
+            r#"{{"path":"{}","sha256":"6199ee948e32ca69a0d8feaeca6c555e0141ec9b159048dc9dc50dc370cc83eb","format":"3","functions":["a","b"],"volume":"v=1","address":"\ufffd1"}}"#,
             path.display()
         )
     );
@@ -139,8 +141,16 @@ fn a_path_that_is_no_regular_file_gives_none() {
     assert_eq!(mappings_facts(scratch.0.join("absent").as_os_str()), None);
     assert_eq!(mappings_facts(scratch.0.as_os_str()), None);
     let fifo = scratch.0.join("fifo");
-    let name = CString::new(fifo.as_os_str().as_bytes()).expect("no NUL");
-    // SAFETY: `name` is a NUL-terminated path that outlives the call.
-    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo starts");
+    assert!(made.success());
+    assert!(
+        fs::symlink_metadata(&fifo)
+            .expect("the FIFO stands")
+            .file_type()
+            .is_fifo()
+    );
     assert_eq!(mappings_facts(fifo.as_os_str()), None);
 }

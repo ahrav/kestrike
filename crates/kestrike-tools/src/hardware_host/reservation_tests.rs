@@ -2,7 +2,9 @@
 //! can meet a copy of the descriptor that another case's fork holds until its exec, so a case that
 //! expects the lock free looks for it over a bounded time.
 
-use std::os::unix::fs::symlink;
+use std::fs;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Child, Command};
 use std::thread;
@@ -42,13 +44,21 @@ fn sleeper() -> Command {
 }
 
 /// A second holder of the host gets none while the first holds it, and the reservation is taken again
-/// once the first drops.
+/// once the first drops. The lock file is made with mode 0644 less the umask.
 #[test]
 fn a_second_holder_gets_none() {
     let scratch = Scratch::new("reserve-second");
     let first = reserve_host(&scratch.0)
         .expect("the lock opens")
         .expect("the first holder takes it");
+    let mode = fs::metadata(scratch.0.join("fis.lock"))
+        .expect("the lock file stands")
+        .permissions()
+        .mode();
+    assert_eq!(
+        mode & 0o777,
+        0o644 & !crate::hardware_host::observer::tests::umask()
+    );
     assert!(reserve_host(&scratch.0).expect("the lock opens").is_none());
     drop(first);
     assert!(taken_soon(&scratch.0));
@@ -62,12 +72,23 @@ fn a_child_started_with_the_reservation_holds_it() {
     let reservation = reserve_host(&scratch.0)
         .expect("the lock opens")
         .expect("the reservation is taken");
+    let fd = reservation.file.as_raw_fd();
     let child = Reaped(
         reservation
             .spawn_holding(sleeper())
             .expect("the child starts"),
     );
+    let fdinfo = fs::read_to_string(format!("/proc/{}/fdinfo/{fd}", child.0.id()))
+        .expect("the child holds the descriptor at the same number");
+    let flags = fdinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("flags:"))
+        .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok())
+        .expect("the record names the flags");
+    assert_eq!(flags & libc::O_CLOEXEC as u32, 0);
     drop(reservation);
+    assert!(reserve_host(&scratch.0).expect("the lock opens").is_none());
+    thread::sleep(Duration::from_millis(200));
     assert!(reserve_host(&scratch.0).expect("the lock opens").is_none());
     drop(child);
     assert!(taken_soon(&scratch.0));

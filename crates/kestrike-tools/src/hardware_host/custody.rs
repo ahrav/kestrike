@@ -80,14 +80,15 @@ pub fn held_custody(directory: &Path, proc: &Path, boot: &Path) -> Result<Vec<Te
     let mut held = Vec::new();
     let current = boot_id(boot);
     for (marker, text) in markers(directory)? {
-        let record = fs::read(&marker).ok().and_then(|bytes| {
+        let read = fs::read(&marker).ok().and_then(|bytes| {
             let text = String::from_utf8(bytes).ok()?;
-            match json::parse(&text).ok()? {
-                Value::Object(record) if record.get("pgid").is_some() => Some(record),
-                _ => None,
-            }
+            let Value::Object(record) = json::parse(&text).ok()? else {
+                return None;
+            };
+            let pgid = record.get("pgid")?.clone();
+            Some((record, pgid))
         });
-        let Some(record) = record else {
+        let Some((record, pgid)) = read else {
             held.push(text!(&text, " (unreadable)"));
             continue;
         };
@@ -105,7 +106,6 @@ pub fn held_custody(directory: &Path, proc: &Path, boot: &Path) -> Result<Vec<Te
             "): ",
             &field("custody")
         );
-        let pgid = record.get("pgid").expect("a readable marker holds pgid");
         let recorded_boot = match record.get("boot") {
             Some(Value::String(recorded)) if is_identity(recorded) => Some(recorded),
             _ => None,
@@ -117,57 +117,59 @@ pub fn held_custody(directory: &Path, proc: &Path, boot: &Path) -> Result<Vec<Te
                 &text,
                 " once the hazard is confirmed over"
             ));
-        } else if current.is_none() || recorded_boot.is_none() {
+            continue;
+        }
+        if current.is_none() || recorded_boot.is_none() {
             held.push(text!(
                 &text,
                 " (the boot identity at ",
                 boot,
                 " or the one the marker records is unreadable, so the marker is judged held)"
             ));
-        } else if recorded_boot != current.as_ref() {
+            continue;
+        }
+        if recorded_boot != current.as_ref() {
             let _ = fs::remove_file(&marker);
-        } else if *pgid == Value::Null {
-            held.push(text!(
-                "an unknown group of ",
-                &place,
-                "; remove ",
-                &text,
-                " once its case is contained"
-            ));
-        } else if !matches!(pgid, Value::Integer(pgid) if *pgid > Integer::from(0u64)) {
-            held.push(text!(
-                &text,
-                " (unreadable process group ",
-                python::repr(pgid).as_str(),
-                ")"
-            ));
-        } else if let Some(members) = members(&record) {
-            let Value::Integer(pgid) = pgid else {
-                unreachable!("the branch above holds a positive integer pgid")
-            };
-            let members = members
-                .into_iter()
-                .map(|(pid, started)| {
-                    Integer::from_digits(false, pid)
-                        .map(|pid| (pid, started.clone()))
-                        .ok_or_else(|| CustodyError::Number(Text::from(pid)))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if still_held(proc, pgid, &members)? {
-                let mut line = text!("process group ", pgid, " of ", &place);
-                if members.is_empty() {
-                    line.push_text(&text!(
-                        "; ",
-                        &text,
-                        " records no member, so identify the group before containing it"
-                    ));
-                }
-                held.push(line);
-            } else {
-                let _ = fs::remove_file(&marker);
+            continue;
+        }
+        let pgid = match pgid {
+            Value::Null => {
+                held.push(text!(
+                    "an unknown group of ",
+                    &place,
+                    "; remove ",
+                    &text,
+                    " once its case is contained"
+                ));
+                continue;
             }
-        } else {
+            Value::Integer(pgid) if pgid > Integer::from(0u64) => pgid,
+            other => {
+                held.push(text!(
+                    &text,
+                    " (unreadable process group ",
+                    python::repr(&other).as_str(),
+                    ")"
+                ));
+                continue;
+            }
+        };
+        let Some(members) = members(&record)? else {
             held.push(text!(&text, " (unreadable members)"));
+            continue;
+        };
+        if still_held(proc, &pgid, &members)? {
+            let mut line = text!("process group ", &pgid, " of ", &place);
+            if members.is_empty() {
+                line.push_text(&text!(
+                    "; ",
+                    &text,
+                    " records no member, so identify the group before containing it"
+                ));
+            }
+            held.push(line);
+        } else {
+            let _ = fs::remove_file(&marker);
         }
     }
     Ok(held)
@@ -205,14 +207,19 @@ fn markers(directory: &Path) -> Result<Vec<(PathBuf, Text)>, CustodyError> {
         .collect())
 }
 
-/// The recorded members of a marker, each a pid's digits and its start time, or none when `members` is
-/// no object whose keys are ASCII digits without a leading zero and whose values are positive integers.
-fn members(record: &Object) -> Option<Vec<(&str, &Integer)>> {
+/// The recorded members of a marker, each a pid and its start time, or none when `members` is no object
+/// whose keys are ASCII digits without a leading zero and whose values are positive integers. Every key
+/// is checked before the first is read as a number.
+///
+/// # Errors
+///
+/// A key of more digits than an integer holds.
+fn members(record: &Object) -> Result<Option<Vec<(Integer, Integer)>>, CustodyError> {
     let Some(Value::Object(members)) = record.get("members") else {
-        return None;
+        return Ok(None);
     };
     let zero = Integer::from(0u64);
-    members
+    let checked: Option<Vec<(&str, &Integer)>> = members
         .iter()
         .map(|(pid, started)| {
             let digits = pid.to_str().filter(|digits| {
@@ -225,7 +232,19 @@ fn members(record: &Object) -> Option<Vec<(&str, &Integer)>> {
                 _ => None,
             }
         })
-        .collect()
+        .collect();
+    let Some(checked) = checked else {
+        return Ok(None);
+    };
+    checked
+        .into_iter()
+        .map(|(pid, started)| {
+            Integer::from_digits(false, pid)
+                .map(|pid| (pid, started.clone()))
+                .ok_or_else(|| CustodyError::Number(Text::from(pid)))
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
 }
 
 /// Whether the group `pgid`, whose members at marking time were `recorded`, still holds memory: a

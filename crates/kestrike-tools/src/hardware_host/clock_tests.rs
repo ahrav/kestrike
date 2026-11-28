@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,4 +29,26 @@ fn the_wall_reading_is_seconds_since_the_epoch() {
         .duration_since(UNIX_EPOCH)
         .expect("after the epoch");
     assert!(before.as_secs_f64() - 1e-6 <= wall && wall <= after.as_secs_f64() + 1e-6);
+}
+
+/// A reading of `time.monotonic_ns()` in a child Python lies between two readings taken around the
+/// child, so both read one clock of the host.
+#[test]
+fn the_monotonic_reading_is_the_clock_other_processes_read() {
+    let before = System.monotonic_ns().expect("the clock reads");
+    let output = Command::new("/usr/bin/python3")
+        .args(["-c", "import time; print(time.monotonic_ns())"])
+        .output()
+        .expect("python3 starts");
+    let after = System.monotonic_ns().expect("the clock reads");
+    assert!(output.status.success());
+    let child: u64 = String::from_utf8(output.stdout)
+        .expect("UTF-8")
+        .trim()
+        .parse()
+        .expect("a number");
+    assert!(
+        before <= child && child <= after,
+        "{before} <= {child} <= {after}"
+    );
 }

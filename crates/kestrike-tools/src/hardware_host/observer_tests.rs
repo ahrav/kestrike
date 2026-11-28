@@ -1,5 +1,5 @@
-//! Each expected text and line was recorded from the hardware lane's observer on the same bytes and
-//! readings, with the log's path and the host's node name put in their places.
+//! Each case writes its own log in a scratch directory and takes its lock alone; a case that expects an
+//! attempt to pass reads a clock under which a refusal waits for the next attempt.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -70,6 +70,7 @@ impl Clocks for Scripted {
 
     fn sleep(&mut self, _: &mut Record<'_>, length: Duration) -> Result<(), Interrupted> {
         assert_eq!(length, POLL);
+        assert!(self.sleeps < 10_000, "the wait ends within 10,000 sleeps");
         std::thread::sleep(Duration::from_millis(1));
         self.sleeps += 1;
         (self.on_sleep)(self.sleeps);
@@ -107,9 +108,9 @@ fn experiment() -> Object {
 
 /// An append writes one line of the event with its keys sorted, `, ` and `: ` between items, and the
 /// readings it takes under the lock, and returns that event; a field of the caller takes the place of
-/// the member of the same key.
+/// the member of the same key. The log is made with mode 0644 less the umask.
 #[test]
-fn an_append_writes_the_lane_line_for_fixed_readings() {
+fn an_append_writes_one_sorted_line_for_fixed_readings() {
     let scratch = Scratch::new("observer-append");
     let directory = scratch.0.join("deep/er");
     let mut slashed = directory.as_os_str().to_owned();
@@ -155,11 +156,17 @@ fn an_append_writes_the_lane_line_for_fixed_readings() {
         .expect("the log stands")
         .permissions()
         .mode();
-    assert_eq!(
-        mode & 0o022,
-        0,
-        "the log is made with mode 0644 under the test's umask"
-    );
+    assert_eq!(mode & 0o777, 0o644 & !umask());
+}
+
+/// The process's umask, from its `status` record.
+pub(crate) fn umask() -> u32 {
+    let status = fs::read_to_string("/proc/self/status").expect("the status reads");
+    let line = status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .expect("the status names the umask");
+    u32::from_str_radix(line.trim(), 8).expect("the umask is octal")
 }
 
 /// The ordinal counts the lines another writer left that are not blank once `\r\n` and `\r` end a
@@ -240,8 +247,7 @@ fn a_read_gives_every_event_in_order() {
     assert_eq!(events, expected);
 }
 
-/// A malformed line refuses a read with the lane's sentence up to `is malformed: `, and refuses an
-/// append, which then writes nothing; the same log without that line takes the append.
+/// A malformed line refuses a read with a sentence that names the log, and refuses an append, which then writes nothing; the same log without that line takes the append.
 #[test]
 fn a_malformed_line_refuses_a_read_and_an_append() {
     let scratch = Scratch::new("observer-malformed");
@@ -332,17 +338,87 @@ fn an_absent_log_and_no_log_give_nothing() {
     assert!(scratch.0.join("none.jsonl").exists());
 }
 
-/// Holds an exclusive lock of `path` through a file description of its own until `release`.
+/// Holds an exclusive lock of `path` through a file description of its own until it drops.
 fn holder(path: &Path) -> File {
-    let file = File::options()
+    let file = opened(path);
+    file.lock().expect("the holder locks");
+    file
+}
+
+fn opened(path: &Path) -> File {
+    File::options()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(path)
-        .expect("the holder opens");
-    file.lock().expect("the holder locks");
-    file
+        .expect("the holder opens")
+}
+
+/// A shared holder lets a read pass at its first attempt and holds an append off until the deadline,
+/// so an append's lock is exclusive and a read's shared.
+#[test]
+fn a_shared_holder_admits_a_read_and_holds_off_an_append() {
+    let scratch = Scratch::new("observer-shared");
+    let log = scratch.0.join("e.jsonl");
+    let shared = opened(&log);
+    shared.lock_shared().expect("the holder locks");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let observer = observer(scratch.0.as_os_str(), "e");
+    let mut clocks = Scripted::constant(READING);
+    assert_eq!(
+        observer.events(&mut clocks, &mut record).expect("reads"),
+        []
+    );
+    assert_eq!(clocks.sleeps, 0);
+    let limit = u64::try_from(LIMIT.as_nanos()).expect("the limit fits");
+    let mut clocks = Scripted::new(&[READING, READING + limit]);
+    assert!(matches!(
+        observer.append(&mut clocks, &mut record, "x", Object::new()),
+        Err(ObserverError::Held { .. })
+    ));
+    assert_eq!(fs::read_to_string(&log).expect("reads"), "");
+}
+
+/// Eight threads, each with an observer and opens of its own, append 25 events each to one log under
+/// the system's clocks; the log then holds 200 lines whose ordinals are 1 to 200, each once.
+#[test]
+fn writers_at_once_give_each_ordinal_once() {
+    let scratch = Scratch::new("observer-writers");
+    let directory = scratch.0.as_os_str().to_owned();
+    let writers: Vec<_> = (0..8)
+        .map(|_| {
+            let directory = directory.clone();
+            std::thread::spawn(move || {
+                let delivered = Delivered::new();
+                let mut record = Record::new(&delivered);
+                let observer = observer(&directory, "e");
+                for _ in 0..25 {
+                    observer
+                        .append(&mut System, &mut record, "x", Object::new())
+                        .expect("the append succeeds");
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("the writer ends");
+    }
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let mut ordinals: Vec<String> = observer(&directory, "e")
+        .events(&mut System, &mut record)
+        .expect("reads")
+        .iter()
+        .map(|event| match event {
+            Value::Object(event) => json::text(event.get("ordinal").expect("an ordinal")),
+            other => panic!("an event is an object: {other:?}"),
+        })
+        .collect();
+    ordinals.sort_by_key(|ordinal| ordinal.parse::<u32>().expect("a number"));
+    let expected: Vec<String> = (1..=200).map(|ordinal: u32| ordinal.to_string()).collect();
+    assert_eq!(ordinals, expected);
 }
 
 /// A lock freed before the limit is taken: the wait reads the clock once before the first attempt and
@@ -383,7 +459,7 @@ fn a_lock_freed_before_the_limit_is_taken() {
 
 /// A lock held past the limit ends the wait at the first reading at or past the first reading plus
 /// the limit, and a reading one nanosecond before it sleeps and tries again; the error names the
-/// refusal's `EWOULDBLOCK` and the lane's sentence with the limit in Python's float form.
+/// refusal's `EWOULDBLOCK` and the limit in Python's float form.
 #[test]
 fn a_lock_held_past_the_limit_ends_at_the_deadline() {
     let scratch = Scratch::new("observer-held");
@@ -518,4 +594,55 @@ fn ready_refuses_an_event_it_cannot_judge() {
         ready(&other, 0).expect("another profile's event needs no role"),
         None
     );
+}
+
+/// The read judges `kind` and `ordinal` of the role's events up to the one it finds: an event of the
+/// role without `kind` or `ordinal` after the found one leaves the result, and the same event before it
+/// refuses the read.
+#[test]
+fn ready_judges_the_role_events_up_to_the_one_found() {
+    let scratch = Scratch::new("observer-ready-lazy");
+    let found = r#"{"profile": "prof", "role": "lane", "kind": "ready", "ordinal": 1}"#;
+    for (name, lacking, missing) in [
+        (
+            "kind",
+            r#"{"profile": "prof", "role": "lane", "ordinal": 2}"#,
+            "kind",
+        ),
+        (
+            "ordinal",
+            r#"{"profile": "prof", "role": "lane", "kind": "ready"}"#,
+            "ordinal",
+        ),
+    ] {
+        let after = ready_log(
+            &scratch,
+            &format!("after-{name}"),
+            &format!("{found}\n{lacking}\n"),
+        );
+        let event = ready(&after, 0).expect("the found event ends the judging");
+        assert!(event.is_some());
+        let before = ready_log(
+            &scratch,
+            &format!("before-{name}"),
+            &format!("{lacking}\n{found}\n"),
+        );
+        match ready(&before, 0) {
+            Err(ObserverError::Event(EventError::Missing(member))) => assert_eq!(member, missing),
+            other => panic!("the event before is judged: {other:?}"),
+        }
+    }
+}
+
+/// An ordinal `true` counts as 1: past 0 and not past 1.
+#[test]
+fn ready_counts_a_true_ordinal_as_one() {
+    let scratch = Scratch::new("observer-ready-true");
+    let observer = ready_log(
+        &scratch,
+        "e",
+        "{\"profile\": \"prof\", \"role\": \"lane\", \"kind\": \"ready\", \"ordinal\": true}\n",
+    );
+    assert!(ready(&observer, 0).expect("reads").is_some());
+    assert_eq!(ready(&observer, 1).expect("reads"), None);
 }

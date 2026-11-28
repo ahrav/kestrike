@@ -3,7 +3,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -67,12 +67,6 @@ impl Reservation {
             });
         }
         command.spawn()
-    }
-}
-
-impl AsFd for Reservation {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.file.as_fd()
     }
 }
 

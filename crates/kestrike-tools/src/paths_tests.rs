@@ -136,3 +136,23 @@ fn a_relative_path_starts_at_the_working_directory() {
         here.parent().expect("the directory has a parent").join("b")
     );
 }
+
+/// `pure_bytes` gives `pure`'s text for ASCII paths: a root of exactly two slashes stays, three or
+/// more fold to one, empty and `.` components drop, `..` stays, and an empty path is `.`.
+#[test]
+fn pure_bytes_holds_the_rules_of_pure() {
+    use crate::paths::{pure, pure_bytes};
+    for (path, expected) in [
+        ("//a", "//a"),
+        ("///a", "/a"),
+        ("a/./b//", "a/b"),
+        ("../a/..", "../a/.."),
+        ("", "."),
+        (".", "."),
+        ("/", "/"),
+    ] {
+        assert_eq!(pure_bytes(path.as_bytes()), expected.as_bytes(), "{path:?}");
+        assert_eq!(pure(path), expected, "{path:?}");
+    }
+    assert_eq!(pure_bytes(b"x/\xff/./y"), b"x/\xff/y");
+}

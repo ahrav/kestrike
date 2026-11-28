@@ -57,24 +57,19 @@ pub enum ObserverError {
     },
     /// The signal record raised during the wait.
     Interrupted(Interrupted),
+    /// Reading the monotonic clock failed.
     Clock(io::Error),
+    /// Reading the opened log failed.
     Read(io::Error),
     /// The log's bytes are no UTF-8.
-    Undecodable {
-        log: Text,
-    },
+    Undecodable { log: Text },
     /// A nonempty line of a read is no JSON value.
-    Malformed {
-        log: Text,
-        error: json::Error,
-    },
+    Malformed { log: Text, error: json::Error },
     /// A nonblank line under an append is no JSON value, so no ordinal follows from the count.
-    Line {
-        log: Text,
-        error: json::Error,
-    },
+    Line { log: Text, error: json::Error },
     /// Reading [`NODE`] failed.
     Node(io::Error),
+    /// Writing the event's line failed; the line may stand in part.
     Write(io::Error),
     /// An event of [`Observer::ready`]'s read lacks a shape the read needs.
     Event(EventError),
@@ -275,14 +270,10 @@ impl Observer {
         for (key, value) in fields.iter() {
             event.insert(key.clone(), value.clone());
         }
-        let event = Value::Object(event);
-        let mut line = json::line_sorted(&event);
+        let mut line = json::line_sorted(&Value::Object(event.clone()));
         line.push('\n');
         file.write_all(line.as_bytes())
             .map_err(ObserverError::Write)?;
-        let Value::Object(event) = event else {
-            unreachable!("the event was built as an object")
-        };
         Ok(Some(event))
     }
 
@@ -422,4 +413,4 @@ fn past(ordinal: &Value, after: &Integer) -> Result<bool, ObserverError> {
 
 #[cfg(test)]
 #[path = "observer_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -215,8 +215,8 @@ pub(crate) fn assembled(root: &str, names: &[&str]) -> String {
 
 /// The text of `path` with empty and `.` components dropped, `..` kept.
 pub(crate) fn pure(path: &str) -> String {
-    let (root, names) = parts(path);
-    assembled(root, &names)
+    String::from_utf8(pure_bytes(path.as_bytes()))
+        .expect("UTF-8 split at `/` and joined again stays UTF-8")
 }
 
 /// `pure_bytes` applies the component rules of [`pure`] to a path's bytes and keeps each remaining
