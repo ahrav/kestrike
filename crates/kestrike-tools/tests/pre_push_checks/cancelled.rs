@@ -63,11 +63,12 @@ fn a_signal_during_worktree_creation_leaves_no_worktree() {
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
-/// Each of SIGINT, SIGTERM and SIGHUP to the tool while a check and its child run ends the check's group,
+/// Each of SIGINT, SIGTERM, SIGHUP and SIGQUIT to the tool while a check and its child run ends the check's
+/// group,
 /// runs no later check, prints no failure, removes the worktree and exits `128 + n`.
 #[test]
 fn each_signal_while_a_check_and_its_child_run_ends_the_group_and_removes_the_worktree() {
-    for sent in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+    for sent in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
         let fx = Fixture::new();
         let head = hanging(&fx, "# hang", "");
         let tool = fx.start(&Fixture::input(&[(&head, &fx.base)]));
@@ -308,7 +309,7 @@ fn a_signal_blocked_at_the_tool_s_start_is_still_recorded() {
 }
 
 #[test]
-fn a_check_that_ignores_the_three_signals_still_ends() {
+fn a_check_that_ignores_the_recorded_signals_still_ends() {
     let fx = Fixture::new();
     let head = hanging(&fx, "# deaf", "");
     let tool = fx.start(&Fixture::input(&[(&head, &fx.base)]));

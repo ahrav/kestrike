@@ -26,7 +26,8 @@ Read the [review policy](../../REVIEW.md) before a code review.
 ## Enforcement
 
 `.github/workflows/agent-checks.yml` rejects comment-lint override markers,
-runs the review-workflow contract tests and the receipt replay self-test, and
+runs the review-workflow contract tests and the receipt replay self-test, runs
+the hook's Rust cases in its workspace suite, and
 checks that every link,
 anchor, and backticked repository path in `REVIEW.md`, `AGENTS.md`, and
 `docs/agents/` resolves in a clean clone. Run the same checks locally:

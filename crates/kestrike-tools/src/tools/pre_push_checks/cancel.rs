@@ -1,18 +1,20 @@
-//! The record of the first SIGINT, SIGTERM or SIGHUP, and the wait on a check that acts on it.
+//! The handlers record the first signal from [`SIGNALS`] in [`RECORD`]. If the check leader is still
+//! unreaped when the tool observes the record, the tool sends SIGKILL to the process group and its leader
+//! before reaping the leader.
 //!
-//! Each of the three signals records into [`RECORD`], whatever disposition the tool inherited, and a later
+//! Each of the four signals records into [`RECORD`], whatever disposition the tool inherited, and a later
 //! signal changes nothing. A check leads a process group of its own, so the tool alone decides what the
 //! group receives: while the check's leader is the tool's child and not yet reaped, its process id cannot
 //! name another process, and on a record the group and the leader get SIGKILL, and the reap comes last. A
 //! leader already reaped gets no signal. [`install`] sets SIGCHLD to its default disposition
 //! before the tool starts any child, so the kernel keeps each ended child until the tool reaps it.
 //!
-//! [`install`] blocks the three signals while it registers their handlers. Unblocking [`SIGNALS`] permits
+//! [`install`] blocks [`SIGNALS`] while it registers their handlers. Unblocking [`SIGNALS`] permits
 //! delivery of pending signals. [`RECORD`] retains the first signal a handler records.
 //!
-//! A check starts with the three signals and SIGCHLD at their default dispositions, since `execve` resets
+//! A check starts with [`SIGNALS`] and SIGCHLD at their default dispositions, since `execve` resets
 //! each caught signal to its default, and with the signal mask of the thread that starts it, since
-//! `Command` passes that mask on: [`install`] unblocked the three there, and any other signal the tool's
+//! `Command` passes that mask on: [`install`] unblocked [`SIGNALS`] there, and any other signal the tool's
 //! starter blocked stays blocked in the check.
 
 use std::io;
@@ -25,7 +27,7 @@ use std::time::Duration;
 #[path = "cancel_tests.rs"]
 mod tests;
 
-const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+const SIGNALS: [i32; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
 
 /// The first pause of the wait on a check; each later pause doubles, up to [`LONGEST_PAUSE`].
 const FIRST_PAUSE: Duration = Duration::from_micros(500);
@@ -95,7 +97,7 @@ pub(super) fn check() -> Result<(), u8> {
 
 /// `code` is the exit code of the recorded `signal`, one of [`SIGNALS`].
 fn code(signal: i32) -> u8 {
-    u8::try_from(128 + signal).expect("SIGINT, SIGTERM and SIGHUP are below 128")
+    u8::try_from(128 + signal).expect("each of SIGNALS is below 128")
 }
 
 /// Why a check gave no exit status.

@@ -4,7 +4,13 @@
 
 use std::fs;
 
-use super::push::{Fixture, STUB, ZERO, finished};
+use super::push::{BINARY, Fixture, STUB, ZERO, finished, spawn_with_input, top};
+
+fn unnamed(fx: &Fixture, input: &str) -> std::process::Child {
+    let mut command = fx.command(BINARY);
+    command.arg(top()).args(["pre-push-checks", ""]);
+    spawn_with_input(&mut command, input)
+}
 
 /// The checks run the pushed commit's scripts, a failure there fails the push though the working tree's
 /// copy passes, and the worktree is removed.
@@ -34,7 +40,7 @@ fn checks_run_on_the_pushed_commit_not_the_working_tree() {
 fn a_deletion_runs_no_check() {
     let fx = Fixture::new();
     let deletion = format!("(delete) {ZERO} refs/heads/gone {}\n", "1".repeat(40));
-    let run = finished(fx.start(&deletion));
+    let run = finished(unnamed(&fx, &deletion));
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert!(fx.ran().is_empty());
 }
@@ -43,7 +49,7 @@ fn a_deletion_runs_no_check() {
 #[test]
 fn a_malformed_ref_line_fails() {
     let fx = Fixture::new();
-    let run = finished(fx.start("ref-update\n"));
+    let run = finished(unnamed(&fx, "ref-update\n"));
     assert_eq!(run.code, Some(2), "{}", run.stderr);
     assert_eq!(run.stderr, "pre-push: malformed ref line: 'ref-update'\n");
     assert!(run.stdout.is_empty(), "{}", run.stdout);

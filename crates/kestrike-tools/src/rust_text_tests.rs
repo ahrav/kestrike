@@ -164,6 +164,22 @@ fn the_ignore_pattern_matches_an_ignore_attribute_and_no_longer_word() {
         ))
         .is_empty()
     );
+    assert_eq!(
+        found("#[ignore\u{301}]\n#[cfg_attr(x, ignore\u{301})]\n#[cfg_attr(\u{301}ignore)]"),
+        [
+            "#[ignore\u{301}]",
+            "#[cfg_attr(x, ignore\u{301})]",
+            "#[cfg_attr(\u{301}ignore)]"
+        ]
+    );
+    assert!(
+        found("#[ignore\u{b2}]\n#[cfg_attr(x, ignore\u{b2})]\n#[cfg_attr(\u{b2}ignore)]")
+            .is_empty()
+    );
+    assert_eq!(
+        found("#[cfg_attr(x, xignore, ignore)]"),
+        ["#[cfg_attr(x, xignore, ignore)]"]
+    );
 }
 
 #[test]

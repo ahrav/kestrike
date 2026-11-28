@@ -60,7 +60,7 @@ hang() {
 }
 if grep -qx '# unlink-git' "$script"; then rm -f "$STUB_GIT_LINK"; fi
 if grep -qx '# linger' "$script"; then child "$STUB_LOG.lingering"; exit 0; fi
-if grep -qx '# deaf' "$script"; then trap '' INT TERM HUP; hang; wait; fi
+if grep -qx '# deaf' "$script"; then trap '' INT TERM HUP QUIT; hang; wait; fi
 if grep -qx '# hang' "$script"; then hang; wait; fi
 if grep -qx '# release' "$script"; then
   hang

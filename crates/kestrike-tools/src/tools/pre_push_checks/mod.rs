@@ -9,8 +9,8 @@
 //! failure is printed as `pre-push: failed: <failure>` at the end.
 //!
 //! Exit 0 passes, 1 is a failed check or a failed tool step, 2 a malformed ref line or a Git command that
-//! exits nonzero, 120 a failed write to standard error, and `128 + n` the first of SIGINT, SIGTERM and
-//! SIGHUP that arrived, which [`cancel`] records whatever disposition the tool inherited. The tool checks
+//! exits nonzero, 120 a failed write to standard error, and `128 + n` for the first signal `n` that
+//! [`cancel`] records, regardless of its inherited disposition. The tool checks
 //! the signal record after reading standard input, after each ref line's plan, after each scan, after the
 //! guard, and while a check or `git worktree add` runs. After a Git read or scan returns, the tool honors
 //! the recorded signal regardless of the result. Cancellation stops the push before the next step, and

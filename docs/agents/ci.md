@@ -1548,8 +1548,9 @@ the worktree; 2 is a malformed ref line, a Git command that exits nonzero
 120 is a failed write to standard error. A panic in the scan ends the tool
 with 101.
 
-The tool records the first of SIGTERM, SIGHUP and SIGINT that reaches it,
-whatever disposition or mask it inherited: it blocks the three while it
+The tool records the first of SIGTERM, SIGHUP, SIGINT and SIGQUIT that
+reaches it, whatever disposition or mask it inherited: it blocks the four
+while it
 installs their handlers, then unblocks them, and it sets SIGCHLD to its
 default disposition before it starts any child. It reads the record after
 reading standard input, after each ref line's plan, after each scan, after the
@@ -1573,10 +1574,10 @@ No handler covers a signal that never reaches the tool. Git starts the hook
 in Git's own process group and signals no group. At a terminal, the
 terminal's signals reach Git, the hook's bash, the tool and the tool's Git
 reads, and not a check or the worktree's add or removal, each of which leads a
-group of its own: the terminal's SIGINT reaches the tool, which stops the
-check as above, while its SIGQUIT ends the tool and leaves the running check
-and its worktree, its SIGTSTP stops the tool and not the check, and under
-`stty tostop` a check that writes to the terminal stops. Dying of a signal, Git
+group of its own: the terminal's SIGINT and SIGQUIT reach the tool, which
+stops the check as above, while its SIGTSTP stops the tool and not the check,
+and under `stty tostop` a check that writes to the terminal stops and the tool
+waits for it. Dying of a signal, Git
 2.50.1 to 2.53 signals no hook process (run on 2.50.1), and Git 2.54.0 to
 2.56.1 signals the hook's own process id alone (read in Git's
 `run-command.c`). The hook's bash then dies, or waits on SIGINT, and the tool

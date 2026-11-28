@@ -234,31 +234,6 @@ fn a_failed_read_of_standard_input_exits_1() {
 }
 
 #[test]
-fn the_hook_s_empty_remote_name_reads_a_deletion_and_refuses_a_malformed_line() {
-    let fx = Fixture::new();
-    let deletion = format!(
-        "(delete) {} refs/heads/gone {}\n",
-        "0".repeat(40),
-        "1".repeat(40)
-    );
-    for (input, code, stderr) in [
-        (deletion.as_str(), 0, ""),
-        (
-            "ref-update\n",
-            2,
-            "pre-push: malformed ref line: 'ref-update'\n",
-        ),
-    ] {
-        let mut command = fx.command(BINARY);
-        command.arg(top()).args(["pre-push-checks", ""]);
-        let run = finished(spawn_with_input(&mut command, input));
-        assert_eq!(run.code, Some(code), "{input:?}: {}", run.stderr);
-        assert_eq!(run.stderr, stderr, "{input:?}");
-        assert!(fx.ran().is_empty(), "{:?}", fx.ran());
-    }
-}
-
-#[test]
 fn a_git_that_cannot_start_exits_1_before_any_check() {
     let fx = Fixture::new();
     let head = fx.commit(&[INVENTORY]);
