@@ -58,20 +58,24 @@ fn a_malformed_ref_line_fails() {
     assert!(fx.ran().is_empty());
 }
 
-/// A ref line whose local or remote field is shaped as an option exits 2 with the malformed line's
-/// sentence: the tool starts no Git command, creates no file and runs no check.
+/// A push with a ref line whose local or remote field is shaped as an option exits 2 with the malformed
+/// line's sentence, also where a line Git could have written stands before it and the destination is
+/// named: the tool checks every line's form before its first Git read, so it starts no Git command,
+/// creates no file and runs no check. The control is the push of the first line alone, which traces Git
+/// commands and runs its checks.
 #[test]
 fn a_ref_line_with_an_option_as_a_field_exits_2_before_any_git_read() {
     let mut fx = Fixture::new();
     let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
     let trace = fx.temp.join("trace");
     fx.set("GIT_TRACE", trace.clone());
+    let valid = Fixture::input(&[(&head, &fx.base)]);
     for (local, remote) in [
         ("--output=../made", fx.base.as_str()),
         (head.as_str(), "--output=../made"),
     ] {
         let line = format!("refs/heads/x {local} refs/heads/x {remote}");
-        let run = finished(unnamed(&fx, &format!("{line}\n")));
+        let run = finished(fx.start(&format!("{valid}{line}\n")));
         assert_eq!(run.code, Some(2), "{line}: {}", run.stderr);
         assert_eq!(
             run.stderr,
@@ -82,6 +86,13 @@ fn a_ref_line_with_an_option_as_a_field_exits_2_before_any_git_read() {
         assert!(!fx.temp.join("made").exists(), "{line}: a file is made");
         assert!(fx.ran().is_empty(), "{line}: {:?}", fx.ran());
     }
+    let run = finished(fx.start(&valid));
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(trace.exists(), "no Git command started");
+    assert_eq!(
+        fx.ran(),
+        ["test-select-tests.py", "verify-receipts.py admit"]
+    );
     fx.unset("GIT_TRACE");
     assert_eq!(fx.worktrees(), 1);
 }

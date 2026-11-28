@@ -5,7 +5,7 @@ use crate::hook::guard::CHAOS_RECORD;
 use crate::hook::members::{Members, link_inputs, verus_sources};
 use crate::hook::reads::spans;
 use crate::hook::table::{Check, Held, ORDER, checks_for};
-use crate::hook::{Failure, Plan, account_number, ignored_tests, record_values, shown};
+use crate::hook::{Plan, account_number, ignored_tests, record_values, shown};
 use crate::rust_text::FUNCTION;
 use crate::text::Text;
 
@@ -95,9 +95,10 @@ fn a_chaos_record_path_matches_whole_with_line_feeds_inside() {
     }
 }
 
-/// Every tracked file named `run.json` under the two run directories matches the record pattern, so the
-/// guard reads each run record the checkout holds; a record at a path outside the pattern, as one
-/// directly under a run directory or one level deeper, fails here.
+/// Every tracked file named `run.json` under `chaos/runs` and `chaos/tests/runs` has a path the record
+/// pattern matches: one directory stands between the root and the file, as in `chaos/runs/r/run.json`.
+/// A tracked `chaos/runs/run.json` or `chaos/runs/r/s/run.json` fails the case. The listing ends each
+/// path with a NUL, and one that ends inside a path fails the case too.
 #[test]
 fn every_tracked_run_record_matches_the_record_pattern() {
     let top = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -117,21 +118,27 @@ fn every_tracked_run_record_matches_the_record_pattern() {
         String::from_utf8_lossy(&listed.stderr)
     );
     let listed = String::from_utf8(listed.stdout).expect("the tracked paths are UTF-8");
-    let records: Vec<&str> = listed
-        .split('\0')
-        .filter(|path| path.rsplit('/').next() == Some("run.json"))
-        .collect();
+    let records: Vec<&str> = match listed.strip_suffix('\0') {
+        Some(paths) => paths
+            .split('\0')
+            .filter(|path| path.rsplit('/').next() == Some("run.json"))
+            .collect(),
+        None => {
+            assert!(listed.is_empty(), "the listing ends inside a path");
+            Vec::new()
+        }
+    };
     for under in ["chaos/runs/", "chaos/tests/runs/"] {
         assert!(
             records.iter().any(|path| path.starts_with(under)),
             "no tracked run record under {under}"
         );
     }
-    let unread: Vec<&&str> = records
+    let unmatched: Vec<&&str> = records
         .iter()
         .filter(|path| !CHAOS_RECORD.is_match(path))
         .collect();
-    assert!(unread.is_empty(), "{unread:?}");
+    assert!(unmatched.is_empty(), "{unmatched:?}");
 }
 
 /// A failure names a printable path as it is and quotes any other; the values are the interpreter's.
@@ -452,16 +459,6 @@ fn a_record_nested_past_the_readers_depth_is_not_json() {
     let nested = |depth: usize| "[".repeat(depth) + &"]".repeat(depth);
     assert_eq!(record_values(&nested(1000)), Some(Vec::new()));
     assert_eq!(record_values(&nested(1001)), None);
-}
-
-/// A commit whose text is not UTF-8 names itself by its `repr` when a batch read cannot name it.
-#[test]
-fn an_unencodable_commit_names_itself_by_its_repr() {
-    let commit = Text::from_code_points([0x61, 0xdcff]).expect("the code points are in range");
-    assert_eq!(
-        Failure::Unencodable(commit).to_string(),
-        "the batch name of 'a\\udcff' is not UTF-8"
-    );
 }
 
 /// The attributes that end before a found fn's match starts share its search, and an attribute the match

@@ -250,10 +250,11 @@ pub(super) fn changes_ignore(
     if rust.is_empty() {
         return Ok(false);
     }
-    let (Some(base), Some(local)) = (base.to_str(), local.to_str()) else {
-        let named = if base.to_str().is_none() { base } else { local };
-        return Err(Failure::Unencodable(named.clone()));
-    };
+    let [base, local] = [base, local].map(|commit| {
+        commit
+            .to_str()
+            .expect("a commit of the plan is a full object id or Git's UTF-8 output")
+    });
     let names: Vec<String> = rust
         .iter()
         .flat_map(|path| [base, local].map(|commit| format!("{commit}:{path}")))

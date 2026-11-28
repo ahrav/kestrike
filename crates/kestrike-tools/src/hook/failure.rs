@@ -10,16 +10,13 @@ use crate::text::Text;
 /// The reason a push ends before its checks start.
 #[derive(Debug)]
 pub enum Failure {
-    /// A ref line without exactly four fields, or whose local or remote field is no full object id;
-    /// `Display` writes `malformed ref line: ` and its `repr`.
+    /// A ref line without exactly four fields, or whose local or remote field is no full object id of 40
+    /// or 64 hexadecimal digits; `Display` writes `malformed ref line: ` and its `repr`.
     Malformed(Text),
     /// A failed Git read; `Display` writes the read's own text.
     Git(GitError),
     /// A tree entry or a raw diff record of a form that Git's manual does not give.
     Form(String),
-    /// A commit named in a batch read whose text is not UTF-8, as a ref line's field the caller decoded
-    /// from bytes outside UTF-8 can be.
-    Unencodable(Text),
     /// The plan's probe reported a recorded signal once a Git read returned; the field is the push's exit
     /// code, and `Display` writes `cancelled with exit <code>`.
     Cancelled(u8),
@@ -37,9 +34,6 @@ impl fmt::Display for Failure {
             Self::Malformed(line) => write!(f, "malformed ref line: {}", line.repr()),
             Self::Git(error) => error.fmt(f),
             Self::Form(text) => f.write_str(text),
-            Self::Unencodable(commit) => {
-                write!(f, "the batch name of {} is not UTF-8", commit.repr())
-            }
             Self::Cancelled(code) => write!(f, "cancelled with exit {code}"),
         }
     }

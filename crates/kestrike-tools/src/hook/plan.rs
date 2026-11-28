@@ -128,6 +128,35 @@ impl Plan {
             .collect()
     }
 
+    /// `object_ids` reads the local and the remote object id of one ref line, as the hook's caller decoded
+    /// it from its input, and `None` for a blank line. Each id is a full object id, 40 or 64 hexadecimal
+    /// digits, returned in lowercase, the form Git writes, so one commit has one text as a tip, a scan
+    /// range and a Git argument, and a field reaches Git as a revision alone. It starts no Git read.
+    ///
+    /// # Errors
+    ///
+    /// A line that is not blank and has other than four fields, or whose second or fourth field is no
+    /// full object id, is [`Failure::Malformed`] with the line as given.
+    pub fn object_ids(line: &OsStr) -> Result<Option<(Text, Text)>, Failure> {
+        let text = Text::from_os(line);
+        if text.strip().is_empty() {
+            return Ok(None);
+        }
+        let id = |field: &Text| {
+            field
+                .to_str()
+                .map(str::to_ascii_lowercase)
+                .filter(|id| is_object_id(id))
+                .map(Text::from)
+        };
+        let fields = text.split();
+        let ids = match fields.as_slice() {
+            [_, local, _, remote] => id(local).zip(id(remote)),
+            _ => None,
+        };
+        ids.map(Some).ok_or(Failure::Malformed(text))
+    }
+
     /// `line` adds one ref line, as the hook's caller decoded it from its input. A line with no comparison
     /// base gives `note` its [`Skipped`] note once the base and the links registry are read, before the
     /// line's later reads.
@@ -145,23 +174,13 @@ impl Plan {
     ///
     /// # Errors
     ///
-    /// A line that is not blank and has other than four fields, or whose local or remote field is no full
-    /// object id, is [`Failure::Malformed`] before any Git read starts, so a field reaches Git as a
-    /// revision alone; a failed read is its error, and a probe that reports `Err` once a read returns is
+    /// A line [`Plan::object_ids`] refuses is [`Failure::Malformed`] before any Git read of the line
+    /// starts, a failed read is its error, and a probe that reports `Err` once a read returns is
     /// [`Failure::Cancelled`].
     pub fn line(&mut self, line: &OsStr, note: impl FnOnce(Skipped)) -> Result<(), Failure> {
-        let text = Text::from_os(line);
-        if text.strip().is_empty() {
+        let Some((local, remote)) = Self::object_ids(line)? else {
             return Ok(());
-        }
-        let [_, local, _, remote] =
-            <[Text; 4]>::try_from(text.split()).map_err(|_| Failure::Malformed(text.clone()))?;
-        if ![&local, &remote]
-            .into_iter()
-            .all(|field| field.to_str().is_some_and(is_object_id))
-        {
-            return Err(Failure::Malformed(text));
-        }
+        };
         if local.to_str() == Some(ZERO) {
             return Ok(());
         }
