@@ -161,11 +161,12 @@ fn a_file_past_the_limit_is_refused_before_it_is_read_and_one_that_grows_before_
 fn a_sync_follows_a_whole_read_and_its_failure_names_the_sync() {
     let file = File::open("/proc/self/status").expect("the status opens");
     let what = Text::from("x");
-    let read = read_sized(&file, 1 << 20, &what, false).expect("the status reads");
+    let read = read_sized(&file, 1 << 20, &what, None).expect("the status reads");
     assert!(read.starts_with(b"Name:"), "the bytes of the status");
     let file = File::open("/proc/self/status").expect("the status opens");
     assert_eq!(
-        read_sized(&file, 1 << 20, &what, true).map_err(|refusal| refusal.to_string()),
+        read_sized(&file, 1 << 20, &what, Some(&|file: &File| file.sync_all()))
+            .map_err(|refusal| refusal.to_string()),
         Err("x cannot be read and synced: Invalid argument".to_owned())
     );
 }

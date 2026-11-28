@@ -365,25 +365,37 @@ from a checkout of the head, with that head's `campaign` on `PATH` and a
 `Cargo.lock` built there:
 
 ```sh
-python3 scripts/plant-runner.py
+bash scripts/tool.sh plant-runner
 ```
 
 The work directory, by default under `$TMPDIR`, must lie outside the
 checkout, on a mount `campaign` accepts (xfs, or ext4 with a journal), under
 ancestors only you or root can write. Where `$TMPDIR` is unset or shared, as
 `/tmp` is, the bare command is rejected: pass `--work DIR` or set `TMPDIR` to
-such a directory. The runner sweeps each plant's archive
+such a directory. The runner runs on Linux alone and reads its umask from
+`/proc/thread-self/status`. It starts `python3`, the first on `PATH`, for
+each proof rerun and for each check of a rerun's verdict by the head's copy
+of `scripts/reproduce-test.py`. The runner sweeps each plant's archive
 in a scratch worktree and writes `verification/plants/score.json`, which reads
 "k of n plants at commit C". A run with `--plant` writes a score over the
 selected plants and names them in its `settings`. A swept miss is one
 sample: a rerun at the same commit builds another archive and sweeps other
 seeds, and the work directory the run prints holds the archives and roots
 that replay it. A plant with no expected profile is missed with no sweep, on
-its `miss_cause` alone. The header of `scripts/plant-runner.py` gives each
-result, the score's fields and the exit codes. The runner takes its Git and
-shared-directory refusals from `scripts/red-green.py`. Run its self-test,
-`python3 scripts/test-plant-runner.py`, before you push a change to either
-plant script or to `scripts/red-green.py`.
+its `miss_cause` alone. `bash scripts/tool.sh plant-runner --help` gives each
+result, the score's fields and the exit codes. Before you push a change to the
+tool or to the library modules under `crates/kestrike-tools/src/plants/`, run
+those modules' unit tests with the unit tests of
+`crates/kestrike-tools/src/process.rs`, then the tool's cases with the case of
+`crates/kestrike-tools/tests/ignored_sigchld.rs`:
+
+```sh
+CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo test -p kestrike-tools --lib -- plants:: process::
+CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo test -p kestrike-tools --test tools -- plant_runner:: ignored_sigchld::
+```
+
+These two runs are the base selection. Add the tests of every other module
+whose callers the change reaches, as `AGENTS.md` directs.
 
 Before you add a plant, show that its `proof` exits 0 on the head and 1 on the
 plant, with a Cargo target directory of each tree's own:
@@ -404,7 +416,9 @@ rerun counts when it exits 0 or 1, prints last the verdict of that exit,
 tree as it was. Any other ending on either the head or the plant leaves the
 plant with no verdict. So does an apply or a reset that fails in the proof's
 worktree, or a rerun that changes the `Cargo.lock`, for that plant and each
-later one. When both reruns count, the plant is live only when its proof
+later one; the lockfile is checked after a rerun whose output is UTF-8 text,
+so one that prints no UTF-8 text leaves its own plant with no verdict and
+the next proof still reruns. When both reruns count, the plant is live only when its proof
 exits 0 on the head and 1 on the plant; the runner then builds its archive.
 Any other pair of exits makes the plant `not live`: `n` does not count it,
 the score names it under `not_live`, and the run exits 3. The runner removes

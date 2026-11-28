@@ -281,6 +281,35 @@ fn half() -> Value {
     Value::Float(0.5)
 }
 
+/// A mutant record whose summary is `null` earns no verdict and leaves the file readable, so an unlisted
+/// mutant with a null summary beside a listed one the tool caught gives a complete run with that one
+/// caught. A boolean or a number as a summary reads the same way; an array or an object makes the file
+/// unreadable.
+#[test]
+fn an_unlisted_mutant_with_a_null_summary_leaves_the_run_complete() {
+    let fx = Fixture::new("null-summary");
+    let a = format!("{SOURCE}/lib.rs:2:1: replace two -> u32 with 0");
+    let mut unlisted = match mutant("b", "CaughtMutant", half()) {
+        Value::Object(object) => object,
+        other => panic!("{other:?}"),
+    };
+    unlisted.insert("summary", Value::Null);
+    fx.plan(&Plan {
+        raw_outcomes: Some(outcome_file(vec![
+            baseline("Success", half()),
+            mutant(&a, "CaughtMutant", half()),
+            Value::Object(unlisted),
+        ])),
+        ..Plan::new(&listed(&lib_rs(), std::slice::from_ref(&a)), &[])
+    });
+    let out = fx.start().run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(complete(&report), "{:?}", reason(&report));
+    assert_eq!(outcomes_of(&report), ["caught"]);
+    assert_eq!(counts(&report)[..2], ["1", "1"]);
+}
+
 #[test]
 fn a_malformed_listing_or_outcome_file_makes_the_run_incomplete() {
     let fx = Fixture::new("malformed");
@@ -574,6 +603,76 @@ fn a_worktree_that_remains_after_removal_makes_the_run_incomplete() {
     assert!(found.starts_with("the worktree "), "{found}");
     assert!(found.contains("fatal: refused"), "{found}");
     assert_eq!(registered(&fx), 2);
+}
+
+/// `tree_entries` lists every path under `root` relative to it, sorted.
+fn tree_entries(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("the directory lists") {
+            let path = entry.expect("an entry reads").path();
+            let relative = path.strip_prefix(root).expect("under the root");
+            found.push(relative.to_string_lossy().into_owned());
+            if fs::symlink_metadata(&path).is_ok_and(|status| status.is_dir()) {
+                pending.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The removal of a worktree goes past each entry it cannot remove: with two directories of mode 0500
+/// that each hold a file and a writable directory with a sentinel file, among twenty-four other entries
+/// and the worktree's own, both sentinels and every other entry of
+/// the worktree goes and the run is incomplete with the worktree that remains. Root removes the files
+/// of a directory of mode 0500, so the case does not apply to uid 0 and says so.
+#[test]
+fn the_removal_of_a_worktree_goes_past_each_entry_it_cannot_remove() {
+    // SAFETY: `geteuid` takes no argument and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: uid 0 removes the files of a directory of mode 0500");
+        return;
+    }
+    let fx = Fixture::new("locked-dirs");
+    fx.plan(&Plan {
+        locked: true,
+        ..Plan::caught(&one_mutant("2:1: m"))
+    });
+    let out = fx.start().env(fx.git_wrapper("fail-remove")).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(found.starts_with("the worktree "), "{found}");
+    let run = only(fx.reports())
+        .parent()
+        .expect("a report stands in its run directory")
+        .to_path_buf();
+    let trees: Vec<std::path::PathBuf> = fs::read_dir(&run)
+        .expect("the run directory lists")
+        .map(|entry| entry.expect("an entry reads").path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("worktree-"))
+        })
+        .collect();
+    let [tree] = trees.as_slice() else {
+        panic!("one worktree remains: {trees:?}");
+    };
+    assert_eq!(
+        tree_entries(tree),
+        [
+            "a-locked",
+            "a-locked/kept",
+            "a-locked/open",
+            "z-locked",
+            "z-locked/kept",
+            "z-locked/open"
+        ],
+        "every entry the removal can remove is gone, each locked directory's sentinel included"
+    );
 }
 
 #[test]
@@ -936,6 +1035,257 @@ fn the_report_binds_the_diff_the_configuration_and_the_test_arguments() {
     assert_eq!(string(get(&report, "debug_assertions")), "false");
 }
 
+/// A `--tests` word outside UTF-8 is written to the report as the code points it was split into and
+/// reaches the tool as its bytes: the bytes `e4 27 b8 27 ad` split into the one word of the three bytes
+/// `e4 b8 ad`, which the report writes as three escaped code points and not as the character those bytes
+/// spell in UTF-8.
+#[test]
+fn a_test_word_outside_utf_8_is_reported_as_it_was_split_and_passed_as_its_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+    let fx = Fixture::new("tests-bytes");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let mut tests = b"--tests=".to_vec();
+    tests.extend_from_slice(b"\xe4'\xb8'\xad");
+    let out = fx.start().args([std::ffi::OsString::from_vec(tests)]).run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    let report = fs::read(only(fx.reports())).expect("the report reads");
+    let report = String::from_utf8(report).expect("the report is ASCII");
+    assert!(
+        report.contains("\"tests\": [\n    \"\\udce4\\udcb8\\udcad\"\n  ]"),
+        "{report}"
+    );
+    let calls = fs::read(fx.state.join("calls")).expect("the calls are recorded");
+    assert!(
+        calls
+            .windows(7)
+            .any(|window| window == b"--\0\xe4\xb8\xad\0"),
+        "the word reaches the tool as its three bytes"
+    );
+}
+
+/// The help's failed write prints one line on standard error and exits 120: a full standard output gives
+/// the error of the write.
+#[test]
+fn a_failed_write_of_the_help_exits_120_with_one_line() {
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full opens");
+    let top = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = std::process::Command::new(fixture::BINARY)
+        .arg(top)
+        .args(["mutants-diff", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(full)
+        .output()
+        .expect("the tool runs");
+    assert_eq!(
+        (out.status.code(), String::from_utf8_lossy(&out.stderr)),
+        (
+            Some(120),
+            "mutants-diff: standard output: No space left on device (os error 28)\n".into()
+        )
+    );
+    let read_only = fs::File::open("/dev/null").expect("/dev/null opens");
+    let out = std::process::Command::new(fixture::BINARY)
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["mutants-diff", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(read_only)
+        .output()
+        .expect("the tool runs");
+    assert_eq!(
+        (out.status.code(), String::from_utf8_lossy(&out.stderr)),
+        (
+            Some(120),
+            "mutants-diff: standard output: Bad file descriptor (os error 9)\n".into()
+        )
+    );
+}
+
+/// A help written to a standard output at the soft file size limit fails with `EFBIG`, which ends no
+/// process: one line on standard error and exit 120.
+#[test]
+fn a_help_past_the_file_size_limit_exits_120_with_one_line() {
+    let scratch = kestrike_tools::temp_dir::make_temp_dir(
+        "help-limit-",
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+    )
+    .expect("the scratch is made");
+    let sink = scratch.join("full.out");
+    let limit = 64 * 1024;
+    fs::write(&sink, vec![b'x'; limit]).expect("written");
+    let out = fs::OpenOptions::new()
+        .append(true)
+        .open(&sink)
+        .expect("opens");
+    let mut command = std::process::Command::new(fixture::BINARY);
+    command
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["mutants-diff", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(out);
+    fixture::limit_file_size(&mut command, u64::try_from(limit).expect("fits"));
+    let out = command.output().expect("the tool runs");
+    fs::remove_dir_all(&scratch).expect("the scratch is removed");
+    assert_eq!(
+        (out.status.code(), String::from_utf8_lossy(&out.stderr)),
+        (
+            Some(120),
+            "mutants-diff: standard output: File too large (os error 27)\n".into()
+        ),
+        "{:?}",
+        out.status
+    );
+}
+
+/// A write past the soft file size limit fails with `EFBIG`, which ends no process: a diff longer than
+/// the limit fails the run with an incomplete report that names `diff.patch` and holds no digest, and an
+/// untracked `Cargo.lock` longer than it fails the copy with an incomplete report that names the
+/// worktree's `Cargo.lock`; either way no worktree stays.
+#[test]
+fn a_write_past_the_file_size_limit_fails_the_run_with_a_report() {
+    const LIMIT: u64 = 64 * 1024;
+    let filler = "// filler\n".repeat(30_000);
+    let fx = Fixture::new("diff-past-limit");
+    fx.write(
+        &lib_rs(),
+        &format!("pub fn one() -> u32 {{ 1 }}\npub fn two() -> u32 {{ 2 }}\n{filler}"),
+    );
+    let head = fx.commit("long head");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().head(&head).file_limit(LIMIT).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(
+        found.contains("diff.patch") && found.contains("os error 27"),
+        "{found}"
+    );
+    assert_eq!(get(&report, "diff_sha256"), &Value::Null);
+    assert!(fx.calls().is_empty(), "no listing runs");
+    assert_eq!(registered(&fx), 1);
+
+    let fx = Fixture::new("lock-past-limit");
+    fs::write(fx.repo.join("Cargo.lock"), &filler).expect("the lock is written");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().file_limit(LIMIT).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(
+        found.contains("Cargo.lock") && found.contains("os error 27"),
+        "{found}"
+    );
+    assert!(fx.calls().is_empty(), "no listing runs");
+    assert_eq!(registered(&fx), 1);
+    let run = only(fx.reports());
+    let run = run.parent().expect("the report has a run directory");
+    let trees: Vec<_> = fs::read_dir(run)
+        .expect("the run directory lists")
+        .map(|entry| entry.expect("an entry reads").path())
+        .filter(|path| path.is_dir())
+        .collect();
+    assert!(trees.is_empty(), "no worktree stays: {trees:?}");
+}
+
+/// The run ignores SIGXFSZ and each child it starts, captured or supervised, Git and Cargo alike, starts
+/// with SIGXFSZ at its default action.
+#[test]
+fn every_child_starts_with_sigxfsz_at_its_default() {
+    let fx = Fixture::new("sigxfsz-default");
+    fs::write(fx.state.join("record_sigign"), "").expect("written");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().env(fx.git_wrapper("")).run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    let lines = fs::read_to_string(fx.state.join("sigign")).expect("the stand-ins recorded");
+    let masks: Vec<u64> = lines
+        .lines()
+        .map(|line| {
+            let mask = line.strip_prefix("SigIgn:").expect("a SigIgn line");
+            u64::from_str_radix(mask.trim(), 16).expect("a mask")
+        })
+        .collect();
+    assert!(masks.len() >= 8, "{lines}");
+    for mask in masks {
+        assert_eq!(mask & (1 << (libc::SIGXFSZ - 1)), 0, "{lines}");
+    }
+}
+
+/// The diff is created as a new file: a link a child of the run left at `diff.patch` before the write
+/// fails the run with an incomplete report that names the path and holds no digest, the file the link
+/// names stays as it was, and no listing runs.
+#[test]
+fn a_link_at_the_diff_s_path_fails_the_run_and_its_target_stays() {
+    let fx = Fixture::new("diff-link");
+    let victim = fx.state.join("victim");
+    fs::write(&victim, "victim before").expect("the victim is written");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().env(fx.git_wrapper("plant-diff")).run();
+    let planted =
+        fs::read_to_string(fx.state.join("planted")).expect("the stand-in planted a link");
+    assert_eq!(planted.lines().count(), 1, "{planted}");
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(found.contains("diff.patch"), "{found}");
+    assert_eq!(get(&report, "diff_sha256"), &Value::Null);
+    assert_eq!(fs::read_to_string(&victim).expect("UTF-8"), "victim before");
+    assert_eq!(
+        fs::read_link(planted.trim_end()).expect("the planted link stays"),
+        victim
+    );
+    assert!(fx.calls().is_empty(), "no listing runs");
+}
+
+/// The report is published through a new file renamed over its path: an entry at `report.json`, a link
+/// a child of the run left there included, is replaced and the file it named stays as it was.
+#[test]
+fn the_report_replaces_an_entry_at_its_path_and_writes_through_no_link() {
+    let fx = Fixture::new("report-link");
+    let victim = fx.state.join("victim");
+    fs::write(&victim, "victim before").expect("the victim is written");
+    fx.plan(&Plan {
+        report_link: true,
+        ..Plan::caught(&one_mutant("2:1: m"))
+    });
+    let out = fx.start().run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    assert_eq!(
+        fs::read_to_string(&victim).expect("the victim reads"),
+        "victim before"
+    );
+    let report = only(fx.reports());
+    let linked = fs::read_to_string(fx.state.join("report_linked")).expect("the link was planted");
+    let [linked] = linked.lines().collect::<Vec<_>>()[..] else {
+        panic!("one link was planted: {linked}");
+    };
+    let linked = std::path::Path::new(linked);
+    assert_eq!(
+        (
+            linked.file_name(),
+            linked.parent().map(|parent| parent
+                .canonicalize()
+                .expect("the link's directory resolves"))
+        ),
+        (
+            report.file_name(),
+            report.parent().map(|parent| parent
+                .canonicalize()
+                .expect("the report's directory resolves"))
+        ),
+        "the link stood at the report's path"
+    );
+    assert!(
+        fs::symlink_metadata(&report).is_ok_and(|status| status.is_file()),
+        "the report is a regular file"
+    );
+    assert!(complete(&fx.report(Some(&out))));
+}
+
 #[test]
 fn the_default_head_and_artifacts_come_from_the_invoking_checkout() {
     let fx = Fixture::new("defaults");
@@ -1085,6 +1435,7 @@ fn a_relative_path_entry_names_the_same_program_in_the_worktree() {
 
 #[test]
 fn the_lock_copy_keeps_a_lock_file_or_link_the_head_tracks() {
+    use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::new("lock-copy");
     let lock = fx.repo.join("Cargo.lock");
     let mut heads = Vec::new();
@@ -1135,14 +1486,28 @@ fn the_lock_copy_keeps_a_lock_file_or_link_the_head_tracks() {
         "the copy does not create a dangling link's target"
     );
     fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    // SAFETY: `geteuid` takes no argument and cannot fail.
+    let unreadable = unsafe { libc::geteuid() } != 0;
+    if unreadable {
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).expect("the mode is set");
+    }
     let out = fx.start().base(&fx.head).head(&tracked).run();
-    assert_eq!(out.code, 0, "{}", out.all());
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).expect("the mode is restored");
+    assert_eq!(
+        out.code,
+        0,
+        "a source the runner cannot read stays unread: {}",
+        out.all()
+    );
     assert_eq!(
         fx.calls()[0].lock.as_deref(),
         Some("# tracked\n"),
         "the head's own Cargo.lock stays"
     );
     assert_eq!(fs::read_to_string(&lock).expect("UTF-8"), "# lock\n");
+    if !unreadable {
+        eprintln!("the unreadable source row is skipped: uid 0 reads a file of mode 0000");
+    }
 }
 
 #[test]

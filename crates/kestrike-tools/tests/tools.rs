@@ -4,6 +4,15 @@
 
 include!(concat!(env!("OUT_DIR"), "/cases.rs"));
 
+/// `case_id` is the test id of the fn `name` of the module `module`, as `module_path!` writes it: the
+/// path without the test executable's own name.
+pub fn case_id(module: &str, name: &str) -> String {
+    let (_, path) = module
+        .split_once("::")
+        .expect("a case module lies under the test executable");
+    format!("{path}::{name}")
+}
+
 const fn same(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {

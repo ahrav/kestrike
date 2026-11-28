@@ -1,6 +1,7 @@
 //! Cases for the checkout's comment-marker scan, its commit hook, its ignore rules and its pre-push hook.
 //! A pre-push case runs a copy of `.githooks/pre-push` beside a stand-in `scripts/tool.sh` that writes its
-//! arguments to `tool.args` and its standard input to `tool.input` in the repository.
+//! arguments to `tool.args` and its standard input to `tool.input` in the repository. The scratch case's
+//! stand-in starts the built tool.
 
 use std::fmt;
 use std::fs::{self, DirBuilder};
@@ -415,4 +416,74 @@ fn pre_push_ends_with_the_tool_s_failing_code_before_the_global_guard() {
         hooks.join("guard.ran").exists(),
         "the guard runs after a passing tool"
     );
+}
+
+/// The launcher's stand-in of the scratch case: it lists `TMPDIR`, names the entry there that is its
+/// standard input, and starts the built tool in the launcher's place, with the repository as the top.
+const SPOOL_TOOL: &str = r#"#!/bin/sh
+here=$(dirname -- "$0")/..
+ls -A "$TMPDIR" > "$here/tool.entries"
+for entry in "$TMPDIR"/*; do
+  if [ /dev/stdin -ef "$entry" ]; then printf '%s\n' "$entry" > "$here/tool.spool"; fi
+done
+exec "$KESTRIKE_TOOLS" "$here" "$@"
+"#;
+
+/// The hook spools the ref lines in the directory the tool checks: with `TMPDIR` a private directory, the
+/// one entry there while the tool starts is the hook's spool, the tool's standard input is that file, and
+/// the push passes. With the same directory writable by every user and not sticky, the spool stands there
+/// again and the tool refuses the directory by its path, so the hook exits 2. The hook removes the spool
+/// on both ways out.
+#[test]
+fn pre_push_spools_in_the_scratch_directory_the_tool_checks() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new("pre-push-spool");
+    let hook = repo.pre_push();
+    fs::write(repo.path.join("scripts/tool.sh"), SPOOL_TOOL)
+        .expect("the launcher's stand-in is written");
+    let scratch = repo.path.join("scratch");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .expect("the scratch directory is made");
+    let refusal = format!(
+        "pre-push: the scratch directory {} is writable by its group or by other users and has no sticky \
+         bit; set TMPDIR to a directory that you own and only you can write\n",
+        scratch.display()
+    );
+    for (mode, code, stderr) in [(0o700, 0, ""), (0o777, 2, refusal.as_str())] {
+        fs::set_permissions(&scratch, fs::Permissions::from_mode(mode)).expect("the mode is set");
+        let mut command = repo.command("bash");
+        command
+            .arg(&hook)
+            .args(["origin", "remote-url"])
+            .env("TMPDIR", &scratch)
+            .env("KESTRIKE_TOOLS", crate::pre_push_checks::push::BINARY);
+        let done = finished(spawn_with_input(&mut command, DELETION));
+        assert_eq!(done.code, Some(code), "{mode:o}: {done}");
+        assert_eq!(done.stderr, stderr, "{mode:o}: {done}");
+        let read = |name: &str| {
+            fs::read_to_string(repo.path.join(name))
+                .unwrap_or_else(|error| panic!("{mode:o}: {name}: {error}"))
+        };
+        let entries = read("tool.entries");
+        let entry = entries
+            .strip_suffix('\n')
+            .filter(|entry| !entry.contains('\n'))
+            .unwrap_or_else(|| panic!("{mode:o}: one entry stands in the scratch: {entries:?}"));
+        let letters = entry
+            .strip_prefix("kestrike-pre-push.")
+            .unwrap_or_else(|| panic!("{mode:o}: {entry} is the hook's spool"));
+        assert_eq!(letters.len(), 6, "{mode:o}: {entry}");
+        assert_eq!(
+            read("tool.spool"),
+            format!("{}\n", scratch.join(entry).display()),
+            "{mode:o}: the tool's standard input is the spool"
+        );
+        let left = fs::read_dir(&scratch).expect("the scratch lists").count();
+        assert_eq!(left, 0, "{mode:o}: the hook removes its spool");
+        for name in ["tool.entries", "tool.spool"] {
+            fs::remove_file(repo.path.join(name)).expect("the record is removed");
+        }
+    }
 }

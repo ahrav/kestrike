@@ -92,11 +92,13 @@ block device.
   ([the pre-push checks](docs/agents/ci.md#pre-push-checks) list them), run
   `python3 -I scripts/test-gameday-judge.py`. The pre-push hook runs it on the
   pushed tips that need it; no CI job runs it yet.
-- Before pushing a change to `scripts/host-stop-controller.py`, its self-test,
+- Before pushing a change to the host stop controller's Rust modules, its cases,
   a file under `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`, or
-  a file the self-test reads ([the pre-push checks](docs/agents/ci.md#pre-push-checks)
-  list them), run `python3 -I scripts/test-host-stop-controller.py`. The pre-push
-  hook runs it on the pushed tips that need it; no CI job runs it yet.
+  another file they read ([the pre-push checks](docs/agents/ci.md#pre-push-checks)
+  list them), run
+  `cargo test -p kestrike-tools --test tools -- host_stop_controller:: host_stop:: host_stop_checks:: host_stop_support::`.
+  The pre-push hook runs those cases on the pushed tips that need them, and the
+  `workspace` job runs them with every case of the crate.
 - Do not run Miri unless the user asks for it or a change touches `unsafe`
   code in a way the test suite cannot otherwise check. A Miri pass over
   `kestrike` takes many minutes; when it is needed, run it after the push,

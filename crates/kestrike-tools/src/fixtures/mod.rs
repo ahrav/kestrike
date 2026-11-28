@@ -22,12 +22,12 @@ pub mod quint;
 mod args_tests;
 #[cfg(test)]
 #[path = "../fixtures_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 mod write;
 
-#[cfg(target_os = "linux")]
-pub(crate) use write::close;
 pub use write::{Model, Rewrite, Style, Trace, keep, traces, write};
+#[cfg(target_os = "linux")]
+pub(crate) use write::{close, fits};
 #[cfg(test)]
 pub(crate) use write::{generate, replace};

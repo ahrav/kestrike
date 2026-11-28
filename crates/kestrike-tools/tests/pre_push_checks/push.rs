@@ -18,6 +18,14 @@
 //! `# release` hangs, then exits 0 once `STUB_LOG.release` stands or 60 seconds pass; one that holds
 //! `# locked` makes the directory `locked` in its working directory, holding the empty file `kept`, with
 //! mode 0500.
+//!
+//! A stand-in `cargo`, first on `PATH` beside it, appends `cargo ARGUMENT...` to the file `STUB_LOG`
+//! names, the value of `CARGO_TARGET_DIR` to `STUB_LOG.target`, the values of `CARGO_BUILD_BUILD_DIR`
+//! and `CARGO_CACHE_RUSTC_INFO` with the state of its working directory's `Cargo.lock` (`absent`,
+//! `checkout` for the bytes of the lock under `STUB_TOP`, the checkout's top, or `own`) to
+//! `STUB_LOG.build`, the count of its arguments and each argument on a line of its own to
+//! `STUB_LOG.args`, and its physical working directory to `STUB_LOG.cwd`, and exits with the value of
+//! `STUB_CARGO`, or 0.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
@@ -83,6 +91,20 @@ fi
 var=$(printf '%s' "${name%.py}" | tr 'abcdefghijklmnopqrstuvwxyz-' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ_')
 eval "code=\${STUB_$var:-0}"
 exit "$code"
+"#;
+
+const CARGO: &str = r#"#!/bin/sh
+line=cargo
+for arg; do line="$line $arg"; done
+printf '%s\n' "$line" >> "$STUB_LOG"
+printf '%s\n' "${CARGO_TARGET_DIR-unset}" >> "$STUB_LOG.target"
+if [ ! -e Cargo.lock ]; then lock=absent
+elif cmp -s Cargo.lock "$STUB_TOP/Cargo.lock"; then lock=checkout
+else lock=own; fi
+printf '%s %s %s\n' "${CARGO_BUILD_BUILD_DIR-unset}" "${CARGO_CACHE_RUSTC_INFO-unset}" "$lock" >> "$STUB_LOG.build"
+printf '%s\n' "$#" "$@" >> "$STUB_LOG.args"
+pwd -P >> "$STUB_LOG.cwd"
+exit "${STUB_CARGO:-0}"
 "#;
 
 /// `fresh` makes a new directory of mode 0700 under `parent`, named `prefix` and eight random letters,
@@ -179,6 +201,7 @@ impl Fixture {
                 .expect("the directory is made");
         }
         executable(&bin.join("python3"), PYTHON);
+        executable(&bin.join("cargo"), CARGO);
         let log = temp.join("stub.log");
         let mut env: Vec<(OsString, OsString)> = std::env::vars_os()
             .chain(
@@ -206,6 +229,7 @@ impl Fixture {
             ("GIT_COMMITTER_NAME", "t".into()),
             ("GIT_COMMITTER_EMAIL", "t@example.com".into()),
             ("STUB_LOG", log.clone().into_os_string()),
+            ("STUB_TOP", top().as_os_str().to_owned()),
             ("PATH", searched),
             ("TMPDIR", tmp.clone().into_os_string()),
         ] {
@@ -306,7 +330,8 @@ impl Fixture {
         self.env.retain(|(key, _)| key != name);
     }
 
-    /// `clear` removes the log, its `-I` record, the stand-ins' process id files and the `git` wrapper's log.
+    /// `clear` removes the log, its `-I` record, the stand-ins' process id files, the target directories the
+    /// stand-in `cargo` logged and the `git` wrapper's log.
     pub fn clear(&self) {
         for suffix in [
             "",
@@ -318,6 +343,10 @@ impl Fixture {
             ".env",
             ".where",
             ".release",
+            ".target",
+            ".build",
+            ".args",
+            ".cwd",
         ] {
             let _ = fs::remove_file(self.logged(suffix));
         }
@@ -333,6 +362,27 @@ impl Fixture {
     /// `ran` lists the log's lines, none when it was never written.
     pub fn ran(&self) -> Vec<String> {
         self.lines("")
+    }
+
+    /// `targets` lists the target directories the stand-in `cargo` was given, one for each of its runs.
+    pub fn targets(&self) -> Vec<String> {
+        self.lines(".target")
+    }
+
+    /// `builds` lists the build directory, the rustc cache setting and the lock's state the stand-in
+    /// `cargo` logged, one line for each of its runs.
+    pub fn builds(&self) -> Vec<String> {
+        self.lines(".build")
+    }
+
+    /// `cargo_args` lists the stand-in `cargo`'s argument counts and arguments, a line each.
+    pub fn cargo_args(&self) -> Vec<String> {
+        self.lines(".args")
+    }
+
+    /// `cargo_dirs` lists the physical working directories of the stand-in `cargo`'s runs.
+    pub fn cargo_dirs(&self) -> Vec<String> {
+        self.lines(".cwd")
     }
 
     /// `isolated` lists the lines of the runs whose first argument was `-I`.
@@ -472,7 +522,8 @@ impl Drop for Tool {
 }
 
 /// `spawn_with_input` starts `command` with both output streams piped, writes the bytes of `input` to its
-/// standard input and closes it.
+/// standard input and closes it. A tool that ends before it reads its input closes the pipe, so a write
+/// that ends in `BrokenPipe` is left to the case, which reads the tool's exit code and streams.
 pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Tool {
     let mut child = command
         .stdin(Stdio::piped())
@@ -482,9 +533,10 @@ pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Tool 
         .expect("the tool starts");
     let mut stdin = child.stdin.take().expect("standard input is piped");
     let tool = Tool(Some(child));
-    stdin
-        .write_all(input.as_ref())
-        .expect("the ref lines are written");
+    match stdin.write_all(input.as_ref()) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        written => written.expect("the ref lines are written"),
+    }
     tool
 }
 

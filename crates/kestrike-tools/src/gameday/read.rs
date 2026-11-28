@@ -77,6 +77,27 @@ pub fn read_file(
     limit: u64,
     sync: bool,
 ) -> Result<Vec<u8>, ReadError> {
+    let all = |file: &File| file.sync_all();
+    read_file_with(path, dir, what, limit, sync.then_some(&all))
+}
+
+/// The function a file read by [`read_file_with`] is synced through, once its bytes are read.
+pub(crate) type Syncer<'s> = &'s dyn Fn(&File) -> io::Result<()>;
+
+/// `read_file_with` reads as [`read_file`] does, and with `sync` it syncs the opened file through
+/// that function in place of `fsync(2)`; the failures and their sentences are [`read_file`]'s, a
+/// failure of `sync` worded as a failed sync.
+///
+/// # Errors
+///
+/// Each failure [`read_file`] names, in its order.
+pub(crate) fn read_file_with(
+    path: &Path,
+    dir: Option<BorrowedFd<'_>>,
+    what: &Text,
+    limit: u64,
+    sync: Option<Syncer<'_>>,
+) -> Result<Vec<u8>, ReadError> {
     let at = opened(path, dir)?;
     let file = OpenOptions::new()
         .read(true)
@@ -101,7 +122,12 @@ fn closed(outcome: Result<Vec<u8>, Refusal>, close: io::Result<()>) -> Result<Ve
 
 /// The bytes of the open file when it is a regular file of at most `limit` bytes, with one byte past its
 /// size asked for, which tells a file that grew while it was read.
-fn read_open(file: &File, what: &Text, limit: u64, sync: bool) -> Result<Vec<u8>, Refusal> {
+fn read_open(
+    file: &File,
+    what: &Text,
+    limit: u64,
+    sync: Option<Syncer<'_>>,
+) -> Result<Vec<u8>, Refusal> {
     let info = file.metadata().map_err(|error| unread(what, &error))?;
     if !info.file_type().is_file() {
         return Err(Refusal::new(said!(what, " is no regular file")));
@@ -119,10 +145,15 @@ fn read_open(file: &File, what: &Text, limit: u64, sync: bool) -> Result<Vec<u8>
 }
 
 /// The bytes of the open regular file of `size` bytes, refused when the read returns more than `size`,
-/// then synced with `sync`.
-fn read_sized(file: &File, size: u64, what: &Text, sync: bool) -> Result<Vec<u8>, Refusal> {
+/// then synced through `sync`.
+fn read_sized(
+    file: &File,
+    size: u64,
+    what: &Text,
+    sync: Option<Syncer<'_>>,
+) -> Result<Vec<u8>, Refusal> {
     let failed = |error: &io::Error| {
-        let and = if sync { " and synced" } else { "" };
+        let and = if sync.is_some() { " and synced" } else { "" };
         Refusal::new(said!(what, " cannot be read", and, ": ", strerror(error)))
     };
     let mut data = Vec::new();
@@ -133,8 +164,8 @@ fn read_sized(file: &File, size: u64, what: &Text, sync: bool) -> Result<Vec<u8>
     if read > size {
         return Err(Refusal::new(said!(what, " grew while it was read")));
     }
-    if sync {
-        file.sync_all().map_err(|error| failed(&error))?;
+    if let Some(sync) = sync {
+        sync(file).map_err(|error| failed(&error))?;
     }
     Ok(data)
 }

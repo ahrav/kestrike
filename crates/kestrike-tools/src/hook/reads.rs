@@ -13,7 +13,12 @@ use super::members::{Members, link_inputs, verus_sources};
 use super::table::LINKS_REGISTRY;
 use super::{Check, Failure, argument};
 
-pub(super) const ZERO: &str = "0000000000000000000000000000000000000000";
+/// `null_id` holds for the null object id of either object format, 40 or 64 zeros: the local id of a
+/// deleted ref and the remote id of a new one.
+pub(super) fn null_id(id: &Text) -> bool {
+    id.to_str()
+        .is_some_and(|id| matches!(id.len(), 40 | 64) && id.bytes().all(|digit| digit == b'0'))
+}
 
 /// A probe the caller runs once each Git read of the plan returns; `Err` carries the exit code of the
 /// push, which ends as [`Failure::Cancelled`].
@@ -88,7 +93,7 @@ pub(super) fn comparison_base(
     local: &Text,
     remote: &Text,
 ) -> Result<Option<Text>, Failure> {
-    if remote.to_str() != Some(ZERO) {
+    if !null_id(remote) {
         let held = output(
             reads,
             &[
@@ -250,10 +255,11 @@ pub(super) fn changes_ignore(
     if rust.is_empty() {
         return Ok(false);
     }
-    let (Some(base), Some(local)) = (base.to_str(), local.to_str()) else {
-        let named = if base.to_str().is_none() { base } else { local };
-        return Err(Failure::Unencodable(named.clone()));
-    };
+    let [base, local] = [base, local].map(|commit| {
+        commit
+            .to_str()
+            .expect("a commit of the plan is a full object id or Git's UTF-8 output")
+    });
     let names: Vec<String> = rust
         .iter()
         .flat_map(|path| [base, local].map(|commit| format!("{commit}:{path}")))

@@ -38,26 +38,17 @@ fn line_starts(text: &str) -> impl Iterator<Item = usize> + '_ {
     std::iter::once(0).chain(text.match_indices('\n').map(|(at, _)| at + 1))
 }
 
-/// `stables` returns the value of each `STABLE: "VALUE"` that follows a line start and whitespace, in
-/// order. The whitespace may span lines, `VALUE` is one or more code points other than `"` and may span
-/// lines too, and a later value is sought at the line starts after the previous value's closing quote.
+/// `stables` returns the value of each line that reads `STABLE: "VALUE"` after spaces or tabs alone, in
+/// order. `VALUE` is one or more code points up to the first `"` of its line, and text after that quote
+/// is allowed.
 pub fn stables(text: &str) -> Vec<&str> {
-    let mut found = Vec::new();
-    let mut resume = 0;
-    for start in line_starts(text) {
-        if start < resume {
-            continue;
-        }
-        let Some(after) = skip_space(&text[start..]).strip_prefix(STABLE) else {
-            continue;
-        };
-        let Some(end) = after.find('"').filter(|&end| end > 0) else {
-            continue;
-        };
-        found.push(&after[..end]);
-        resume = text.len() - after.len() + end + 1;
-    }
-    found
+    text.split('\n')
+        .filter_map(|line| {
+            let after = line.trim_start_matches([' ', '\t']).strip_prefix(STABLE)?;
+            let end = after.find('"').filter(|&end| end > 0)?;
+            Some(&after[..end])
+        })
+        .collect()
 }
 
 /// `uncommented` removes each `#` and the rest of its line and keeps the line feed.
