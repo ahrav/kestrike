@@ -1463,6 +1463,8 @@ of unprintable code points that `Text::repr` in
 bidirectional control, a line or paragraph separator or a byte order mark, as
 `repr` writes it (`\r`, `\x7f`, `\u202e`); a backslash and a quote stay. The
 acknowledging line carries the character itself, as Git stores the path. The
+argument parser's error, a usage line and an `error:` line, prints an
+unrecognized argument as it was given. The
 CI step runs the scanner through `scripts/ci-scan-weakened-tests.sh`, which
 stops the runner's workflow commands before the scan, with a token it draws at
 each run and keeps out of the scan's environment, writes the scan's two
