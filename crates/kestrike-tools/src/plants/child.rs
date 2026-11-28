@@ -23,7 +23,9 @@ use super::files::strerror;
 use super::verdict::NoVerdict;
 use crate::environ::Environ;
 use crate::json::Value;
-use crate::process::{Interrupt, child_defaults, exit_code, exited_within, handled_set};
+use crate::process::{
+    Interrupt, child_defaults, exit_code, exited_within, file_size_signal_default, handled_set,
+};
 use crate::text::{Text, newlines, text};
 
 /// The program the run starts for the head's helper and for the question to it.
@@ -63,7 +65,8 @@ fn defaults(command: &mut Command, session: bool) {
             if session && libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            child_defaults(&handled)
+            child_defaults(&handled)?;
+            file_size_signal_default()
         });
     }
 }
@@ -118,6 +121,9 @@ fn did_not_run(what: &str, error: &io::Error) -> Stopped {
 /// `logged` runs the command with its standard output in `LOG.out` and its error output in `LOG.err`.
 /// It creates each log exclusively and returns the child's exit code or the negated terminating signal
 /// number, with the child's standard output as UTF-8 text, `\r\n` and `\r` read as `\n`.
+/// SIGTERM goes to the child by its process id, which is sound only while `logged` holds the child
+/// unreaped and is its one waiter: no other code of the process waits for any child, and SIGCHLD is
+/// not ignored.
 ///
 /// # Errors
 ///

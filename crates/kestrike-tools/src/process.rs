@@ -159,6 +159,36 @@ pub(crate) fn child_defaults(handled: &libc::sigset_t) -> io::Result<()> {
     Ok(())
 }
 
+/// `ignore_file_size_signal` sets SIGXFSZ to be ignored in this process, so a write past the soft
+/// file size limit returns `EFBIG` to its caller and ends no process.
+///
+/// # Errors
+///
+/// The disposition cannot be set.
+pub(crate) fn ignore_file_size_signal() -> io::Result<()> {
+    // SAFETY: `signal` takes a signal number and a disposition constant and touches no memory of the
+    // caller.
+    if unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_IGN) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `file_size_signal_default` sets SIGXFSZ back to its default action; it calls only
+/// async-signal-safe functions, so a `pre_exec` hook may call it before a child runs its program.
+///
+/// # Errors
+///
+/// The disposition cannot be set.
+pub(crate) fn file_size_signal_default() -> io::Result<()> {
+    // SAFETY: `signal` takes a signal number and a disposition constant, touches no memory of the
+    // caller, and is async-signal-safe.
+    if unsafe { libc::signal(libc::SIGXFSZ, libc::SIG_DFL) } == libc::SIG_ERR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// `exit_code` is the child's exit status, or the negated number of the signal that ended it.
 pub(crate) fn exit_code(status: ExitStatus) -> i32 {
     status
@@ -213,6 +243,8 @@ fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
 /// exited and both of its output pipes have closed. A signal recorded in `interrupt` before then kills a
 /// child that still runs with SIGKILL, waits up to [`GRACE`] for it and returns the interruption, leaving
 /// a pipe that a descendant holds to its reader.
+/// The kill by process id is sound only while the caller holds the child unreaped and is its one
+/// waiter: no other code of the process waits for any child, and SIGCHLD is not ignored.
 ///
 /// # Errors
 ///
@@ -234,6 +266,8 @@ pub(crate) fn capture(
 }
 
 /// `captured` reads a started child's piped output streams and waits for it as [`capture`] does.
+/// The kill by process id is sound only while the caller holds the child unreaped and is its one
+/// waiter: no other code of the process waits for any child, and SIGCHLD is not ignored.
 ///
 /// # Errors
 ///

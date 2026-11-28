@@ -6,7 +6,9 @@
 //! the signal and no score, and one recorded once the write has begun changes nothing.
 
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, Write};
+use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 
 use crate::plants::{
@@ -15,10 +17,55 @@ use crate::plants::{
 use crate::process::{INTERRUPT, install_handlers};
 use crate::text::text;
 
+/// A standard stream written through a duplicate of its descriptor, so a write the descriptor refuses
+/// returns its error, `EBADF` of a stream opened read-only or closed included.
+struct Stream(Result<File, i32>);
+
+impl Stream {
+    fn of(descriptor: RawFd) -> Self {
+        // SAFETY: `fcntl` with `F_DUPFD_CLOEXEC` takes a descriptor and an integer minimum and touches
+        // no memory; a closed `descriptor` gives -1.
+        let copy = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+        if copy < 0 {
+            return Self(Err(io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EBADF)));
+        }
+        // SAFETY: `copy` is a new open descriptor that this stream alone owns.
+        Self(Ok(unsafe { File::from_raw_fd(copy) }))
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match &mut self.0 {
+            Ok(file) => file.write(bytes),
+            Err(code) => Err(io::Error::from_raw_os_error(*code)),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut self.0 {
+            Ok(file) => file.flush(),
+            Err(code) => Err(io::Error::from_raw_os_error(*code)),
+        }
+    }
+}
+
 /// `run` runs the plants the checks select, from the invoking directory's checkout.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let env = std::env::vars_os().collect();
-    let (mut out, mut err) = (io::stdout().lock(), io::stderr().lock());
+    let (mut out, mut err) = (
+        Stream::of(libc::STDOUT_FILENO),
+        Stream::of(libc::STDERR_FILENO),
+    );
+    if let Err(error) = crate::process::ignore_file_size_signal() {
+        let _ = said(
+            &mut err,
+            &text!("plant-runner: SIGXFSZ: ", error.to_string()),
+        );
+        return 4;
+    }
     let inputs = match prepare(args, env, std::env::current_dir()) {
         Outcome::Run(inputs) => inputs,
         Outcome::Help(text) => {
