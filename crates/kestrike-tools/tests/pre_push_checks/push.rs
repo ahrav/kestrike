@@ -11,8 +11,8 @@
 //! child that writes its process id to `STUB_LOG.child` and sleeps, writes its own process id to
 //! `STUB_LOG.leader`, and waits for the child; one that holds `# linger` starts the same child, writing
 //! `STUB_LOG.lingering`, and exits 0 at once. A script that holds `# env` writes its environment to
-//! `STUB_LOG.env`, its working directory and that directory's mode to `STUB_LOG.where`, and the line
-//! `output of NAME` to standard output.
+//! `STUB_LOG.env`, its working directory and that directory's mode to `STUB_LOG.where`, the line
+//! `output of NAME` to standard output and `error output of NAME` to standard error.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder, File};
@@ -30,6 +30,9 @@ pub const STUB: &str = "import os, sys\nname = os.path.basename(sys.argv[0])\nwi
 
 /// The longest wait for a file a stand-in writes and for a stopped process group to end.
 pub const LIMIT: Duration = Duration::from_secs(10);
+
+/// The longest run of the tool in a case.
+pub const RUN_LIMIT: Duration = Duration::from_secs(120);
 
 const PYTHON: &str = r#"#!/bin/sh
 isolated=no
@@ -61,6 +64,7 @@ if grep -qx '# env' "$script"; then
   pwd > "$STUB_LOG.where"
   ls -ld . | cut -c1-10 >> "$STUB_LOG.where"
   printf 'output of %s\n' "$name"
+  printf 'error output of %s\n' "$name" >&2
 fi
 var=$(printf '%s' "${name%.py}" | tr 'abcdefghijklmnopqrstuvwxyz-' 'ABCDEFGHIJKLMNOPQRSTUVWXYZ_')
 eval "code=\${STUB_$var:-0}"
@@ -420,14 +424,50 @@ pub fn spawn_with_input(command: &mut Command, input: &str) -> Child {
     child
 }
 
-/// `finished` closes the child's standard input, waits for it and returns the run.
+/// `finished` closes the child's standard input, reads both output streams and waits for the child against
+/// [`RUN_LIMIT`]; a child still running then gets SIGKILL while it is held unreaped, and the case fails.
 pub fn finished(mut child: Child) -> Run {
     drop(child.stdin.take());
-    let output = child.wait_with_output().expect("the tool's run is read");
+    let reader = |stream: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut stream) = stream {
+                stream.read_to_end(&mut bytes).expect("the stream reads");
+            }
+            String::from_utf8(bytes).expect("the stream is UTF-8")
+        })
+    };
+    let stdout = reader(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    );
+    let stderr = reader(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    );
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the tool is polled") {
+            break Some(status);
+        }
+        if start.elapsed() >= RUN_LIMIT {
+            child.kill().expect("the tool is killed");
+            child.wait().expect("the tool is reaped");
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let stdout = stdout.join().expect("standard output is read");
+    let stderr = stderr.join().expect("standard error is read");
+    let status = status.unwrap_or_else(|| panic!("the tool ran past {RUN_LIMIT:?}: {stderr}"));
     Run {
-        code: output.status.code(),
-        stdout: String::from_utf8(output.stdout).expect("standard output is UTF-8"),
-        stderr: String::from_utf8(output.stderr).expect("standard error is UTF-8"),
+        code: status.code(),
+        stdout,
+        stderr,
     }
 }
 

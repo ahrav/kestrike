@@ -131,9 +131,8 @@ fn a_lowered_budget_alone_fails_the_push_with_no_worktree_check() {
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
 }
 
-// The fixture drops every `GITHUB_` variable from the push's environment, as the hook's own test did, so
-// the summary the caller's environment names stays as it was; a fixture that passed it on would let the
-// scan append its report lines there.
+// The fixture drops every `GITHUB_` variable from the push's environment, so the summary file the caller's
+// environment names stays unchanged.
 #[test]
 fn an_inherited_step_summary_is_left_alone() {
     let summary_dir = super::push::fresh(

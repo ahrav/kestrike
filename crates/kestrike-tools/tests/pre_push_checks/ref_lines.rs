@@ -75,8 +75,9 @@ fn an_unreadable_origin_main_fails_the_push_with_a_git_error() {
     );
 }
 
-/// A source path outside ASCII that the inventory names selects reconciliation under the C locale, which
-/// plays no part in what the tool reads.
+/// A source path outside ASCII that the inventory names selects reconciliation under the C locale and
+/// under an ISO-8859-1 locale where the host has one installed, since the locale plays no part in what the
+/// tool reads.
 #[test]
 fn a_non_ascii_verus_source_selects_reconciliation_under_a_non_utf8_locale() {
     let mut fx = Fixture::new();
@@ -89,8 +90,19 @@ fn a_non_ascii_verus_source_selects_reconciliation_under_a_non_utf8_locale() {
         (source, "v\n"),
     ]);
     let head = fx.commit(&[(source, "edited\n")]);
-    fx.set("LC_ALL", "C");
-    let run = fx.push(&[(&head, &base)]);
-    assert_eq!(run.code, Some(0), "{}", run.stderr);
-    assert_eq!(fx.ran(), ["judge-verus.py reconcile"]);
+    let installed = std::process::Command::new("locale")
+        .arg("-a")
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    let latin = ["en_US.iso88591", "en_US.ISO-8859-1"]
+        .into_iter()
+        .find(|name| installed.split_whitespace().any(|line| line == *name));
+    for locale in std::iter::once("C").chain(latin) {
+        fx.clear();
+        fx.set("LC_ALL", locale);
+        let run = fx.push(&[(&head, &base)]);
+        assert_eq!(run.code, Some(0), "{locale}: {}", run.stderr);
+        assert_eq!(fx.ran(), ["judge-verus.py reconcile"], "{locale}");
+    }
 }

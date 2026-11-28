@@ -11,6 +11,13 @@ use std::process::Stdio;
 
 use super::push::{BINARY, Fixture, STUB, finished, spawn_with_input, top, which};
 
+const PATHSPEC_MODES: [&str; 4] = [
+    "GIT_LITERAL_PATHSPECS",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+];
+
 const INVENTORY: (&str, &str) = ("scripts/test-inventory.json", r#"{"rows": []}"#);
 
 fn reporting(fx: &Fixture) -> String {
@@ -41,11 +48,18 @@ fn a_check_runs_in_the_pushed_tip_s_worktree_with_the_push_s_environment_and_out
     let mut fx = Fixture::new();
     let head = reporting(&fx);
     fx.set("KESTRIKE_PUSH_MARK", "pushed");
-    fx.set("GIT_LITERAL_PATHSPECS", "1");
-    fx.set("GIT_ICASE_PATHSPECS", "1");
+    for mode in PATHSPEC_MODES {
+        fx.set(mode, "1");
+    }
     let run = fx.push(&[(&head, &fx.base)]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(run.stdout, "output of test-select-tests.py\n");
+    assert!(
+        run.stderr
+            .contains("\nerror output of test-select-tests.py\n"),
+        "{}",
+        run.stderr
+    );
     let env = fs::read_to_string(fx.logged(".env")).expect("the check logs its environment");
     let env: Vec<&str> = env.lines().collect();
     for present in [
@@ -56,10 +70,10 @@ fn a_check_runs_in_the_pushed_tip_s_worktree_with_the_push_s_environment_and_out
     ] {
         assert!(env.contains(&present), "{present}: {env:?}");
     }
-    for absent in ["GIT_LITERAL_PATHSPECS=", "GIT_ICASE_PATHSPECS="] {
+    for mode in PATHSPEC_MODES {
         assert!(
-            !env.iter().any(|line| line.starts_with(absent)),
-            "{absent}: {env:?}"
+            !env.iter().any(|line| line.starts_with(&format!("{mode}="))),
+            "{mode}: {env:?}"
         );
     }
     let where_ = fs::read_to_string(fx.logged(".where")).expect("the check logs its directory");
@@ -140,24 +154,26 @@ fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
     fx.wrap_git_around(
         "if [ \"$1 $2\" = 'worktree remove' ]; then echo 'error: kept by the stand-in' >&2; exit 1; fi",
     );
-    let run = fx.push(&[(&head, &fx.base)]);
-    assert_eq!(run.code, Some(0), "{}", run.stderr);
     let prefix = format!(
         "pre-push: could not remove worktree {}/kestrike-pre-push-",
         fx.tmp.display()
     );
-    let named: Vec<&str> = run
-        .stderr
-        .lines()
-        .filter(|line| line.starts_with(&prefix))
-        .collect();
-    assert_eq!(named.len(), 1, "{}", run.stderr);
-    assert!(
-        named[0].ends_with(": error: kept by the stand-in"),
-        "{}",
-        run.stderr
-    );
-    assert!(fx.left().is_empty(), "{:?}", fx.left());
+    for code in [0, 1] {
+        let run = fx.push_with(&[(&head, &fx.base)], &[("test_select_tests", code)]);
+        assert_eq!(run.code, Some(code), "{}", run.stderr);
+        let named: Vec<&str> = run
+            .stderr
+            .lines()
+            .filter(|line| line.starts_with(&prefix))
+            .collect();
+        assert_eq!(named.len(), 1, "{}", run.stderr);
+        assert!(
+            named[0].ends_with(": error: kept by the stand-in"),
+            "{}",
+            run.stderr
+        );
+        assert!(fx.left().is_empty(), "{:?}", fx.left());
+    }
     fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
     fx.git(&["worktree", "prune"]);
     assert_eq!(fx.worktrees(), 1);
