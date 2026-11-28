@@ -152,7 +152,8 @@ const HOST_STOP_CASES: &str = "crates/kestrike-tools/tests/host_stop_controller/
 const HOST_STOP_RUN: &str = "cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::";
 
 /// A push that changes no input of the host stop controller's cases asks Git nothing about them, though the
-/// trace records the tool's other lookups.
+/// trace records the tool's other lookups; the control, a push that changes a fixture they read, asks
+/// Git for their module and runs them.
 #[test]
 fn an_unrelated_push_asks_git_nothing_about_the_host_stop_self_test() {
     let mut fx = Fixture::new();
@@ -176,6 +177,18 @@ fn an_unrelated_push_asks_git_nothing_about_the_host_stop_self_test() {
         "{lookups:?}"
     );
     assert!(!fx.ran().iter().any(|line| line.starts_with("cargo")));
+    let fixture = fx.commit(&[("scripts/host-stop-fixtures/operator.json", "{}\n")]);
+    fx.set("GIT_TRACE", trace.clone());
+    let _ = fs::remove_file(&trace);
+    assert_eq!(fx.push(&[(&fixture, &head)]).code, Some(0));
+    fx.unset("GIT_TRACE");
+    let text = fs::read_to_string(&trace).expect("the trace reads");
+    assert!(
+        text.lines()
+            .any(|line| line.contains("cat-file") && line.contains(HOST_STOP_CASES)),
+        "a push that changes a file the cases read asks Git for the cases' module: {text}"
+    );
+    assert!(fx.ran().iter().any(|line| line.starts_with("cargo")));
 }
 
 /// The host stop controller's cases run for a fixture they read only at a tip that holds them, with a base

@@ -8,8 +8,11 @@
 //! descriptor 3, apart from libtest's own output, which goes to `/dev/null`. The test executable
 //! cannot stand in under the name `aws` itself: libtest refuses the call's options. In that role the
 //! test holds the plane's state in its state directory: the call log, the alarm a case plants in
-//! state `ALARM` and the second of the stop. It answers the five calls, stamps the stop's
-//! transition second from its own clock, and refuses and logs a call it has no reply for.
+//! state `ALARM`, the second of the stop, and where a case sets them, the caller's identity and
+//! the target's last launch, with which the record reads it running. It answers the five calls,
+//! stamps the stop's transition second from its own clock, and refuses and logs a call it has no
+//! reply for. The stand-in starts no program by a bare name: it runs the shell's own commands and
+//! starts the test executable by its absolute path.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -362,10 +365,9 @@ fn reply(state: &Path, words: &[String]) -> Option<String> {
     };
     Some(match op.as_str() {
         "sts get-caller-identity" => {
-            format!(
-                r#"{{"Arn": {}}}"#,
-                json(&Value::String(Text::from(identity(&operator()))))
-            )
+            let caller = fs::read_to_string(state.join("identity"))
+                .unwrap_or_else(|_| identity(&operator()));
+            format!(r#"{{"Arn": {}}}"#, json(&Value::String(Text::from(caller))))
         }
         "ec2 describe-instance-status" => {
             let rows: Vec<String> = after(words, "--instance-ids")
@@ -382,6 +384,13 @@ fn reply(state: &Path, words: &[String]) -> Option<String> {
                 })
                 .collect();
             format!(r#"{{"InstanceStatuses": [{}]}}"#, rows.join(", "))
+        }
+        "ec2 describe-instances" if state.join("launched").exists() => {
+            let launched = fs::read_to_string(state.join("launched")).expect("the launch reads");
+            format!(
+                r#"{{"Reservations": [{{"Instances": [{{"InstanceId": "{TARGET}", "State": {{"Code": 16, "Name": "running"}}, "StateTransitionReason": "", "LaunchTime": "{}"}}]}}]}}"#,
+                launched.trim()
+            )
         }
         "ec2 describe-instances" => {
             let second: i64 = stopped?
@@ -576,14 +585,25 @@ fn a_started_run_aborts_on_a_guardrail_alarm_ahead_of_the_stop() {
                 format!("{stdout}{stderr}").contains(&super::steps()),
                 "{stdout}{stderr}"
             );
+            let control = Started::new("started-abort-control");
+            let ran = control.run(&control.top, &control.bin, &control.command("run"));
+            assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+            assert!(
+                control
+                    .calls()
+                    .iter()
+                    .any(|call| call == "ec2 stop-instances"),
+                "with no alarm planted the same run sends the stop: {:?}",
+                control.calls()
+            );
         },
     );
 }
 
 /// A SIGTERM that stands pending and blocked when the binary starts is delivered at the root's
 /// first statement, where the handlers' registration unblocks it, and the record holds it: the run
-/// raises it at its first read and ends with exit 2, nothing written and no call made. A process
-/// that lost it would run to its end.
+/// raises it at its first read and ends with exit 2, nothing written and no call made. The same
+/// start with no signal pending, the control, makes its calls and writes its marks.
 #[test]
 fn a_signal_delivered_at_the_roots_first_statement_is_recorded() {
     apart(
@@ -618,13 +638,20 @@ fn a_signal_delivered_at_the_roots_first_statement_is_recorded() {
             assert_eq!(text(&ran.stdout), "");
             assert_eq!(started.calls(), Vec::<String>::new());
             assert_eq!(listing(&started.evidence), ["package.json"]);
+            let control = Started::new("started-signal-control");
+            let ran = control.run(&control.top, &control.bin, &control.command("run"));
+            assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+            assert_ne!(control.calls(), Vec::<String>::new());
+            assert_ne!(listing(&control.evidence), ["package.json"]);
         },
     );
 }
 
 /// With no `aws` on its `PATH`, the tool refuses `run` at its first step on the committed tree,
 /// whose catalog leaves GD-2's prerequisites unmet, and `restore` of a copy of the held fixture at
-/// the caller check, each with exit 2 and nothing written.
+/// the caller check, each with exit 2 and nothing written. The control of the restore is the same
+/// start with the stand-in on `PATH`, which writes the restoration; that of the run is the clean
+/// started run, whose met catalog lets it write its marks.
 #[test]
 fn the_tool_without_aws_refuses_run_at_step_one_and_restore_at_the_caller_check() {
     apart(
@@ -689,12 +716,37 @@ fn the_tool_without_aws_refuses_run_at_step_one_and_restore_at_the_caller_check(
                 listing(&copy.join("injection")),
                 ["roles.json", "stop.json", "stopped.json"]
             );
+            assert_eq!(started.calls(), Vec::<String>::new());
+            fs::write(started.state.join("identity"), "operator-role").expect("the caller is set");
+            fs::write(started.state.join("launched"), "1970-01-01T00:02:00Z")
+                .expect("the launch is set");
+            let ran = started.run(&tree(), &started.bin, &args);
+            assert_eq!(ran.status.code(), Some(0), "{ran:?}");
+            assert_eq!(
+                listing(&copy.join("injection")),
+                [
+                    "restoration.json",
+                    "roles.json",
+                    "stop.json",
+                    "stopped.json"
+                ],
+                "with the stand-in on PATH the same restore writes its mark"
+            );
+            assert_eq!(
+                started.calls(),
+                [
+                    "sts get-caller-identity",
+                    "ec2 describe-instance-status",
+                    "ec2 describe-instances"
+                ]
+            );
         },
     );
 }
 
-/// `seal` of a copy of the held fixture without `injection/collected.json`, started with no `aws` on
-/// its `PATH`, writes the seal and prints its SHA-256, with exit 0 and no call.
+/// `seal` of a copy of the held fixture without `injection/collected.json`, started with the
+/// stand-in on its `PATH`, writes the seal and prints its SHA-256, with exit 0 and no call logged;
+/// the restore of the case above, the control, logs each call it makes through the same stand-in.
 #[test]
 fn a_started_seal_writes_the_mark_and_prints_its_digest() {
     apart(
@@ -702,8 +754,6 @@ fn a_started_seal_writes_the_mark_and_prints_its_digest() {
         "a_started_seal_writes_the_mark_and_prints_its_digest",
         || {
             let started = Started::new("started-seal");
-            let empty = started.scratch.0.join("empty");
-            fs::create_dir(&empty).expect("the empty directory is made");
             let copy = started.scratch.0.join("held");
             super::sealing::copy_tree(&tree().join("scripts/gameday-fixtures/held"), &copy, &[]);
             fs::remove_file(copy.join("injection/collected.json")).expect("the seal is removed");
@@ -715,7 +765,7 @@ fn a_started_seal_writes_the_mark_and_prints_its_digest() {
                 Path::new("--evidence"),
                 &copy,
             ];
-            let ran = started.run(&tree(), &empty, &args);
+            let ran = started.run(&tree(), &started.bin, &args);
             let (stdout, stderr) = (text(&ran.stdout), text(&ran.stderr));
             assert_eq!(ran.status.code(), Some(0), "{stdout}{stderr}");
             assert_eq!(stderr, "");
