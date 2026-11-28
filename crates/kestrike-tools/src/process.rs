@@ -218,8 +218,9 @@ pub fn install_handlers() -> io::Result<()> {
         if ignored(signal)? {
             return Ok(());
         }
-        // SAFETY: the action only calls `Interrupt::record`, one atomic compare-exchange on a static,
-        // which is async-signal-safe.
+        // SAFETY: the action only calls `Interrupt::record`, a compare-exchange and a bounded-increment
+        // update of two atomics of a static, which take no lock and allocate nothing, so the action is
+        // async-signal-safe.
         unsafe { signal_hook::low_level::register(signal, move || INTERRUPT.record(signal)) }
             .map(drop)
     });

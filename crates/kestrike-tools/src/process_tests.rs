@@ -607,13 +607,20 @@ fn running(pid: &str) -> bool {
 
 /// `worker_group` starts a group leader that writes `leader` once a worker of its group, which ignores
 /// SIGTERM, has written its pid to `worker`; the leader keeps SIGTERM's default action.
-fn worker_group(marker: &Path) -> (std::process::Child, String) {
-    let script = "sh -c 'trap \"\" TERM; echo $$ > \"$1/worker\"; exec sleep 120' sh \"$1\" & \
-                  while [ ! -s \"$1/worker\" ]; do sleep 0.05; done; echo $$ > \"$1/leader\"; exec sleep 120";
+fn worker_group(marker: &Path, leader_ignores_term: bool) -> (std::process::Child, String) {
+    let trap = if leader_ignores_term {
+        "trap '' TERM; "
+    } else {
+        ""
+    };
+    let script = format!(
+        "{trap}sh -c 'trap \"\" TERM; echo $$ > \"$1/worker\"; exec sleep 120' sh \"$1\" & \
+         while [ ! -s \"$1/worker\" ]; do sleep 0.05; done; echo $$ > \"$1/leader\"; exec sleep 120"
+    );
     let child = {
         use std::os::unix::process::CommandExt;
         Command::new("sh")
-            .args(["-c", script, "sh"])
+            .args(["-c", &script, "sh"])
             .arg(marker)
             .process_group(0)
             .spawn()
@@ -630,13 +637,14 @@ fn worker_group(marker: &Path) -> (std::process::Child, String) {
 
 /// A handled signal recorded as the stop begins, after a deadline (no delivery spent) or after the
 /// delivery that ended a wait, or recorded just before the stop's SIGKILL, leaves no member of the group
-/// running: the worker ignores SIGTERM, so only the SIGKILL ends it. The grace of the stop ends once the
-/// deliveries pass the spent ones, and the stop reaps the leader.
+/// running: the worker ignores SIGTERM, so only the SIGKILL ends it. Where the signal is recorded as the
+/// stop begins the leader ignores SIGTERM too, so only the deliveries passing the spent ones end the 45 s
+/// grace before 20 s; the stop reaps the leader.
 #[test]
 fn a_signal_during_the_stop_still_ends_the_whole_group() {
     for (at, spent) in [("stop", 0), ("stop", 1), ("kill", 0)] {
         let scratch = crate::paths::tests::Scratch::new("stop-signal");
-        let (mut child, worker) = worker_group(&scratch.0);
+        let (mut child, worker) = worker_group(&scratch.0, at == "stop");
         let interrupt = Interrupt::new();
         if spent == 1 {
             interrupt.record(libc::SIGINT);
@@ -700,37 +708,81 @@ fn a_hold_nests_and_its_outermost_release_reports_the_first_signal() {
     assert!(!interrupt.held(), "a dropped hold ends");
 }
 
-/// A signal delivered while the handled signals are blocked stays pending, so the handler records it
-/// only once the mask is set back, and the thread's mask is the one it held before.
+const BLOCKED_ROLE: &str = "KESTRIKE_PROCESS_BLOCKED_ROLE";
+
+/// `pending` holds where `signal` is pending for the calling thread or the process.
+fn pending(signal: i32) -> bool {
+    // SAFETY: all-zero bytes are a valid `sigset_t`, which `sigpending` overwrites; `set` outlives both calls.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(libc::sigpending(&mut set), 0);
+        libc::sigismember(&set, signal) == 1
+    }
+}
+
+/// `mask_holds` holds where `signal` is blocked in the calling thread.
+fn mask_holds(signal: i32) -> bool {
+    // SAFETY: a null new set makes `pthread_sigmask` only write the current mask into `set`, which all-zero
+    // bytes initialize and which outlives the calls.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut set),
+            0
+        );
+        libc::sigismember(&set, signal) == 1
+    }
+}
+
+/// A SIGHUP sent to the thread while the handled signals are blocked stays pending and unrecorded, and the
+/// handler records it once the mask is set back; the mask set back is the one the thread held before, so
+/// SIGINT, blocked before, stays blocked. The handlers stand in this test executable started again in a
+/// role, so the other tests keep their dispositions.
 #[test]
 fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
-    let own = |set: &mut libc::sigset_t| {
-        // SAFETY: a null new set makes `pthread_sigmask` only write the current mask into `set`.
-        let status = unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), set) };
-        assert_eq!(status, 0);
-    };
-    // SAFETY: all-zero bytes are a valid `sigset_t` that `own` overwrites.
-    let (mut before, mut inside, mut after): (libc::sigset_t, libc::sigset_t, libc::sigset_t) =
-        unsafe { (std::mem::zeroed(), std::mem::zeroed(), std::mem::zeroed()) };
-    own(&mut before);
-    let value = super::blocked(|| {
-        own(&mut inside);
-        7
-    })
-    .expect("the mask changes");
-    own(&mut after);
-    assert_eq!(value, 7);
-    for signal in super::SIGNALS {
-        // SAFETY: each set is initialized and `signal` is a valid number.
-        let (was, held, is) = unsafe {
+    if std::env::var_os(BLOCKED_ROLE).is_some() {
+        super::install_handlers().expect("the handlers stand");
+        // SAFETY: `sigemptyset` initializes the set before `sigaddset` and `pthread_sigmask` read it.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGINT);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+                0
+            );
+        }
+        let inside = super::blocked(|| {
+            // SAFETY: `pthread_kill` sends a signal to the calling thread, which runs.
+            let sent = unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGHUP) };
             (
-                libc::sigismember(&before, signal),
-                libc::sigismember(&inside, signal),
-                libc::sigismember(&after, signal),
+                sent,
+                pending(libc::SIGHUP),
+                super::INTERRUPT.deliveries(),
+                mask_holds(libc::SIGHUP),
             )
-        };
-        assert_eq!((held, is), (1, was), "signal {signal}");
+        })
+        .expect("the mask changes");
+        let after = (
+            super::INTERRUPT.deliveries(),
+            super::INTERRUPT.recorded(),
+            mask_holds(libc::SIGHUP),
+            mask_holds(libc::SIGINT),
+        );
+        let held = inside == (0, true, 0, true) && after == (1, Some(libc::SIGHUP), false, true);
+        std::process::exit(if held { 0 } else { 3 });
     }
+    let name = module_path!()
+        .split_once("::")
+        .map_or("", |(_, rest)| rest)
+        .to_owned()
+        + "::a_blocked_signal_is_recorded_once_the_mask_is_set_back";
+    let status = Command::new(std::env::current_exe().expect("the test executable"))
+        .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(BLOCKED_ROLE, "1")
+        .status()
+        .expect("the role runs");
+    assert_eq!(status.code(), Some(0), "{status:?}");
 }
 
 /// A read of the state that fails while the exited child is held unreaped sends SIGKILL to the child's
