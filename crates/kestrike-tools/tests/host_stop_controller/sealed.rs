@@ -1,9 +1,8 @@
 //! The cases of `seal` and of `restore` over a sealed copy of the held fixture, which holds a
-//! case's marks in place of the fixture's. A case that the script's self-test judges asserts
-//! `seal`'s exit, the judge's load of the sealed copy or its refusal, and the fact its verdict
-//! rests on: whether the restoration ends observation, or which marks stand. With
-//! `HOST_STOP_KEEP` set, each such case keeps the copy it loads under its name and the load's
-//! ordinal.
+//! case's marks in place of the fixture's. A case that judges a sealed copy asserts `seal`'s
+//! exit, the judge's load of the copy or its refusal, and the fact the judge's verdict rests on:
+//! whether the restoration ends observation, or which marks stand. With `HOST_STOP_KEEP` set, each
+//! such case keeps each copy it loads under the case's name and the load's ordinal.
 
 use std::fs;
 use std::os::unix::fs::symlink;
