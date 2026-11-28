@@ -9,8 +9,10 @@
 //! published with [`Creation::Exact`] is created new with mode 0600, written, and then given that mode as
 //! it stands, so the write leaves its set-id bits. A [`Staging`] with a modification time gives the
 //! written file that time, as its access time too, through its descriptor. The rename replaces a link at
-//! the target's path, whose target stays. A write, close or rename that fails leads to an attempt to
-//! remove the staging file. The write makes no sync.
+//! the target's path, whose target stays. A [`Staging`] with a gate hands the rename to that gate once
+//! the staging file is written and closed. A write, close or rename that fails, or a gate that returns an
+//! error with the rename not done, leads to an attempt to remove the staging file. The write makes no
+//! sync.
 
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Write};
@@ -104,14 +106,18 @@ pub enum Creation {
     Exact(u32),
 }
 
-/// How [`publish_staged`] stages a file: its [`Creation`], the suffix of the staging file's name and the
-/// modification time it gives the file, in nanoseconds since the epoch.
+/// A gate of [`Staging::gate`]: called with the rename, it runs that rename at most once and returns its
+/// result, or returns an error of its own with the rename not run.
+pub type Gate<'a> = &'a dyn Fn(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>;
+
+/// How [`publish_staged`] stages a file: its [`Creation`], the suffix of the staging file's name, the
+/// modification time it gives the file, in nanoseconds since the epoch, and the gate its rename runs in.
 #[derive(Clone, Copy)]
 pub struct Staging<'a> {
     creation: Creation,
     suffix: &'a str,
     modified: Option<i128>,
-    commit: Option<&'a dyn Fn() -> io::Result<()>>,
+    gate: Option<Gate<'a>>,
 }
 
 impl<'a> Staging<'a> {
@@ -121,15 +127,17 @@ impl<'a> Staging<'a> {
             creation,
             suffix: "",
             modified: None,
-            commit: None,
+            gate: None,
         }
     }
 
-    /// The staging whose rename waits for `commit`, called once the staging file is written and closed: an
-    /// error of `commit` removes the staging file and leaves the target as it stood.
+    /// The staging whose rename runs inside `gate`, called once the staging file is written and closed,
+    /// so the gate can run its own last check and the rename as one stretch. A gate that returns an error
+    /// with the rename not run leaves the target as it stood and leads to an attempt to remove the
+    /// staging file.
     #[must_use]
-    pub const fn commit(mut self, commit: &'a dyn Fn() -> io::Result<()>) -> Self {
-        self.commit = Some(commit);
+    pub const fn gate(mut self, gate: Gate<'a>) -> Self {
+        self.gate = Some(gate);
         self
     }
 
@@ -219,13 +227,16 @@ fn times(file: &File, nanoseconds: i128) -> io::Result<()> {
 }
 
 /// `publish_staged` replaces `target` with `written` through a staging file it creates beside it, as
-/// `staging` names, gives its mode and its modification time.
+/// `staging` names, gives its mode and its modification time, and renames it over `target`, inside
+/// `staging`'s gate where it has one.
 ///
 /// # Errors
 ///
-/// The staging file cannot be created, given its mode or its time, written, closed or renamed, or
-/// `written` is longer than the soft file size limit allows (`EFBIG`, before any byte is written); the
-/// text names the target's path.
+/// The staging file cannot be created, given its mode or its time, written, closed or renamed, `written`
+/// is longer than the soft file size limit allows (`EFBIG`, before any byte is written), or the gate
+/// returns an error, which is returned as it stands with the rename not run and the target as it stood;
+/// the text names the target's path. Where the error comes before the rename, removal of the staging
+/// file is attempted and its own failure is not reported.
 pub fn publish_staged(
     target: &Path,
     written: &[u8],
@@ -256,17 +267,23 @@ pub fn publish_staged(
         })
         .map_err(at_target);
     let closed = crate::fixtures::close(file).map_err(at_target);
-    let done = written
-        .and(closed)
-        .and_then(|()| {
-            staging
-                .commit
-                .map_or(Ok(()), |commit| commit().map_err(at_target))
-        })
-        .and_then(|()| fs::rename(&staged, target).map_err(at_target));
-    done.inspect_err(|_| {
+    let renamed = std::cell::Cell::new(false);
+    let mut rename = || {
+        fs::rename(&staged, target)?;
+        renamed.set(true);
+        Ok(())
+    };
+    let done = written.and(closed).and_then(|()| {
+        match staging.gate {
+            Some(gate) => gate(&mut rename),
+            None => rename(),
+        }
+        .map_err(at_target)
+    });
+    if done.is_err() && !renamed.get() {
         let _ = fs::remove_file(&staged);
-    })
+    }
+    done
 }
 
 /// `conclude` takes the run's last two steps, which read no signal record: `write` writes the score's

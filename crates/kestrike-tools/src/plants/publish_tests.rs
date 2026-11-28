@@ -275,21 +275,9 @@ fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
     );
 }
 
-/// A staging whose commit fails leaves the target as it stood and no staging file, and returns the
-/// commit's error; one whose commit passes publishes the bytes.
-#[test]
-fn a_failed_commit_leaves_the_target_and_no_staging_file() {
-    let scratch = Scratch::new("publish-commit");
-    let target = scratch.0.join("report.json");
-    fs::write(&target, "before\n").expect("written");
-    let refused = || Err(std::io::Error::other("signal 15"));
-    let staging = Staging::new(Creation::Masked(0o022))
-        .suffix(".weaken")
-        .commit(&refused);
-    let error = publish_staged(&target, b"after\n", staging).expect_err("the commit refuses");
-    assert!(error.to_string().contains("signal 15"), "{error}");
-    assert_eq!(fs::read_to_string(&target).expect("reads"), "before\n");
-    let names: Vec<String> = fs::read_dir(&scratch.0)
+/// The names in `directory`, sorted.
+fn names_in(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
         .expect("lists")
         .map(|entry| {
             entry
@@ -299,11 +287,56 @@ fn a_failed_commit_leaves_the_target_and_no_staging_file() {
                 .into_owned()
         })
         .collect();
-    assert_eq!(names, ["report.json"]);
-    let passed = || Ok(());
+    names.sort();
+    names
+}
+
+/// A gate runs once the staging file holds the whole text and is closed. A gate that refuses without the
+/// rename leaves the target as it stood and no staging file, and its error is returned; a gate that runs
+/// the rename publishes the bytes; a gate that runs the rename and then fails returns its error and
+/// leaves the published file in place.
+#[test]
+fn a_gate_runs_the_rename_once_the_staging_file_is_whole() {
+    let scratch = Scratch::new("publish-gate");
+    let target = scratch.0.join("report.json");
+    fs::write(&target, "before\n").expect("written");
+    let staged_text = || -> Vec<String> {
+        names_in(&scratch.0)
+            .into_iter()
+            .filter(|name| name.ends_with(".weaken"))
+            .map(|name| fs::read_to_string(scratch.0.join(name)).expect("reads"))
+            .collect()
+    };
+    let refused = |_: &mut dyn FnMut() -> std::io::Result<()>| {
+        assert_eq!(staged_text(), ["after\n"], "the staging file is whole");
+        Err(std::io::Error::other("signal 15"))
+    };
     let staging = Staging::new(Creation::Masked(0o022))
         .suffix(".weaken")
-        .commit(&passed);
-    publish_staged(&target, b"after\n", staging).expect("the commit passes");
+        .gate(&refused);
+    let error = publish_staged(&target, b"after\n", staging).expect_err("the gate refuses");
+    assert!(error.to_string().contains("signal 15"), "{error}");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "before\n");
+    assert_eq!(names_in(&scratch.0), ["report.json"]);
+    let passed = |rename: &mut dyn FnMut() -> std::io::Result<()>| {
+        assert_eq!(staged_text(), ["after\n"], "the staging file is whole");
+        rename()
+    };
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .gate(&passed);
+    publish_staged(&target, b"after\n", staging).expect("the gate passes");
     assert_eq!(fs::read_to_string(&target).expect("reads"), "after\n");
+    assert_eq!(names_in(&scratch.0), ["report.json"]);
+    let late = |rename: &mut dyn FnMut() -> std::io::Result<()>| {
+        rename()?;
+        Err(std::io::Error::other("after the rename"))
+    };
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .gate(&late);
+    let error = publish_staged(&target, b"later\n", staging).expect_err("the gate fails late");
+    assert!(error.to_string().contains("after the rename"), "{error}");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "later\n");
+    assert_eq!(names_in(&scratch.0), ["report.json"]);
 }

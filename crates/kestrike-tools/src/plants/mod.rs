@@ -69,7 +69,7 @@ pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
 pub(crate) use publish::UNANNOUNCED;
 pub use publish::{
-    Creation, Staging, THREAD_STATUS, conclude, publish, publish_staged, publish_with, umask,
+    Creation, Gate, Staging, THREAD_STATUS, conclude, publish, publish_staged, publish_with, umask,
 };
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub(crate) use removal::remove;
