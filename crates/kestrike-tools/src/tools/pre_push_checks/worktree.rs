@@ -15,8 +15,14 @@
 //!
 //! `git worktree add` and `git worktree remove` each lead a process group of their own, so a signal sent to
 //! the tool's process group reaches them only through the tool. A recorded cancellation signal causes the
-//! tool to stop `git worktree add` as it would a running check. The tool waits for `git worktree remove`
-//! to finish.
+//! tool to stop `git worktree add` as it would a running check, also after Git exits while a process of
+//! its group still holds one of its output streams. A process that holds such a stream from outside the
+//! group gets no signal, and the tool waits for the stream's end with no limit unless a signal is
+//! recorded. The tool waits for `git worktree remove` to finish.
+//!
+//! An add stopped before it writes the worktree's `gitdir` file can leave an entry under the common
+//! `.git/worktrees` directory that holds only its `locked` file; Git lists no such worktree, the removal
+//! names a tree Git does not know, and the entry stays.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, File};
@@ -27,7 +33,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::thread;
-use std::time::Duration;
 
 use crate::environ::Environ;
 use crate::git::{self, GitError};
@@ -147,13 +152,8 @@ fn checks_in(
             .process_group(0)
             .spawn()
             .map_err(|error| Ended::Fault(format!("{program}: {error}")))?;
-        let status = cancel::wait(&mut child).map_err(|unwaited| match unwaited {
-            Unwaited::Cancelled(code) => Ended::Cancelled(code),
-            Unwaited::Unstopped(code, error) => {
-                Ended::Unstopped(code, format!("{program}: {error}"))
-            }
-            Unwaited::Failed(error) => Ended::Fault(format!("{program}: {error}")),
-        })?;
+        let status =
+            cancel::wait(&mut child, || true).map_err(|unwaited| ended(program, unwaited))?;
         if !status.success() {
             failures.push(command);
         }
@@ -161,6 +161,22 @@ fn checks_in(
     Ok(failures)
 }
 
+/// `ended` is how a run of `program` ended where [`cancel::wait`] gave no status.
+fn ended(program: &str, unwaited: Unwaited) -> Ended {
+    match unwaited {
+        Unwaited::Cancelled(code) => Ended::Cancelled(code),
+        Unwaited::Unstopped(code, error) => Ended::Unstopped(code, format!("{program}: {error}")),
+        Unwaited::Failed(error) => Ended::Fault(format!("{program}: {error}")),
+    }
+}
+
+/// A reader of one of Git's output streams: the stream's bytes to its end, or the read's error.
+type Reader = thread::JoinHandle<io::Result<Vec<u8>>>;
+
+/// `add` runs `git worktree add --quiet --detach <tree> <tip>`, reading its two output streams to their
+/// ends on threads of their own. The leader stays unreaped until it has ended and both streams have
+/// reached their ends, so a signal recorded while a process of the add's group holds a stream still stops
+/// that group. A successful add whose standard output is not UTF-8 is a refusal.
 fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
     let tip = argument(tip);
     let args = [
@@ -179,53 +195,57 @@ fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
         .process_group(0)
         .spawn()
         .map_err(|error| Ended::Fault(format!("git: {error}")))?;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let status = cancel::wait(&mut child).map_err(|unwaited| match unwaited {
-        Unwaited::Cancelled(code) => Ended::Cancelled(code),
-        Unwaited::Unstopped(code, error) => Ended::Unstopped(code, format!("git: {error}")),
-        Unwaited::Failed(error) => Ended::Fault(format!("git: {error}")),
-    })?;
+    let readers = drain(child.stdout.take())
+        .and_then(|stdout| drain(child.stderr.take()).map(|stderr| (stdout, stderr)));
+    let (stdout, stderr) = match readers {
+        Ok(readers) => readers,
+        Err(error) => {
+            return Err(match cancel::stop(&mut child, false) {
+                Ok(()) => Ended::Fault(format!("git: {error}")),
+                Err(stopped) => Ended::Fault(format!(
+                    "git: {error}; the stop that followed failed: {stopped}"
+                )),
+            });
+        }
+    };
+    let status = cancel::wait(&mut child, || stdout.is_finished() && stderr.is_finished())
+        .map_err(|unwaited| ended("git", unwaited))?;
     let stdout = drained(stdout)?;
+    let stderr = drained(stderr)?;
     if status.success() {
         return String::from_utf8(stdout).map(drop).map_err(|error| {
             Ended::Git(GitError::NotUtf8(format!("{}: {error}", git::label(&args))))
         });
     }
-    let stderr = drained(stderr)?;
     Err(Ended::Git(git::failed(&args, &stderr)))
 }
 
-/// `drain` reads `stream` to its end on a thread of its own. Where the thread cannot start, the stream is
-/// closed and its bytes read as none.
-fn drain(stream: Option<impl Read + Send + 'static>) -> Option<thread::JoinHandle<Vec<u8>>> {
-    let mut stream = stream?;
-    thread::Builder::new()
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stream.read_to_end(&mut bytes);
-            bytes
-        })
-        .ok()
-}
-
-/// `drained` waits for the reader of `drain`, reading the signal record between polls, since a descendant
-/// of Git can hold the stream open after Git exits.
+/// `drain` reads `stream` to its end on a thread of its own.
 ///
 /// # Errors
 ///
-/// A signal was recorded while the reader ran.
-fn drained(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Result<Vec<u8>, Ended> {
-    let Some(reader) = reader else {
-        return Ok(Vec::new());
-    };
-    let mut pause = Duration::from_micros(500);
-    while !reader.is_finished() {
-        cancel::check().map_err(Ended::Cancelled)?;
-        thread::sleep(pause);
-        pause = (pause * 2).min(Duration::from_millis(20));
+/// The stream is missing, or the thread cannot start.
+fn drain(stream: Option<impl Read + Send + 'static>) -> io::Result<Reader> {
+    let mut stream = stream.ok_or_else(|| io::Error::other("a captured stream is missing"))?;
+    thread::Builder::new().spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).map(|_| bytes)
+    })
+}
+
+/// `drained` joins a reader of `drain` that has finished.
+///
+/// # Errors
+///
+/// The read failed, or the reader panicked.
+fn drained(reader: Reader) -> Result<Vec<u8>, Ended> {
+    match reader.join() {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(error)) => Err(Ended::Fault(format!("git: {error}"))),
+        Err(_) => Err(Ended::Fault(
+            "git: a reader of Git's output panicked".to_owned(),
+        )),
     }
-    Ok(reader.join().unwrap_or_default())
 }
 
 /// `remove` runs `git worktree remove --force --force` on `tree` in its own process group, prints

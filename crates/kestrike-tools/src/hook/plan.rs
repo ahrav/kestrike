@@ -139,8 +139,9 @@ impl Plan {
     /// test where a source it reads changed, the replay, and each self-test where none of its own scripts
     /// changed and another of its inputs did. Then the commits under the record directories that the tip
     /// reaches and the destination is not known to hold. A presence read, and a read of the inventory or the
-    /// registry, whose Git command fails for any reason reads as an absent file. A line that returns an
-    /// error leaves the plan as it stood before the line.
+    /// registry, whose Git command runs and exits nonzero reads as an absent file. The probe also runs once
+    /// the skipped-scan note returns, before the next read. A line that returns an error leaves the plan as
+    /// it stood before the line.
     ///
     /// # Errors
     ///
@@ -162,6 +163,7 @@ impl Plan {
         let (checks, guard) = match &base {
             None => {
                 note(Skipped(local.clone()));
+                (reads.probe)().map_err(Failure::Cancelled)?;
                 (unbased_checks(reads, &local, links.as_ref())?, true)
             }
             Some(base) => {

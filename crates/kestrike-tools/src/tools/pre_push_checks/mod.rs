@@ -9,11 +9,17 @@
 //! failure is printed as `pre-push: failed: <failure>` at the end.
 //!
 //! Exit 0 passes; 1 is a failed check or a failed step of the tool's own, Git that cannot start or a
-//! failed read or write of the batch read's Git child among them, named by a `pre-push-checks: ` line; 2 is
-//! every other refusal before the checks, named by a `pre-push: ` line: a malformed ref line, a Git read
-//! that exits nonzero where the read is not a presence test, Git output or a record the tool cannot read, a
-//! Git argument the standard library refuses, and a `git worktree add` that exits nonzero, and also signal
-//! handlers that cannot be installed; 120 is a failed write to standard error; 101 a panic in the scan; and
+//! failed read or write of the batch read's Git child among them, named by a `pre-push-checks: ` line, or
+//! for Git that cannot start for the worktree's removal by the line `pre-push: could not remove worktree
+//! <tree>: git: <error>`; a guarded chaos record that is missing or not JSON is a failure listed at the
+//! end with the failed checks. 2 is every other refusal before the checks, named by a `pre-push: ` line:
+//! a malformed ref line, a Git read that exits nonzero where the read is not a presence test, Git output
+//! that is not UTF-8, a tree entry or a raw diff record of a form Git's manual does not give, a Git
+//! argument the standard library refuses, and a `git worktree add` that exits nonzero, which exits 1
+//! where Git cannot start for the removal; 2 is also signal handlers that cannot be installed, named by a
+//! `pre-push-checks: ` line. A presence read, and a read of the inventory or the registry, whose Git
+//! command exits nonzero reads as an absent file, and a removal that Git refuses is a warning. 120 is a
+//! failed write to standard error; 101 a panic in the scan; and
 //! `128 + n` the first signal `n` that [`cancel`] records, regardless of its inherited disposition. The
 //! tool checks the signal record after reading standard input, after each Git read of a ref line's plan and
 //! of the guard, through the plan's probe, after each scan, after each line it prints, and while a check or
@@ -26,7 +32,7 @@ mod worktree;
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -45,6 +51,12 @@ const STREAM_FAILED: u8 = 120;
 type Exit = u8;
 
 /// `run` installs the signal record, then runs the push's checks and returns the exit code.
+///
+/// `run` is meant to run once, in a process of its own, whether a caller names it or reaches it through
+/// the tool table: it replaces the handlers of SIGINT, SIGTERM, SIGHUP and SIGQUIT and SIGCHLD's
+/// disposition, changes the calling thread's signal mask, and restores none of them, and the first signal
+/// it records stays recorded for the life of the process. Where the installation fails, part of those
+/// changes can stand, the four signals blocked in the calling thread among them.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     if let Err(error) = cancel::install() {
         return fail(&format!("{NAME}: the signal handlers: {error}"), 2);
@@ -53,17 +65,44 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     push(destination).unwrap_or_else(|code| code)
 }
 
-/// `say` writes `line` and a line feed to standard error; a failed write is exit 120. While standard error
-/// cannot take the line, `say` waits for it and reads the signal record, so a recorded signal ends the
-/// wait with its exit code and the line is not written.
+/// The longest slice of a line that `say` writes after one poll: POSIX's least `PIPE_BUF`, so a pipe that
+/// reports room for a write takes the slice whole unless another writer fills it first.
+const SLICE: usize = 512;
+
+/// `say` writes `line` and a line feed to standard error; a failed write is exit 120. It writes the line
+/// in slices of at most [`SLICE`] bytes, each cut at a character's edge, and before each slice it waits
+/// until standard error can take a write, reading the signal record while it waits, so a recorded signal
+/// ends the wait with its exit code and the rest of the line is not written. A stream that another writer
+/// fills between the poll and the write can still hold a slice's write until its reader drains it.
 fn say(line: &str) -> Result<(), Exit> {
-    cancel::writable(io::stderr().as_fd())?;
-    emit(io::stderr().as_fd(), &format!("{line}\n")).map_err(|_| STREAM_FAILED)
+    said(io::stderr().as_fd(), &format!("{line}\n"))
 }
 
-/// `fail` writes `line` to standard error and returns `code`, or 120 where the write fails.
+/// `said` is [`say`] on `stream`, writing `text` as it stands.
+fn said(stream: BorrowedFd<'_>, text: &str) -> Result<(), Exit> {
+    let mut rest = text;
+    while !rest.is_empty() {
+        let mut end = rest.len().min(SLICE);
+        while !rest.is_char_boundary(end) {
+            end -= 1;
+        }
+        let (slice, after) = rest.split_at(end);
+        cancel::writable(stream)?;
+        emit(stream, slice).map_err(|_| STREAM_FAILED)?;
+        rest = after;
+    }
+    Ok(())
+}
+
+/// `fail` writes `line` to standard error and returns `code`, or 120 where the write fails. A signal
+/// recorded by the time the write returns outranks both: `fail` then returns its `128 + n`, the write
+/// done or not.
 fn fail(line: &str, code: Exit) -> Exit {
-    say(line).map_or_else(|failed| failed, |()| code)
+    let written = say(line);
+    match cancel::check() {
+        Err(signal) => signal,
+        Ok(()) => written.map_or_else(|failed| failed, |()| code),
+    }
 }
 
 /// `refused` ends the push on `failure` and returns its exit code: a recorded signal's code with nothing
