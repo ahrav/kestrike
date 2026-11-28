@@ -57,28 +57,33 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         })
     }
 
-    /// The lock of `injection/` that `restore` and `seal` hold, on the directory the name gives. A
-    /// run that holds the lock can remove its new `injection/` and free the lock between this
-    /// command's open of that directory and its `flock`, which then succeeds on the removed
-    /// directory; the lookup behind the lock refuses that. Once the lock is held on the directory
-    /// at the name, no command removes it: a run removes `injection/` only under its lock.
+    /// The lock of `injection/` that `restore` and `seal` hold.
     ///
     /// # Errors
     ///
-    /// A refusal for a lock that cannot be opened or is taken, for a name that gives another
-    /// directory than the one locked, and for a lookup of the name that fails, a name with no
-    /// entry included.
+    /// A refusal for a directory that cannot be opened and for a lock that is taken.
     pub(super) fn locked(&self, injection: &Path) -> Result<Lock, Halt> {
-        let files = self.cx.files;
-        let held = lock(files, injection)
-            .map_err(|error| Halt::refused(lock_sentence(injection, &error)))?;
+        lock(self.cx.files, injection)
+            .map_err(|error| Halt::refused(lock_sentence(injection, &error)))
+    }
+
+    /// Checks that the name `injection/` gives the directory `held` locks. A run that holds the
+    /// lock can remove its new `injection/` and free the lock between a seal's open of that
+    /// directory and its `flock`, which then succeeds on a directory with no name. Once the lock
+    /// is held on the directory at the name, no command removes that directory: a run removes
+    /// `injection/` only under its lock.
+    ///
+    /// # Errors
+    ///
+    /// A refusal for a name whose `lstat` finds another entry than the locked directory, and for a
+    /// lookup that fails, a name with no entry included.
+    pub(super) fn at_its_name(&self, held: &Lock, injection: &Path) -> Result<(), Halt> {
         let mut sentence = Text::from_os(injection.as_os_str());
-        match held.stands_at(files, injection) {
-            Ok(true) => return Ok(held),
-            Ok(false) => sentence.push_str(
-                " is another directory than the one locked: the one this command opened was \
-                 removed while it took the lock",
-            ),
+        match held.stands_at(self.cx.files, injection) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {
+                sentence.push_str(" names another entry than the directory this command locked");
+            }
             Err(error) => sentence.push_str(&format!(
                 " cannot be looked up behind its lock, so the directory locked may be another: {}",
                 strerror(&error)

@@ -233,6 +233,51 @@ fn a_surrogate_is_escaped_before_the_details_cut_and_one_past_the_cut_changes_no
     assert_eq!(detail, whole("a".repeat(room)));
     let (plain, plain_bytes) = written(state(room, u32::from(b'x')));
     assert_eq!((detail, bytes), (plain, plain_bytes));
+
+    let codes = std::iter::repeat_n(u32::from(b'a'), room - 1).chain([0x1f600, 0xe9]);
+    let (detail, bytes) = written(Text::from_code_points(codes).expect("code points of a text"));
+    assert_eq!(detail, whole(format!("{}\u{1f600}", "a".repeat(room - 1))));
+    assert_eq!(detail.chars().count(), DETAIL_MAX);
+    let kept_whole = format!("a\\ud83d\\ude00{}\",\n", tail());
+    assert!(String::from_utf8_lossy(&bytes).contains(&kept_whole));
+
+    let codes = (0..3 * DETAIL_MAX).flat_map(|_| [0xdc80, u32::from(b'a'), u32::from(b'b')]);
+    let (detail, _) = written(Text::from_code_points(codes).expect("code points of a text"));
+    assert_eq!(detail, whole("\\udc80ab".repeat(3 * DETAIL_MAX)));
+    assert_eq!(detail.chars().count(), DETAIL_MAX);
+}
+
+/// The mark's `detail` line for the alarm state `state`, as the file holds it.
+fn detail_line(state: Text) -> String {
+    let mut case = Case::new("surrogate-bytes");
+    state_after_stop(&case, state);
+    case.assert_aborted("guardrail", &ALL, Some(&guardrails()[4]), None);
+    assert_eq!(case.stderr(), "");
+    let bytes = std::fs::read(case.evidence.join("injection/abort.json")).expect("the mark reads");
+    let text = String::from_utf8(bytes).expect("the mark's bytes are UTF-8");
+    let line = text.lines().find(|line| line.starts_with(" \"detail\": "));
+    line.expect("the mark holds a detail").to_owned()
+}
+
+/// A state with no surrogate keeps each character: a backslash that starts the letters of an
+/// escape, a tab, a scalar of the basic plane and one past it reach the mark as JSON writes them.
+/// Each of two lone surrogates in one state is written as its own six characters.
+#[test]
+fn the_abort_detail_keeps_a_text_with_no_surrogate_and_escapes_each_surrogate_of_one() {
+    let plain = Text::from("q\\ud800w\t\u{e9}\u{1f600}z");
+    assert_eq!(
+        detail_line(plain),
+        format!(
+            " \"detail\": \"{READS}q\\\\ud800w\\t\\u00e9\\ud83d\\ude00z{}\",",
+            tail()
+        )
+    );
+    let codes = [0xd800, u32::from(b'x'), 0xdfff];
+    let twice = Text::from_code_points(codes).expect("a text holds lone surrogates");
+    assert_eq!(
+        detail_line(twice),
+        format!(" \"detail\": \"{READS}\\\\ud800x\\\\udfff{}\",", tail())
+    );
 }
 
 #[test]

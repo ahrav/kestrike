@@ -1,10 +1,10 @@
 //! After the operator starts the target again, `restore` checks the marks a run left, polls the
 //! target until a read shows it running again, and writes `restoration.json` once.
 //!
-//! `restore` names the evidence by the pathname `DIR/injection`. At the lock it refuses a name that
-//! gives another directory than the one it locked; from there no command of the controller removes
-//! that directory, and `restore` trusts the operator to keep it under that name until `restore`
-//! returns.
+//! `restore` names the evidence by the pathname `DIR/injection`. Once it holds the lock it refuses
+//! a name whose lookup finds another entry than the directory it locked; from there no command of
+//! the controller removes that directory, and `restore` trusts the operator to keep it under that
+//! name until `restore` returns.
 
 use std::cmp::Ordering;
 use std::ffi::OsStr;
@@ -82,7 +82,8 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                  target and the operator's",
             ));
         }
-        let _held = self.locked(&injection)?;
+        let held = self.locked(&injection)?;
+        self.at_its_name(&held, &injection)?;
         let shown = self.stands_in(&injection, "stopped.json")?;
         let aborted = self.stands_in(&injection, "abort.json")?;
         if !(aborted || shown) {

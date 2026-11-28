@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use kestrike_tools::host_stop::{Disk, Signal, lock};
+use kestrike_tools::host_stop::{Disk, Lock, Signal, lock};
 
 use super::plane::{CALLER, STATUS};
 use super::sealed::taken_now;
@@ -44,7 +44,7 @@ fn removals(case: &Case) -> Rc<Cell<usize>> {
 /// lock.
 #[test]
 fn a_run_that_never_held_the_lock_leaves_injection_and_the_holders_lock() {
-    for arm in ["taken", "unopened", "held"] {
+    for arm in ["taken", "unopened", "panicked", "held"] {
         let mut case = Case::new("lock-lost");
         let injection = case.evidence.join("injection");
         fail_the_evidence_sync(&case);
@@ -68,6 +68,15 @@ fn a_run_that_never_held_the_lock_leaves_injection_and_the_holders_lock() {
                 made = matches!(step, Step::Mkdir(_));
                 opens.then(|| errno(libc::EMFILE))
             }));
+        } else if arm == "panicked" {
+            let mut locking = false;
+            case.plant(Box::new(move |_, step| {
+                if matches!(step, Step::TryLock) && !locking {
+                    locking = true;
+                    panic!("a planted lock fault");
+                }
+                None
+            }));
         }
         let removed = removals(&case);
         assert_eq!(case.run(), 2, "{arm}: {}", case.output());
@@ -85,14 +94,16 @@ fn a_run_that_never_held_the_lock_leaves_injection_and_the_holders_lock() {
             assert_eq!(listing(&case.evidence), [COPY], "{arm}");
             continue;
         }
-        let reason = if arm == "taken" {
-            "is held by a run, restore or seal that has not ended: Resource temporarily unavailable"
-        } else {
-            "cannot be opened: Too many open files"
+        let failed = match arm {
+            "taken" => format!(
+                "Refusal: {shown} is held by a run, restore or seal that has not ended: Resource \
+                 temporarily unavailable"
+            ),
+            "unopened" => format!("Refusal: {shown} cannot be opened: Too many open files"),
+            _ => "panic: a planted lock fault".to_owned(),
         };
         let line = format!(
-            "host-stop-controller: refused: Refusal: {shown} {reason} before roles.json stood; \
-             {shown}{LEFT}"
+            "host-stop-controller: refused: {failed} before roles.json stood; {shown}{LEFT}"
         );
         assert_eq!(stderr, line, "{arm}");
         assert_eq!(removed.get(), 0, "{arm}");
@@ -200,6 +211,46 @@ fn a_run_that_holds_the_lock_keeps_it_through_the_removal_and_the_sync() {
     drop(free_lock(&through));
 }
 
+/// A panic in the removal or in the evidence directory's sync behind it ends the run with the
+/// refusal that names `injection/` as possibly standing, and the lock is free once the run returns.
+#[test]
+fn a_panic_in_the_removal_or_its_sync_names_injection_as_possibly_standing() {
+    for arm in ["removal", "sync"] {
+        let mut case = Case::new("removal-panic");
+        case.fail_once(libc::ENOSPC, |step| links(step, "roles.json"));
+        let (injection, evidence) = (case.evidence.join("injection"), case.evidence.clone());
+        let pinned = Rc::new(RefCell::new(None));
+        let (pin, at) = (Rc::clone(&pinned), injection.clone());
+        case.plant(Box::new(move |_, step| {
+            match step {
+                Step::Rmdir => {
+                    let open = File::open(&at).expect("the directory stands at its removal");
+                    *pin.borrow_mut() = Some(open);
+                    assert!(arm != "removal", "a planted removal fault");
+                }
+                Step::FsyncDirectory(synced) if *synced == evidence && pin.borrow().is_some() => {
+                    panic!("a planted removal fault");
+                }
+                _ => {}
+            }
+            None
+        }));
+        assert_eq!(case.run(), 2, "{arm}: {}", case.output());
+        let line = format!(
+            "host-stop-controller: refused: OSError: [Errno 28] No space left on device before \
+             roles.json stood; {} may stand, since its removal failed or is unsynced (panic: a \
+             planted removal fault): remove it before another run\n",
+            injection.display()
+        );
+        assert_eq!(case.stderr(), line, "{arm}");
+        assert_eq!(case.stdout(), "", "{arm}");
+        assert_eq!(injection.exists(), arm == "removal", "{arm}");
+        let open = pinned.borrow_mut().take().expect("the removal was reached");
+        let through = PathBuf::from(format!("/proc/self/fd/{}/.", open.as_raw_fd()));
+        drop(free_lock(&through));
+    }
+}
+
 /// After the command opens `injection` and before it calls `flock`, the plant renames the directory
 /// to `aside`. If `remade` is true, the plant copies `aside` to `injection`.
 fn swap_at_the_lock(case: &Case, injection: &Path, aside: &Path, remade: bool) {
@@ -217,13 +268,38 @@ fn swap_at_the_lock(case: &Case, injection: &Path, aside: &Path, remade: bool) {
     }));
 }
 
-fn swapped_refusal(injection: &Path, arm: &str) -> String {
-    let reason = if arm == "another" {
-        "is another directory than the one locked: the one this command opened was removed while \
-         it took the lock"
-    } else {
-        "cannot be looked up behind its lock, so the directory locked may be another: No such \
-         file or directory"
+/// Plants on the first lookup of `injection` behind the command's `flock`: with `signal`, the
+/// lookup stores SIGTERM, and with `fails`, it returns `EIO`.
+fn at_the_lookup_behind_the_lock(case: &Case, injection: &Path, signal: bool, fails: bool) {
+    let (at, delivered) = (injection.to_path_buf(), case.delivered);
+    let (mut locked, mut looked) = (false, false);
+    case.plant(Box::new(move |_, step| {
+        locked |= matches!(step, Step::TryLock);
+        if !locked || looked || !matches!(step, Step::Lstat(path) if *path == at) {
+            return None;
+        }
+        looked = true;
+        if signal {
+            delivered.deliver(Signal::Terminate);
+        }
+        fails.then(|| errno(libc::EIO))
+    }));
+}
+
+fn lock_refusal(injection: &Path, arm: &str) -> String {
+    let reason = match arm {
+        "another" => "names another entry than the directory this command locked",
+        "none" => {
+            "cannot be looked up behind its lock, so the directory locked may be another: No such \
+             file or directory"
+        }
+        "unread" => {
+            "cannot be looked up behind its lock, so the directory locked may be another: \
+             Input/output error"
+        }
+        _ => {
+            "is held by a run, restore or seal that has not ended: Resource temporarily unavailable"
+        }
     };
     format!(
         "host-stop-controller: refused: {} {reason}; nothing written\n",
@@ -231,21 +307,42 @@ fn swapped_refusal(injection: &Path, arm: &str) -> String {
     )
 }
 
+/// Arranges `arm` on `case`: the directory replaced (`another`) or gone (`none`) at the lock, the
+/// lookup behind the lock failed (`unread`), or the lock held by another descriptor (`taken`),
+/// whose lock is returned. With `signal`, SIGTERM is stored at the lookup behind the lock, and for
+/// `taken` before the command starts.
+fn arrange(case: &Case, arm: &str, signal: bool, injection: &Path, aside: &Path) -> Option<Lock> {
+    match arm {
+        "another" | "none" => {
+            swap_at_the_lock(case, injection, aside, arm == "another");
+            at_the_lookup_behind_the_lock(case, injection, signal, false);
+        }
+        "unread" => at_the_lookup_behind_the_lock(case, injection, signal, true),
+        "taken" => {
+            case.contended.set(true);
+            if signal {
+                case.delivered.deliver(Signal::Terminate);
+            }
+            return Some(lock(&Disk, injection).expect("another descriptor takes the lock"));
+        }
+        _ => {}
+    }
+    None
+}
+
+const ARMS: [&str; 4] = ["another", "none", "unread", "taken"];
+
 /// After directory replacement, publishing by name targets the replacement directory, but the
 /// seal's lock covers the original directory.
 #[test]
 fn a_seal_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
-    for arm in ["same", "another", "none"] {
+    let arms = ARMS.iter().flat_map(|arm| [(*arm, false), (*arm, true)]);
+    for (arm, signal) in arms.chain([("same", false)]) {
         let mut case = Case::new("seal-swapped");
         let root = case.restored_copy();
         case.advance_to(window_end().0 + 30.0);
         let (injection, aside) = (root.join("injection"), case.scratch.0.join("aside"));
-        if arm != "same" {
-            swap_at_the_lock(&case, &injection, &aside, arm == "another");
-        }
-        if arm == "none" {
-            case.delivered.deliver(Signal::Terminate);
-        }
+        let holder = arrange(&case, arm, signal, &injection, &aside);
         let read = case.reads_under(&root);
         let seen = case.output().len();
         let code = case.seal_at(&root);
@@ -256,19 +353,30 @@ fn a_seal_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
             assert!(seal.exists() && !read.borrow().is_empty(), "{output}");
             continue;
         }
-        assert_eq!(code, 2, "{arm}: {output}");
-        assert_eq!(output, swapped_refusal(&injection, arm), "{arm}");
+        assert_eq!(code, 2, "{arm} {signal}: {output}");
+        let stored = case.delivered.stored();
+        if signal && arm != "taken" {
+            let line = "host-stop-controller: signal SIGTERM before any mark; nothing written\n";
+            assert_eq!((output.as_str(), stored), (line, None), "{arm}");
+        } else {
+            let pending = signal.then_some(Signal::Terminate);
+            let line = lock_refusal(&injection, arm);
+            assert_eq!((output, stored), (line, pending), "{arm} {signal}");
+        }
         assert!(read.borrow().is_empty(), "{arm}: {:?}", read.borrow());
         assert!(!seal.exists() && !aside.join("collected.json").exists());
-        let stored = (arm == "none").then_some(Signal::Terminate);
-        assert_eq!(case.delivered.stored(), stored, "{arm}");
-        drop(free_lock(&aside));
+        drop(holder);
+        let locked = if aside.exists() { &aside } else { &injection };
+        drop(free_lock(locked));
     }
 }
 
+/// `restore` raises a signal in its caller check and its poll, so a refusal behind its lock leaves
+/// a stored SIGTERM pending, as the refusal of a taken lock does.
 #[test]
 fn a_restore_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
-    for arm in ["same", "another", "none"] {
+    let arms = ARMS.iter().flat_map(|arm| [(*arm, false), (*arm, true)]);
+    for (arm, signal) in arms.chain([("same", false)]) {
         let mut case = Case::new("restore-swapped");
         assert_eq!(case.run(), 0, "{}", case.output());
         case.start_target(0);
@@ -276,12 +384,7 @@ fn a_restore_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
             case.evidence.join("injection"),
             case.scratch.0.join("aside"),
         );
-        if arm != "same" {
-            swap_at_the_lock(&case, &injection, &aside, arm == "another");
-        }
-        if arm == "none" {
-            case.delivered.deliver(Signal::Terminate);
-        }
+        let holder = arrange(&case, arm, signal, &injection, &aside);
         let (calls, seen) = (case.log().len(), case.output().len());
         let evidence = case.evidence.clone();
         let code = case.restore_at(&evidence, None);
@@ -292,12 +395,14 @@ fn a_restore_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
             assert!(mark.exists() && case.log().len() > calls, "{output}");
             continue;
         }
-        assert_eq!(code, 2, "{arm}: {output}");
-        assert_eq!(output, swapped_refusal(&injection, arm), "{arm}");
+        assert_eq!(code, 2, "{arm} {signal}: {output}");
+        assert_eq!(output, lock_refusal(&injection, arm), "{arm} {signal}");
+        let pending = signal.then_some(Signal::Terminate);
+        assert_eq!(case.delivered.stored(), pending, "{arm} {signal}");
         assert_eq!(case.log().len(), calls, "{arm}: the restore makes no call");
         assert!(!mark.exists() && !aside.join("restoration.json").exists());
-        let stored = (arm == "none").then_some(Signal::Terminate);
-        assert_eq!(case.delivered.stored(), stored, "{arm}");
-        drop(free_lock(&aside));
+        drop(holder);
+        let locked = if aside.exists() { &aside } else { &injection };
+        drop(free_lock(locked));
     }
 }

@@ -17,7 +17,8 @@ pub struct Lock {
 impl Lock {
     /// Whether `path` names the locked directory: an `lstat` of `path` finds the device and inode
     /// numbers of the directory the lock holds open. The open directory keeps its inode number in
-    /// use, so a directory removed and made again at `path` reads as another one.
+    /// use, so a directory removed and made again at `path` reads as another one. The `lstat` is a
+    /// step of `files`; the `fstat` reads the lock's own descriptor and is no step of `files`.
     ///
     /// # Errors
     ///

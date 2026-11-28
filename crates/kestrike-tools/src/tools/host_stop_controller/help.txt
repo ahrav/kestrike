@@ -59,10 +59,12 @@ The snapshot directory, written by the store's reader:
      does not own, a status read of the declared set that fails, names another set or shows an instance not running (a
      run left open), a `roles.json` past the judge's file size, and a deadline passed before `injection/` is made. Make
      `injection/`, hold its lock (`flock`) to the run's end and write `roles.json`; a failure before it stands is a
-     refusal. A run that holds the lock removes `injection/` again and syncs DIR before it frees the lock. A run that
-     never held it, since another command took it first or the directory cannot be opened, leaves `injection/`, names
-     it, and the operator removes it before another run. Apply the judge's pre-stop reach conditions (`roles_reach`,
-     with its working role counts MIN_OWNED and MIN_STOOD); unmet, the abort path runs with cause `reach`.
+     refusal. A run that holds the lock attempts to remove `injection/` again and to sync DIR before it frees the
+     lock, and names `injection/` as possibly standing where either fails. A run that never held it, since another
+     command took it first or the directory cannot be opened, leaves `injection/` and names it; the operator removes
+     it before another run, once no run, restore or seal on DIR holds it. Apply the judge's pre-stop reach conditions
+     (`roles_reach`, with its working role counts MIN_OWNED and MIN_STOOD); unmet, the abort path runs with cause
+     `reach`.
   4. Read the alarms, which must each be quiet (`quiet`): `OK`, missing data treated as `missing` or `breaching` as
      the row states it, no `EvaluationState`, no PromQL alarm (`EvaluationCriteria`), no metric query expression
      (metric math, FILL or Metrics Insights) and no percentile that ignores a low sample count, each of which can read
@@ -140,9 +142,9 @@ window's start to less than the package's `clock_error_seconds` after its end (i
 precede the start by 2 * SKEW_SECONDS and the second `LaunchTime` leaves out, so a start less than that plus
 `clock_error_seconds` after the run window's end may end it; `run` prints that bound. `restore` reads and writes the
 marks by the pathname `DIR/injection`: its lock excludes a run and another restore of the directory it opened, it
-refuses once it holds the lock where that name gives another directory than the one it locked, keeping that directory
-under that name until `restore` ends is the operator's, and exit 0 says the mark stands in the directory so named when
-the mark was linked.
+refuses once it holds the lock where a lookup of that name finds another entry than the directory it locked, keeping
+that directory under that name until `restore` ends is the operator's, and exit 0 says the mark stands in the
+directory so named when the mark was linked.
 
 `seal`, run by the operator once the run window has ended and every collection named in `DIR/coverage.json` is in DIR,
 makes no AWS call and refuses: an empty evidence path; an evidence root or `injection/` that is a link, no directory or
@@ -167,8 +169,8 @@ collection after the seal, with its count lowered to match, and an abort or rest
 exception, added after it are refused. A collection short before the seal stays the collector's declaration, and a seal
 removed and written again reads as the first, so the operator keeps the printed digest, which the judge's record
 carries. `seal` checks for an existing mark and links its own by the pathname `DIR/injection`, as `restore` does: it
-refuses once it holds the lock where that name gives another directory than the one it locked, and keeping DIR under
-that name until `seal` ends is the operator's.
+refuses once it holds the lock where a lookup of that name finds another entry than the directory it locked, and
+keeping DIR under that name until `seal` ends is the operator's.
 
 The marks, in the judge's field names, each written once: an unnamed file in `injection/`, synced, linked
 to the mark's name (failing when an entry stands there), synced again, then the directory synced; when a sync after
