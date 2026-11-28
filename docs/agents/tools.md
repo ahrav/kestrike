@@ -1,7 +1,7 @@
 # Tools
 
 Read this before you start, add or change a tool under `crates/kestrike-tools`, port a script to one, or
-change a Python file that a row of [Rules held twice](#rules-held-twice) names.
+change a file that a row of [Rules held twice](#rules-held-twice) names.
 The repository's tools are modules of one Rust binary. A caller starts a tool through one launcher, and a
 port keeps its script's contract.
 
