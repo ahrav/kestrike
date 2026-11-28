@@ -1149,3 +1149,26 @@ fn a_signal_during_the_helper_s_question_acts_after_the_question() {
     assert!(fx.proof_log().is_empty());
     assert!(!fx.score.exists());
 }
+
+/// The planted rerun rewrites the staged `plants/p-miss/plant.patch` in the work directory, and the
+/// planted commit holds the rewritten patch's change.
+#[test]
+fn the_staged_patch_is_applied_by_name_after_the_proof_reruns() {
+    let mut fx = Fixture::new();
+    let staged = fx.work.join("plants/p-miss/plant.patch");
+    let pair = format!(
+        "[{}, {}]",
+        super::fixture::json_text(&staged.display().to_string()),
+        super::fixture::json_text(&patch_of("catch", "base"))
+    );
+    let done = fx.run(&["p-miss"], &[("STANDIN_REWRITE", &pair)]);
+    let (_, plants) = fx.results();
+    let commit = text_of(plants["p-miss"].get("commit").expect("a commit"));
+    assert_eq!(
+        fx.git(&["show", &format!("{commit}:mode")]),
+        "catch\n",
+        "{}",
+        done.stderr
+    );
+    assert_eq!(fx.proof_modes(), ["base", "pass"]);
+}
