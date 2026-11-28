@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use kestrike_tools::gameday::{FILE_LIMIT, FleetBounds, decode};
 use kestrike_tools::json::{Object, Text, Value, text};
 
-/// The run's start on the wall clock that the self-test's clock reads first.
+/// The run's start on the wall clock, the first reading of the cases' clock.
 pub(crate) const START: f64 = 104.0;
 /// The package's target instance.
 pub(crate) const TARGET: &str = "i-h1";
@@ -212,4 +212,21 @@ pub(crate) fn rewrite(path: &Path, change: impl FnOnce(&mut Vec<Value>)) {
     change(&mut rows);
     let lines: String = rows.iter().map(|row| format!("{}\n", json(row))).collect();
     fs::write(path, lines).expect("the snapshot file is written");
+}
+
+/// The value of `work`, run on a thread of its own, or a panic naming `what` when it has not returned
+/// within five seconds. A blocked thread stays blocked until the case process ends.
+pub(crate) fn bounded<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = send.send(work());
+    });
+    match receive.recv_timeout(std::time::Duration::from_secs(5)) {
+        Ok(value) => value,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{what} returned within 5 s"),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("{what} panicked"),
+    }
 }

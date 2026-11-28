@@ -2,6 +2,7 @@
 //! record, of its abort mark and of `stopped.json`, refused with the controller's sentence, and the
 //! values an admitted one returns.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use kestrike_tools::gameday::{FILE_LIMIT, Refusal};
@@ -11,7 +12,7 @@ use kestrike_tools::host_stop::{
 use kestrike_tools::json::{Object, Text, Value};
 use kestrike_tools::python::hexdigest;
 
-use crate::host_stop_support::{Scratch, gd2_mut, json, met, set, value};
+use crate::host_stop_support::{Scratch, bounded, gd2_mut, json, met, set, value};
 
 /// The stop request the marks close.
 const STOP: &str = r#"{"instance": "i-h1", "time": 105.0, "identity": "arn:aws:sts::account:assumed-role/gameday-operator/gd2-run"}"#;
@@ -51,6 +52,8 @@ fn abort_mark() -> Value {
 enum Place {
     Outside,
     Inside,
+    /// The record stands beside the evidence directory under a name that begins with the directory's.
+    Beside,
     /// The record is not given.
     None,
     /// The record's path names no file.
@@ -84,6 +87,7 @@ fn reviewed(
     review(&mut record);
     let path: PathBuf = match place {
         Place::Inside => scratch.0.join("evidence/reviewed.json"),
+        Place::Beside => scratch.0.join("evidence-reviewed.json"),
         _ => scratch.0.join("reviewed.json"),
     };
     let raw = json(&record).into_bytes();
@@ -138,8 +142,24 @@ type Refused = (
     &'static str,
 );
 
-/// A record admitted: its name, the changes of the mark and of the record, and the abort's time.
-type Admitted = (&'static str, fn(&mut Value), fn(&mut Value), &'static str);
+/// A record admitted: its name, the changes of the mark and of the record, its place and the abort's
+/// time.
+type Admitted = (
+    &'static str,
+    fn(&mut Value),
+    fn(&mut Value),
+    Place,
+    &'static str,
+);
+
+/// The record's `abort_sha256` set to a digest of no abort mark.
+fn another_abort(record: &mut Value) {
+    set(
+        record,
+        &["abort_sha256"],
+        Value::String(Text::from("0".repeat(64))),
+    );
+}
 /// A `stopped.json` row: its name, the member it changes and its new value, restore's start and the
 /// time or the sentence.
 type Stopped = (
@@ -298,6 +318,20 @@ const REFUSED: &[Refused] = &[
         OTHERS,
     ),
     (
+        "a cause guardrail with no guardrail and another abort",
+        |a| set(a, &["cause"], value(r#""guardrail""#)),
+        another_abort,
+        Place::Outside,
+        GUARDRAIL,
+    ),
+    (
+        "another abort and a detail without the digest",
+        |a| detail(a, |d| d[..d.len() - 91].to_owned()),
+        another_abort,
+        Place::Outside,
+        "the reviewed record names another abort",
+    ),
+    (
         "an abort dated before the stop",
         |a| set(a, &["time"], value("104.5")),
         |r| set(r, &["time"], value("150")),
@@ -307,8 +341,10 @@ const REFUSED: &[Refused] = &[
 ];
 
 /// A review needs the record of the abort that stands: each other record, abort mark or place is
-/// refused with its sentence; an admitted record returns its digest and the abort's time, of the kind
-/// the mark writes it, an integer equal to the stop's float time included.
+/// refused with its sentence, the first of two faults by the order of the checks; an admitted record
+/// returns its digest and the abort's time, of the kind the mark writes it, an integer equal to the
+/// stop's float time included, for an abort of cause `guardrail` and for a record beside the
+/// evidence directory under a name that begins with the directory's.
 #[test]
 fn after_an_abort_restore_needs_the_reviewed_record_of_that_abort() {
     for &(name, abort, review, place, sentence) in REFUSED {
@@ -316,29 +352,49 @@ fn after_an_abort_restore_needs_the_reviewed_record_of_that_abort() {
         let refusal = found.err().unwrap_or_else(|| panic!("{name} is refused"));
         assert_eq!(*refusal.message(), sentence, "{name}");
     }
-    let admitted: [Admitted; 4] = [
-        ("admitted", same, same, "110.25"),
+    let admitted: [Admitted; 6] = [
+        ("admitted", same, same, Place::Outside, "110.25"),
         (
             "an integer abort time equal to the stop's",
             |a| set(a, &["time"], value("105")),
             |r| set(r, &["time"], value("105")),
+            Place::Outside,
             "105",
         ),
         (
             "a review at restore's start",
             same,
             |r| set(r, &["time"], value("200")),
+            Place::Outside,
             "110.25",
         ),
         (
             "a detail that is the digest alone",
             |a| detail(a, |d| d[d.len() - 91..].to_owned()),
             same,
+            Place::Outside,
+            "110.25",
+        ),
+        (
+            "an abort of cause guardrail",
+            |a| {
+                set(a, &["cause"], value(r#""guardrail""#));
+                set(a, &["guardrail"], value(r#""any generation change""#));
+            },
+            same,
+            Place::Outside,
+            "110.25",
+        ),
+        (
+            "a record beside the evidence directory",
+            same,
+            same,
+            Place::Beside,
             "110.25",
         ),
     ];
-    for (name, abort, review, time) in admitted {
-        let (found, digest) = reviewed(abort, review, Place::Outside);
+    for (name, abort, review, place, time) in admitted {
+        let (found, digest) = reviewed(abort, review, place);
         let (sha256, aborted) = found.unwrap_or_else(|refusal| panic!("{name}: {refusal}"));
         assert_eq!(
             (sha256, aborted.to_string()),
@@ -355,7 +411,7 @@ fn after_an_abort_restore_needs_the_reviewed_record_of_that_abort() {
 fn restore_refuses_a_stopped_mark_that_does_not_show_the_stop() {
     let no_stop =
         "injection/stopped.json shows no stop of injection/stop.json's request read at or after it";
-    let rows: [Stopped; 10] = [
+    let rows: [Stopped; 11] = [
         ("admitted", "time", "108.5", NOW, Ok("108.5")),
         (
             "a read at the request's time, which is restore's start",
@@ -409,6 +465,13 @@ fn restore_refuses_a_stopped_mark_that_does_not_show_the_stop() {
             Err(no_stop),
         ),
         (
+            "a report of a request for another instance",
+            "request/instance",
+            r#""i-h2""#,
+            NOW,
+            Err(no_stop),
+        ),
+        (
             "a report read before the request",
             "time",
             "104",
@@ -446,8 +509,9 @@ fn restore_refuses_a_stopped_mark_that_does_not_show_the_stop() {
 }
 
 /// A record that reaches the evidence directory through a link is inside it, as is one inside an
-/// evidence directory named through a link; a record whose path is a link loop cannot be resolved; a
-/// record with a repeated key, a named pipe, a malformed abort mark and an unreadable or malformed
+/// evidence directory named through a link; a record or an evidence directory whose path is a link
+/// loop cannot be resolved, and one whose path holds a NUL byte is refused, the evidence directory's
+/// first; a record with a repeated key, a named pipe, a malformed abort mark and an unreadable or malformed
 /// `stopped.json` are refused with their sentences, the pipe without waiting for a writer.
 #[test]
 fn a_review_through_a_link_a_loop_or_a_pipe_or_an_unreadable_mark_is_refused() {
@@ -486,59 +550,83 @@ fn a_review_through_a_link_a_loop_or_a_pipe_or_an_unreadable_mark_is_refused() {
     );
     let within = "the reviewed record lies inside the evidence directory, where the judge admits no file \
                   outside its layout; keep it outside";
-    let rows: [(&str, &std::path::Path, &std::path::Path, &str); 5] = [
+    let away = scratch.write("away.json", json(&record).as_bytes());
+    let with_nul = |path: &std::path::Path| {
+        let mut bytes = path.as_os_str().as_bytes().to_vec();
+        bytes.extend_from_slice(b"\0x");
+        PathBuf::from(std::ffi::OsStr::from_bytes(&bytes))
+    };
+    let nul = "has a path no file can have: file name contained an unexpected NUL byte";
+    let rows: [(&str, PathBuf, PathBuf, String); 8] = [
         (
             "a record linked into the evidence directory",
-            &outside,
-            &evidence,
-            within,
+            outside.clone(),
+            evidence.clone(),
+            within.to_owned(),
         ),
         (
             "an evidence directory named through a link",
-            &inside,
-            &linked_evidence,
-            within,
+            inside.clone(),
+            linked_evidence.clone(),
+            within.to_owned(),
         ),
         (
             "a record whose path is a link loop",
-            &loop_a,
-            &evidence,
-            "the reviewed record cannot be resolved: symlink loop from ",
+            loop_a.clone(),
+            evidence.clone(),
+            "the reviewed record cannot be resolved: symlink loop from ".to_owned(),
+        ),
+        (
+            "an evidence directory whose path is a link loop",
+            away.clone(),
+            loop_a.clone(),
+            "the evidence directory cannot be resolved: symlink loop from ".to_owned(),
+        ),
+        (
+            "an evidence directory whose path holds a NUL byte",
+            away.clone(),
+            with_nul(&evidence),
+            format!("the evidence directory {nul}"),
+        ),
+        (
+            "a record whose path holds a NUL byte",
+            with_nul(&away),
+            evidence.clone(),
+            format!("the reviewed record {nul}"),
         ),
         (
             "a repeated key",
-            &repeated,
-            &evidence,
-            "the reviewed record is not strict JSON: an object repeats a key",
+            repeated.clone(),
+            evidence.clone(),
+            "the reviewed record is not strict JSON: an object repeats a key".to_owned(),
         ),
         (
             "a named pipe",
-            &pipe,
-            &evidence,
-            "the reviewed record is no regular file",
+            pipe.clone(),
+            evidence.clone(),
+            "the reviewed record is no regular file".to_owned(),
         ),
     ];
     for (name, path, root, sentence) in rows {
-        let refusal = check_reviewed(
-            Some(path),
-            &abort_path,
-            root,
-            Number::from(NOW),
-            &stop(),
-            FILE_LIMIT,
-        )
-        .expect_err(name);
+        let abort_path = abort_path.clone();
+        let refusal = bounded(name, move || {
+            let found = check_reviewed(
+                Some(&path),
+                &abort_path,
+                &root,
+                Number::from(NOW),
+                &stop(),
+                FILE_LIMIT,
+            );
+            found.expect_err(name).message().to_string()
+        });
+        assert!(refusal.starts_with(&sentence), "{name}: {refusal}");
         assert!(
-            refusal.message().to_string().starts_with(sentence),
-            "{name}: {refusal}"
-        );
-        assert!(
-            name.contains("loop") || *refusal.message() == sentence,
+            name.contains("loop") || refusal == sentence,
             "{name}: {refusal}"
         );
     }
     std::fs::write(&abort_path, b"{").expect("the mark is rewritten");
-    let away = scratch.write("away.json", json(&record).as_bytes());
     let refusal = check_reviewed(
         Some(&away),
         &abort_path,
@@ -566,4 +654,44 @@ fn a_review_through_a_link_a_loop_or_a_pipe_or_an_unreadable_mark_is_refused() {
         *refusal.message(),
         "injection/stopped.json is not strict JSON: expected a value at byte 0"
     );
+}
+
+/// The end of an abort's detail is the SHA-256 of the steps' UTF-8 bytes, outer white space and a
+/// non-ASCII character included, against digests that `sha256sum` printed for those bytes.
+#[test]
+fn the_steps_digest_is_the_sha256_of_the_steps_bytes() {
+    let rows = [
+        (
+            " a \u{b6} step\n",
+            "; restoration steps sha256 6438afa24593cef26d31f7e3301903b58a1dac0cb47eacd82960a5a9aa089dfa",
+        ),
+        (
+            "",
+            "; restoration steps sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        ),
+    ];
+    for (steps, tail) in rows {
+        assert_eq!(steps_tail(steps), tail, "{steps:?}");
+    }
+}
+
+/// A stop request off the judge's request schema is refused when it is checked, with the sentence of
+/// the schema check under the name it is given.
+#[test]
+fn a_stop_request_off_the_schema_is_refused() {
+    let rows = [
+        (
+            r#"{"instance": "i-h1", "time": 105.0}"#,
+            "injection/stop.json holds the keys ['instance', 'time'], not ['identity', 'instance', 'time']",
+        ),
+        (
+            r#"{"instance": "i-h1", "time": "105", "identity": "x"}"#,
+            "injection/stop.json time is no time of the layout: '105'",
+        ),
+    ];
+    for (request, sentence) in rows {
+        let refusal = Request::checked(&value(request), &Text::from("injection/stop.json"))
+            .expect_err(request);
+        assert_eq!(*refusal.message(), sentence, "{request}");
+    }
 }

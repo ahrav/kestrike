@@ -676,7 +676,7 @@ pub fn indented(value: &Value) -> Result<String, NonFinite> {
 /// # Errors
 ///
 /// `indented_by` refuses a non-finite float.
-pub fn indented_by(value: &Value, width: usize) -> Result<String, NonFinite> {
+pub fn indented_by(value: &Value, width: u8) -> Result<String, NonFinite> {
     let two = indented(value)?;
     let mut out = String::with_capacity(two.len());
     for (at, line) in two.split('\n').enumerate() {
@@ -685,7 +685,7 @@ pub fn indented_by(value: &Value, width: usize) -> Result<String, NonFinite> {
         }
         let body = line.trim_start_matches(' ');
         let depth = (line.len() - body.len()) / 2;
-        out.push_str(&" ".repeat(depth * width));
+        out.push_str(&" ".repeat(depth * usize::from(width)));
         out.push_str(body);
     }
     Ok(out)

@@ -9,7 +9,7 @@ use crate::json::Value;
 use crate::text::Text;
 
 /// The words for a path that holds a NUL byte, the Rust standard library's for that fact.
-const NUL: &str = "file name contained an unexpected NUL byte";
+pub(super) const NUL: &str = "file name contained an unexpected NUL byte";
 
 /// `read_bytes` is the bytes of the regular file at `path`, at most `limit` of them, read as
 /// [`read_file`] reads them: opened without following a link at the last component and without

@@ -9,9 +9,10 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use kestrike_tools::host_stop::{
-    AWS, Call, CallError, Delivered, FailedCall, Record, System, reply,
+    AWS, Call, CallError, Delivered, Ended, FailedCall, Interrupted, Record, Seam, Signal, System,
+    reply,
 };
-use kestrike_tools::json::{Object, Value};
+use kestrike_tools::json::{Object, Value, text as text_of};
 
 use crate::host_stop_support::Scratch;
 
@@ -22,9 +23,10 @@ const PROGRAM: &str = r#"#!/bin/sh
 : > "$FAKE_AWS_STARTED"
 case "$FAKE_AWS_MODE" in
   echo) format='{"argv": "%s", "attempts": "%s", "mode": "%s", "pager": "%s", "prompt": "%s", "endpoints": "%s"'
-        printf "$format"', "home": "%s", "stdin": "%s"}' "$*" "$AWS_MAX_ATTEMPTS" "$AWS_RETRY_MODE" \
-          "${AWS_PAGER-unset}" "$AWS_CLI_AUTO_PROMPT" "$AWS_IGNORE_CONFIGURED_ENDPOINT_URLS" "${HOME-unset}" \
-          "$(/usr/bin/readlink /proc/self/fd/0)" ;;
+        printf "$format"', "home": "%s", "stdin": "%s", "names": "%s"}' "$*" "$AWS_MAX_ATTEMPTS" \
+          "$AWS_RETRY_MODE" "${AWS_PAGER-unset}" "$AWS_CLI_AUTO_PROMPT" "$AWS_IGNORE_CONFIGURED_ENDPOINT_URLS" \
+          "${HOME-unset}" "$(/usr/bin/readlink /proc/self/fd/0)" \
+          "$(/usr/bin/env | /usr/bin/cut -d= -f1 | /usr/bin/tr '\n' ' ')" ;;
   fail) echo "An error occurred (UnauthorizedOperation)" >&2; echo '{"Arn": "a"}'; exit 254 ;;
   list) echo '[]' ;;
   twice) echo '{"Arn": "a", "Arn": "b"}' ;;
@@ -137,7 +139,8 @@ fn text(reply: &Object, key: &str) -> String {
 const IDENTITY: [&str; 2] = ["sts", "get-caller-identity"];
 
 /// The child runs under the environment the call gives it and no other: the given mode reaches it,
-/// and a variable the test process holds and the call does not give is unset there.
+/// and each variable the child holds is one the call gives, one the call sets, or one the shell
+/// sets for itself, while the test process holds a variable outside those.
 #[test]
 fn the_cli_runs_under_the_environment_it_is_given() {
     let standin = Standin::new("environment");
@@ -149,11 +152,30 @@ fn the_cli_runs_under_the_environment_it_is_given() {
         argv.split_whitespace().take(2).collect::<Vec<_>>(),
         IDENTITY
     );
+    let given = standin.env("echo", &standin.bin);
+    let mut known: Vec<OsString> = given.into_iter().map(|(name, _)| name).collect();
+    let set = [
+        "AWS_PAGER",
+        "AWS_CLI_AUTO_PROMPT",
+        "AWS_IGNORE_CONFIGURED_ENDPOINT_URLS",
+        "AWS_MAX_ATTEMPTS",
+        "AWS_RETRY_MODE",
+        "PWD",
+        "SHLVL",
+        "_",
+    ];
+    known.extend(set.map(OsString::from));
+    let names = text(&reply, "names");
+    for name in names.split_whitespace() {
+        assert!(
+            known.contains(&OsString::from(name)),
+            "{name} reached the child"
+        );
+    }
     assert!(
-        std::env::var_os("HOME").is_some(),
-        "the test process holds HOME"
+        std::env::vars_os().any(|(name, _)| !known.contains(&name)),
+        "the test process holds a variable the call does not give"
     );
-    assert_eq!(text(&reply, "home"), "unset");
 }
 
 /// A reply is the object the CLI prints: a call without retries carries one attempt in standard
@@ -247,5 +269,94 @@ fn every_other_outcome_is_a_failed_call() {
         ),
         other => panic!("no aws: {other:?}"),
     }
+    assert!(!standin.started().exists(), "no process starts");
+}
+
+/// A seam's scripted outcome and the reply's expected outcome, an object as its JSON text.
+type Scripting = (Result<String, Ended>, Result<&'static str, CallError>);
+
+/// A seam that gives one scripted outcome to one call and reads no clock and sleeps never.
+struct Scripted {
+    outcome: Option<Result<String, Ended>>,
+    calls: usize,
+}
+
+impl Seam for Scripted {
+    fn call(&mut self, _: &mut Record<'_>, _: &Call<'_>) -> Result<String, Ended> {
+        self.calls += 1;
+        self.outcome.take().expect("the seam is called once")
+    }
+
+    fn wall(&self) -> f64 {
+        panic!("the call reads no wall clock")
+    }
+
+    fn monotonic(&self) -> f64 {
+        panic!("the call reads no monotonic clock")
+    }
+
+    fn sleep(&mut self, _: &mut Record<'_>, _: Duration) -> Result<(), Interrupted> {
+        panic!("the call sleeps never")
+    }
+}
+
+/// A reply makes one call of the seam and reads no clock: a signal the seam raises is passed on as
+/// that signal, and a printed object, a printed list and a launch's failure are a reply, a failed
+/// call with its sentence and that failure. With the system's seam, a signal delivered to an armed
+/// record before the call is passed on and no process starts.
+#[test]
+fn a_signal_during_a_call_is_passed_on_and_each_reply_makes_one_call() {
+    let env: Vec<(OsString, OsString)> = Vec::new();
+    let call = Call {
+        argv: &IDENTITY,
+        retry: true,
+        cut: Duration::from_secs(5),
+        env: &env,
+    };
+    let outcomes: [Scripting; 3] = [
+        (Ok(r#"{"Arn": "a"}"#.into()), Ok(r#"{"Arn":"a"}"#)),
+        (
+            Ok("[]".into()),
+            Err(CallError::Failed(FailedCall::Reply(
+                "the reply of sts get-caller-identity is no JSON object".into(),
+            ))),
+        ),
+        (
+            Err(Ended::Interrupted(Interrupted(Signal::Terminate))),
+            Err(CallError::Interrupted(Interrupted(Signal::Terminate))),
+        ),
+    ];
+    for (outcome, expected) in outcomes {
+        let mut seam = Scripted {
+            outcome: Some(outcome),
+            calls: 0,
+        };
+        let delivered = Delivered::new();
+        let mut record = Record::new(&delivered);
+        let got = reply(&mut seam, &mut record, &call);
+        assert_eq!(seam.calls, 1, "{expected:?}");
+        match (got, expected) {
+            (Ok(object), Ok(json)) => assert_eq!(text_of(&Value::Object(object)), json),
+            (Err(got), Err(expected)) => assert_eq!(got, expected),
+            (got, expected) => panic!("{got:?} against {expected:?}"),
+        }
+    }
+    let standin = Standin::new("interrupted");
+    let env = standin.env("echo", &standin.bin);
+    let call = Call {
+        argv: &IDENTITY,
+        retry: true,
+        cut: Duration::from_secs(5),
+        env: &env,
+    };
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    record.arm();
+    delivered.deliver(Signal::Terminate);
+    let got = reply(&mut System::new(), &mut record, &call);
+    assert_eq!(
+        got,
+        Err(CallError::Interrupted(Interrupted(Signal::Terminate)))
+    );
     assert!(!standin.started().exists(), "no process starts");
 }

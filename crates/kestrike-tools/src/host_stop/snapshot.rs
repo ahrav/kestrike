@@ -96,7 +96,7 @@ impl Snapshot {
 }
 
 /// Numbers no two of which are equal; of equal values the first stays, as a Python set keeps it.
-#[derive(Clone, Default)]
+#[derive(Default)]
 struct Distinct(Vec<Number>);
 
 impl Distinct {
@@ -108,14 +108,6 @@ impl Distinct {
 
     fn as_slice(&self) -> &[Number] {
         &self.0
-    }
-
-    /// The least, or `None` for none.
-    fn least(&self) -> Option<Number> {
-        self.0
-            .iter()
-            .copied()
-            .reduce(|least, number| if number < least { number } else { least })
     }
 }
 
@@ -150,7 +142,10 @@ impl Fresh {
 fn lines(operator: &Operator, name: &str, limit: u64) -> Result<Vec<Value>, Refusal> {
     let what = Text::from(name);
     let data = read_bytes(&operator.snapshot().join(name), &what, limit)?;
-    Ok(list(&parsed(&data, &what)?).to_vec())
+    match parsed(&data, &what)? {
+        Value::Array(rows) => Ok(rows),
+        other => panic!("the lines of {name} decode as a list, not {other:?}"),
+    }
 }
 
 /// `read_snapshot` reads `shards.jsonl` and then `hosts.jsonl` of the operator's snapshot directory,
@@ -159,8 +154,8 @@ fn lines(operator: &Operator, name: &str, limit: u64) -> Result<Vec<Value>, Refu
 /// # Errors
 ///
 /// The first refusal in this order. For each shard line: off its shape; a repeated shard; a time before
-/// `now` less the snapshot's age bound or after `now`. Then a shard of the package with no line;
-/// lines of more than one time; a cut before the baseline window starts. For each host line: keys other
+/// `now` less the snapshot's age bound or after `now`. Then shard lines of another set of shards than
+/// the package's, the sentence naming the package's shards with no line; lines of more than one time; a cut before the baseline window starts. For each host line: keys other
 /// than `host`, `instance` and `report`; a host outside the package or repeated; an instance that is no
 /// ID; a report that is neither null nor `{time, healthy}`, or whose time lies outside the same bounds.
 /// Then two hosts that name one instance; a target host whose line lacks the target instance; an owned
@@ -169,7 +164,9 @@ fn lines(operator: &Operator, name: &str, limit: u64) -> Result<Vec<Value>, Refu
 ///
 /// # Panics
 ///
-/// When `package` or `names` is other than the package check made them.
+/// When `package` or `names` lacks a member of the shapes the package check gives them, or when an
+/// integer `now` less the age bound passes an `i128`, which no `now` made from an `i64` or a float
+/// reaches.
 pub fn read_snapshot(
     operator: &Operator,
     package: &Object,
@@ -182,9 +179,8 @@ pub fn read_snapshot(
         now,
     };
     let (records, cut) = shard_lines(operator, package, names, fresh, limit)?;
-    let mut earliest = Distinct::default();
-    earliest.add(cut);
-    let reports = host_lines(operator, names, fresh, &mut earliest, limit)?;
+    let mut oldest = cut;
+    let reports = host_lines(operator, names, fresh, &mut oldest, limit)?;
     let target = object_at(package, "target");
     let (target_host, target_instance) = (text_at(target, "host"), text_at(target, "instance"));
     let named = reports
@@ -217,7 +213,6 @@ pub fn read_snapshot(
             " the target does not own, so the judge would refuse the run's evidence"
         )
     })?;
-    let oldest = earliest.least().expect("the cut is one of the times");
     Ok(Snapshot {
         records,
         reports,
@@ -235,27 +230,37 @@ fn shard_lines(
     limit: u64,
 ) -> Result<(Object, Number), Refusal> {
     let (mut records, mut times) = (Object::new(), Distinct::default());
-    for (at, row) in lines(operator, "shards.jsonl", limit)?.iter().enumerate() {
+    for (at, row) in lines(operator, "shards.jsonl", limit)?
+        .into_iter()
+        .enumerate()
+    {
         let what = sentence!("shards.jsonl line ", (at + 1).to_string());
-        conform(row, &SHARD_LINE, &what, names)?;
-        let row = object(row);
-        let shard = text_at(row, "shard");
-        need(member(&records, shard).is_none(), || {
+        conform(&row, &SHARD_LINE, &what, names)?;
+        let Value::Object(mut row) = row else {
+            unreachable!("the shard line's schema is an object")
+        };
+        let shard = text_at(&row, "shard").clone();
+        need(member(&records, &shard).is_none(), || {
             sentence!(what, " repeats shard ", shard)
         })?;
-        times.add(fresh.check(number_at(row, "time"), sentence!(what, " time"))?);
+        times.add(fresh.check(number_at(&row, "time"), sentence!(what, " time"))?);
         let mut version = Object::new();
         for (key, _) in VERSION_FIELDS {
-            version.insert(key, get(row, key).clone());
+            let field = row
+                .remove(key)
+                .expect("the shard line's schema holds the version");
+            version.insert(key, field);
         }
-        records.insert(shard.clone(), Value::Object(version));
+        records.insert(shard, Value::Object(version));
     }
-    let missing: BTreeSet<&Text> = list(get(package, "shards"))
+    let shards: BTreeSet<&Text> = list(get(package, "shards")).iter().map(text).collect();
+    let missing: BTreeSet<&Text> = shards
         .iter()
-        .map(text)
+        .copied()
         .filter(|shard| member(&records, shard).is_none())
         .collect();
-    need(missing.is_empty(), || {
+    let extra = records.iter().any(|(shard, _)| !shards.contains(shard));
+    need(missing.is_empty() && !extra, || {
         sentence!(
             "shards.jsonl misses shards ",
             sorted_texts(missing.iter().copied())
@@ -282,13 +287,14 @@ fn shard_lines(
     Ok((records, cut))
 }
 
-/// The host lines as `{host: line}`, each report's time added to `earliest`; two hosts that name one
-/// instance are refused once every line is read.
+/// The host lines as `{host: line}`, `oldest` lowered to each report's time that lies below it, so
+/// of equal times the first read stays; two hosts that name one instance are refused once every line
+/// is read.
 fn host_lines(
     operator: &Operator,
     names: &Names,
     fresh: Fresh,
-    earliest: &mut Distinct,
+    oldest: &mut Number,
     limit: u64,
 ) -> Result<BTreeMap<Text, HostLine>, Refusal> {
     let hosts = names
@@ -322,7 +328,9 @@ fn host_lines(
             {
                 let time =
                     fresh.check(number_at(report, "time"), sentence!(what, " report time"))?;
-                earliest.add(time);
+                if time < *oldest {
+                    *oldest = time;
+                }
                 let healthy = matches!(report.get("healthy"), Some(Value::Bool(true)));
                 Some(Report { time, healthy })
             }
@@ -345,16 +353,22 @@ fn host_lines(
 /// `build_roles` is `roles.json` at the snapshot's cut `cut`: the package's digest, the time, the
 /// version of each shard, and in `standbys` each standby host of a shard the target owns, other than
 /// the target, whose snapshot line names an instance `states` holds, with that instance's state and the
-/// word of its host's report.
+/// word of its host's report. A run passes the package and names [`check_run`] admitted with the
+/// package's digest, the records, reports and cut of the [`read_snapshot`] it then made, and the
+/// statuses [`read_statuses`] read for its declared instances.
 ///
 /// # Errors
 ///
-/// The mark off the judge's layout under `names`, as `conform` refuses it.
+/// The mark off the judge's layout under `names`, as `conform` refuses it, which covers records that
+/// lack a shard of the package and versions that are no object, lack a field or hold a standby of
+/// another type. A shard whose version is off its layout contributes no standby.
 ///
 /// # Panics
 ///
-/// When `records` lacks a shard of `package` or a version's `owner` or `standby`: the caller passes
-/// the records [`read_snapshot`] read.
+/// When `package` lacks a member of the shapes the package check gives it.
+///
+/// [`check_run`]: super::check_run
+/// [`read_statuses`]: super::read_statuses
 pub fn build_roles(
     package: &Object,
     names: &Names,
@@ -367,9 +381,11 @@ pub fn build_roles(
     let target = text_at(object_at(package, "target"), "host");
     let mut standbys = Object::new();
     for shard in list(get(package, "shards")).iter().map(text) {
-        let standby = get(version(records, shard), "standby");
-        if is_text(owner(records, shard), target)
-            && let Value::String(host) = standby
+        if let Some(Value::Object(version)) = member(records, shard)
+            && version
+                .get("owner")
+                .is_some_and(|owner| is_text(owner, target))
+            && let Some(Value::String(host)) = version.get("standby")
             && host != target
             && let Some(line) = reports.get(host)
             && let Some(state) = states.get(&line.instance)
