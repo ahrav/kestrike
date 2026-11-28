@@ -88,7 +88,10 @@ fn a_supervised_run_concludes_from_its_wait_and_then_its_stop() {
         ))
     );
     assert_eq!(
-        concluded(Err(Stop::interrupted(libc::SIGTERM)), Ok(GroupStopped::Running)),
+        concluded(
+            Err(Stop::interrupted(libc::SIGTERM)),
+            Ok(GroupStopped::Running)
+        ),
         Err(Stop::interrupted(libc::SIGTERM))
     );
 }

@@ -173,7 +173,10 @@ pub fn supervise(
 
 /// `concluded` is the result of a supervised run whose wait ended as `ended` and whose stop ended as
 /// `stopped`: a failed stop first, then the wait's error, then the stop's outcome.
-pub(super) fn concluded(ended: Result<(), Stop>, stopped: io::Result<GroupStopped>) -> Result<i32, Stop> {
+pub(super) fn concluded(
+    ended: Result<(), Stop>,
+    stopped: io::Result<GroupStopped>,
+) -> Result<i32, Stop> {
     let stopped = stopped.map_err(|error| Stop::failed(&Fault::os(&error, None)))?;
     ended?;
     match stopped {

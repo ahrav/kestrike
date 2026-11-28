@@ -92,6 +92,8 @@ fn the_status_read_decides_before_the_open() {
         let found = open_regular_with(&root.join(name), |_| panic!("{name} is opened"));
         assert!(matches!(found, Ok(Opened::Other)), "{name}");
     }
-    let missing = open_regular_with(&root.join("missing"), |_| panic!("a missing path is opened"));
+    let missing = open_regular_with(&root.join("missing"), |_| {
+        panic!("a missing path is opened")
+    });
     assert!(matches!(missing, Ok(Opened::Absent)));
 }

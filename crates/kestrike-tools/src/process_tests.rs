@@ -413,7 +413,10 @@ fn a_failed_signal_an_empty_group_and_a_reap_past_its_bound() {
     let running = super::leader(child.id());
     child.kill().expect("the child is killed");
     child.wait().expect("the child is reaped");
-    assert_eq!(stopped.expect("the stop runs"), super::GroupStopped::Running);
+    assert_eq!(
+        stopped.expect("the stop runs"),
+        super::GroupStopped::Running
+    );
     assert_eq!(running.expect("the state reads"), super::Leader::Running);
     let signals: Vec<i32> = times.iter().map(|&(signal, _)| signal).collect();
     assert_eq!(signals, [libc::SIGTERM, libc::SIGKILL, libc::SIGKILL]);
@@ -485,7 +488,10 @@ fn a_failed_signal_while_the_leader_is_a_zombie_still_kills_its_group() {
     let error = super::stop_with(&mut child, &stop, &mut send).expect_err("the signal fails");
     let ended = || {
         std::fs::read(format!("/proc/{member}/stat")).map_or(true, |stat| {
-            let state = stat.iter().rposition(|&byte| byte == b')').map(|at| stat.get(at + 2));
+            let state = stat
+                .iter()
+                .rposition(|&byte| byte == b')')
+                .map(|at| stat.get(at + 2));
             state == Some(Some(&b'Z'))
         })
     };

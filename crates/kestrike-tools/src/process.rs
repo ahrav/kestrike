@@ -18,8 +18,8 @@
 
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};

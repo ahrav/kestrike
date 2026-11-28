@@ -68,7 +68,11 @@ fn a_file_published_with_a_creation_mode_takes_the_bits_of_a_file_created_beside
     assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "kept\n");
     let status = fs::symlink_metadata(&target).expect("stats");
     assert!(status.is_file());
-    let control = fs::metadata(&elsewhere).expect("stats").permissions().mode() & 0o777;
+    let control = fs::metadata(&elsewhere)
+        .expect("stats")
+        .permissions()
+        .mode()
+        & 0o777;
     assert_eq!(status.permissions().mode() & 0o777, control);
     let leftover = fs::read_dir(&scratch.0)
         .expect("lists")

@@ -343,9 +343,7 @@ fn decimal_reads_digits_of_any_script_up_to_the_limit() {
     );
     assert_eq!(
         digits(&format!("0{}", "1".repeat(4300))),
-        Err(
-            "a string of 4301 digits passes the limit of 4300 for integer conversion".to_owned()
-        ),
+        Err("a string of 4301 digits passes the limit of 4300 for integer conversion".to_owned()),
         "a leading zero counts"
     );
     assert_eq!(digits(&"1".repeat(4300)).map(|text| text.len()), Ok(4300));

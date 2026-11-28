@@ -1267,15 +1267,15 @@ fn the_report_replaces_an_entry_at_its_path_and_writes_through_no_link() {
     assert_eq!(
         (
             linked.file_name(),
-            linked
-                .parent()
-                .map(|parent| parent.canonicalize().expect("the link's directory resolves"))
+            linked.parent().map(|parent| parent
+                .canonicalize()
+                .expect("the link's directory resolves"))
         ),
         (
             report.file_name(),
-            report
-                .parent()
-                .map(|parent| parent.canonicalize().expect("the report's directory resolves"))
+            report.parent().map(|parent| parent
+                .canonicalize()
+                .expect("the report's directory resolves"))
         ),
         "the link stood at the report's path"
     );
