@@ -189,7 +189,7 @@ impl<'t> Reader<'t> {
         }
     }
 
-    fn refuse(&self, message: String) -> Parsed {
+    fn refuse<T>(&self, message: String) -> Parsed<T> {
         Parsed::Refused {
             code: 2,
             text: format!("{}\n{}: error: {message}\n", self.usage, self.tool),
@@ -215,10 +215,6 @@ impl<'t> Reader<'t> {
     /// `parse_known` parses `args` as [`Reader::parse`] does and returns the arguments it does not
     /// recognize, in command-line order, beside the values, where `parse` refuses them.
     pub fn parse_known(&self, args: &[OsString]) -> Parsed<(Values, Vec<OsString>)> {
-        let refused = |parsed: Parsed| match parsed {
-            Parsed::Refused { code, text } => Parsed::Refused { code, text },
-            _ => unreachable!("a refusal"),
-        };
         let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
         let mut kinds = Vec::with_capacity(args.len());
         let mut ended = false;
@@ -231,7 +227,7 @@ impl<'t> Reader<'t> {
             } else {
                 match self.classify(arg) {
                     Ok(kind) => kind,
-                    Err(message) => return refused(self.refuse(message)),
+                    Err(message) => return self.refuse(message),
                 }
             });
         }
@@ -252,11 +248,11 @@ impl<'t> Reader<'t> {
                     };
                     return match ignored(found.string, explicit) {
                         None => Parsed::Help(self.help.to_owned()),
-                        Some(rest) => refused(self.refuse(format!(
+                        Some(rest) => self.refuse(format!(
                             "argument {}: ignored explicit argument {}",
                             option.name(),
                             Text::from_os(OsStr::from_bytes(rest)).repr()
-                        ))),
+                        )),
                     };
                 }
                 Kind::Value { check, .. } | Kind::Repeated { check } => check,
@@ -268,15 +264,14 @@ impl<'t> Reader<'t> {
                     args[at]
                 }
                 (None, _) => {
-                    return refused(
-                        self.refuse(format!("argument {}: expected one argument", option.name())),
-                    );
+                    return self
+                        .refuse(format!("argument {}: expected one argument", option.name()));
                 }
             };
             at += 1;
             let value = OsStr::from_bytes(value);
             if let Err(message) = check(&Text::from_os(value)) {
-                return refused(self.refuse(format!("argument {}: {message}", option.name())));
+                return self.refuse(format!("argument {}: {message}", option.name()));
             }
             let kept = &mut values[found.option];
             if !matches!(option.kind, Kind::Repeated { .. }) {
@@ -294,10 +289,10 @@ impl<'t> Reader<'t> {
             .map(|(option, _)| option.name())
             .collect();
         if !missing.is_empty() {
-            return refused(self.refuse(format!(
+            return self.refuse(format!(
                 "the following arguments are required: {}",
                 missing.join(", ")
-            )));
+            ));
         }
         let extras = extras
             .into_iter()
@@ -452,13 +447,10 @@ impl<'a> Commands<'a> {
                 {
                     None => return Parsed::Help(self.top.help.to_owned()),
                     Some(rest) => {
-                        return self
-                            .top
-                            .refuse(format!(
-                                "argument -h/--help: ignored explicit argument {}",
-                                Text::from_os(OsStr::from_bytes(rest)).repr()
-                            ))
-                            .map(|_| unreachable!("a refusal"));
+                        return self.top.refuse(format!(
+                            "argument -h/--help: ignored explicit argument {}",
+                            Text::from_os(OsStr::from_bytes(rest)).repr()
+                        ));
                     }
                 },
             }
@@ -467,8 +459,7 @@ impl<'a> Commands<'a> {
         let Some(given) = args.get(at) else {
             return self
                 .top
-                .refuse("the following arguments are required: command".to_owned())
-                .map(|_| unreachable!("a refusal"));
+                .refuse("the following arguments are required: command".to_owned());
         };
         let Some(index) = self
             .words
@@ -480,14 +471,11 @@ impl<'a> Commands<'a> {
                 .iter()
                 .map(|word| Text::from(word.word).repr())
                 .collect();
-            return self
-                .top
-                .refuse(format!(
-                    "argument command: invalid choice: {} (choose from {})",
-                    Text::from_os(given).repr(),
-                    choices.join(", ")
-                ))
-                .map(|_| unreachable!("a refusal"));
+            return self.top.refuse(format!(
+                "argument command: invalid choice: {} (choose from {})",
+                Text::from_os(given).repr(),
+                choices.join(", ")
+            ));
         };
         match self.words[index].reader.parse_known(&args[at + 1..]) {
             Parsed::Run((values, more)) => {
@@ -495,9 +483,7 @@ impl<'a> Commands<'a> {
                 if extras.is_empty() {
                     Parsed::Run((index, values))
                 } else {
-                    self.top
-                        .refuse(unrecognized(&extras))
-                        .map(|_| unreachable!("a refusal"))
+                    self.top.refuse(unrecognized(&extras))
                 }
             }
             Parsed::Help(text) => Parsed::Help(text),
