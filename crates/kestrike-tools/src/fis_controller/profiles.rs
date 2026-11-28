@@ -10,7 +10,7 @@ use super::operator::Operator;
 use super::seconds::Seconds;
 use crate::hardware_lane::episode_name;
 use crate::json::{Object, Value};
-use crate::python::repr;
+use crate::python::{repr, texts_repr};
 use crate::text::{Text, text};
 
 /// The action whose profiles hold direction flags and a latency.
@@ -345,11 +345,4 @@ fn of_profile(name: &Text, rest: impl crate::text::Piece) -> Rejected {
 /// Python's `repr` of a member read with `get`, `None` for an absent one.
 fn shown(member: Option<&Value>) -> String {
     member.map_or_else(|| "None".to_owned(), repr)
-}
-
-/// Python's `repr` of a list of strings.
-pub(super) fn texts_repr<'a>(texts: impl IntoIterator<Item = &'a Text>) -> String {
-    repr(&Value::Array(
-        texts.into_iter().cloned().map(Value::String).collect(),
-    ))
 }

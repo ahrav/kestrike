@@ -3,9 +3,8 @@
 
 use super::constants::OPERATOR_KEYS;
 use super::error::Rejected;
-use super::profiles::texts_repr;
 use crate::json::{Integer, Object, Value};
-use crate::python::{repr, type_name};
+use crate::python::{repr, texts_repr, type_name};
 use crate::text::{Text, text};
 
 /// An operator contract that [`check_operator`] admits: its strings, its lists of strings, its map from

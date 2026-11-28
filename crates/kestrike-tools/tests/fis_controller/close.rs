@@ -193,7 +193,8 @@ fn each_call_reads_the_manifest_anew() {
 }
 
 /// A lane's whole number or boolean names an item of a list of the manifest, a negative one counted from
-/// the end; one past the end is [`Error::OutOfRange`], and a float or a string names no item.
+/// the end; one that names no item of a list or a string is [`Error::OutOfRange`], and a float or a
+/// string names no item of a list.
 #[test]
 fn a_lane_of_whole_numbers_names_items_of_the_manifests_lists() {
     let scratch = Scratch::new("close-lists");
@@ -222,8 +223,27 @@ fn a_lane_of_whole_numbers_names_items_of_the_manifests_lists() {
     for (lane, expected) in rows {
         assert_eq!(close(&with_lane(Some(lane)), &lists), expected, "{lane}");
     }
-    let past = with_lane(Some(r#"{"profile": 5, "role": 0}"#));
-    assert_eq!(close_seconds(&past, &lists), Err(Error::OutOfRange));
+    for lane in [
+        r#"{"profile": 5, "role": 0}"#,
+        r#"{"profile": 0, "role": true}"#,
+    ] {
+        assert_eq!(
+            close_seconds(&with_lane(Some(lane)), &lists),
+            Err(Error::OutOfRange),
+            "{lane}"
+        );
+    }
+    let roles = scratch.file(
+        "roles.json",
+        br#"{"profiles": [{"roles": [{"cases": [{"grace": 7}]}, {"cases": [{"grace": 9}]}]}]}"#,
+    );
+    for (role, expected) in [("-1", Ok(49.0)), ("true", Ok(49.0)), ("-2", Ok(47.0))] {
+        let lane = format!(r#"{{"profile": 0, "role": {role}}}"#);
+        let read = close_seconds(&with_lane(Some(&lane)), &roles);
+        assert_eq!(read, expected, "{lane}");
+    }
+    let before = with_lane(Some(r#"{"profile": 0, "role": -3}"#));
+    assert_eq!(close_seconds(&before, &roles), Err(Error::OutOfRange));
     let string = scratch.file("string.json", br#"{"profiles": "abc"}"#);
     assert_eq!(
         close(
@@ -235,8 +255,16 @@ fn a_lane_of_whole_numbers_names_items_of_the_manifests_lists() {
             "a string has no member 1"
         )
     );
-    let past = with_lane(Some(r#"{"profile": 9, "role": "owner"}"#));
-    assert_eq!(close_seconds(&past, &string), Err(Error::OutOfRange));
+    for lane in [
+        r#"{"profile": 9, "role": "owner"}"#,
+        r#"{"profile": -4, "role": "owner"}"#,
+    ] {
+        assert_eq!(
+            close_seconds(&with_lane(Some(lane)), &string),
+            Err(Error::OutOfRange),
+            "{lane}"
+        );
+    }
 }
 
 /// The longest grace keeps the first case's until a later one is above it, so a first `nan` stands and

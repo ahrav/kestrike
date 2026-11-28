@@ -35,7 +35,7 @@ pub enum Error {
     Rejected(Rejected),
     /// A whole number of seconds that a sum converts to a float is past the largest float.
     Overflow,
-    /// A lane names an item past the end of an array or a string of the hardware manifest.
+    /// A lane's whole number or boolean names no item of a list or a string of the hardware manifest.
     OutOfRange,
 }
 
@@ -51,7 +51,7 @@ impl fmt::Display for Error {
             Self::Rejected(rejected) => rejected.fmt(f),
             Self::Overflow => f.write_str("a whole number of seconds is too large for a float"),
             Self::OutOfRange => {
-                f.write_str("the lane names an item past the end of the hardware manifest's list")
+                f.write_str("the lane names no item of a list or a string of the hardware manifest")
             }
         }
     }

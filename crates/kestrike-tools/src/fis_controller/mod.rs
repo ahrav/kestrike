@@ -15,7 +15,8 @@
 //! [`check_operator`] admits the contract as an [`Operator`] and [`check_manifest`] the profiles file
 //! as a [`Manifest`]; the checks and bounds after them take those. A bound is a sum of seconds and
 //! starts no timer. [`Error::Overflow`] stands for a whole number of seconds that converts to a float
-//! past the largest, and [`Error::OutOfRange`] for a lane that names an item past the end of a list.
+//! past the largest, and [`Error::OutOfRange`] for a lane whose whole number names no item of a
+//! list.
 //! The module makes no call, starts no process, reads no clock and writes nothing; its one effect is
 //! the read in [`close_seconds`] of the hardware manifest its caller names.
 

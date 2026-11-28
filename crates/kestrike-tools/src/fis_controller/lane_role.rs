@@ -34,7 +34,7 @@ use crate::text::{Text, text};
 /// names the lane after `the hardware manifest names no lane role for `, for a read that fails, written
 /// as `[Errno N] <the system's text>: '<path>'`, bytes that are no JSON, and a manifest without that role,
 /// or whose role holds no list of cases each with a number under `grace`; [`Error::OutOfRange`] for a
-/// whole number that names no item of its array or string; and [`Error::Overflow`].
+/// whole number or boolean that names no item of its list or string; and [`Error::Overflow`].
 pub fn close_seconds(profile: &Value, hardware_manifest: &Path) -> Result<f64, Error> {
     match longest_grace(profile, hardware_manifest) {
         Ok(grace) => Ok(grace.float()? + STOP_SECONDS + CONTROLLER_SECONDS),
@@ -146,7 +146,7 @@ fn item(count: usize, name: &Value) -> Result<usize, Miss> {
     let at: i128 = match name {
         Value::Bool(flag) => i128::from(*flag),
         Value::Integer(whole) => whole.to_string().parse().map_err(|_| Miss::OutOfRange)?,
-        _ => return Err(Miss::OutOfRange),
+        _ => unreachable!("an item is named by a whole number or a boolean"),
     };
     let count = i128::try_from(count).map_err(|_| Miss::OutOfRange)?;
     let at = if at < 0 { at + count } else { at };

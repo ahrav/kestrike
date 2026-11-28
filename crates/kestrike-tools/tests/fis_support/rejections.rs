@@ -29,7 +29,7 @@ const PAST_TAG: &str = concat!(
 );
 
 /// An episode of 225 characters, at the tag's bound and past the receipt's.
-const SHORT_OF_TAG: &str = concat!(
+const AT_TAG: &str = concat!(
     "\"",
     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
@@ -341,8 +341,8 @@ pub(crate) const REJECTIONS: &[Row] = &[
         sentence: "episode 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeex' is 1 characters too long for the receipt file name derived from it",
     },
     Row {
-        case: "an episode one character short of the tag",
-        changes: &[(Episode, &[], Some(SHORT_OF_TAG))],
+        case: "an episode at the tag's bound",
+        changes: &[(Episode, &[], Some(AT_TAG))],
         sentence: "episode 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' is 49 characters too long for the receipt file name derived from it",
     },
     Row {

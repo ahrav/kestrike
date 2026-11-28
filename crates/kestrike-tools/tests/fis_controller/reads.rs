@@ -164,6 +164,21 @@ fn reads() -> Vec<Read> {
             Ok(()),
         ),
         (
+            "an action of nan that a list of eligible_types does not hold",
+            &[
+                (
+                    Profiles,
+                    &["eligible_types"],
+                    Some("[1, \"aws:ebs:volume-io-latency\", \"aws:ebs:pause-volume-io\"]"),
+                ),
+                (Profiles, &["profiles", "fis-pause", "action"], Some("NaN")),
+            ],
+            stops(
+                Check::Manifest,
+                "manifest profile 'fis-pause' names action nan, which the manifest's eligible_types does not list",
+            ),
+        ),
+        (
             "an action of [nan] that a list of eligible_types holds as [nan]",
             &[
                 (

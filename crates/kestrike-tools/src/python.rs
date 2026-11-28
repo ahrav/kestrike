@@ -230,6 +230,13 @@ fn push_value_repr(value: &Value, out: &mut String) {
     }
 }
 
+/// `texts_repr` follows Python's `repr` of a list of strings, `['a', 'b']`, in the given order.
+pub fn texts_repr<'a>(texts: impl IntoIterator<Item = &'a Text>) -> String {
+    repr(&Value::Array(
+        texts.into_iter().cloned().map(Value::String).collect(),
+    ))
+}
+
 /// `type_name` is the name Python gives the type of the value, `type(value).__name__`: `dict`, `list`,
 /// `str`, `int`, `float`, `bool` or `NoneType`.
 pub fn type_name(value: &Value) -> &'static str {
