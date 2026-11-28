@@ -30,7 +30,8 @@
 //! [`Run`] runs the checked plants: the run's worktrees, the proof reruns in the proof's worktree with
 //! the head's staged helper as their judge, the planted commits, the archives, the sweeps and the
 //! children a judgment asks for. [`publish`] writes the score's bytes, [`publish_with`] another tool's
-//! file the same way, and [`conclude`] writes the score and prints its lines.
+//! file the same way, [`publish_staged`] a file with the staging name's suffix, its mode, its time and a
+//! gate for its rename, and [`conclude`] writes the score and prints its lines.
 
 mod campaign;
 mod child;

@@ -311,8 +311,9 @@ pub fn conclude<E: std::fmt::Display>(
     announce(head, entries, out)
 }
 
-/// The exit of a run whose standard output refused its last lines: the score's lines, after the score
-/// is written, or the help, when no score is written.
+/// The exit of a tool whose standard output refused its last lines: for the plant runner the score's
+/// lines, after the score is written, or the help, when no score is written; for another tool its help,
+/// its report or its result line.
 pub(crate) const UNANNOUNCED: u8 = 120;
 
 /// `announce` prints the score's lines on `out` and returns the run's exit, or [`UNANNOUNCED`] when a
