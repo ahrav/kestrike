@@ -18,8 +18,8 @@ fn running(pid: &str) -> bool {
     })
 }
 
-/// `gone` holds once `pid` stops running within 30 seconds; a process that SIGKILL reached while the host
-/// is loaded can take seconds to leave its last state.
+/// `gone` holds once `pid` stops running within 30 seconds, a margin over the moment SIGKILL reaches a
+/// process on a loaded host.
 fn gone(pid: &str) -> bool {
     let start = Instant::now();
     while running(pid) && start.elapsed() < Duration::from_secs(30) {
@@ -28,29 +28,46 @@ fn gone(pid: &str) -> bool {
     !running(pid)
 }
 
+/// `assert_gone` asserts that the process `pid`, named `what`, is [`gone`], with its status in the failure.
+fn assert_gone(pid: &str, what: &str) {
+    assert!(
+        gone(pid),
+        "{what} {} stays: {:?}",
+        pid.trim(),
+        std::fs::read_to_string(format!("/proc/{}/status", pid.trim()))
+    );
+}
+
 fn words(argv: &[&str]) -> Vec<OsString> {
     argv.iter().map(OsString::from).collect()
 }
 
 /// `group` is a command whose leader writes `leader` once its same-group worker, which ignores SIGTERM,
-/// has written its pid to `worker`. Each of the two runs until a signal ends it or `marker` is gone, so a
-/// case's group ends with the case's scratch directory and the teardown signals no process.
+/// has written its pid to `worker`. The marker directory is the command's argument. Each loop of the two
+/// ends once `marker` is gone or after about 120 seconds, and the leader exits without its marker where
+/// the worker's never appears, so a case's group ends with the case's scratch directory, or within that
+/// bound where the directory stays, and the teardown signals no process.
 fn group(marker: &Path, leader_ignores_term: bool) -> Vec<OsString> {
     let trap = if leader_ignores_term {
         "trap '' TERM; "
     } else {
         ""
     };
-    let m = marker.display();
-    words(&[
+    let mut argv = words(&[
         "sh",
         "-c",
         &format!(
-            "{trap}sh -c 'trap \"\" TERM; echo $$ > {m}/worker; while [ -d {m} ]; do sleep 0.1; done' & \
-             while [ ! -s {m}/worker ]; do sleep 0.05; done; echo $$ > {m}/leader; \
-             while [ -d {m} ]; do sleep 0.1; done"
+            "{trap}sh -c 'trap \"\" TERM; echo $$ > \"$1/worker\"; n=0; \
+             while [ -d \"$1\" ] && [ $n -lt 1200 ]; do sleep 0.1; n=$((n+1)); done' sh \"$1\" & \
+             n=0; while [ ! -s \"$1/worker\" ]; do \
+             if [ ! -d \"$1\" ] || [ $n -ge 2400 ]; then exit 1; fi; sleep 0.05; n=$((n+1)); done; \
+             echo $$ > \"$1/leader\"; \
+             n=0; while [ -d \"$1\" ] && [ $n -lt 1200 ]; do sleep 0.1; n=$((n+1)); done"
         ),
-    ])
+        "sh",
+    ]);
+    argv.push(marker.as_os_str().to_owned());
+    argv
 }
 
 fn read(path: &Path) -> String {
@@ -129,21 +146,24 @@ fn an_interrupted_command_leaves_no_process_behind() {
         Some(0),
         "the run ended by its signal's interruption"
     );
-    assert!(gone(&pid), "the test's leader {pid} is gone");
-    assert!(
-        gone(&worker),
-        "the test's worker {worker}, which ignores SIGTERM, is gone"
-    );
+    assert_gone(&pid, "the test's leader");
+    assert_gone(&worker, "the test's worker, which ignores SIGTERM,");
 }
 
 /// A deadline ends the wait with no exit code, the stop ends the worker that ignores SIGTERM, and the
-/// loom judgment of a run with no exit code is a timeout.
+/// loom judgment of a run with no exit code is a timeout. The group stands before the wait's first poll,
+/// and the deadline counts from before the start.
 #[test]
 fn a_deadline_ends_the_whole_process_group() {
     let scratch = Scratch::new("weaken-deadline");
     let interrupt = Interrupt::new();
+    let leader_file = scratch.0.join("leader");
+    let on_start = |_: &Child| wait_for(&leader_file);
     let (code, seconds) = execute(
-        &Launch::new(&interrupt),
+        &Launch {
+            started: &on_start,
+            ..Launch::new(&interrupt)
+        },
         &group(&scratch.0, false),
         Path::new("."),
         None,
@@ -154,7 +174,7 @@ fn a_deadline_ends_the_whole_process_group() {
     assert!(scratch.0.join("leader").is_file());
     assert_eq!(code, None);
     assert!(seconds < 30.0, "{seconds}");
-    assert!(gone(&read(&scratch.0.join("worker"))));
+    assert_gone(&read(&scratch.0.join("worker")), "the worker");
     assert_eq!(
         loom_result(
             "",
@@ -206,7 +226,7 @@ fn a_second_signal_during_the_grace_still_kills_the_group() {
     );
     assert!(matches!(stopped, GroupStopped::Reaped(_)), "{stopped:?}");
     assert_eq!(interrupt.recorded(), Some(libc::SIGTERM));
-    assert!(gone(&read(&scratch.0.join("worker"))));
+    assert_gone(&read(&scratch.0.join("worker")), "the worker");
 }
 
 /// A signal recorded just after the child starts ends the wait at once: the child is stopped and reaped,
@@ -386,12 +406,9 @@ fn a_further_signal_ends_the_grace_and_the_one_that_ended_the_wait_keeps_it() {
             assert!(matches!(ran, Err(Halt::Interrupted(_))), "{name}: {ran:?}");
             assert!(least <= took && took < most, "{name}: {took}");
         });
-        let worker = read(&scratch.0.join("worker"));
-        assert!(
-            gone(&worker),
-            "{name}: the worker {} stays: {:?}",
-            worker.trim(),
-            std::fs::read_to_string(format!("/proc/{}/status", worker.trim()))
+        assert_gone(
+            &read(&scratch.0.join("worker")),
+            &format!("{name}: the worker"),
         );
         assert!(!interrupt.held(), "{name}");
     }
@@ -457,10 +474,11 @@ fn an_exit_first_seen_after_the_deadline_counts_as_an_exit() {
     assert_eq!(code, Some(3));
 }
 
-/// A signal recorded once the deadline has passed, before the wait reads the record, finds the wait ended
-/// by the deadline: no delivery is spent, so that signal ends the stop's grace at once.
+/// A signal recorded once the deadline has passed but before the wait's poll reads the record is read by
+/// that poll, which reads the record before the clock: the delivery is spent, so the stop's grace runs to
+/// its end and only a further signal would end it early.
 #[test]
-fn a_signal_after_the_deadline_ends_the_grace() {
+fn a_signal_recorded_by_the_deciding_poll_keeps_the_grace() {
     let scratch = Scratch::new("weaken-after-deadline");
     let interrupt = Interrupt::new();
     let leader_file = scratch.0.join("leader");
@@ -470,7 +488,7 @@ fn a_signal_after_the_deadline_ends_the_grace() {
         interrupt.record(libc::SIGHUP);
     };
     let launch = Launch {
-        grace: Duration::from_secs(30),
+        grace: Duration::from_secs(3),
         started: &on_start,
         ..Launch::new(&interrupt)
     };
@@ -483,16 +501,16 @@ fn a_signal_after_the_deadline_ends_the_grace() {
         Duration::from_secs(1),
         &scratch.0.join("out"),
     );
+    let took = start.elapsed();
     assert!(
         matches!(ran, Err(Halt::Interrupted(libc::SIGHUP))),
         "{ran:?}"
     );
     assert!(
-        start.elapsed() < Duration::from_secs(15),
-        "the signal ended the 30 s grace: {:?}",
-        start.elapsed()
+        took >= Duration::from_millis(4500) && took < Duration::from_secs(15),
+        "the 3 s grace ran to its end after the 1.5 s start: {took:?}"
     );
-    assert!(gone(&read(&scratch.0.join("worker"))));
+    assert_gone(&read(&scratch.0.join("worker")), "the worker");
 }
 
 /// A test whose leader ends by its own signal gives the negated signal number as its exit code.

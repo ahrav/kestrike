@@ -2,25 +2,28 @@
 //! on the monotonic clock; its process group is then stopped with SIGTERM and SIGKILL.
 //!
 //! The handled signals are held from before the child starts until its group has ended. A signal
-//! recorded before the start starts no child; one recorded during the wait ends it, and the stop's grace
-//! then lasts until a further signal; after a deadline or the leader's exit the first signal ends the
-//! grace. The leader stays unreaped until the stop's last signal, and its exit code comes from that reap.
+//! recorded before the start starts no child. The wait reads, at each poll, the leader's state, then the
+//! record, then the clock: a signal the poll reads ends the wait, and the stop's grace then lasts until a
+//! further signal; after a wait the deadline or the leader's exit ended, the first signal ends the grace.
+//! A poll that finds the leader running with time left pauses its whole pause, so the poll that sees the
+//! deadline can come up to one pause after it. The leader stays unreaped until the stop's last signal,
+//! and its exit code comes from that reap.
 
-use std::cell::Cell;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::halt::Halt;
 use crate::json::Value;
 use crate::ownership::PathError;
 use crate::process::{
-    GroupStop, GroupStopped, Interrupt, Leader, child_defaults, exit_code,
-    file_size_signal_default, handled_set, leader_left_by, stop_group,
+    FIRST_PAUSE, GroupStop, GroupStopped, Interrupt, Leader, child_defaults, exit_code,
+    file_size_signal_default, handled_set, leader, stop_group,
 };
 use crate::python::round;
 
@@ -175,18 +178,12 @@ fn supervised(
         .spawn()
         .map_err(|error| Halt::failed(format!("{}: {error}", program.to_string_lossy())))?;
     (launch.started)(&child);
-    let ended_by_signal = Cell::new(false);
-    let recorded = || {
-        let seen = launch.interrupt.deliveries() > 0;
-        ended_by_signal.set(seen);
-        seen
-    };
-    let left = leader_left_by(child.id(), started.checked_add(deadline), POLL, &recorded);
-    let spent = usize::from(ended_by_signal.get());
+    let waited = waited(child.id(), started.checked_add(deadline), launch.interrupt);
+    let spent = waited.as_ref().map_or(0, |&(_, spent)| spent);
     (launch.stopping)();
     let stopped = stop(&mut child, launch, spent);
     (launch.stopped)();
-    let exited = matches!(left?, Leader::Exited | Leader::Reaped);
+    let exited = matches!(waited?.0, Leader::Exited | Leader::Reaped);
     let code = match stopped? {
         GroupStopped::Reaped(status) => exited.then(|| exit_code(status)),
         GroupStopped::Running | GroupStopped::ReapedElsewhere => {
@@ -197,6 +194,34 @@ fn supervised(
     };
     launch.interrupt.check()?;
     Ok(code)
+}
+
+/// `waited` waits for the leader `pid` to leave [`Leader::Running`], for a signal in `interrupt` or for
+/// `cutoff`, `None` for none, and returns the last state read with the deliveries the wait spent: one
+/// where the last poll read a recorded signal, else none. Each poll reads the leader's state, then the
+/// record, then the clock, and a poll that finds the leader running with no signal and time left pauses
+/// for a time that starts at [`FIRST_PAUSE`] and doubles up to [`POLL`], uncut by the cutoff. It reaps
+/// nothing.
+///
+/// # Errors
+///
+/// A read of the leader's state fails as [`leader`] states.
+fn waited(
+    pid: u32,
+    cutoff: Option<Instant>,
+    interrupt: &Interrupt,
+) -> io::Result<(Leader, usize)> {
+    let mut pause = FIRST_PAUSE;
+    loop {
+        let state = leader(pid)?;
+        let spent = usize::from(interrupt.deliveries() > 0);
+        let passed = cutoff.is_some_and(|cutoff| Instant::now() >= cutoff);
+        if state != Leader::Running || spent > 0 || passed {
+            return Ok((state, spent));
+        }
+        thread::sleep(pause);
+        pause = (pause * 2).min(POLL);
+    }
 }
 
 /// `holding` runs `body` under a hold of `interrupt`. Where the hold is the outermost one and a signal is
