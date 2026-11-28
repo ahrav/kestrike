@@ -308,7 +308,8 @@ fn patch_paths(
 /// `committed` refuses `data`, read at `relative` under the top, unless the output of `git ls-tree`
 /// names a regular file of mode 100644 there and the output of `git cat-file blob` for its object equals
 /// `data`. Neither exit code is read: a failed read whose output differs reads as a difference from HEAD,
-/// and one whose output matches passes.
+/// and one whose output matches passes. The row's mode, type and object are read, and its path is taken
+/// to be `relative`, the one path Git was asked for.
 fn committed(
     env: &Environ,
     top: &Path,
