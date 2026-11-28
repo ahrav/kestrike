@@ -10,7 +10,8 @@ use crate::orderings::sites::{EXTERNAL, Pin};
 use crate::orderings::sources::tests::{
     Plant, committed, package_of, planted as source, planted_package, reader, root_of, text, top,
 };
-use crate::orderings::sources::{diagnostics, kernel_texts, module_source};
+use crate::orderings::sources::{c_literals, diagnostics, kernel_texts, module_source};
+use crate::python::repr;
 
 const FILL: &str = "crates/kestrike/src/storage/fill.rs";
 const GRACE: &str = "crates/kestrike/src/storage/grace.rs";
@@ -199,6 +200,18 @@ fn refused_at(root: &Path, plants: Plants<'_>, name: &str, holds: &str) {
 
 fn refused(plants: Plants<'_>, name: &str, holds: &str) {
     refused_at(&top(), plants, name, holds);
+}
+
+/// Asserts that the check over `plants` refuses `name` with exactly `message`.
+fn sentence(plants: Plants<'_>, name: &str, message: &str) {
+    let report = checked(plants).0;
+    assert!(
+        messages_of(&report, name)
+            .iter()
+            .any(|found| found == message),
+        "{name}: {message:?} in {:?}",
+        member(&report, "refusals")
+    );
 }
 
 fn with_catalog(change: impl FnOnce(&mut Value)) -> Plants<'static> {
@@ -444,6 +457,7 @@ fn a_site_after_a_test_only_element_is_a_site() {
     for (label, planted) in plants {
         let (report, code) = checked(with_source(FILL, ANCHOR, &format!("{planted}\n{ANCHOR}")));
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "unrowed site")
                 .iter()
@@ -512,6 +526,7 @@ fn a_hook_with_a_body_is_a_fence_site() {
         let rowed = catalog_with(|catalog| rows(catalog).push(planted_row(&fields)));
         let (report, code) = checked(vec![(GRACE, text(planted)), (CATALOG, text(rowed))]);
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "unrowed site")
                 .iter()
@@ -527,6 +542,7 @@ fn a_hook_with_a_body_is_a_fence_site() {
             format!("{definition}fn extra<S: Strength>() {{\n    S::fence_pin();\n}}\n\n{ANCHOR}");
         let (report, code) = checked(with_source(FILL, ANCHOR, &extra));
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "unrowed site")
                 .iter()
@@ -623,6 +639,7 @@ fn a_forwarder_that_passes_another_fence_is_refused() {
         for holds in [format!("{FILL}: "), message.to_owned()] {
             let (report, code) = checked(with_source(FILL, invocation, &new));
             assert_eq!(code, 1, "{label}: {report:?}");
+            assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
             assert!(
                 messages_of(&report, "spelling")
                     .iter()
@@ -804,6 +821,7 @@ fn a_forwarder_that_is_not_one_arm_its_invocations_directly_follow_is_refused() 
         assert_ne!(planted, fill, "{label}");
         let (report, code) = checked(vec![(FILL, text(planted))]);
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "spelling")
                 .iter()
@@ -937,6 +955,7 @@ fn a_test_only_element_the_matcher_cuts_is_refused() {
     for (label, path, old, new) in &plants {
         let (report, code) = checked(with_source(path, old, new));
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "spelling")
                 .iter()
@@ -979,6 +998,7 @@ fn a_test_only_element_the_matcher_cuts_is_refused() {
     ] {
         let (report, code) = checked(with_source(path, old, new));
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "find")
                 .iter()
@@ -1426,6 +1446,7 @@ fn a_module_declaration_inside_a_macro_is_refused() {
     for (label, planted) in plants {
         let (report, code) = checked(vec![(STORAGE, text(planted))]);
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "scope file")
                 .iter()
@@ -1495,6 +1516,7 @@ fn a_module_declared_by_a_raw_identifier_loads_its_file() {
             text(format!("{storage}#[cfg(not(test))]\n{declaration}\n")),
         )]);
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "scope file").contains(&lacks(STEPS)),
             "{label}: {report:?}"
@@ -1858,6 +1880,7 @@ fn a_scoped_file_that_loads_other_source_is_refused() {
             let (report, code) =
                 checked(with_source(FILL, ANCHOR, &format!("{loaded}\n\n{ANCHOR}")));
             assert_eq!(code, 1, "{label}: {report:?}");
+            assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
             assert!(
                 messages_of(&report, "scope file")
                     .iter()
@@ -1957,6 +1980,7 @@ fn a_path_attribute_the_include_scanner_misses_is_refused() {
         let scratch = planted_package(&[], Some(planted));
         let (report, code) = checked_at(&root_of(&scratch), vec![], EXTERNAL);
         assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
         assert!(
             messages_of(&report, "scope file")
                 .iter()
@@ -2136,6 +2160,10 @@ fn a_catalog_with_every_row_decided_and_none_refused_credits() {
         (1, &Value::Array(Vec::new()), &Value::Bool(false)),
         "{report:?}"
     );
+    assert_eq!(
+        messages_of(&report, "revision"),
+        ["grace-visit: its survives disposition records no revision"]
+    );
 }
 
 /// A file listed outside the package's scope and a test that is no positive one are refused without a
@@ -2172,6 +2200,18 @@ fn a_refused_path_or_test_is_never_read() {
         refused
             .iter()
             .any(|message| message.contains(&format!("{spy} is no positive loom test"))),
+        "{report:?}"
+    );
+    assert!(
+        !refused
+            .iter()
+            .any(|message| message.contains("no model source of")),
+        "{report:?}"
+    );
+    assert!(
+        messages_of(&report, "scope file").contains(&format!(
+            "{SLOT} is listed and the kernel package includes no production file there"
+        )),
         "{report:?}"
     );
     let spied = spied.into_inner();
@@ -2302,6 +2342,17 @@ fn a_twin_that_is_no_control_is_refused() {
         );
         refused(plants, "reference", "fill-depart-release: twin");
     }
+    sentence(
+        with_catalog(|catalog| {
+            let mut twin = twins(catalog, "fill-depart-release");
+            object(&mut twin[0]).insert("steps", value("0"));
+            row(catalog, "fill-depart-release").insert("twin", Value::Array(twin));
+        }),
+        "reference",
+        &format!(
+            "fill-depart-release: twin {{'lane': 'loom', 'test': '{CONTROL}', 'steps': 0}} is no loom twin with its steps"
+        ),
+    );
     refused(
         with_catalog(|catalog| {
             let mut twin = twins(catalog, "fill-depart-release");
@@ -2526,6 +2577,12 @@ fn a_loom_failure_two_message_literals_hold_is_refused() {
         "reference",
         "grace-unpin: the failure 'anchor released twice' lies in more than one message literal",
     );
+    sentence(
+        grace_unpin(grace_entry("anchor released twice")),
+        "reference",
+        "grace-unpin: the failure 'anchor released twice' lies in more than one message literal of \
+         a model source of its tests, so a panic holding it names no one assertion",
+    );
 }
 
 #[test]
@@ -2554,7 +2611,8 @@ fn a_loom_failure_another_message_literal_extends_is_refused() {
 }
 
 /// A failure that only a `should_panic` attribute holds, whole or as a substring, is no message
-/// literal, and a model source whose attribute is bare leaves a failure its assertions hold accepted.
+/// literal, and a model source whose attribute is bare draws no `reference` refusal for a failure its
+/// assertions hold.
 #[test]
 fn a_loom_failure_only_an_attribute_holds_is_refused() {
     assert!(
@@ -2737,6 +2795,12 @@ fn a_loom_model_source_follows_inline_and_path_declared_modules() {
 /// case whose family has no kernel file.
 #[test]
 fn a_genmc_failure_that_is_no_one_check_message_is_refused() {
+    let cutoff = committed(&format!("{PACKAGE}/src/cutoff_kernel.rs"));
+    let twice = c_literals(&cutoff)
+        .iter()
+        .filter(|message| *message == "pin refused")
+        .count();
+    assert_eq!(twice, 2);
     let plants = [
         (
             "a substring",
@@ -2807,7 +2871,7 @@ fn a_genmc_failure_that_is_no_one_check_message_is_refused() {
 }
 
 /// A failure the kernel file spells as a `c"..."` literal only in a comment, outside a `check!` call or
-/// in its condition is refused; a plain string beside the one message leaves it accepted.
+/// in its condition is refused; a plain string beside the one message draws no `reference` refusal.
 #[test]
 fn a_genmc_failure_spelled_c_only_in_a_comment_is_refused() {
     let literal = "c\"a follower's record was freed or reissued under it\"";
@@ -2945,6 +3009,19 @@ fn a_disposition_that_names_no_run_is_refused_outside_the_unmodeled_rows() {
         "disposition",
         "grace-visit: its survives disposition names no run",
     );
+    sentence(
+        with_catalog(|catalog| {
+            decided(
+                catalog,
+                "grace-visit",
+                "survives",
+                value(r#"{"reason": "planted", "passed": []}"#),
+            );
+        }),
+        "disposition",
+        "grace-visit: its survives disposition names no run, and the row is outside \
+         ['word-install', 'fill-depart-held', 'sequence-begin-store', 'sequence-commit']",
+    );
     refused(
         with_catalog(|catalog| {
             row(catalog, "grace-visit")
@@ -2988,12 +3065,18 @@ fn a_row_with_two_dispositions_or_none_is_refused() {
             row(catalog, "grace-visit").remove(key);
         }
     };
-    let changes: [(Change<'_>, usize); 2] = [(&two, 2), (&none, 0)];
-    for (change, count) in changes {
+    let changes: [(Change<'_>, usize, &str); 2] =
+        [(&two, 2, "['survives', 'unrun']"), (&none, 0, "[]")];
+    for (change, count, held) in changes {
         refused(
             with_catalog(change),
             "disposition",
             &format!("grace-visit: it holds {count} dispositions"),
+        );
+        sentence(
+            with_catalog(change),
+            "disposition",
+            &format!("grace-visit: it holds {count} dispositions {held}"),
         );
         let report = report_of(with_catalog(change));
         assert_eq!(disposition(&report, "grace-visit"), Value::Null);
@@ -3125,6 +3208,9 @@ fn a_decided_row_without_a_revision_is_refused() {
         ("a number", Some(value(&"1".repeat(40)))),
         ("a trailing newline", Some(string(&format!("{REVISION}\n")))),
         ("upper case", Some(string(&"A".repeat(40)))),
+        ("39 digits", Some(string(&"0".repeat(39)))),
+        ("41 digits", Some(string(&"0".repeat(41)))),
+        ("a letter past f", Some(string(&"g".repeat(40)))),
     ];
     for (kind, planted) in &decisions {
         for (label, revision) in &revisions {
@@ -3241,6 +3327,13 @@ fn a_row_without_an_enclosing_item_is_refused() {
     refused(
         with_catalog(|catalog| {
             row(catalog, "grace-visit").remove("scope");
+        }),
+        "enclosing item",
+        "grace-visit: it names no enclosing item",
+    );
+    refused(
+        with_catalog(|catalog| {
+            row(catalog, "grace-visit").insert("scope", list(&[]));
         }),
         "enclosing item",
         "grace-visit: it names no enclosing item",
@@ -3398,9 +3491,23 @@ fn a_malformed_row_is_refused_by_name() {
         "row",
         "row 'grace-visit' is malformed: it is no object",
     );
+    sentence(
+        with_catalog(|catalog| {
+            row(catalog, "grace-visit").insert("op", string("swap"));
+        }),
+        "row",
+        "row 'grace-visit' is malformed: its op 'swap' is none of ['load', 'store', 'rmw', 'fence']",
+    );
 }
 
-/// The walk of a kernel package that fails for `walk`'s reason, whatever its kind.
+fn error_of(report: &Value) -> String {
+    match member(report, "error") {
+        Value::String(error) => error.to_string(),
+        error => panic!("the error is a string: {error:?}"),
+    }
+}
+
+/// A walk of the kernel package that fails with the reason `planted` and the error kind `kind`.
 fn failing(kind: io::ErrorKind) -> impl Fn(&Path) -> io::Result<Vec<PathBuf>> {
     move |_: &Path| Err(io::Error::new(kind, "planted"))
 }
@@ -3457,16 +3564,50 @@ fn an_unreadable_catalog_exits_2() {
     for (label, planted) in texts {
         let (report, code) = checked(vec![(CATALOG, text(planted))]);
         assert_eq!(code, 2, "{label}: {report:?}");
-        let Value::String(error) = member(&report, "error") else {
-            panic!("{label}: the error is a string");
-        };
         assert!(
-            error.to_string().contains("unreadable catalog"),
+            error_of(&report).contains("unreadable catalog"),
+            "{label}: {report:?}"
+        );
+    }
+    let mut keys = Vec::new();
+    for (key, _) in object(&mut items(get(&catalog(), "rows"))[0].clone()).iter() {
+        keys.push(Value::String(key.clone()));
+        if *key == "find" {
+            keys.push(Value::String(key.clone()));
+        }
+    }
+    let repeated = json::dump(&catalog()).replacen("\"find\":", "\"find\":\"stale\",\"find\":", 1);
+    assert_eq!(
+        error_of(&checked(vec![(CATALOG, text(repeated))]).0),
+        format!(
+            "unreadable catalog or declaration: an object repeats a key among {}",
+            repr(&Value::Array(keys))
+        )
+    );
+    assert_eq!(
+        error_of(&checked(vec![(CATALOG, text(document(value("5"), "[]")))]).0),
+        "unreadable catalog or declaration: files is no list of distinct paths, or rows is no list"
+    );
+    let mut no_rows = Object::new();
+    no_rows.insert("files", files.clone());
+    for (label, plant) in [
+        ("a list", text("[]".to_owned())),
+        ("no rows", text(json::dump(&Value::Object(no_rows)))),
+        ("a refused read", Plant::Refused),
+    ] {
+        let (report, code) = checked(vec![(CATALOG, plant)]);
+        assert_eq!(code, 2, "{label}: {report:?}");
+        assert!(
+            error_of(&report).starts_with("unreadable catalog or declaration: "),
             "{label}: {report:?}"
         );
     }
     let (report, code) = checked(vec![(super::GENMC, text("[".repeat(100_000)))]);
     assert_eq!(code, 2, "{report:?}");
+    assert!(
+        error_of(&report).starts_with("unreadable catalog or declaration: "),
+        "{report:?}"
+    );
     for kind in [
         io::ErrorKind::Other,
         io::ErrorKind::NotFound,
@@ -3480,33 +3621,19 @@ fn an_unreadable_catalog_exits_2() {
     }
 }
 
-/// A source of the kernel package that links to itself is an unreadable package, or a refused include,
-/// never an accepted one.
+/// A source of the kernel package that links to itself makes the package unreadable: exit 2, never an
+/// accepted include.
 #[test]
 fn a_symlink_loop_in_the_kernel_package_is_never_accepted() {
     let scratch = planted_package(&[], Some("#[path = \"loop.rs\"]\nmod looped;\n"));
     std::os::unix::fs::symlink("loop.rs", package_of(&scratch).join("src/loop.rs"))
         .expect("the link is made");
     let (report, code) = checked_at(&root_of(&scratch), vec![], EXTERNAL);
-    if code == 2 {
-        let Value::String(error) = member(&report, "error") else {
-            panic!("the error is a string: {report:?}");
-        };
-        assert!(
-            error.to_string().contains("unreadable kernel package"),
-            "{report:?}"
-        );
-    } else {
-        assert_eq!(code, 1, "{report:?}");
-        assert!(
-            messages_of(&report, "scope file")
-                .iter()
-                .any(|message| message.contains(
-                    "the include 'loop.rs' is no Rust source of the package the scan reads"
-                )),
-            "{report:?}"
-        );
-    }
+    assert_eq!(code, 2, "{report:?}");
+    assert!(
+        error_of(&report).starts_with("unreadable kernel package: "),
+        "{report:?}"
+    );
 }
 
 /// Every GenMC failure of a row's entries is a `check!` message of its case family's one kernel file,
@@ -3517,12 +3644,14 @@ fn each_cataloged_genmc_failure_lies_in_its_case_family_kernel() {
     let package = top().join(PACKAGE);
     let kernels = kernel_texts(&package).expect("the kernel package reads");
     let catalog = catalog();
+    let mut checked_cases = 0;
     for entry in items(get(&catalog, "rows")) {
         let Value::Object(entry) = entry else {
             panic!("a row is an object");
         };
-        let (entries, _) =
+        let (entries, wanted) =
             row_entries(entry).expect("a committed row's disposition is well formed");
+        assert_eq!(wanted, None, "a committed row is unrun");
         for entry in entries {
             let failure = match entry.get("failure") {
                 Some(Value::String(failure)) if !failure.is_empty() => failure.to_string(),
@@ -3542,6 +3671,16 @@ fn each_cataloged_genmc_failure_lies_in_its_case_family_kernel() {
                     text
                 );
                 assert!(text.contains(&format!("c\"{failure}\"")), "{case}");
+                let messages = c_literals(text);
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|message| **message == failure)
+                        .count(),
+                    1,
+                    "{case}"
+                );
+                checked_cases += 1;
             }
         }
     }
@@ -3555,4 +3694,185 @@ fn each_cataloged_genmc_failure_lies_in_its_case_family_kernel() {
         ("src/nested/grace_kernel.rs".to_owned(), "u".to_owned()),
     ]);
     assert_eq!(family_kernel(&Text::from("grace1-seq"), &both), None);
+    assert!(checked_cases > 0);
+}
+
+/// The GenMC declaration with the production entry of `join-detach-release` set by `change`.
+fn detach_production(change: impl FnOnce(&mut Object)) -> String {
+    let mut declared = value(&committed(super::GENMC));
+    let bindings = match object(&mut declared).get_mut("bindings") {
+        Some(Value::Array(bindings)) => bindings,
+        _ => panic!("the declaration lists bindings"),
+    };
+    let entry = bindings
+        .iter_mut()
+        .map(object)
+        .find(|entry| entry.get("id") == Some(&string("join-detach-release")))
+        .expect("the declaration binds join-detach-release");
+    change(entry);
+    json::dump(&declared)
+}
+
+/// A bound row whose binding's production is no object, or whose binding scope holds a header that is
+/// no string, is a malformed row; that refusal ends the row's checks, so its planted second disposition
+/// draws no `disposition` refusal.
+#[test]
+fn a_binding_of_another_shape_makes_its_row_malformed() {
+    let production = |planted: &'static str| {
+        move |entry: &mut Object| match entry.get_mut("production") {
+            Some(Value::Object(production)) => {
+                production.insert("scope", value(planted));
+            }
+            _ => panic!("the binding has a production entry"),
+        }
+    };
+    let plants: [(&str, String, &str); 3] = [
+        (
+            "a production that is a number",
+            detach_production(|entry| entry.insert("production", value("5"))),
+            "its binding's production is no object",
+        ),
+        (
+            "a header that is a number",
+            detach_production(production("[1]")),
+            "a header of its binding's scope is no string",
+        ),
+        (
+            "a number after a header that resolves to no body",
+            detach_production(production(r#"["fn nowhere", 1]"#)),
+            "a header of its binding's scope is no string",
+        ),
+    ];
+    for (label, declared, reason) in plants {
+        let mut plants = with_catalog(|catalog| {
+            row(catalog, "row-detach")
+                .insert("survives", value(r#"{"reason": "planted", "passed": []}"#));
+        });
+        plants.push((super::GENMC, text(declared)));
+        let (report, code) = checked(plants);
+        assert_eq!(code, 1, "{label}: {report:?}");
+        assert_eq!(*member(&report, "credited"), Value::Bool(false), "{label}");
+        assert_eq!(
+            messages_of(&report, "row"),
+            [format!("row 'row-detach' is malformed: {reason}")],
+            "{label}"
+        );
+        let row_detach: Vec<&Value> = items(member(&report, "refusals"))
+            .iter()
+            .filter(|entry| match get(entry, "message") {
+                Value::String(message) => message.to_string().contains("row-detach"),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(row_detach.len(), 1, "{label}: {report:?}");
+    }
+}
+
+/// `row_entries` gives a row's entries with the result each run must give, `killed`, `survived` or none,
+/// and refuses a row with a malformed disposition or none by the row's id.
+#[test]
+fn row_entries_gives_each_disposition_its_entries_and_its_result() {
+    let mut planted = catalog();
+    let entry = |planted: &mut Value| Value::Object(row(planted, "fill-observe").clone());
+    let read = |row: &Value| match row {
+        Value::Object(row) => row_entries(row).map(|(entries, wanted)| {
+            (
+                entries
+                    .into_iter()
+                    .map(|entry| Value::Object(entry.clone()))
+                    .collect::<Vec<_>>(),
+                wanted,
+            )
+        }),
+        _ => panic!("a row is an object"),
+    };
+    decided(
+        &mut planted,
+        "fill-observe",
+        "kill",
+        list(&[value(DEPARTED), value(FOLLOWER)]),
+    );
+    assert_eq!(
+        read(&entry(&mut planted)),
+        Ok((vec![value(DEPARTED), value(FOLLOWER)], Some("killed")))
+    );
+    let passed = with(
+        r#"{"lane": "genmc"}"#,
+        &[("tests", names(&["join-production"]))],
+    );
+    decided(
+        &mut planted,
+        "fill-observe",
+        "survives",
+        Value::Object({
+            let mut survives = Object::new();
+            survives.insert("reason", string("planted"));
+            survives.insert("passed", list(&[passed.clone()]));
+            survives
+        }),
+    );
+    assert_eq!(
+        read(&entry(&mut planted)),
+        Ok((vec![passed], Some("survived")))
+    );
+    needing(&mut planted, "fill-observe", list(&[value(FREED)]));
+    assert_eq!(read(&entry(&mut planted)), Ok((vec![value(FREED)], None)));
+    decided(&mut planted, "fill-observe", "kill", list(&[]));
+    assert_eq!(
+        read(&entry(&mut planted)),
+        Err(Text::from(
+            "fill-observe: its kill disposition is malformed"
+        ))
+    );
+    row(&mut planted, "fill-observe").remove("kill");
+    assert_eq!(
+        read(&entry(&mut planted)),
+        Err(Text::from("fill-observe: it holds no disposition"))
+    );
+}
+
+/// A site after an `fn` nested in its enclosing item lies at the item's own level, also where the
+/// nested body's `}` directly precedes the site in the normalized text.
+#[test]
+fn a_site_after_a_nested_item_lies_in_its_enclosing_item() {
+    let call = "std::sync::atomic::fence(Ordering::SeqCst);";
+    let planted = source(
+        FILL,
+        ANCHOR,
+        &format!("fn extra() {{\n    fn inner() {{}}\n    {call}\n}}\n\n{ANCHOR}"),
+    );
+    let mut plants = with_catalog(|catalog| {
+        rows(catalog).push(planted_row(&[
+            ("find", string(call)),
+            ("replace", string("")),
+        ]));
+    });
+    plants.push((FILL, text(planted)));
+    accepted(plants);
+}
+
+/// A word that starts where a path attribute's match ends lies outside it and is refused on its own.
+#[test]
+fn a_word_after_a_path_attribute_is_its_own_refusal() {
+    let loaded = "#[cfg_attr(x, path =include)]\nmod extra;\n\n";
+    let planted = source(FILL, ANCHOR, &format!("{loaded}{ANCHOR}"));
+    let line = planted[..planted.find(loaded).expect("the plant stands")]
+        .matches('\n')
+        .count()
+        + 1;
+    let (report, code) = checked(vec![(FILL, text(planted))]);
+    assert_eq!(code, 1, "{report:?}");
+    assert_eq!(
+        messages_of(&report, "scope file"),
+        [
+            format!(
+                "{FILL}:{line}: #[cfg_attr(x, path = can load source that the catalog does not scope"
+            ),
+            format!("{FILL}:{line}: include can load source that the catalog does not scope"),
+            format!(
+                "{FILL}:{}: mod can load source that the catalog does not scope",
+                line + 1
+            ),
+        ]
+    );
 }

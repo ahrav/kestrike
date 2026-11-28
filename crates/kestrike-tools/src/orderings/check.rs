@@ -34,8 +34,8 @@ use regex::Regex;
 
 use super::sites::{self, Kind, Pin, Strength, body_open, line_of};
 use super::sources::{
-    Reader, References, Scope, Walk, c_literals, diagnostics, include_defects, module_source,
-    path_attributes, references, scope_files, stem,
+    PackageWalk, Reader, References, Scope, c_literals, diagnostics, include_defects,
+    module_source, path_attributes, references, scope_files, stem,
 };
 use crate::classes::{bounded_iter, compiled, is_word};
 use crate::genmc::{self, normalized};
@@ -90,6 +90,10 @@ impl Refusals {
         self.0.push((name, message));
     }
 
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     fn value(&self) -> Value {
         Value::Array(
             self.0
@@ -133,6 +137,12 @@ fn strings<'t>(names: impl IntoIterator<Item = &'t str>) -> Value {
     )
 }
 
+/// Whether `value` is a list of strings.
+fn all_strings(value: Option<&Value>) -> bool {
+    matches!(value, Some(Value::Array(items))
+        if items.iter().all(|item| matches!(item, Value::String(_))))
+}
+
 /// `row` as a [`Row`], or the defect that makes it malformed.
 fn row_defect<'v>(row: &'v Value, ids: &BTreeSet<Text>, files: &[Text]) -> Result<Row<'v>, Text> {
     let Value::Object(object) = row else {
@@ -161,19 +171,21 @@ fn row_defect<'v>(row: &'v Value, ids: &BTreeSet<Text>, files: &[Text]) -> Resul
     let binding = object
         .get("binding")
         .is_none_or(|binding| matches!(binding, Value::String(_)));
-    let scope = object.get("scope").is_none_or(|scope| {
-        matches!(scope, Value::Array(headers) if headers.iter().all(|header| matches!(header, Value::String(_))))
-    });
-    let (Some(id), Some(path), Some(op), Some(find), Some(replace), true, true) = (
+    let scope = object
+        .get("scope")
+        .is_none_or(|scope| all_strings(Some(scope)));
+    let wrong = || Text::from("a field has the wrong type");
+    if !binding || !scope {
+        return Err(wrong());
+    }
+    let (Some(id), Some(path), Some(op), Some(find), Some(replace)) = (
         string("id"),
         string("path"),
         string("op"),
         string("find"),
         string("replace"),
-        binding,
-        scope,
     ) else {
-        return Err(Text::from("a field has the wrong type"));
+        return Err(wrong());
     };
     if id.strip().is_empty() {
         return Err(Text::from("its id is blank"));
@@ -283,11 +295,11 @@ fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Opt
 fn loaders(code: &str) -> Vec<(usize, usize)> {
     let attributes = path_attributes(code);
     let mut found = attributes.clone();
-    for (word, after_hash) in [("include", true), ("mod", false)] {
+    for (word, hash_allowed) in [("include", true), ("mod", false)] {
         for (offset, _) in code.match_indices(word) {
             let before = code[..offset].chars().next_back();
             let next = code[offset + word.len()..].chars().next();
-            let bounded = !before.is_some_and(|c| is_word(c) || (!after_hash && c == '#'))
+            let bounded = !before.is_some_and(|c| is_word(c) || (!hash_allowed && c == '#'))
                 && !next.is_some_and(is_word);
             let inside = attributes
                 .iter()
@@ -310,13 +322,13 @@ fn production<'r>(references: &'r References, id: &Text) -> Result<Option<&'r Ob
     let Some(entry) = references.binding(id) else {
         return Ok(None);
     };
-    match entry {
-        Value::Object(entry) => match entry.get("production") {
-            None => Ok(None),
-            Some(Value::Object(production)) => Ok(Some(production)),
-            Some(_) => Err(Malformed("its binding's production is no object")),
-        },
-        _ => Err(Malformed("its binding is no object")),
+    let Value::Object(entry) = entry else {
+        unreachable!("the references keep each binding entry as an object");
+    };
+    match entry.get("production") {
+        None => Ok(None),
+        Some(Value::Object(production)) => Ok(Some(production)),
+        Some(_) => Err(Malformed("its binding's production is no object")),
     }
 }
 
@@ -329,8 +341,7 @@ fn entry_fields(entry: &Value, failure: bool) -> Option<&Object> {
     let lane = matches!(entry.get("lane"), Some(Value::String(lane)) if *lane == "loom" || *lane == "genmc");
     let tests = matches!(entry.get("tests"), Some(Value::Array(tests))
         if !tests.is_empty() && tests.iter().all(|test| matches!(test, Value::String(_))));
-    let failed = !failure
-        || matches!(entry.get("failure"), Some(Value::String(text)) if !text.strip().is_empty());
+    let failed = !failure || nonblank(entry.get("failure"));
     (lane && tests && failed).then_some(entry)
 }
 
@@ -416,7 +427,7 @@ pub fn row_entries(row: &Object) -> Result<(Vec<&Object>, Option<&'static str>),
 }
 
 /// The package-relative path and the text of the one kernel file of `case`'s family among `kernels`, the
-/// source named `<family>_kernel.rs`, the family being the leading lowercase letters of the case name:
+/// source named `<family>_kernel.rs`, the family being the leading lowercase ASCII letters of the case name:
 /// `src/join_kernel.rs` for `join-production`. `None` when the package holds none or several.
 pub fn family_kernel<'k>(
     case: &Text,
@@ -652,8 +663,7 @@ fn check_references(
         let field = |key: &str| production.and_then(|production| production.get(key));
         let (call, scope) = (field("call"), field("scope"));
         let bound = matches!(field("file"), Some(Value::String(file)) if file == row.path);
-        let headers = matches!(scope, Some(Value::Array(headers))
-            if headers.iter().all(|header| matches!(header, Value::String(_))));
+        let headers = all_strings(scope);
         if !bound {
             refusals.refuse(
                 "reference",
@@ -763,8 +773,8 @@ fn nested(body: &str, position: usize) -> bool {
 
 /// Refuses `row` unless `scope`, its enclosing item's headers, resolves in `normal`, its file's
 /// [`normalized`] production text, to one body that holds its `find`, with its site, `offset` bytes into
-/// the find, outside every `fn` or `impl` nested in that body. A header is read only while some body
-/// remains to search.
+/// the find, outside every `fn` or `impl` nested in that body. The bodies are searched header by header
+/// while some body remains; the joined name of a refusal needs every header to be a string.
 fn check_enclosing(
     row: &Row<'_>,
     refusals: &mut Refusals,
@@ -891,19 +901,20 @@ struct Inputs {
 
 /// The inputs `read` gives, or the reason one cannot be read or has another shape.
 fn inputs(read: Reader<'_>, root: &Path) -> Result<Inputs, String> {
-    let mut documents = Vec::new();
-    for path in [CATALOG, GENMC, RC11, OBLIGATIONS] {
+    let load = |path: &str| {
         let source = read(path).map_err(|error| format!("{path}: {error}"))?;
-        documents.push(parse_unique(&source).map_err(|error| match error {
+        parse_unique(&source).map_err(|error| match error {
             UniqueError::Repeated(_, keys) => format!(
                 "an object repeats a key among {}",
                 repr(&Value::Array(keys.into_iter().map(Value::String).collect()))
             ),
             UniqueError::Syntax(error) => format!("{path}: {error}"),
-        })?);
-    }
-    let [catalog, declared, litmus, records] = <[Value; 4]>::try_from(documents)
-        .unwrap_or_else(|_| unreachable!("one document is read for each of four paths"));
+        })
+    };
+    let catalog = load(CATALOG)?;
+    let declared = load(GENMC)?;
+    let litmus = load(RC11)?;
+    let records = load(OBLIGATIONS)?;
     let Value::Object(catalog) = catalog else {
         return Err("the catalog is no object".to_owned());
     };
@@ -946,8 +957,8 @@ fn inputs(read: Reader<'_>, root: &Path) -> Result<Inputs, String> {
 
 /// The report and the exit code of the catalog check: the catalog, the declarations and the scoped
 /// files come from `read`, the kernel package is walked under the checkout `root`, and the crate
-/// sources that can declare an included file are found under `tree`, and `walk` lists the package's
-/// sources. A strength constant with no `S::NAME` mention in its file takes its op from its pin in `pins`.
+/// sources that can declare an included file are found under `tree`. `package_walk` lists the sources
+/// the scope rule classifies; the kernel texts and the include defects are read on disk under `root`. A strength constant with no `S::NAME` mention in its file takes its op from its pin in `pins`.
 ///
 /// The check acts with the authority of its caller and trusts the directories it is given; it reads
 /// each input whole.
@@ -956,7 +967,7 @@ pub fn check(
     root: &Path,
     tree: &Path,
     pins: &[Pin],
-    walk: Walk<'_>,
+    package_walk: PackageWalk<'_>,
 ) -> (Value, u8) {
     let Inputs {
         files,
@@ -968,17 +979,15 @@ pub fn check(
         Err(reason) => return failed("unreadable catalog or declaration: ", &reason),
     };
     let mut refusals = Refusals::default();
-    let scope = package.map_or_else(
-        || Ok(Scope::default()),
-        |package| {
-            include_defects(&package, references.kernels()).and_then(|defects| {
-                for defect in defects {
-                    refusals.refuse(defect.name(), Text::from(defect.message()));
-                }
-                scope_files(&package, root, read, tree, walk)
-            })
-        },
-    );
+    let scope = match package {
+        None => Ok(Scope::default()),
+        Some(package) => include_defects(&package, references.kernels()).and_then(|defects| {
+            for defect in defects {
+                refusals.refuse(defect.name(), Text::from(defect.message()));
+            }
+            scope_files(&package, root, read, tree, package_walk)
+        }),
+    };
     let scope = match scope {
         Ok(scope) => scope,
         Err(error) => return failed("unreadable kernel package: ", &error.to_string()),
@@ -1128,8 +1137,8 @@ pub fn check(
     let mut excluded = scope.excluded().to_vec();
     excluded.sort_unstable();
     let count: usize = scoped.iter().map(|file| file.reading.sites().len()).sum();
-    let credited = refusals.0.is_empty() && unrun.is_empty();
-    let code = u8::from(!refusals.0.is_empty());
+    let credited = refusals.is_empty() && unrun.is_empty();
+    let code = u8::from(!refusals.is_empty());
     let mut report = Object::new();
     report.insert("refusals", refusals.value());
     report.insert("rows", Value::Object(dispositions));
