@@ -13,6 +13,8 @@ pub mod gameday;
 pub mod genmc;
 pub mod git;
 pub mod hook;
+#[cfg(target_os = "linux")]
+pub mod host_stop;
 pub mod json;
 pub mod orderings;
 pub mod ownership;
