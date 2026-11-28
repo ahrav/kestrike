@@ -206,6 +206,7 @@ and remove its rows. A Python file stays when no ticket of its own port deletes 
 
 | Rust module | Python file that stays | Rules held in both |
 | --- | --- | --- |
+| `crates/kestrike-tools/src/decimal.rs` | `scripts/gameday-judge.py` | The number rules of the strict JSON read and of a package's windows: `nearest_double` and `spells_shortest` in the Rust module hold the test of `double` in the Python file, a token's nearest double and whether the token has the decimal value of that double's shortest form, within the exponent range of Python's `decimal` module (`EMAX` and `ETINY` in the Rust module); `whole_quotient` holds the test of the interval count in `check_package`, a whole number from 1 to the bound its caller passes, `MAX_INTERVALS`. |
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/escrow_check.py` | The text of `case.qnt` for a case of the escrow model without mutations or extra text: `case::escrow` and `inputs`. |
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/gate_check.py` | The text of `case.qnt` for a case of the gate model without mutations or extra text: `case::gate` and `inputs`. |
 | `crates/kestrike-tools/src/fixtures/case.rs` | `quint/grace_check.py` | The text of `case.qnt` for a case of the grace model without mutations or extra text: `case::bounded` and `inputs`. |
