@@ -309,8 +309,10 @@ pub(crate) fn exit_code(status: ExitStatus) -> i32 {
         .expect("an exited child has a code or a signal")
 }
 
-/// `exited_within` waits up to `limit` for the child to exit and returns its status, polling it with a
-/// pause that grows to [`POLL`]; an `interrupt` that holds a signal ends the wait early with `Ok(None)`.
+/// `exited_within` polls the child for its exit as [`polled`] does, with a pause that grows to [`POLL`],
+/// and returns its status: a status or an error of the poll comes first, and only a poll that finds the
+/// child running leads to the check of `limit` and of `interrupt`, either of which ends the wait with
+/// `Ok(None)`.
 ///
 /// # Errors
 ///
@@ -475,9 +477,11 @@ fn leader_under(root: &Path, pid: u32, own: u32) -> io::Result<Leader> {
     }
 }
 
-/// `polled` calls `step` until it returns a value, `limit` passes on the monotonic clock or `ended`
-/// holds, pausing between two calls for a time that starts at [`FIRST_PAUSE`] and doubles up to `cap`.
-/// It returns `None` when the limit passes or `ended` holds first.
+/// `polled` calls `step` first and returns its value or its error. Only after `step` returns `Ok(None)`
+/// does it read the limit on the monotonic clock and then `ended`, and it returns `Ok(None)` when either
+/// holds; otherwise it pauses for a time that starts at [`FIRST_PAUSE`], doubles up to `cap` and is cut to
+/// the time left, and calls `step` again, so one more call runs at the limit and its value is returned.
+/// The length of one call of `step` has no bound.
 fn polled<T>(
     limit: Duration,
     cap: Duration,
