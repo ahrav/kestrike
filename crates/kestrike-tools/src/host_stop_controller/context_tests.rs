@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::os::unix::ffi::OsStrExt;
 
 use super::{beside, pure};
 
@@ -22,7 +22,11 @@ fn pure_writes_a_path_as_pathlib_does() {
         (".//.", "."),
     ];
     for (path, expected) in rows {
-        assert_eq!(pure(path.as_bytes()), Path::new(expected), "{path:?}");
+        assert_eq!(
+            pure(path.as_bytes()).as_os_str().as_bytes(),
+            expected.as_bytes(),
+            "{path:?}"
+        );
     }
 }
 
@@ -39,8 +43,8 @@ fn beside_joins_a_name_as_pathlib_does() {
     for (directory, expected) in rows {
         let root = pure(directory.as_bytes());
         assert_eq!(
-            beside(&root, "injection"),
-            Path::new(expected),
+            beside(&root, "injection").as_os_str().as_bytes(),
+            expected.as_bytes(),
             "{directory:?}"
         );
     }

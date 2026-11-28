@@ -133,7 +133,8 @@ fn row(state: &mut State, name: &str, field: &str, new: Option<Value>) {
     state.row(name, field, new);
 }
 
-/// Applies `change` to each metric alarm row of the first alarm reply.
+/// Applies `change` once to the first alarm reply, with its other members and its list of metric
+/// alarm rows.
 fn reshape(state: &mut State, change: fn(&mut Object, &mut Vec<Value>)) {
     state.shape(
         ALARMS,

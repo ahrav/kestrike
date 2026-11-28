@@ -178,7 +178,7 @@ fn files_and_record(
     };
     let document = std::str::from_utf8(&data).map_err(|error| unreadable(&error))?;
     let value = json::parse_unique(document).map_err(|error| match error {
-        json::UniqueError::Repeated(member) => {
+        json::UniqueError::Repeated(member, _) => {
             let mut reason = Text::from("plant.json is unreadable: repeated member ");
             reason.push_text(&member);
             rejected(name, reason)

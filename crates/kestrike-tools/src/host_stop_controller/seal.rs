@@ -42,7 +42,8 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// `seal` returns 0 when it writes `injection/collected.json`, and 1 when the write fails; for
     /// a mark it linked, it prints the mark's SHA-256 too.
     ///
-    /// After taking the lock, `seal` arms the signal record and reads it. It reads the record again
+    /// After taking the lock, `seal` arms the signal record, ends a hold an earlier command left on
+    /// it and reads it. It reads the record again
     /// before each file read. Before writing the mark it reads the record once more and disarms it.
     /// If a record read reports a signal, `seal` returns [`Halt::Interrupted`] before writing
     /// `injection/collected.json`.
@@ -61,7 +62,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let _held = lock(self.cx.files, &injection)
             .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
         self.cx.record.arm();
-        self.cx.record.read()?;
+        self.cx.record.release()?;
         if self.stands_in(&injection, "collected.json")? {
             return Err(written_once());
         }

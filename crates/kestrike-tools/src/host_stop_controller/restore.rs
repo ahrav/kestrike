@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use super::context::{Stream, beside, pure, seconds};
 use super::controller::Controller;
 use super::fault::{Fault, Halt};
-use super::run::{TOOL, lock_sentence, probe_refusal, shown_path};
+use super::run::{TOOL, lock_sentence, probe_refusal};
 use super::seal::{read_halt, run_end};
 use crate::gameday::{ends_observation, read_evidence};
 use crate::host_stop::{
@@ -188,7 +188,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         stopped_at: Option<Number>,
         seen: &mut Text,
     ) -> Result<Option<Number>, Halt> {
-        self.cx.record.read()?;
+        self.cx.record.release()?;
         self.require_caller()?;
         let deadline = self.monotonic() + seconds(self.operator.deadline_seconds());
         self.deadline = Some(deadline);
@@ -326,7 +326,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Err(Halt::refused(sentence));
         }
         if !directory(&injection) {
-            let mut sentence = shown_path(&injection);
+            let mut sentence = Text::from_os(injection.as_os_str());
             sentence.push_str(" is no directory: ");
             sentence.push_str(missing);
             return Err(Halt::refused(sentence));

@@ -157,7 +157,6 @@ fn subtract_digits(left: &str, right: &str) -> String {
     String::from_utf8(difference).expect("digits are ASCII")
 }
 
-#[cfg(target_os = "linux")]
 impl crate::text::Piece for Integer {
     fn push_to(&self, text: &mut Text) {
         text.push_str(&self.to_string());
@@ -304,24 +303,26 @@ pub fn parse(text: &str) -> Result<Value, Error> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
-            StrictError::Repeated(_) | StrictError::Number(_) => {
+            StrictError::Repeated(..) | StrictError::Number(_) => {
                 unreachable!("a read that keeps repeated keys and every number refuses neither")
             }
         })
 }
 
-/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`.
+/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`,
+/// with that object's keys in the order the text spells them, each repeat included, as runs of one key
+/// and the count of its spellings in a row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UniqueError {
     Syntax(Error),
-    Repeated(Text),
+    Repeated(Text, Vec<(Text, usize)>),
 }
 
 impl fmt::Display for UniqueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(name) => write!(f, "repeated member {name}"),
+            Self::Repeated(name, _) => write!(f, "repeated member {name}"),
         }
     }
 }
@@ -345,7 +346,7 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => UniqueError::Syntax(error),
-            StrictError::Repeated(name) => UniqueError::Repeated(name),
+            StrictError::Repeated(name, keys) => UniqueError::Repeated(name, keys),
             StrictError::Number(_) => unreachable!("a read that keeps every number refuses none"),
         })
 }
@@ -363,11 +364,12 @@ pub(crate) enum Unnumber {
 }
 
 /// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, or a
-/// number strict JSON refuses.
+/// number strict JSON refuses. A repeat of the unique read carries the repeating object's keys as
+/// [`UniqueError::Repeated`] holds them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StrictError {
     Syntax(Error),
-    Repeated(Text),
+    Repeated(Text, Vec<(Text, usize)>),
     Number(Unnumber),
 }
 
@@ -378,7 +380,7 @@ impl fmt::Display for StrictError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(_) => f.write_str("an object repeats a key"),
+            Self::Repeated(..) => f.write_str("an object repeats a key"),
             Self::Number(Unnumber::Constant(token)) => {
                 write!(f, "the constant {token} is no number")
             }
@@ -424,10 +426,18 @@ pub fn parse_members(text: &str) -> Result<Value, Error> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
-            StrictError::Repeated(_) | StrictError::Number(_) => {
+            StrictError::Repeated(..) | StrictError::Number(_) => {
                 unreachable!("a read that keeps every member and every number refuses neither")
             }
         })
+}
+
+/// Counts `key` in `runs`, runs of one key and the count of its spellings in a row.
+fn tally(runs: &mut Vec<(Text, usize)>, key: Text) {
+    match runs.last_mut() {
+        Some((last, count)) if *last == key => *count += 1,
+        _ => runs.push((key, 1)),
+    }
 }
 
 struct Reader<'a> {
@@ -560,6 +570,7 @@ impl<'a> Reader<'a> {
         }
         let mut repeated = None;
         let mut keys = HashSet::new();
+        let mut later = Vec::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -577,18 +588,27 @@ impl<'a> Reader<'a> {
             } else if self.mode == Mode::Keep {
                 object.insert(key, value);
             } else if repeated.is_none() {
-                // The parser defers the first duplicate-key error until the object closes, and the
-                // members after it are read and dropped.
+                // The parser defers the first duplicate-key error until the object closes. The strict
+                // read drops the members after it; the unique read drops their values and tallies
+                // their keys for the refusal.
                 if keys.insert(key.clone()) {
                     object.0.push((key, value));
                 } else {
+                    if self.mode == Mode::Unique {
+                        for (key, _) in object.0.drain(..) {
+                            tally(&mut later, key);
+                        }
+                        tally(&mut later, key.clone());
+                    }
                     repeated = Some(key);
                 }
+            } else if self.mode == Mode::Unique {
+                tally(&mut later, key);
             }
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
-                    return Err(StrictError::Repeated(name));
+                    return Err(StrictError::Repeated(name, later));
                 }
                 return Ok(self.closed(object, members));
             }

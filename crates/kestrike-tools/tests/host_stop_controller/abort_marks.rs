@@ -106,8 +106,9 @@ fn a_panic_in_the_abort_status_read_or_its_line_says_the_state_is_unknown() {
     let panicked = Rc::new(Cell::new(false));
     let once = Rc::clone(&panicked);
     case.writes = Some(Rc::new(move |bytes: &[u8]| {
-        let shown = bytes.starts_with(b"host-stop-controller: the target reads {");
-        assert!(!shown || once.replace(true), "a planted stream fault");
+        if bytes.starts_with(b"host-stop-controller: the target reads {") && !once.replace(true) {
+            panic!("a planted stream fault");
+        }
         None
     }));
     case.assert_aborted("guardrail", &ALL, Some(&guardrails()[4]), None);
@@ -159,12 +160,31 @@ fn a_stop_mark_past_the_mark_size_limit_is_refused_before_any_stop_request() {
     );
     case.plane.borrow_mut().arn = identity;
     case.mark_limit = 5000;
-    let found = case.assert_aborted(
+    case.assert_aborted(
         "exception",
         &["roles", "abort"],
         None,
         Some("no stop request was sent; Refusal: injection/stop.json would hold "),
     );
     assert!(case.stops().is_empty(), "{:?}", case.ops());
-    assert!(found.contains_key("roles"));
+}
+
+#[test]
+fn a_stopped_mark_that_fails_in_the_abort_path_is_named_unwritten() {
+    let mut case = Case::new("abort-path-stopped");
+    guardrail_after_stop(&case);
+    case.fail_once(libc::ENOSPC, |step| links(step, "stopped.json"));
+    case.assert_aborted(
+        "guardrail",
+        &["roles", "stop", "abort"],
+        Some(&guardrails()[4]),
+        None,
+    );
+    let stderr = case.stderr();
+    assert!(
+        stderr.starts_with("host-stop-controller: stopped.json is unwritten: OSError: [Errno 28]"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert_eq!(case.after_fault(), [STATUS]);
 }

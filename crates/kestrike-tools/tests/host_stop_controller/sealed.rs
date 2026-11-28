@@ -9,7 +9,8 @@ use std::os::unix::fs::symlink;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 
-use kestrike_tools::host_stop::{Disk, Record, Signal, lock};
+use kestrike_tools::host_stop::{Disk, Interrupted, Record, Signal, lock};
+use kestrike_tools::host_stop_controller::Halt;
 use kestrike_tools::host_stop_controller::{Command, entry};
 use kestrike_tools::json::{Text, Value};
 use kestrike_tools::python::{hexdigest, repr_float};
@@ -1252,4 +1253,42 @@ fn a_seal_refuses_an_injection_that_takes_no_unnamed_file_or_a_records_file() {
     fs::remove_file(root.join("records")).expect("removed");
     fs::rename(&records, root.join("records")).expect("records is restored");
     assert_eq!(case.seal_at(&root), 0, "{}", case.output());
+}
+
+/// A record that an earlier command left held, with a signal stored, raises at the first read of
+/// `restore` and of `seal` after arming: each ends its hold there. `restore` exits 1 with no call
+/// and no mark, and `seal` ends with the signal before it reads a file.
+#[test]
+fn restore_and_seal_end_a_hold_an_earlier_command_left_on_their_record() {
+    let mut case = Case::new("stale-hold-restore-seal");
+    let root = case.restored_copy();
+    case.advance_to(window_end().0 + 30.0);
+    fs::remove_file(root.join("injection/restoration.json")).expect("removed");
+    let mut record = Record::new(case.delivered);
+    record.hold();
+    case.delivered.deliver(Signal::Terminate);
+    let calls = case.log().len();
+    let restored = case.owned_on(&mut record, Vec::new(), |mut controller| {
+        controller.restore(root.as_os_str(), None)
+    });
+    assert!(matches!(restored, Ok(1)), "{restored:?}");
+    assert!(!record.is_held());
+    assert_eq!(case.log().len(), calls, "no call");
+    assert!(!root.join("injection/restoration.json").exists());
+    record.hold();
+    case.delivered.deliver(Signal::Terminate);
+    let read = case.reads_under(&root);
+    let sealed = case.owned_on(&mut record, Vec::new(), |mut controller| {
+        controller.seal(root.as_os_str())
+    });
+    assert!(
+        matches!(
+            sealed,
+            Err(Halt::Interrupted(Interrupted(Signal::Terminate)))
+        ),
+        "{sealed:?}"
+    );
+    assert!(!record.is_held());
+    assert!(read.borrow().is_empty(), "{:?}", read.borrow());
+    assert!(!root.join("injection/collected.json").exists());
 }

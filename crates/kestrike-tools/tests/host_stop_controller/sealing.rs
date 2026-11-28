@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use kestrike_tools::gameday::{Evidence, FILE_LIMIT, ReadError, ends_observation, read_evidence};
+use kestrike_tools::host_stop::Record;
 use kestrike_tools::host_stop_controller::{Command, entry};
 use kestrike_tools::json::{Value, indented_in_order};
 
@@ -169,7 +170,8 @@ impl Case {
             operator: self.write_operator(),
             evidence: root.as_os_str().to_owned(),
         };
-        self.in_context(|cx| entry(&command, cx))
+        let mut record = Record::new(self.delivered);
+        self.in_context_on(&mut record, |cx| entry(&command, cx))
     }
 
     /// Runs `restore` over `root` with `reviewed` and returns its exit code.
@@ -180,7 +182,8 @@ impl Case {
             evidence: root.as_os_str().to_owned(),
             reviewed: reviewed.map(Path::to_path_buf),
         };
-        self.in_context(|cx| entry(&command, cx))
+        let mut record = Record::new(self.delivered);
+        self.in_context_on(&mut record, |cx| entry(&command, cx))
     }
 }
 
