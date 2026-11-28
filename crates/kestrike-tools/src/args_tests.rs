@@ -430,6 +430,14 @@ fn a_command_word_selects_its_reader_as_argparse_reads_subparsers() {
             ),
         ),
         (
+            "--",
+            refused("t", "the following arguments are required: command"),
+        ),
+        (
+            "-x --",
+            refused("t", "the following arguments are required: command"),
+        ),
+        (
             "-- check",
             refused(
                 "t",

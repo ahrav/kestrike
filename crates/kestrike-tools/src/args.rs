@@ -426,7 +426,8 @@ impl<'a> Commands<'a> {
 
     /// `parse` reads `args` in order up to the command word: help before it returns the reader's help,
     /// another argument that reads as an option is unrecognized, and the first other argument, `--`
-    /// included, is the command word. The word's reader parses the arguments after it, and its help and
+    /// included where another argument follows it, is the command word; a `--` that ends `args` leaves the
+    /// command missing. The word's reader parses the arguments after it, and its help and
     /// refusals are its own. The arguments that neither reader recognizes, those before the word first,
     /// are refused as unrecognized with the reader's own usage. `parse` returns the index of the word in
     /// `words` and the word's values.
@@ -456,7 +457,8 @@ impl<'a> Commands<'a> {
             }
             at += 1;
         }
-        let Some(given) = args.get(at) else {
+        let trailing = args.get(at).is_some_and(|arg| arg == "--") && at + 1 == args.len();
+        let Some(given) = args.get(at).filter(|_| !trailing) else {
             return self
                 .top
                 .refuse("the following arguments are required: command".to_owned());
