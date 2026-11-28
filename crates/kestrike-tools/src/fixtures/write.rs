@@ -403,7 +403,7 @@ pub(crate) fn replace(file: &Path, staged: &Path, mode: u32, text: &str) -> Resu
 
 /// `close` closes `file` once and returns the error `close(2)` reports. The descriptor is released even on
 /// an error, so it is never closed again.
-fn close(file: File) -> io::Result<()> {
+pub(crate) fn close(file: File) -> io::Result<()> {
     let descriptor = file.into_raw_fd();
     // SAFETY: `into_raw_fd` hands this function the sole ownership of `descriptor`, which is closed here once.
     if unsafe { libc::close(descriptor) } == 0 {
