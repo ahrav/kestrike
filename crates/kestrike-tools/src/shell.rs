@@ -1,4 +1,5 @@
-//! The shell split of one argument, as Python's `shlex.split` performs it in POSIX mode.
+//! The shell split of one argument, as Python's `shlex.split` performs it in POSIX mode, and the shell
+//! join of words, as Python's `shlex.join` writes it.
 //!
 //! Words split on space, tab, carriage return and line feed. Text in `'...'` is literal. In `"..."` a
 //! backslash escapes `"` and `\`, and stays in the word before any other code point. Outside quotes a
@@ -95,6 +96,41 @@ pub fn split(text: &Text) -> Result<Vec<Text>, Error> {
         }
         State::Space => Ok(words),
     }
+}
+
+/// `safe` holds for a code point that a joined word leaves unquoted: an ASCII letter or digit, or one of
+/// `_@%+=:,./-`.
+fn safe(code: u32) -> bool {
+    char::from_u32(code).is_some_and(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+}
+
+/// `join` writes `words` separated by single spaces, each as `shlex.quote` writes it: an empty word as
+/// `''`, a word of safe code points as it stands, and any other word inside `'...'` with each `'` written
+/// as `'"'"'`.
+pub fn join<'w>(words: impl IntoIterator<Item = &'w Text>) -> Text {
+    let mut joined = Text::new();
+    for (at, word) in words.into_iter().enumerate() {
+        if at > 0 {
+            push(&mut joined, 0x20);
+        }
+        let quoted = word.code_points().next().is_none() || !word.code_points().all(safe);
+        if quoted {
+            push(&mut joined, SINGLE);
+        }
+        for code in word.code_points() {
+            if quoted && code == SINGLE {
+                for part in "'\"'\"'".chars() {
+                    push(&mut joined, u32::from(part));
+                }
+            } else {
+                push(&mut joined, code);
+            }
+        }
+        if quoted {
+            push(&mut joined, SINGLE);
+        }
+    }
+    joined
 }
 
 #[cfg(test)]
