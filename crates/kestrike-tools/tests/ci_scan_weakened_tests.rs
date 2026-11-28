@@ -5,14 +5,11 @@ use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 const WRAPPER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../scripts/ci-scan-weakened-tests.sh"
 );
-
-static TREES: AtomicUsize = AtomicUsize::new(0);
 
 struct Tree {
     root: PathBuf,
@@ -29,14 +26,17 @@ impl Tree {
         let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(&scratch).expect("the scratch root is made");
         let root = (0..1000)
-            .map(|_| {
+            .map(|at| {
                 scratch.join(format!(
-                    "kestrike-ci-scan-{name}-{}-{}",
-                    std::process::id(),
-                    TREES.fetch_add(1, Ordering::Relaxed)
+                    "kestrike-ci-scan-{name}-{}-{at}",
+                    std::process::id()
                 ))
             })
-            .find(|root| DirBuilder::new().mode(0o700).create(root).is_ok())
+            .find(|root| match DirBuilder::new().mode(0o700).create(root) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => panic!("{}: {error}", root.display()),
+            })
             .expect("a new scratch directory is made");
         fs::create_dir(root.join("scripts")).expect("the scratch tree is made");
         fs::create_dir(root.join("draws")).expect("the stand-in directory is made");
@@ -53,8 +53,12 @@ impl Tree {
         }
     }
 
-    fn environment(&self) -> Option<String> {
-        fs::read_to_string(self.root.join("environment")).ok()
+    fn environment(&self) -> Option<Vec<u8>> {
+        match fs::read(self.root.join("environment")) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => panic!("the capture reads: {error}"),
+        }
     }
 
     fn run(&self, env: &[(&str, &str)]) -> Output {
@@ -64,6 +68,7 @@ impl Tree {
             .args(["--base", "HEAD^1"])
             .current_dir(&self.root)
             .env("STAND_IN_ENVIRONMENT", self.root.join("environment"))
+            .env("LC_ALL", "C")
             .envs(env.iter().copied())
             .output()
             .expect("bash starts")
@@ -151,13 +156,15 @@ fn the_wrapper_stops_workflow_commands_around_the_scan_and_keeps_its_status() {
         if launcher.is_some_and(|text| text.starts_with(RECORDS)) {
             let environment = tree.environment().expect("the stand-in ran");
             assert!(
-                environment
-                    .lines()
-                    .all(|line| line.split_once('=').is_none_or(|(_, value)| value != token)),
-                "a variable of the launcher holds the token"
+                !environment
+                    .windows(token.len())
+                    .any(|window| window == token.as_bytes()),
+                "the launcher's environment holds the token"
             );
             assert!(
-                !environment.lines().any(|line| line.starts_with("token=")),
+                !environment
+                    .split(|&byte| byte == b'\n')
+                    .any(|line| line.starts_with(b"token=")),
                 "a token variable reached the launcher"
             );
         }
@@ -176,11 +183,7 @@ fn the_wrapper_stops_workflow_commands_around_the_scan_and_keeps_its_status() {
 fn a_failed_or_malformed_draw_stops_the_wrapper_before_the_scan() {
     let tree = Tree::new("draw");
     tree.launcher(Some(&format!("{RECORDS}exit 0\n")));
-    let path = format!(
-        "{}:{}",
-        tree.root.join("draws").display(),
-        std::env::var("PATH").expect("PATH is set")
-    );
+    let path = format!("./draws:{}", std::env::var("PATH").expect("PATH is set"));
     for draw in [
         "exit 1\n",
         "printf 'abc\\n'\n",

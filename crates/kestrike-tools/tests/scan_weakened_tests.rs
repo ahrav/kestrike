@@ -1632,7 +1632,7 @@ fn a_range_with_no_blocking_finding_reads_no_commit_message() {
 fn an_unreadable_head_or_an_unwritable_summary_exits_two() {
     let repo = Repo::new("unreadable-head");
     let run = repo.scan(&["--base", &repo.base, "--head", "no-such-ref"]);
-    assert_eq!(run.code, Some(2));
+    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     let rest = run
         .stderr
         .strip_prefix("scan-weakened-tests: git rev-parse ")
@@ -3277,10 +3277,10 @@ impl Repo {
     }
 }
 
-/// An unchanged name that is not UTF-8 beside an ancestor of a changed Rust file and beside the inventory
-/// leaves the range as the base read it: exit 0, nothing on either stream.
+/// A range with an unchanged name that is not UTF-8 beside an ancestor of a changed Rust file and beside the
+/// inventory exits 0 with nothing on either stream.
 #[test]
-fn a_name_outside_utf8_beside_a_scanned_path_reads_as_before() {
+fn a_name_outside_utf8_beside_a_scanned_path_exits_zero_with_nothing_printed() {
     let repo = Repo::new("quiet-neighbors");
     let neighbors = repo.add_bytes(&[b"src/\xff", b"scripts/\xff"]);
     let changed = repo.change(&[("src/deep/x.rs", "fn x() {}\n")]);
@@ -3289,10 +3289,10 @@ fn a_name_outside_utf8_beside_a_scanned_path_reads_as_before() {
     assert_eq!(run.stderr, "");
 }
 
-/// An unchanged name that is not UTF-8 in a fixture of the tools crate's test directory leaves a range that
-/// changes nothing under that directory as the base read it.
+/// An unchanged name that is not UTF-8 in a fixture of the tools crate's test directory, on a range that
+/// changes nothing under that directory, exits 0 with nothing on either stream.
 #[test]
-fn a_name_outside_utf8_in_an_unchanged_case_directory_reads_as_before() {
+fn a_name_outside_utf8_in_an_unchanged_case_directory_exits_zero_with_nothing_printed() {
     let repo = Repo::new("quiet-cases");
     let fixture = repo.add_bytes(&[b"crates/kestrike-tools/tests/fixtures/\xff"]);
     let changed = repo.change(&[("src/later.rs", "fn later() {}\n")]);
@@ -3301,10 +3301,10 @@ fn a_name_outside_utf8_in_an_unchanged_case_directory_reads_as_before() {
     assert_eq!(run.stderr, "");
 }
 
-/// A Rust path 1,900 directories deep, whose ancestors' names together pass the 2,621,440-byte argument
-/// limit of a Linux host with an 8 MiB stack, reads as any other added file.
+/// A Rust path 1,900 directories deep, whose ancestors' names together pass 2,621,440 bytes, the argument
+/// budget of a Linux host with a 10 MiB stack, exits 0 with nothing on either stream as an added file.
 #[test]
-fn a_path_whose_ancestors_pass_the_argument_limit_reads_as_before() {
+fn a_path_whose_ancestors_pass_the_argument_limit_exits_zero_with_nothing_printed() {
     let repo = Repo::new("deep-path");
     let deep = format!("{}x.rs", "a/".repeat(1900));
     let ancestors: usize = (1..=1900).map(|depth| 2 * depth).sum();

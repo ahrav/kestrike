@@ -285,4 +285,6 @@ fn escaped_writes_each_scalar_value_as_repr_writes_it_inside_its_quotes() {
         let expected = if code == '\\' { "\\" } else { inside };
         assert_eq!(escaped(&alone), expected, "U+{:04X}", u32::from(code));
     }
+    let printable = "a'b\"c\\'d";
+    assert_eq!(escaped(printable), printable);
 }
