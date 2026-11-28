@@ -1297,9 +1297,16 @@ qualifies each alarm to signal the loss of its source within
 `observe_seconds`. The controller shows the stop by a status read and a
 `describe-instances` record apart from the request's reply, and its one abort
 path writes `abort.json` and sends no call that changes an instance. The abort
-path starts once `roles.json` stands: a failure before that removes
-`injection/` again and ends as a refusal, so the controller writes
-`abort.json` only beside `roles.json`. The abort mark's `detail` ends with the
+path starts once `roles.json` stands: a failure before that ends as a
+refusal, so the controller writes `abort.json` only beside `roles.json`. A
+run that holds the lock of `injection/` then removes the directory again and
+syncs `DIR` before it frees the lock. A run that never held the lock, since
+another command took it first or the directory cannot be opened, leaves
+`injection/` and names it in its refusal; the operator removes it before
+another run. The abort mark's `detail` holds each lone surrogate of its text,
+from a reply's field or a byte of `DIR` with no UTF-8 form, as the six
+characters `\udXXX`, written before the detail is cut to its length, so the
+mark has a UTF-8 form. The `detail` ends with the
 SHA-256 of the restoration steps text the run printed: the digest stands at
 the end of `detail` because the layout fixes the mark's four keys. After an
 abort, `restore` needs the operator's reviewed record of those steps, the text
@@ -1326,7 +1333,10 @@ CLI reference ("the time that the instance was last launched"); the cases'
 stand-in pins the field, and no test reads a real control plane.
 `restore` reads and writes the marks by the pathname
 `DIR/injection`, so the operator keeps that directory under that name until
-`restore` ends. `seal --operator F --evidence DIR`, run once the run window
+`restore` ends. Once it holds the lock, `restore` refuses where that name
+gives another directory than the one it locked, or none: a run that held the
+lock can remove its new `injection/` between another command's open of the
+directory and its `flock`. `seal --operator F --evidence DIR`, run once the run window
 has ended and every collection named in `DIR/coverage.json` is in DIR, writes
 `collected.json`: the SHA-256 of `coverage.json`, of each collected file and
 of each mark under `injection/`, dated by the wall clock at its start, and prints the mark's own SHA-256,
@@ -1351,7 +1361,8 @@ simulation export seals its own files), a second seal, a held lock and a time
 before the run window's end, when a collection may still grow. A signal
 before the mark's write is held ends it with nothing written; one during the
 write waits for the write's end. `seal` checks for an existing mark and writes its own by
-the pathname `DIR/injection`, as `restore` does. The judge refuses a file
+the pathname `DIR/injection`, as `restore` does, and refuses at its lock in
+the same way, before it reads a file. The judge refuses a file
 whose bytes differ from the seal, so a row removed after the seal with its
 count lowered to match is refused. A collection that was short when sealed
 is the collector's declaration, and a seal removed and written again reads
