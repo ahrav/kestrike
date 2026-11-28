@@ -2,7 +2,7 @@
  "region": "us-west-2",
  "identity": "arn:aws:sts::account:assumed-role/gameday-operator/gd2-run",
  "approval": {
-  "approver": "synthetic fixture of scripts/test-host-stop-controller.py: no owner approved a run",
+  "approver": "synthetic fixture of the host stop controller's cases under crates/kestrike-tools/tests/: no owner approved a run",
   "package_sha256": "30759c81708af91aa8ad1e953f902fb6001cb6465e84e2231726463af9292056",
   "instance": "i-h1",
   "not_after": "1970-01-01T01:00:00Z"

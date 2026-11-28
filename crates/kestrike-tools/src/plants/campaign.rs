@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use super::stop::Stop;
 use crate::ownership::PathError;
 use crate::paths;
+use crate::python;
 use crate::text::Text;
 
 /// `executable` holds for a path that exists, is no directory, and that the real user may execute.
@@ -78,10 +79,5 @@ pub(super) fn campaign(
             Err(error) => return Err(unreadable(error)),
         }
     }
-    let hex = digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    Ok((resolved, hex))
+    Ok((resolved, python::hex(&digest.finalize())))
 }

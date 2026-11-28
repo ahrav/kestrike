@@ -1,12 +1,10 @@
 //! Runs that send a stop request: the clean run, the evidence directory's copy, the window of the
 //! request, the effect timeout, the observation's end, the run's environment and its bounds.
 
-use std::cell::RefCell;
 use std::fs;
 use std::os::unix::fs::symlink;
-use std::rc::Rc;
 
-use kestrike_tools::host_stop::{Disk, Lock, SKEW_SECONDS, lock};
+use kestrike_tools::host_stop::SKEW_SECONDS;
 use kestrike_tools::host_stop_controller::Fault;
 use kestrike_tools::json::{Object, Value};
 
@@ -307,25 +305,10 @@ fn an_approval_that_lapses_the_skew_after_the_deadline_admits_the_run() {
     assert_eq!(code, 0, "{}", case.output());
 }
 
-/// Plants one failure between the making of `injection/` and the roles mark on `case`, and returns
-/// the refusal's text and what the case drops once its first run ends.
-fn window_plant(case: &Case, name: &str) -> (&'static str, Rc<RefCell<Option<Lock>>>) {
-    let holder = Rc::new(RefCell::new(None));
-    let reason = match name {
-        "a lock another descriptor holds" => {
-            case.contended.set(true);
-            let (held, injection) = (Rc::clone(&holder), case.evidence.join("injection"));
-            let mut taken = false;
-            case.plant(Box::new(move |_, step| {
-                if !taken && matches!(step, Step::TryLock) && injection.exists() {
-                    taken = true;
-                    let lock = lock(&Disk, &injection).expect("another descriptor takes the lock");
-                    *held.borrow_mut() = Some(lock);
-                }
-                None
-            }));
-            "is held by a run, restore or seal that has not ended"
-        }
+/// Plants one failure between the taking of the lock of `injection/` and the roles mark on `case`,
+/// and returns the refusal's text.
+fn window_plant(case: &Case, name: &str) -> &'static str {
+    match name {
         "the evidence directory's sync" => {
             let evidence = case.evidence.clone();
             case.fail_once(
@@ -355,27 +338,25 @@ fn window_plant(case: &Case, name: &str) -> (&'static str, Rc<RefCell<Option<Loc
             }));
             "so the mark is removed"
         }
-    };
-    (reason, holder)
+    }
 }
 
-/// Each failure between the making of `injection/` and the roles mark (a lock another descriptor
-/// holds, a failed sync of the evidence directory, a failed roles write, a roles mark that stands
-/// under another's hand, a roles mark removed after its sync failed) is a refusal after the caller
+/// Each failure of a run that holds the lock of `injection/`, before the roles mark counts as
+/// written (a failed sync of the evidence directory, a failed roles write, a roles mark that stands
+/// under another's hand, a roles mark removed after its sync failed), is a refusal after the caller
 /// and the status read that removes `injection/` again; the failure is planted once, so the same
 /// directory takes the next run to its end. The evidence directory's sync is the first sync and the
 /// roles mark's sync once linked the third.
 #[test]
 fn a_failure_before_the_roles_mark_stands_is_a_refusal_that_removes_injection() {
     for name in [
-        "a lock another descriptor holds",
         "the evidence directory's sync",
         "the roles mark's write",
         "a roles mark that stands under another's hand",
         "a roles mark removed after its sync failed",
     ] {
         let mut case = Case::new("window");
-        let (reason, holder) = window_plant(&case, name);
+        let reason = window_plant(&case, name);
         case.assert_refused(&[CALLER, STATUS], reason);
         let output = case.output();
         assert!(
@@ -387,7 +368,6 @@ fn a_failure_before_the_roles_mark_stands_is_a_refusal_that_removes_injection() 
             "{name}: {output}"
         );
         assert!(!output.contains("aborted on"), "{name}: {output}");
-        drop(holder.borrow_mut().take());
         let code = case.run();
         assert_eq!(code, 0, "{name}: {}", case.output());
         assert_eq!(names(&case), ["roles", "stop", "stopped"], "{name}");

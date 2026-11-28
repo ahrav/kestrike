@@ -2,6 +2,8 @@
 //! [`plane`], the clock it holds and the file steps of [`steps`], in a scratch directory that holds
 //! the operator file, the snapshot, the package, a catalog in which each GD-2 prerequisite reads as
 //! met, and an evidence directory that holds the operator's copy of the package.
+//! The cases of [`started`] and [`command_line`] start the built binary instead, and those of
+//! [`script`] read the controller's Rust source.
 
 #![cfg(target_os = "linux")]
 
@@ -9,16 +11,20 @@ mod abort_marks;
 mod abort_path;
 mod after_stop;
 mod before_stop;
+mod command_line;
 mod kept_defects;
 mod late_reads;
+mod locks;
 mod marks;
 mod plane;
 mod refusals;
 mod restore;
 mod restoring;
+mod script;
 mod sealed;
 mod sealing;
 mod signals;
+mod started;
 mod step_one;
 mod steps;
 mod stop_run;

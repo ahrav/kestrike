@@ -237,7 +237,10 @@ fn a_new_branch_without_origin_main_runs_the_contract_checks_its_tip_holds() {
     let full = repository.commit(&[
         ("scripts/chaos-receipt-replay.py", STUB),
         ("scripts/test-gameday-judge.py", STUB),
-        ("scripts/test-host-stop-controller.py", STUB),
+        (
+            "crates/kestrike-tools/tests/host_stop_controller/mod.rs",
+            "",
+        ),
     ]);
     repository.git(&["rm", "-q", "--", "chaos/ledger.json"]);
     let unledgered = repository.commit(&[]);
@@ -302,23 +305,30 @@ fn a_change_to_the_calibration_controls_runs_the_judges_test_of_a_tip_that_holds
     );
 }
 
-/// A change to a file the host stop controller's self-test reads runs it only at a tip that holds it.
+/// A change to a file the host stop controller's cases read runs them only at a tip that holds them; a tip
+/// that holds the Python self-test alone runs nothing for the row.
 #[test]
 fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
     if child().is_some() {
         return plan_row();
     }
     let (repository, base) = fixture("host-stop");
-    let unheld = repository.commit(&[("scripts/fis-profiles.json", "{}\n")]);
-    let held = repository.commit(&[("scripts/test-host-stop-controller.py", STUB)]);
-    let head = repository.commit(&[("scripts/fis-profiles.json", "{\"x\": 1}\n")]);
+    let fixture = "scripts/host-stop-fixtures/operator.json";
+    let unheld = repository.commit(&[(fixture, "{}\n")]);
+    let python = repository.commit(&[("scripts/test-host-stop-controller.py", STUB)]);
+    let python_head = repository.commit(&[(fixture, "{\"y\": 1}\n")]);
+    let held = repository.commit(&[(
+        "crates/kestrike-tools/tests/host_stop_controller/mod.rs",
+        "",
+    )]);
+    let head = repository.commit(&[(fixture, "{\"x\": 1}\n")]);
     assert_plan(
         &repository,
         &id(
             module_path!(),
             "the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it",
         ),
-        &[(&unheld, &base), (&head, &held)],
+        &[(&unheld, &base), (&python_head, &python), (&head, &held)],
         &[(&head, &[Check::HostStop])],
     );
 }

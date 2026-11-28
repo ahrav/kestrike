@@ -1,8 +1,11 @@
 //! The run's seven steps, the abort path, and the entry that reads the catalog and the operator
 //! file and prints the line of a run that ends before `roles.json` stands.
 //!
-//! Once `injection/` is made the run holds its lock to the run's end. A failure before `roles.json`
-//! counts as written removes `injection/` again and is a refusal; once it counts as written, every
+//! Once `injection/` is made the run takes its lock and holds it to the run's end. A failure before
+//! `roles.json` counts as written is a refusal: a run that holds the lock attempts the removal of
+//! `injection/` and the evidence directory's sync before it frees the lock, and names the
+//! directory as possibly standing where either fails or panics; a run that never took the lock
+//! leaves `injection/` as it stands and names it. Once `roles.json` counts as written, every
 //! end of steps 3 to 7 but the observation's enters the abort path, which attempts `abort.json`,
 //! then `stopped.json` when the stop was shown and the abort mark counts as written, reads the
 //! target's status once when a stop request may have left, and prints GD-2's restoration steps. A
@@ -26,7 +29,7 @@ use crate::host_stop::{
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
-use crate::text::{Text, text};
+use crate::text::{Text, push_backslashed, text};
 
 pub(super) const TOOL: &str = "host-stop-controller: ";
 
@@ -118,10 +121,15 @@ fn caught<T>(step: impl FnOnce() -> Result<T, Halt>) -> Result<T, Halt> {
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// The run's seven steps on a controller that has made no step; returns the exit code of a run
     /// whose `roles.json` counts as written, and the refusal, the signal or the failure of one that
-    /// ends before it counts. The run's first read of the record ends a hold an earlier run left. A
-    /// panic before `injection/` is made, and one in the abort path outside its catches of a mark's
-    /// write and of the status read, unwinds out of `run` and may leave the record armed or held;
-    /// [`entry`] disarms it and ends the hold.
+    /// ends before it counts. A run that made `injection/` and ends before `roles.json` counts
+    /// returns a refusal. While it holds the lock it attempts the removal of `injection/` and the
+    /// evidence directory's sync; where either fails or panics, the refusal names the directory as
+    /// possibly standing and its `may_stand` is set. A run that made `injection/` and never took
+    /// the lock removes nothing and sets `may_stand` too. A run that ends before it makes
+    /// `injection/` removes nothing. The run's first read of the record ends a hold an earlier run
+    /// left. A panic before `injection/` is made, and one in the abort path outside its catches of
+    /// a mark's write and of the status read, unwinds out of `run` and may leave the record armed
+    /// or held; [`entry`] disarms it and ends the hold.
     ///
     /// # Errors
     ///
@@ -173,30 +181,40 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             drop(held);
             return Ok(code);
         }
-        drop(held);
         let mut what = detail;
         what.push_str(" before roles.json stood; ");
         what.push_text(&Text::from_os(injection.as_os_str()));
-        let removed = self
-            .cx
-            .files
-            .rmdir(&injection)
-            .and_then(|()| sync_directory(self.cx.files, &root));
-        match removed {
-            Err(error) => Err(Halt::Refused {
-                sentence: {
-                    let mut sentence = what;
-                    sentence.push_str(&format!(
-                        " may stand, since its removal failed or is unsynced ({}): remove it \
-                         before another run",
-                        strerror(&error)
-                    ));
-                    sentence
-                },
+        let Some(held) = held else {
+            what.push_str(
+                " is left as it stands, since this run never held its lock: remove it before \
+                 another run, once no run, restore or seal holds it",
+            );
+            return Err(Halt::Refused {
+                sentence: what,
                 may_stand: true,
-            }),
-            Ok(()) => Err(Halt::refused(text!(what, " is removed"))),
-        }
+            });
+        };
+        let files = self.cx.files;
+        let removed = caught(|| {
+            Ok(files
+                .rmdir(&injection)
+                .and_then(|()| sync_directory(files, &root)))
+        });
+        drop(held);
+        let failed = match removed {
+            Ok(Ok(())) => return Err(Halt::refused(text!(what, " is removed"))),
+            Ok(Err(error)) => Text::from(strerror(&error)),
+            Err(halt) => halt_text(halt),
+        };
+        Err(Halt::Refused {
+            sentence: text!(
+                what,
+                " may stand, since its removal failed or is unsynced (",
+                failed,
+                "): remove it before another run",
+            ),
+            may_stand: true,
+        })
     }
 
     /// `ended`, or the signal a read of the record raises at the end of an armed span whose last
@@ -569,10 +587,14 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         lower <= at as f64 && (at + 1) as f64 <= upper
     }
 
-    /// The abort path, unarmed and with no deadline: `abort.json` with the detail cut at
-    /// [`DETAIL_MAX`] characters ahead of the steps' digest, then `stopped.json` when the stop was
-    /// shown and the abort mark counts as written, one status read of the target when a request may
-    /// have left, and GD-2's restoration steps. It makes no call that changes an instance; returns 1.
+    /// The abort path, unarmed and with no deadline: `abort.json` with each lone surrogate of the
+    /// detail written as the six characters `\udXXX` and the detail then cut at [`DETAIL_MAX`]
+    /// characters ahead of the steps' digest, then `stopped.json` when the stop was shown and the
+    /// abort mark counts as written, one status read of the target when a request may have left, and
+    /// GD-2's restoration steps. The detail can hold text of a reply or a path, and a text with a
+    /// lone surrogate has no UTF-8 form, which the mark's layout requires; the cut can end inside an
+    /// escape. The escape reads at most [`DETAIL_MAX`] code points of the detail. It makes no call
+    /// that changes an instance; returns 1.
     fn abort(&mut self, cause: &'static str, guardrail: Option<Text>, detail: &Text) -> u8 {
         self.deadline = None;
         let mut text = if !self.sent {
@@ -595,9 +617,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let tail = steps_tail(steps);
         let time = self.wall();
         let kept = DETAIL_MAX.saturating_sub(tail.chars().count());
-        let mut cut = Text::from_code_points(text.code_points().take(kept))
-            .expect("the code points of a text form a text");
+        // Each code point is written as one character or more, so the first `kept` characters of
+        // the escaped text come from its first `kept` code points.
+        let mut escaped = String::new();
+        for code in text.code_points().take(kept) {
+            push_backslashed(code, &mut escaped);
+        }
+        let mut cut: String = escaped.chars().take(kept).collect();
         cut.push_str(&tail);
+        let cut = Text::from(cut);
         let mut mark = Object::new();
         mark.insert("cause", Value::String(Text::from(cause)));
         mark.insert(

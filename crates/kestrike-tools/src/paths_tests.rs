@@ -8,7 +8,7 @@ use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::paths::{DEPTH, resolve};
+use crate::paths::{DEPTH, realpath, resolve};
 
 /// `Scratch` is a directory the test process created itself, with mode 0700, and removes on drop. A name
 /// that already exists is left as it is and the next name is tried.
@@ -121,6 +121,27 @@ fn links_nested_past_the_depth_are_refused() {
             .starts_with(&format!("links nest more than {DEPTH} deep at ")),
         "{error}"
     );
+}
+
+/// `realpath` reads the components after a link loop as written, so a repeated separator there starts the
+/// path again at the root, and it walks a component that holds a NUL as a name that is no link. Each
+/// value of the first three rows is `os.path.realpath`'s on Python 3.9.25, which raises `ValueError` for
+/// the fourth.
+#[test]
+fn realpath_reads_the_components_after_a_loop_as_written() {
+    let scratch = tree();
+    let base = &scratch.0;
+    let at = |rest: &str| PathBuf::from(format!("{}{rest}", base.display()));
+    let rows = [
+        ("/loop//../y", PathBuf::from("/y")),
+        ("/loop///x", PathBuf::from("//x")),
+        ("/loop/../y", base.join("y")),
+        ("/x\0/../y", base.join("y")),
+    ];
+    for (rest, expected) in rows {
+        let found = realpath(&at(rest)).expect("the path resolves");
+        assert_eq!(found.as_os_str(), expected.as_os_str(), "{rest:?}");
+    }
 }
 
 #[test]

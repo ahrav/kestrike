@@ -208,19 +208,18 @@ impl Case {
 }
 
 impl Case {
-    /// Seals the copy at `root` once the run window has ended, keeps it under `name` and returns
-    /// the judge's load of it, which admits the sealed copy.
-    pub(crate) fn judge_copy(&mut self, root: &Path, name: &str) -> Evidence {
+    /// Seals the copy at `root` once the run window has ended and returns the judge's load of it,
+    /// which admits the sealed copy.
+    pub(crate) fn sealed_load(&mut self, root: &Path) -> Evidence {
         self.advance_to(window_end().0 + 30.0);
         assert_eq!(self.seal_at(root), 0, "{}", self.output());
-        self.keep_tree(root, name);
         judged(root).unwrap_or_else(|reason| panic!("{reason}\n{}", self.output()))
     }
 
-    /// [`Case::judge_copy`] over a copy that holds the held fixture's collections unchanged.
-    pub(crate) fn judge(&mut self, name: &str) -> (PathBuf, Evidence) {
+    /// [`Case::sealed_load`] over a copy that holds the held fixture's collections unchanged.
+    pub(crate) fn judge(&mut self) -> (PathBuf, Evidence) {
         let root = self.copy(&[], &[]);
-        let evidence = self.judge_copy(&root, name);
+        let evidence = self.sealed_load(&root);
         (root, evidence)
     }
 

@@ -91,9 +91,9 @@ pub fn int(value: &Value) -> Result<Integer, String> {
     Integer::from_digits(negative, &body.replace('_', "")).ok_or_else(refused)
 }
 
-/// `int_space` holds for the code points `int()` strips: ASCII space, tab, line feed, vertical tab, form
-/// feed and carriage return, and each non-ASCII code point [`is_space`] takes.
-fn int_space(code: u32) -> bool {
+/// `int_space` holds for the code points `int()` and `float()` strip: ASCII space, tab, line feed,
+/// vertical tab, form feed and carriage return, and each non-ASCII code point [`is_space`] takes.
+pub(crate) fn int_space(code: u32) -> bool {
     matches!(code, 0x9..=0xd | 0x20) || (code >= 0x80 && is_space(code))
 }
 
@@ -249,10 +249,12 @@ pub fn say(out: &mut impl Write, line: &Text) -> io::Result<()> {
 /// `hexdigest` writes the SHA-256 digest of `bytes` as 64 lowercase hexadecimal digits, as Python's
 /// `hashlib.sha256(bytes).hexdigest()` does.
 pub fn hexdigest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&Sha256::digest(bytes))
+}
+
+/// `hex` writes each byte as two lowercase hexadecimal digits.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn returncode(status: ExitStatus) -> i32 {

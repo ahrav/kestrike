@@ -1,0 +1,202 @@
+Stop the one declared staging instance of a run of the game-day package GD-2, show the stop by a read apart from
+the stop request, and write the `injection/` marks that `scripts/gameday-judge.py` reads.
+
+Usage:
+  bash scripts/tool.sh host-stop-controller run --operator F --package F --evidence DIR
+  bash scripts/tool.sh host-stop-controller restore --operator F --evidence DIR [--reviewed F]
+  bash scripts/tool.sh host-stop-controller seal --operator F --evidence DIR
+
+Every file read is UTF-8 JSON (`.json`) or JSON lines (`.jsonl`), opened without following a link or waiting on a pipe,
+and checked by the judge's `decode`, `parsed` and `conform`: distinct keys, finite numbers, exactly the
+keys listed. The judge's `check_package`, which `run`, `seal` and a `restore` after a seal call, also reads the two Rust
+files its FLEET_BOUNDS names for their list bounds. A time in a file is POSIX seconds on the wall clock, which the
+package's `clock` names and which agrees with AWS's within SKEW_SECONDS (chrony on EC2 keeps it so); an ISO time reads
+`YYYY-MM-DDTHH:MM:SSZ`, seconds 00 to 59. The deadline, the effect timeout, the observation, the snapshot's age at the
+stop and the restoration's poll run on the monotonic clock; the snapshot's age is also checked on the wall clock, which
+counts a suspend, and a stop leaves only while the two clocks have moved within SKEW_SECONDS of each other since the
+run's start. `roles.json` holds the SHA-256 of the `--package` bytes, which the judge requires `DIR/package.json` to
+hold: the operator copies the package there first. The operator file, the snapshot and the reviewed record stay outside
+DIR, where the judge admits no file outside its layout. Marks need Linux: DIR's file system takes unnamed files
+(`O_TMPFILE`), and `/proc/self/fd` resolves to link one to a name.
+
+The operator file, kept outside the repository:
+  {region, identity, approval, instances, snapshot, snapshot_max_age_seconds, alarms, effect_timeout_seconds,
+   observe_seconds, deadline_seconds}. `region` an AWS region name; `identity` the ARN `sts get-caller-identity`
+  returns for the run's caller; `approval` {approver, package_sha256, instance, not_after}, the owner's recorded
+  approval of this run: the SHA-256 of the filled package's bytes, the target instance and the ISO time at which the
+  approval lapses; `instances` the declared instance set, at most 100 distinct IDs of `i-` and up to 17 lowercase
+  letters and digits; `snapshot` the snapshot directory, relative to the operator file's directory unless absolute;
+  `alarms` {guardrail text: alarm name}, keyed by exactly GD-2's eight guardrail texts at run time, with distinct
+  CloudWatch metric alarm names; and four bounds in seconds, each positive and at most LIMIT_SECONDS: the snapshot's
+  age, the wait for the stop to show, the observation after it and the run's deadline, which holds the other two.
+
+The snapshot directory, written by the store's reader:
+  shards.jsonl  one line per shard of the package: {shard, owner, standby, generation, volume, attempts, time}, the
+                shard record as the store holds it and the time it was read, one time for every line: the cut at
+                which every record is the store's last committed version. `standby` a host or null, owner and standby
+                hosts of the package, `generation` an integer from 1 to 2^32 - 1, `attempts` one from 0 to 2^31 - 2.
+  hosts.jsonl   at most one line per host of the package: {host, instance, report}, the host's instance and its
+                latest report {time, healthy}, `healthy` true or false, or null when it has none. The target host's
+                line names the package's target instance, and no two lines name one instance.
+  Every time in it lies within `snapshot_max_age_seconds` before the run reads it, and none after. The controller
+  checks the shape, times and roles it reads; that the files come from the store's reader as one export is the
+  operator's to keep.
+
+`run`, in this order:
+  1. Refuse, with no call and nothing written: a malformed operator file, package or key set; a package of kind other
+     than `staging`; an approval of another package digest or instance, or one that lapses less than SKEW_SECONDS after
+     the run's deadline; a run whose start lies before the package's baseline window ends or its run window starts, or
+     whose deadline passes the run window's end; a target outside `instances`; `alarms` keyed other than by GD-2's
+     guardrail texts; GD-2 texts other than those the judge and this controller were written from, or restoration
+     steps that are empty or have no UTF-8 form; a GD-2 prerequisite that holds the catalog's mark of one not met
+     (`TBD` of `scripts/readiness.py`); an evidence directory that is unnamed, missing, a link, holds an entry
+     `injection`, takes no unnamed file it can link, or whose `package.json` is no regular file of the `--package`
+     bytes; a snapshot path or alarm name with a control character or no UTF-8 form.
+  2. Refuse unless `sts get-caller-identity` names `identity`. From here each call is cut at the run's deadline, and a
+     deadline passed before `injection/` is made is a refusal.
+  3. Refuse a malformed, stale or inconsistent snapshot, a cut before the package's baseline window starts (the judge
+     shows no stop from one), an owned shard with no witness key in the package or a witness key of a shard the target
+     does not own, a status read of the declared set that fails, names another set or shows an instance not running (a
+     run left open), a `roles.json` past the judge's file size, and a deadline passed before `injection/` is made. Make
+     `injection/`, hold its lock (`flock`) to the run's end and write `roles.json`; a failure before it stands is a
+     refusal. A run that holds the lock attempts to remove `injection/` again and to sync DIR before it frees the
+     lock, and names `injection/` as possibly standing where either fails. A run that never held it, since another
+     command took it first or the directory cannot be opened, leaves `injection/` and names it; the operator removes
+     it before another run, once no run, restore or seal on DIR holds it. Apply the judge's pre-stop reach conditions
+     (`roles_reach`, with its working role counts MIN_OWNED and MIN_STOOD); unmet, the abort path runs with cause
+     `reach`.
+  4. Read the alarms, which must each be quiet (`quiet`): `OK`, missing data treated as `missing` or `breaching` as
+     the row states it, no `EvaluationState`, no PromQL alarm (`EvaluationCriteria`), no metric query expression
+     (metric math, FILL or Metrics Insights) and no percentile that ignores a low sample count, each of which can read
+     `OK` while its source is silent. Else the abort path runs with cause `guardrail`. Each alarm's
+     `StateTransitionedTimestamp` from this read is the baseline every later read must match, so an alarm that fires
+     and recovers between two reads aborts the run. A quiet read shows the alarm's configuration and state; that its
+     source still reports is the owner's to qualify for each alarm within `observe_seconds`.
+  5. Check that the stop may leave (`ready`): the snapshot's oldest time within its bound (cause `reach`); the clocks
+     within SKEW_SECONDS of each other, more than the observation and one POLL_SECONDS left before the deadline, and
+     the wall clock after the snapshot's cut, inside the run window and SKEW_SECONDS before the approval's lapse
+     (cause `deadline`). Write `stop.json` with the time that check read, then read the alarms again and check again,
+     then send the stop request once, with the CLI's retries off, cut at half the effect timeout so the polls keep the
+     other half. Its reply is never evidence; a request that never left aborts the run with cause `stop-not-shown`.
+  6. Poll the alarms and the target's status, at once and then after a pause of POLL_SECONDS. On `stopped`, read at or
+     after the request and before the run window's end, read `describe-instances`: a record of the instance stopped by
+     a user-initiated shutdown shows the stop when its transition second lies whole in the stop call's window, from
+     SKEW_SECONDS before its launch to SKEW_SECONDS after its return, and both reads end within
+     `effect_timeout_seconds` of the request. With no such pair, the abort path runs with cause `stop-not-shown`. A
+     match is a correlation of time and reason; it names no caller.
+  7. Poll the alarms for `observe_seconds`, ending with a read that starts at or after its end, then write
+     `stopped.json` with the time of step 6's status read and exit 0 with the restoration pending. `stopped.json`
+     stands only after the observation or after `abort.json`, so a run killed between the stop and either leaves
+     `stop.json` alone, which `restore` refuses as an unknown outcome and the judge reads as not injected.
+A status read that fails in step 6 shows nothing and the poll goes on. An alarm read that fails, an alarm missing from
+the reply and one not quiet each abort the run; a failed read of all of them names GD-2's first guardrail text (the
+abort mark names one text for cause `guardrail`), and its detail says that no alarm was read. Step 6 cuts its alarm
+reads at the effect timeout too: one that fails at or after it shows no stop, and the cause is `stop-not-shown`.
+
+The abort path, the one end of a run once `roles.json` stands, for the reach condition, a guardrail alarm, the
+deadline (`deadline_seconds` after the run's start), an exception and a signal (SIGINT, SIGTERM, SIGHUP, each not
+ignored at start): it writes `abort.json` {cause, guardrail, time, detail}, the detail saying whether no stop request
+was sent, one was sent and answered, or one may have left with its outcome unknown and the call's failure, and ending
+with `; restoration steps sha256 ` and the SHA-256 of the restoration steps text this run prints, and then
+`stopped.json` when the stop was shown. A lone surrogate in the detail's text, from a reply's field or a byte of DIR
+with no UTF-8 form, is written as the six characters `\udXXX` before the detail is cut to its length. It reads the
+target's status once when a request may have left, prints that read and GD-2's restoration steps from the catalog, and
+exits 1. It sends no call that changes an instance, and the controller holds no call that starts one. A signal raises
+only before `injection/` is made (exit 2; one that arrives before step 1 waits for it) and in steps 3 to 7 (the abort
+path); during a mark's write it waits for the write's end, and during the abort path and the final `stopped.json` it is
+left unraised. In `restore` a signal raises during the poll; in `seal` it raises from the lock to the mark's write,
+which writes nothing (exit 2), and waits for that write.
+
+`restore`, run by the operator after starting the instance themselves, refuses: an empty evidence path; an evidence root
+or `injection/` that is a link, no directory or one that takes no unnamed file; a missing or malformed `stop.json`, or
+one of another instance or identity than the approval's target and the operator file's `identity`; an existing
+`restoration.json`; evidence a run or restore still holds; a `restoration.json`, `stopped.json` or `abort.json` whose
+lookup fails, which leaves unknown whether the mark stands; neither `stopped.json` nor `abort.json` (a run that ended
+unrecorded, whose outcome is unknown); a `roles.json` of another package than the approval's; a `stopped.json` that does
+not show this stop read from the request's time to restore's start; with no abort, a `--reviewed`; with `abort.json`
+standing, an abort dated before the stop, an abort mark whose detail does not end with its run's steps digest, a
+missing, mismatched or future `--reviewed`, or one inside DIR; and a wrong caller. It reads `stopped.json` before
+`abort.json`, since the abort path writes `abort.json` first. The reviewed record is the operator's {abort_sha256,
+steps, reviewer, time}, kept outside DIR, since the judge admits no file outside its layout: GD-2's restoration steps as
+the aborted run printed them (`steps`, the text whose SHA-256 ends that abort mark's detail, the one text `restore`
+compares it with) were done, at `time`, from the abort's time to restore's start, after the abort whose `abort.json`
+bytes `abort_sha256` digests. Where `collected.json` stands, `restore` first reads DIR as the judge does and refuses any
+evidence the judge's `read_evidence` refuses of the directory as it stands, and a `package.json` other than the
+approval's: a seal that leaves out a collected file, `coverage.json` or a standing mark, one that names a file that is
+missing, a sealed file of other bytes, and a file outside the layout among them; it then writes the restoration with its
+true time and exits 1 when that time ends observation (the judge's `ends_observation`), since the judge refuses the
+evidence while the unsealed mark stands. It then requires the caller as `run` does and polls the target's status for up
+to `deadline_seconds` until a read dated at or after restore's start shows it running with the instance and system
+checks `ok` and the target's record, read after that read, dates its return. The record's `LaunchTime` L is the time of
+the instance's last launch on AWS's clock, so on this clock the launch lies within SKEW_SECONDS of L. `restore` writes
+`restoration.json` {instance, state, time, reviewed_sha256}: `time` the later of L - SKEW_SECONDS, the earliest time at
+which the target may have run again, and the latest time among the stop request, the stopped report and the abort mark,
+which the judge requires it to reach; `reviewed_sha256` the SHA-256 of the reviewed record's bytes after an abort and
+null otherwise. A record dates no return when it is unread, reads a state other than `running`, names no `LaunchTime` in
+the form the calls paragraph states, dates the launch more than SKEW_SECONDS before the stopped report (it shows no
+start after the stop) or more than SKEW_SECONDS after the ready read. The poll then goes on, and at its bound `restore`
+exits 1 with no mark and says that the evidence is not to be judged as it stands, since the judge reads the whole run
+window where no restoration stands. Where no `stopped.json` stands, an abort whose stop was never shown, an earlier
+launch is admitted and the time is the abort's. The judge ends its observation at a restoration dated from the run
+window's start to less than the package's `clock_error_seconds` after its end (its `ends_observation`), and `time` may
+precede the start by 2 * SKEW_SECONDS and the second `LaunchTime` leaves out, so a start less than that plus
+`clock_error_seconds` after the run window's end may end it; `run` prints that bound. `restore` reads and writes the
+marks by the pathname `DIR/injection`: its lock excludes a run and another restore of the directory it opened, it
+refuses once it holds the lock where a lookup of that name finds another entry than the directory it locked, keeping
+that directory under that name until `restore` ends is the operator's, and exit 0 says the mark stands in the
+directory so named when the mark was linked.
+
+`seal`, run by the operator once the run window has ended and every collection named in `DIR/coverage.json` is in DIR,
+makes no AWS call and refuses: an empty evidence path; an evidence root or `injection/` that is a link, no directory or
+one that takes no unnamed file; evidence a run, restore or seal still holds; an existing `collected.json`; a `records/`
+that is a link or no directory; a `package.json` whose SHA-256 is not the approval's, of kind other than `staging` (a
+simulation export seals its own files), or a `roles.json` of another package; a wall clock before the package's run
+window ends; an entry of DIR, `records/` or `injection/` outside the judge's layout, or a file of the layout missing,
+which it refuses once `package.json` is read and before it reads any other file, as the judge lists them before it
+reads; a file or directory sync that fails; and any evidence the judge's `load_evidence` refuses, run over the bytes it
+read with the mark it would write: a `coverage.json` off the judge's layout or naming other files than the package's
+collected files (the judge's `collected`: each `records/` file, `activations.jsonl`, `witness.jsonl` and each
+observation file of its world), a collected file malformed, holding another line count than its coverage entry or
+spanned past the seal's time. The judge's witness checks against `roles.json` run in the judge alone. It reads every
+file relative to the descriptor of its directory, following no link, and syncs each file it reads, then `records/`,
+`injection/` and DIR, before the mark. It writes `collected.json` {time, files}: `time` the wall clock read at its
+start, at or after the run window's end, and `files` the SHA-256 of `coverage.json`, of each collected file and of each
+mark that stands in `injection/`, the bytes as it read them; it prints the mark's own SHA-256, also (exit 1) for a mark
+it linked whose sync then failed, which stands or may stand again after a crash. The judge refuses a file whose bytes
+differ from that digest, a named file that is missing and a mark the seal does not name (a restoration that ends no
+observation excepted, one dated at or after the run window's end plus `clock_error_seconds`), so a row removed from a
+collection after the seal, with its count lowered to match, and an abort or restoration mark removed or, with that
+exception, added after it are refused. A collection short before the seal stays the collector's declaration, and a seal
+removed and written again reads as the first, so the operator keeps the printed digest, which the judge's record
+carries. `seal` checks for an existing mark and links its own by the pathname `DIR/injection`, as `restore` does: it
+refuses once it holds the lock where a lookup of that name finds another entry than the directory it locked, and
+keeping DIR under that name until `seal` ends is the operator's.
+
+The marks, in the judge's field names, each written once: an unnamed file in `injection/`, synced, linked
+to the mark's name (failing when an entry stands there), synced again, then the directory synced; when a sync after
+the link fails the mark is removed again, and when the removal fails it stands with its durability unknown, as the
+controller says. roles.json {package_sha256, time, shards, standbys}, `time` the snapshot's cut and `standbys` each
+standby host of the target's owned shards whose snapshot line names a declared instance; stop.json {instance, time,
+identity}; stopped.json {instance, state, time, request}; abort.json, its detail DETAIL_MAX characters at most, cut
+ahead of the steps' digest; restoration.json; collected.json. Each is at most the judge's file size. Nothing is
+written outside DIR/injection.
+
+The five calls, each made through one launch of the `aws` child, and the fields read: `sts
+get-caller-identity` (Arn); `ec2 describe-instance-status --include-all-instances` (InstanceStatuses[]: InstanceId,
+InstanceState.Name, InstanceStatus.Status, SystemStatus.Status); `ec2 describe-instances` (Reservations[].Instances[]:
+InstanceId, State.Name, StateReason.Code, StateTransitionReason, and for `restore` LaunchTime, a UTC time
+`YYYY-MM-DDTHH:MM:SS` with an optional fraction of up to nine digits and then `Z` or `+00:00`); `ec2 stop-instances`
+(none); `cloudwatch describe-alarms --alarm-types MetricAlarm` (MetricAlarms[]: AlarmName, StateValue,
+TreatMissingData, EvaluationState, StateTransitionedTimestamp, EvaluationCriteria,
+EvaluateLowSampleCountPercentile, Metrics[].Expression).
+Each runs with `--no-paginate` (a split listing shows its `NextToken`) and configured endpoint URLs ignored, under the
+environment the run read at its start, so all five use one profile and one set of credentials. A reply that is no JSON
+object, holds a `NextToken`, names an instance or alarm twice or outside the request, holds a composite alarm, or
+holds a read field off its type counts as a failed call, whose outcome is unknown.
+
+Exit 0: a run ended with the restoration pending, a restoration written, or a seal written. 1: an abort, a
+restoration not shown within its bound, cut by a signal or unwritten, a restoration written after the seal that ends
+observation, which stands and which a later `restore` refuses as existing, or a seal unwritten or left standing with
+its durability unknown, which a later `seal` refuses as existing and the judge reads. 2: a refusal or a signal
+before `roles.json` stands, which leave no mark, or a failure the controller did not foresee, whose message names the
+marks that stand.

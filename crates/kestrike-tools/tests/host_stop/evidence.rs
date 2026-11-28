@@ -156,3 +156,49 @@ fn the_lookup_answers_stands_absent_or_its_error() {
     let denied = stands(&planted, Path::new(&base.join("file"))).expect_err("the planted error");
     assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
 }
+
+/// A lock reads the directory it holds as the one at its name, with one `lstat` of that path through
+/// the file steps it is given. A directory removed and made again at the name reads as another, since
+/// the held descriptor keeps the first inode number in use; a lock taken on the new directory reads
+/// it as itself. A sibling directory and a link at the name to the locked directory read as another,
+/// and a name with no entry and a lookup that fails return the lookup's error.
+#[test]
+fn a_lock_reads_its_directory_at_the_name_as_itself_and_one_made_again_there_as_another() {
+    let scratch = Scratch::new("lock-name");
+    let directory = scratch.dir("injection");
+    let held = lock(&Disk, &directory).expect("the holder locks");
+    let files = Observed::default();
+    assert!(held.stands_at(&files, &directory).expect("looks up"));
+    assert_eq!(files.steps(), ["lstat"]);
+    assert_eq!(files.seen()[0].path.as_deref(), Some(directory.as_path()));
+    let sibling = scratch.dir("sibling");
+    assert!(!held.stands_at(&Disk, &sibling).expect("looks up"));
+
+    fs::remove_dir(&directory).expect("the directory is removed");
+    let missing = held
+        .stands_at(&Disk, &directory)
+        .expect_err("no entry stands at the name");
+    assert_eq!(missing.raw_os_error(), Some(libc::ENOENT));
+    fs::create_dir(&directory).expect("the directory is made again");
+    assert!(!held.stands_at(&Disk, &directory).expect("looks up"));
+    let again = lock(&Disk, &directory).expect("the new directory's lock is free");
+    assert!(again.stands_at(&Disk, &directory).expect("looks up"));
+
+    let planted = Observed::failing(&[Fault {
+        step: "lstat",
+        nth: 1,
+        errno: libc::EACCES,
+    }]);
+    let denied = again
+        .stands_at(&planted, &directory)
+        .expect_err("the planted error");
+    assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
+    fs::rename(&directory, scratch.0.join("moved")).expect("the directory is renamed");
+    symlink("moved", &directory).expect("the link is made");
+    assert!(!again.stands_at(&Disk, &directory).expect("looks up"));
+    assert!(
+        again
+            .stands_at(&Disk, &scratch.0.join("moved"))
+            .expect("looks up")
+    );
+}

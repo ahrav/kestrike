@@ -320,6 +320,19 @@ fn texts_match_and_replace_by_code_points() {
     }
     let replaced = surrogate.replace(&text(&[0xdc80]), &Text::from("-"));
     assert_eq!(replaced, Text::from("a-b"));
+    let contains: &[(Text, Text, bool)] = &[
+        (Text::from("abc"), Text::new(), true),
+        (Text::new(), Text::new(), true),
+        (Text::from("ab"), Text::from("abc"), false),
+        (Text::from("aab"), Text::from("ab"), true),
+        (surrogate.clone(), text(&[0xdc80]), true),
+        (surrogate, text(&[0xdc81]), false),
+        (Text::from("caf\u{e9}"), text(&[0x63, 0x61, 0x66]), true),
+        (Text::from("caf\u{e9}"), text(&[0x66, 0xdcc3]), false),
+    ];
+    for (whole, part, expected) in contains {
+        assert_eq!(whole.contains(part), *expected, "{whole:?} holds {part:?}");
+    }
 }
 
 /// `text!` writes a path outside UTF-8 as `Text::from_os` decodes it, each stray byte a surrogate.

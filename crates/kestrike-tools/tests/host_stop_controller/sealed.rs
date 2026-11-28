@@ -1,10 +1,7 @@
 //! The cases of `seal` and of `restore` over a sealed copy of the held fixture, which holds a
 //! case's marks in place of the fixture's. A case that judges a sealed copy asserts `seal`'s
 //! exit, the judge's load of the copy or its refusal, and the fact the judge's verdict rests on:
-//! whether the restoration ends observation, or which marks stand. With `HOST_STOP_KEEP` set, a
-//! case keeps one copy for each run of the judge it stands for, a run that refuses the evidence
-//! included, under the case's name and that run's ordinal; a case that only loads a copy keeps
-//! none.
+//! whether the restoration ends observation, or which marks stand.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -48,7 +45,7 @@ fn a_clean_run_and_its_restoration_keep_the_fixture_held() {
     let mut case = Case::new("judged-clean");
     assert_eq!(case.run(), 0, "{}", case.output());
     case.restore_after_the_run_window(1);
-    let (root, evidence) = case.judge("a_clean_run_and_its_restoration_keep_the_fixture_held-1");
+    let (root, evidence) = case.judge();
     assert_eq!(
         marks_in(&root),
         sealed_with(&["restoration", "roles", "stop", "stopped"])
@@ -80,9 +77,7 @@ fn a_target_started_inside_the_run_window_and_restored_after_it_leaves_the_run_i
     assert_eq!(case.restore(None), 0, "{}", case.output());
     let restored = time(&case.marks()["restoration"]);
     assert!((restored - (started - SKEW)).abs() < 1e-6, "{restored}");
-    let (_, evidence) = case.judge(
-        "a_target_started_inside_the_run_window_and_restored_after_it_leaves_the_run_inconclusive-1",
-    );
+    let (_, evidence) = case.judge();
     assert!(ends(&evidence));
 }
 
@@ -94,10 +89,7 @@ fn a_target_started_inside_the_run_window_and_restored_after_it_leaves_the_run_i
 fn a_launch_the_skew_admits_inside_the_run_window_ends_observation_there() {
     let (end, error) = window_end();
     assert_eq!((end, error), (400.0, 0.0));
-    for (at, (launched, ending)) in [(end + SKEW - 1.0, true), (end + SKEW, false)]
-        .into_iter()
-        .enumerate()
-    {
+    for (launched, ending) in [(end + SKEW - 1.0, true), (end + SKEW, false)] {
         let mut case = Case::new("judged-skew");
         assert_eq!(case.run(), 0, "{}", case.output());
         case.advance_to(end + 20.0);
@@ -110,11 +102,7 @@ fn a_launch_the_skew_admits_inside_the_run_window_ends_observation_there() {
             .launched = launched;
         assert_eq!(case.restore(None), 0, "{}", case.output());
         assert_eq!(time(&case.marks()["restoration"]), launched - SKEW);
-        let name = format!(
-            "a_launch_the_skew_admits_inside_the_run_window_ends_observation_there-{}",
-            at + 1
-        );
-        let (_, evidence) = case.judge(&name);
+        let (_, evidence) = case.judge();
         assert_eq!(ends(&evidence), ending, "{launched}");
     }
 }
@@ -128,8 +116,7 @@ fn a_restoration_inside_the_run_window_leaves_the_run_inconclusive() {
     case.start_target(1);
     assert_eq!(case.restore(None), 0, "{}", case.output());
     assert!(time(&case.marks()["restoration"]) < window_end().0);
-    let (_, evidence) =
-        case.judge("a_restoration_inside_the_run_window_leaves_the_run_inconclusive-1");
+    let (_, evidence) = case.judge();
     assert!(ends(&evidence));
 }
 
@@ -146,10 +133,7 @@ fn a_version_committed_after_the_snapshots_cut_keeps_the_run_judged() {
         r#"{"time": 102, "owner": "h3", "standby": "h4", "generation": 5, "volume": "vol-s5", "attempts": 2}"#,
     );
     let root = case.copy(&[], &[("s5", vec![later])]);
-    let evidence = case.judge_copy(
-        &root,
-        "a_version_committed_after_the_snapshots_cut_keeps_the_run_judged-1",
-    );
+    let evidence = case.sealed_load(&root);
     assert!(!ends(&evidence));
     let rows = fs::read_to_string(root.join("records/s5.jsonl")).expect("s5 reads");
     assert!(
@@ -168,7 +152,7 @@ fn too_few_roles_fail_to_inject() {
     assert_eq!(case.run(), 1, "{}", case.output());
     let change = value(r#"{"standby": "h3"}"#);
     let root = case.copy(&[("s4", change)], &[]);
-    case.judge_copy(&root, "too_few_roles_fail_to_inject-1");
+    case.sealed_load(&root);
     assert_eq!(marks_in(&root), sealed_with(&["abort", "roles"]));
 }
 
@@ -178,7 +162,7 @@ fn a_stop_never_shown_fails_to_inject() {
     let mut case = Case::new("judged-never-shown");
     case.plane.borrow_mut().stop_after = None;
     assert_eq!(case.run(), 1, "{}", case.output());
-    let (root, _) = case.judge("a_stop_never_shown_fails_to_inject-1");
+    let (root, _) = case.judge();
     assert_eq!(marks_in(&root), sealed_with(&["abort", "roles", "stop"]));
 }
 
@@ -189,7 +173,7 @@ fn an_abort_before_the_stop_is_shown_fails_to_inject() {
     case.plane.borrow_mut().stop_after = None;
     case.faulted(flip("gd2-guardrail-1", "ALARM"), true);
     assert_eq!(case.run(), 1, "{}", case.output());
-    let (root, _) = case.judge("an_abort_before_the_stop_is_shown_fails_to_inject-1");
+    let (root, _) = case.judge();
     assert_eq!(marks_in(&root), sealed_with(&["abort", "roles", "stop"]));
 }
 
@@ -211,8 +195,7 @@ fn an_abort_after_the_stop_and_its_reviewed_restoration_read_halted() {
         super::text_of(restoration, "reviewed_sha256"),
         digest(&path)
     );
-    let (root, _) =
-        case.judge("an_abort_after_the_stop_and_its_reviewed_restoration_read_halted-1");
+    let (root, _) = case.judge();
     assert_eq!(
         marks_in(&root),
         sealed_with(&["abort", "restoration", "roles", "stop", "stopped"])
@@ -234,7 +217,7 @@ fn a_run_killed_during_the_observation_is_not_held() {
         &case.evidence.join("injection"),
         &[],
     );
-    let (root, _) = case.judge("a_run_killed_during_the_observation_is_not_held-1");
+    let (root, _) = case.judge();
     assert_eq!(marks_in(&root), sealed_with(&["roles", "stop"]));
     let calls = case.log().len();
     assert_eq!(case.restore(None), 2, "{}", case.output());
@@ -258,7 +241,7 @@ fn a_signal_during_the_evidence_directory_sync_fails_to_inject() {
         move |step| matches!(step, Step::FsyncDirectory(path) if *path == evidence),
     );
     assert_eq!(case.run(), 1, "{}", case.output());
-    let (root, _) = case.judge("a_signal_during_the_evidence_directory_sync_fails_to_inject-1");
+    let (root, _) = case.judge();
     assert_eq!(marks_in(&root), sealed_with(&["abort", "roles"]));
 }
 
@@ -281,8 +264,6 @@ fn the_seal_names_each_collected_file_and_a_row_removed_after_it_is_refused() {
         output[seen..].contains(&format!("injection/collected.json sha256 {sha}\n")),
         "{output}"
     );
-    let name = "the_seal_names_each_collected_file_and_a_row_removed_after_it_is_refused";
-    case.keep_tree(&root, &format!("{name}-1"));
     let evidence = judged(&root).expect("the sealed copy loads");
     assert_eq!(evidence.seal_sha256(), sha);
     let now = case.plane.borrow().wall();
@@ -330,7 +311,6 @@ fn the_seal_names_each_collected_file_and_a_row_removed_after_it_is_refused() {
         value(&format!("{}", lines as i64 - 1)),
     );
     fs::write(root.join("coverage.json"), indented_one(&coverage)).expect("written");
-    case.keep_tree(&root, &format!("{name}-2"));
     let refused = judged(&root).expect_err("the judge refuses the changed collection");
     assert!(
         refused.contains("provider.jsonl differs from the bytes injection/collected.json seals"),
@@ -1067,10 +1047,6 @@ fn the_seal_names_each_mark_and_the_judge_refuses_one_removed_after_it() {
     let mut rewritten = parse(&restoration);
     set(&mut rewritten, &["reviewed_sha256"], Value::Null);
     fs::write(&restoration, indented_one(&rewritten)).expect("the restoration is rewritten");
-    case.keep_tree(
-        &root,
-        "the_seal_names_each_mark_and_the_judge_refuses_one_removed_after_it-1",
-    );
     let refused = judged(&root).expect_err("the judge refuses the copy");
     assert!(
         refused.contains("injection/collected.json seals injection/abort.json, which is missing"),
@@ -1085,14 +1061,12 @@ fn the_seal_names_each_mark_and_the_judge_refuses_one_removed_after_it() {
 #[test]
 fn a_restore_after_the_seal_writes_its_restoration_and_exits_1_when_it_may_end_observation() {
     let end = window_end().0;
-    let name =
-        "a_restore_after_the_seal_writes_its_restoration_and_exits_1_when_it_may_end_observation";
     let launches = [
         (end - 10.0, 1),
         (end + SKEW + 5.0, 0),
         (end + 40.0 + SKEW, 0),
     ];
-    for (at, (launched, code)) in launches.into_iter().enumerate() {
+    for (launched, code) in launches {
         let mut case = Case::new("seal-then-restore");
         assert_eq!(case.run(), 0, "{}", case.output());
         let root = case.copy(&[], &[]);
@@ -1110,7 +1084,6 @@ fn a_restore_after_the_seal_writes_its_restoration_and_exits_1_when_it_may_end_o
         assert_eq!(case.restore_at(&root, None), code, "{}", case.output());
         let restoration = parse(&root.join("injection/restoration.json"));
         assert_eq!(time(&restoration), launched - SKEW);
-        case.keep_tree(&root, &format!("{name}-{}", at + 1));
         if code == 1 {
             let output = case.output();
             let line = format!(
@@ -1557,44 +1530,6 @@ fn a_restoration_within_the_clock_error_after_the_window_ends_a_sealed_runs_obse
     }
 }
 
-/// A run that makes `injection/` and then loses its lock to another command of the same directory
-/// removes that directory while the other command still holds the lock: the run exits 2 with the
-/// lock's refusal and `... is removed`, and the holder is left with a lock on a directory that no
-/// longer stands. The run removes the directory it made whenever no `roles.json` counts as
-/// written, whether or not it ever held the lock.
-#[test]
-fn a_run_that_loses_the_lock_of_its_new_injection_removes_it_while_another_holds_the_lock() {
-    let mut case = Case::new("lost-lock");
-    case.contended.set(true);
-    let injection = case.evidence.join("injection");
-    let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let (held, at) = (std::rc::Rc::clone(&holder), injection.clone());
-    case.plant(Box::new(move |_, step| {
-        if matches!(step, Step::TryLock) && held.borrow().is_none() {
-            *held.borrow_mut() = Some(lock(&Disk, &at).expect("the other command locks first"));
-        }
-        None
-    }));
-    assert_eq!(case.run(), 2, "{}", case.output());
-    let stderr = case.stderr();
-    assert!(
-        stderr.contains("is held by a run, restore or seal that has not ended"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!(
-            "before roles.json stood; {} is removed",
-            injection.display()
-        )),
-        "{stderr}"
-    );
-    assert!(!injection.exists(), "the run removed the directory it made");
-    assert!(
-        holder.borrow().is_some(),
-        "the other command still holds its lock"
-    );
-}
-
 /// A lookup of a standing seal that fails other than by a missing entry is refused before any
 /// file of the copy is read, with no call and no mark.
 #[test]
@@ -1682,38 +1617,4 @@ fn a_seal_over_the_file_limit_or_at_an_unordered_time_is_refused() {
     case.plane.borrow_mut().step = 0.0;
     assert_eq!(*read.borrow(), ["package.json"]);
     assert!(!root.join("injection/collected.json").exists());
-}
-
-/// A kept copy holds each file under its own bytes of name, a name that is no UTF-8 beside the
-/// name its lossy reading gives, and a directory that cannot be read fails the copy.
-#[test]
-fn a_kept_copy_holds_each_name_as_it_stands_and_fails_on_an_unreadable_directory() {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
-    let place = Scratch::new("copy-tree");
-    let from = place.0.join("from");
-    fs::create_dir(&from).expect("the source is made");
-    let raw = OsStr::from_bytes(b"raw-\xff");
-    fs::write(from.join(raw), b"raw").expect("written");
-    fs::write(from.join("raw-\u{fffd}"), b"replaced").expect("written");
-    fs::create_dir(from.join("skipped")).expect("made");
-    fs::write(from.join("skipped/inner"), b"inner").expect("written");
-    let to = place.0.join("to");
-    copy_tree(&from, &to, &["skipped"]);
-    assert_eq!(fs::read(to.join(raw)).expect("the raw name reads"), b"raw");
-    assert_eq!(
-        fs::read(to.join("raw-\u{fffd}")).expect("the replaced name reads"),
-        b"replaced"
-    );
-    assert!(!to.join("skipped").exists());
-    let locked = from.join("locked");
-    fs::create_dir(&locked).expect("made");
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("locked");
-    let readable = fs::read_dir(&locked).is_ok();
-    let copied = std::panic::catch_unwind(|| copy_tree(&from, &place.0.join("again"), &[]));
-    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).expect("unlocked");
-    if !readable {
-        assert!(copied.is_err(), "an unreadable directory fails the copy");
-    }
 }

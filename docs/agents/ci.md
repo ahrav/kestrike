@@ -1270,7 +1270,7 @@ writer inside that directory.
 
 ### The host stop controller
 
-`python3 scripts/host-stop-controller.py run --operator F --package F
+`bash scripts/tool.sh host-stop-controller run --operator F --package F
 --evidence DIR` stops the one target instance of a GD-2 run and writes the
 marks under `DIR/injection/` in
 [the evidence layout](#the-evidence-layout-the-rules-and-the-record) of the
@@ -1288,8 +1288,8 @@ while the catalog marks a GD-2 prerequisite `TBD - BLOCKS EXECUTION`, and a
 run that lacks the approval, a declared target, the caller, a fresh snapshot
 cut at or after the start of the package's baseline window, a run inside the
 package's run window or every declared instance running. It
-aborts on the judge's pre-stop reach conditions (`roles_reach`), loaded by
-path, and on an alarm that is not
+aborts on the judge's pre-stop reach conditions (`roles_reach`) and on an
+alarm that is not
 `OK`, changed state since the read before the stop, or is configured so that
 it can read `OK` without data. That check covers the alarm's configuration:
 it does not show that a guardrail's source still reports, so the owner
@@ -1297,9 +1297,19 @@ qualifies each alarm to signal the loss of its source within
 `observe_seconds`. The controller shows the stop by a status read and a
 `describe-instances` record apart from the request's reply, and its one abort
 path writes `abort.json` and sends no call that changes an instance. The abort
-path starts once `roles.json` stands: a failure before that removes
-`injection/` again and ends as a refusal, so the controller writes
-`abort.json` only beside `roles.json`. The abort mark's `detail` ends with the
+path starts once `roles.json` stands: a failure before that ends as a
+refusal, so the controller writes `abort.json` only beside `roles.json`. A
+run that holds the lock of `injection/` then attempts to remove the directory
+again and to sync `DIR` before it frees the lock; where the removal or the
+sync fails, its refusal names `injection/` as possibly standing. A run that
+never held the lock, since another command took it first or the directory
+cannot be opened, leaves `injection/` and names it in its refusal. The
+operator removes that directory before another run, once no run, restore or
+seal on `DIR` holds it, and starts no command on `DIR` until it is removed.
+The abort mark's `detail` holds each lone surrogate of its text,
+from a reply's field or a byte of `DIR` with no UTF-8 form, as the six
+characters `\udXXX`, written before the detail is cut to its length, so the
+mark has a UTF-8 form. The `detail` ends with the
 SHA-256 of the restoration steps text the run printed: the digest stands at
 the end of `detail` because the layout fixes the mark's four keys. After an
 abort, `restore` needs the operator's reviewed record of those steps, the text
@@ -1322,11 +1332,14 @@ bound. A record that dates no return (unread, of another state, without a
 ends `restore` with exit 1 and no mark; the judge reads the whole run window
 where no restoration stands, so that evidence is not to be judged as it
 stands. That a start from `stopped` sets `LaunchTime` is read from the AWS
-CLI reference ("the time that the instance was last launched"); the self-test's
-fake pins the field, and no test reads a real control plane.
+CLI reference ("the time that the instance was last launched"); the cases'
+stand-in pins the field, and no test reads a real control plane.
 `restore` reads and writes the marks by the pathname
 `DIR/injection`, so the operator keeps that directory under that name until
-`restore` ends. `seal --operator F --evidence DIR`, run once the run window
+`restore` ends. Once it holds the lock, `restore` refuses where a lookup of
+that name finds another entry than the directory it locked, or fails. No
+command of the controller changes the name under a `restore`, so that refusal
+covers a change made outside the controller. `seal --operator F --evidence DIR`, run once the run window
 has ended and every collection named in `DIR/coverage.json` is in DIR, writes
 `collected.json`: the SHA-256 of `coverage.json`, of each collected file and
 of each mark under `injection/`, dated by the wall clock at its start, and prints the mark's own SHA-256,
@@ -1351,20 +1364,32 @@ simulation export seals its own files), a second seal, a held lock and a time
 before the run window's end, when a collection may still grow. A signal
 before the mark's write is held ends it with nothing written; one during the
 write waits for the write's end. `seal` checks for an existing mark and writes its own by
-the pathname `DIR/injection`, as `restore` does. The judge refuses a file
+the pathname `DIR/injection`, as `restore` does, and refuses in the same way
+once it holds the lock, before it reads a file: a run that holds the lock can
+remove its new, empty `injection/` between a seal's open of the directory and
+its `flock`. A signal that stands at that refusal is raised in its place. The judge refuses a file
 whose bytes differ from the seal, so a row removed after the seal with its
 count lowered to match is refused. A collection that was short when sealed
 is the collector's declaration, and a seal removed and written again reads
 as the first, so the operator keeps the digest `seal` printed.
 The five AWS calls of `run` and `restore` run under the environment the run
-read at its start. The script's header states the operator file, the
+read at its start. The tool's help, which
+`bash scripts/tool.sh host-stop-controller -h` prints on Linux and
+`crates/kestrike-tools/src/tools/host_stop_controller/help.txt` holds, states
+the operator file, the
 snapshot's two file shapes, the five AWS calls and the reply fields it reads.
-`python3 -I scripts/test-host-stop-controller.py` runs it
-over an in-process fake control plane and judges what it wrote on a copy of
-the held fixture; no test calls a real control plane. The pre-push hook runs
-it for a push that changes the controller, its self-test, its fixtures, the
-held fixture or a file it loads or reads, as [the pre-push checks](#pre-push-checks)
-list.
+The controller's Rust cases, under `crates/kestrike-tools/tests/host_stop/`,
+`host_stop_checks/` and `host_stop_controller/`, with their helpers under
+`host_stop_support/`, run it over an in-process stand-in control plane and
+judge what it wrote on a copy of the held fixture through the tools library's
+copy of the game-day judge's loader; the started cases run the built binary
+against a stand-in `aws` that the test executable plays. No standing test runs
+`scripts/gameday-judge.py` on a seal the controller writes, and no test calls
+a real control plane. The
+`workspace` job runs the cases with every case of the crate, and the pre-push
+hook runs them for a push that changes the controller's Rust modules, its
+cases, its fixtures, the held fixture or a file they read, as
+[the pre-push checks](#pre-push-checks) list.
 
 ## Lane admission
 
@@ -1393,23 +1418,52 @@ change. A skipped proof lane is not proof credit.
 
 ## Pre-push checks
 
-With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` runs
-`bash scripts/tool.sh pre-push-checks REMOTE` with Git's ref lines on standard
-input, then the user-wide hook. The tool `pre-push-checks` runs the checks
+With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` reads
+Git's ref lines from its standard input once and holds them in the shell,
+its only copy of them. It runs `bash scripts/tool.sh pre-push-checks REMOTE` and then
+the user-wide hook, each with those bytes on its standard input through a
+pipe. An exit status of the tool other than 0 ends the hook with that status
+before the user-wide hook starts, and the user-wide hook's exit status is the
+hook's. A reader that exits before it has read the lines decides with its
+exit status as one that read them. A writer of the lines that fails
+otherwise, or that a signal ends, fails the push where its reader exits 0.
+A reader that leaves a process holding its standard input open and unread
+holds the hook as it would hold Git, once the lines are more than a pipe
+holds. Before it starts the tool, the hook refuses with
+exit 2 an input that holds a NUL byte, which Git writes in none of its ref
+lines, and with exit 1 an input whose read ends before the input does. The tool
+`pre-push-checks` runs the checks
 `AGENTS.md` requires before a push, each in a worktree of the pushed tip that
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
 commit pushed under a new name included. A failed check blocks the push. The
-tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
-as the pushing user's: where another user can rename entries in it, as in a
-directory writable by others without the sticky bit, that user can swap
-either between the steps that name it. The default `/tmp` is sticky. CI
+tool trusts no more of the directory `TMPDIR` names than its checks show. Before it reads its standard
+input, the tool refuses with exit 2 a directory there that a user other than
+the pushing user and root owns, and one whose mode, or the mode of a
+directory its path is reached through, from the root down and through links,
+gives its group or every user write access without the sticky bit: such a
+user could swap a worktree or a directory on the way between the
+steps that name them. It also refuses a directory there whose path passes
+through a link that such a user owns in a directory its group or every user
+can write, a sticky one included, since that user can replace the link. It
+reads the statuses again before each worktree it adds. A directory above the
+scratch directory that another user owns is trusted, and with it a link in a
+directory that only its owner can write. The default `/tmp` is sticky and
+root's, and passes. Where root's directories read as another id, as in a user
+namespace that maps the pushing user alone, such a `/tmp` is refused and a
+`TMPDIR` the user owns passes. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
-replay, the judges' test and the game-day judge's and the host stop
-controller's self-tests run in the hook and by hand; no CI job runs them.
+replay, the judges' test and the game-day judge's self-test run in the hook
+and by hand; no CI job runs them. The hook also runs the host stop
+controller's Rust cases, which the `workspace` job runs with every case of
+the crate.
 
-Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`.
+Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`,
+each sha a full object id of 40 or 64 hexadecimal digits, which the tool reads
+in lowercase, as Git writes it. The tool checks every line's form before its
+first Git read and refuses the push as malformed where a line holds another
+field there.
 For each pushed tip the tool lists the files the push changes against the
 remote commit, or against the tip's merge base with `origin/main` for a new
 branch or a remote commit this clone lacks, and runs the checks those files
@@ -1463,17 +1517,46 @@ require:
   `verification/readiness/failover.json`. A change to the judge or its
   self-test runs it at any tip, so a push that removes the self-test fails on
   the missing file;
-- `python3 -I scripts/test-host-stop-controller.py`, at a tip that holds it,
-  for a change to `scripts/host-stop-controller.py`, its self-test, a path
-  under `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`,
-  `scripts/fis-controller.py`, or a file the game-day judge reads
-  (`scripts/gameday-judge.py`, `scripts/readiness.py`, a script of its `OWNING`
-  tuple, `scripts/fis-profiles.json`, `verification/readiness/gamedays.json` or
-  a file that declares one of its `FLEET_BOUNDS`). A change to the controller
-  or its self-test runs it at any tip, so a push that removes the self-test
-  fails on the missing file.
+- the host stop controller's Rust cases,
+  `cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::`,
+  built with `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to
+  `target/tools` under the checkout's top level, the directory
+  `scripts/tool.sh` builds into, so the dependencies' build outlasts the tip's
+  worktree, with `CARGO_CACHE_RUSTC_INFO=0`, and with the checkout's
+  `Cargo.lock` copied into a worktree that holds none. Its `cargo` is the
+  push's first `cargo` on `PATH`, not the launcher's pinned toolchain, and it
+  builds without `--target`, so its outputs stand in `target/tools/debug`
+  beside the launcher's `target/tools/<host>/debug`. The package and its
+  `tools` test executable compile again at each tip, whose worktree has a new
+  path and new file times. While the row's `cargo` runs it holds the
+  directory's build lock, so a `scripts/tool.sh` call in the same checkout
+  waits for it, and two pushes of one checkout that run the row at once share
+  its build directory, so one can run the other's test executable: run such
+  pushes one at a time. The row runs the integration cases of `--test tools`
+  and leaves the modules' unit cases to the `workspace` job. Before `cargo`
+  starts, the row fails where another user owns or can write a directory
+  above the worktree, or a Cargo or rustup configuration entry there, since
+  Cargo and rustup search those directories for configuration; the default
+  `/tmp` is such a directory, so set `TMPDIR` to a directory only you control.
+  On a host other than Linux the row prints that the cases run on Linux alone
+  and runs nothing. A change at or under
+  `crates/kestrike-tools/src/host_stop/`,
+  `crates/kestrike-tools/src/host_stop_controller/`,
+  `crates/kestrike-tools/src/gameday/`, the tool's root
+  `crates/kestrike-tools/src/tools/host_stop_controller/`, one of the case
+  directories `crates/kestrike-tools/tests/host_stop/`, `host_stop_checks/`
+  and `host_stop_controller/`, or their helpers' directory
+  `host_stop_support/` runs them at any tip; at a
+  tip that lacks the cases the filter matches no case, and the weakened-test
+  scan reports the removal. A change to a path under
+  `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`, to
+  `verification/readiness/gamedays.json` or to a file that declares one of the
+  package's list bounds (`crates/kestrike/src/failover/zone_loop/directory.rs`,
+  `crates/kestrike/src/failover/standbys.rs`) runs them at a tip that holds
+  `crates/kestrike-tools/tests/host_stop_controller/mod.rs`, so a branch cut
+  before the cases runs nothing for this row.
 
-The five checks above that start as `python3 -I` take their imports from the
+The four checks above that start as `python3 -I` take their imports from the
 interpreter's installation, so a file beside the program at the pushed tip and
 the `PYTHON*` variables have no effect on them. Each check starts with the
 push's environment, the tool's three streams and the worktree as its working
@@ -1546,21 +1629,27 @@ worktree checks still run after it. A ref line with no comparison base prints
 that its scan was skipped and runs every worktree check: the links checks only
 at a tip that holds the registry or the links check, the contract check only
 at a tip that holds `chaos/ledger.json`, the replay only beside it, and the
-judges' test and the two self-tests each only at a tip that holds it; it also
+judges' test, the game-day self-test and the host stop controller's cases each
+only at a tip that holds it; it also
 guards that tip's chaos records. A deleted ref needs no check, and a blank
 line is skipped.
 
 The tool prints each failure as `pre-push: failed: FAILURE` at the end. Exit 0
-passes; 1 is a failed check or a failed step of the tool's own (reading
+passes; 1 is a failed check or a failed step of the tool's own (reading the
+scratch directory's status, where the working directory of a relative
+`TMPDIR` cannot be read or the `stat` fails for another reason than an absent
+path, reading
 standard input, making or removing the worktree's directory, starting or
 waiting for a check or for `git worktree add`, starting Git, or reading or
 writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
 the worktree; 2 is every other refusal before the checks, printed as
-`pre-push: ` and its text: a malformed ref line, a Git read that exits
+`pre-push: ` and its text: a scratch directory that another user can reach
+by ownership, a write bit or a link, as stated above, a malformed ref
+line, a Git read that exits
 nonzero where the read is not a presence test (Git's own text), Git output
 that is not UTF-8, a tree entry or a raw diff record of a form Git's manual
-does not give, and a Git argument the standard library refuses (the tool's
+does not give (the tool's
 text), and a `git worktree add` that exits nonzero, which exits 1 where Git
 cannot start for the removal; 2 is also signal handlers that cannot be
 installed, named by a `pre-push-checks: ` line. A guarded chaos record that is
@@ -1575,6 +1664,7 @@ reaches it, whatever disposition or mask it inherited: it blocks the four
 while it
 installs their handlers, then unblocks them, and it sets SIGCHLD to its
 default disposition before it starts any child. It reads the record after
+reading the scratch directory's status, after
 reading standard input, after each Git read of a ref line's plan and of the
 guard, after each scan, after each line it prints, and while it waits for
 `git worktree add` or a check; once it reads a record it starts no further
@@ -1629,8 +1719,8 @@ waits for it. Dying of a signal, Git
 2.50.1 to 2.53 signals no hook process (run on 2.50.1), and Git 2.54.0 to
 2.56.1 signals the hook's own process id alone (read in Git's
 `run-command.c`). The hook's bash then dies, or waits on SIGINT, and the tool
-with its check runs to its end. While the launcher builds the tool at line 6
-of the hook, the same holds for Cargo (read, not run).
+with its check runs to its end. While the hook's launcher builds the tool,
+the same holds for Cargo (read, not run).
 
 CI runs the same scanner in the `Weakened-test scan` step of
 the `comment-policy` job, after `Obligation catalog admission`. On a pull

@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 
-use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
+use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, Reads, any, unrecognized};
 use crate::text::Text;
 
 fn given(value: &Text) -> Result<(), String> {
@@ -356,6 +356,260 @@ fn a_repeated_option_keeps_every_occurrence_in_order() {
         repeated(&["--plant"]),
         refused("argument --plant: expected one argument")
     );
+}
+
+const KINDS: [Opt; 4] = [
+    HELP,
+    value(&["--base"], any),
+    Opt {
+        names: &["--plant"],
+        kind: Kind::Many {
+            required: true,
+            check: any,
+        },
+    },
+    Opt {
+        names: &["--quiet"],
+        kind: Kind::Flag,
+    },
+];
+
+fn kinds(args: &[&str]) -> Parsed {
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &KINDS,
+    );
+    let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+    reader.parse(args.as_slice())
+}
+
+/// `--plant` is `nargs="+"` with `action="append"` and `required=True`, `--quiet` is
+/// `action="store_true"`. A value after `=` is that value, `--` included, where Python 3.9.25 reads
+/// `--plant=--` as no value and Python 3.12.3 as `--`.
+#[test]
+fn a_flag_takes_no_value_and_a_many_option_takes_each_value_up_to_the_next_option() {
+    #[rustfmt::skip]
+    type Row<'a> = (&'a [&'a str], Result<(&'a [&'a str], bool), &'a str>);
+    let rows: &[Row] = &[
+        (&["--plant", "a"], Ok((&["a"], false))),
+        (
+            &["--plant", "a", "b", "--base", "x"],
+            Ok((&["a", "b"], false)),
+        ),
+        (&["--plant=a", "b"], Err("unrecognized arguments: b")),
+        (
+            &["--plant", "a", "--plant", "b", "c"],
+            Ok((&["a", "b", "c"], false)),
+        ),
+        (
+            &["--plant"],
+            Err("argument --plant: expected at least one argument"),
+        ),
+        (
+            &["--plant", "--base", "x"],
+            Err("argument --plant: expected at least one argument"),
+        ),
+        (
+            &["--plant", "--", "a"],
+            Err("argument --plant: expected at least one argument"),
+        ),
+        (
+            &["--plant", "a", "--", "b"],
+            Err("unrecognized arguments: -- b"),
+        ),
+        (
+            &["--plant", "-", "-1", "-.5", "a b"],
+            Ok((&["-", "-1", "-.5", "a b"], false)),
+        ),
+        (
+            &["--plant", "-x"],
+            Err("argument --plant: expected at least one argument"),
+        ),
+        (&[], Err("the following arguments are required: --plant")),
+        (
+            &["--base", "x"],
+            Err("the following arguments are required: --plant"),
+        ),
+        (&["--plant", "a", "--quiet"], Ok((&["a"], true))),
+        (&["--plant", "a", "--quiet", "--quiet"], Ok((&["a"], true))),
+        (
+            &["--plant", "a", "--quiet=x"],
+            Err("argument --quiet: ignored explicit argument 'x'"),
+        ),
+        (
+            &["--plant", "a", "--quiet="],
+            Err("argument --quiet: ignored explicit argument ''"),
+        ),
+        (&["--plant=", "a"], Err("unrecognized arguments: a")),
+        (&["--plant=--"], Ok((&["--"], false))),
+    ];
+    for (args, expected) in rows {
+        let found = kinds(args);
+        match expected {
+            Ok((plants, quiet)) => {
+                let Parsed::Run(values) = found else {
+                    panic!("{args:?} reads, not {found:?}");
+                };
+                let all: Vec<&OsStr> = values
+                    .all("--plant")
+                    .iter()
+                    .map(OsString::as_os_str)
+                    .collect();
+                assert_eq!(
+                    all,
+                    plants.iter().map(OsStr::new).collect::<Vec<_>>(),
+                    "{args:?}"
+                );
+                assert_eq!(values.flag("--quiet"), *quiet, "{args:?}");
+            }
+            Err(message) => assert_eq!(found, refused(message), "{args:?}"),
+        }
+    }
+}
+
+/// `p.add_argument('--plant', nargs='+', action='append', required=True, type=given)` refuses the first
+/// value its type refuses, in either form, with the type's message.
+#[test]
+fn a_many_option_checks_each_value() {
+    const CHECKED: [Opt; 2] = [
+        HELP,
+        Opt {
+            names: &["--plant"],
+            kind: Kind::Many {
+                required: true,
+                check: given,
+            },
+        },
+    ];
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &CHECKED,
+    );
+    for args in [
+        &["--plant", "a", ""][..],
+        &["--plant", "", "a"],
+        &["--plant="],
+    ] {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        assert_eq!(
+            reader.parse(&args),
+            refused("argument --plant: a value"),
+            "{args:?}"
+        );
+    }
+}
+
+/// `p.add_argument('--plant', nargs='+', action='append', type=given)` reads a command line without the
+/// option, where `plant` is `None`, and asks for at least one value where the option stands.
+#[test]
+fn a_many_option_that_is_not_required_may_be_left_out() {
+    const OPTIONAL: [Opt; 2] = [
+        HELP,
+        Opt {
+            names: &["--plant"],
+            kind: Kind::Many {
+                required: false,
+                check: given,
+            },
+        },
+    ];
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &OPTIONAL,
+    );
+    let read = |args: &[&str]| {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        reader.parse(&args)
+    };
+    let Parsed::Run(values) = read(&[]) else {
+        panic!("a command line without --plant reads");
+    };
+    assert!(values.all("--plant").is_empty());
+    assert_eq!(values.get("--plant"), None);
+    let Parsed::Run(values) = read(&["--plant", "a", "b"]) else {
+        panic!("--plant a b reads");
+    };
+    assert_eq!(values.all("--plant"), ["a", "b"].map(OsString::from));
+    assert_eq!(
+        read(&["--plant"]),
+        refused("argument --plant: expected at least one argument")
+    );
+    assert_eq!(
+        read(&["--plant", "a", ""]),
+        refused("argument --plant: a value")
+    );
+}
+
+/// `parse_known` returns the leftover arguments in command-line order beside the values, and
+/// `parse` refuses the same leftovers with the text of [`unrecognized`] after the missing-option
+/// check.
+#[test]
+fn parse_known_keeps_the_leftovers_in_order_and_parse_refuses_them() {
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &OPTIONS,
+    );
+    let args: Vec<OsString> = ["x", "--base", "b", "--nope", "y", "--head=h", "-z"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let Parsed::Run((values, extras)) = reader.parse_known(&args) else {
+        panic!("the reader takes the values")
+    };
+    assert_eq!(values.get("--base"), Some(OsStr::new("b")));
+    assert_eq!(values.get("--head"), Some(OsStr::new("h")));
+    let expected: Vec<OsString> = ["x", "--nope", "y", "-z"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    assert_eq!(extras, expected);
+    assert_eq!(reader.parse(&args), refused(&unrecognized(&expected)));
+}
+
+/// `reads` sorts one argument as `parse` does: a value, an option of a row, an unknown option, or
+/// the refusal of an ambiguous prefix.
+#[test]
+fn reads_sorts_an_argument_as_parse_does() {
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &OPTIONS,
+    );
+    for (arg, expected) in [
+        ("--", Ok(Reads::End)),
+        ("x", Ok(Reads::Value)),
+        ("-", Ok(Reads::Value)),
+        ("-1", Ok(Reads::Value)),
+        ("-a b", Ok(Reads::Value)),
+        ("--base", Ok(Reads::Option)),
+        ("--ba=x", Ok(Reads::Option)),
+        ("-hx=y", Ok(Reads::Option)),
+        ("--nope", Ok(Reads::Unknown)),
+        (
+            "--=x",
+            Err(
+                "ambiguous option: --=x could match --help, --base, --head, --max-mutants, \
+                 --shard, --tests, --artifacts, --cargo"
+                    .to_owned(),
+            ),
+        ),
+    ] {
+        assert_eq!(reader.reads(OsStr::new(arg)), expected, "{arg}");
+    }
 }
 
 /// The rows' texts after `error: ` were recorded from Python 3.9's `argparse` with a required subparser

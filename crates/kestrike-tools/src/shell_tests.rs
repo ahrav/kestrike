@@ -101,3 +101,37 @@ fn join_quotes_each_word_as_shlex_does() {
         assert_eq!(join(&words), Text::from(*expected), "{words:?}");
     }
 }
+
+#[test]
+fn join_quotes_each_word_that_holds_a_character_outside_the_safe_set() {
+    #[rustfmt::skip]
+    let rows: &[(&[&[u8]], &[u8])] = &[
+        (&[], b""),
+        (&[b""], b"''"),
+        (&[b"a"], b"a"),
+        (&[b"a b"], b"'a b'"),
+        (&[b"it's"], b"'it'\"'\"'s'"),
+        (&[b"-x", b"--y=z"], b"-x --y=z"),
+        (&[b"a@b%c+d=e:f,g./h-i_j"], b"a@b%c+d=e:f,g./h-i_j"),
+        (&[b"$HOME"], b"'$HOME'"),
+        (&["caf\u{e9}".as_bytes()], "'caf\u{e9}'".as_bytes()),
+        (&[b"n\xff"], b"'n\xff'"),
+        (&[b"a\nb"], b"'a\nb'"),
+        (&[b"'"], b"''\"'\"''"),
+        (&[b"~"], b"'~'"),
+        (&[b"*"], b"'*'"),
+        (&[b"a", b"", b"b"], b"a '' b"),
+    ];
+    let text = |bytes: &[u8]| Text::from_os(OsStr::from_bytes(bytes));
+    for (words, joined) in rows {
+        let words: Vec<Text> = words.iter().map(|word| text(word)).collect();
+        assert_eq!(join(&words), text(joined), "shlex.join({words:?})");
+        if !words.is_empty() {
+            assert_eq!(
+                split(&join(&words)),
+                Ok(words.clone()),
+                "the joined words split back"
+            );
+        }
+    }
+}
