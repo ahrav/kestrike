@@ -212,6 +212,24 @@ fn rows() -> Vec<(&'static [&'static str], u8, Option<String>)> {
         ),
         (&["seal", "--operator=a", "--evidence="], 2, missing),
         (
+            &["seal", "--operator", "-٣", "--evidence", "e"],
+            2,
+            error("argument --operator: expected one argument"),
+        ),
+        (
+            &[
+                "run",
+                "--package",
+                "-٣",
+                "--operator",
+                "a",
+                "--evidence",
+                "e",
+            ],
+            2,
+            error("argument --package: expected one argument"),
+        ),
+        (
             &["-hx=y"],
             2,
             error("argument -h/--help: ignored explicit argument 'x=y'"),
@@ -344,7 +362,8 @@ fn an_argument_of_no_utf_8_form_shows_as_its_surrogate_escape() {
 
 /// The reader puts each value in its field of the command: the last of a repeated option, a value
 /// given by a prefix or after `=`, and `--reviewed` of `restore` where it is given and `None` where
-/// it is not.
+/// it is not. A value `--` given after `=`, by a whole name or a prefix, is the path `--`, and a
+/// later occurrence of the option replaces it.
 #[test]
 fn each_value_lands_in_its_field_of_the_command() {
     use std::ffi::OsString;
@@ -393,6 +412,36 @@ fn each_value_lands_in_its_field_of_the_command() {
             args(&["seal", "--ev", "e", "--o", "o"]),
             Read::Seal {
                 operator: PathBuf::from("o"),
+                evidence: OsString::from("e"),
+            },
+        ),
+        (
+            args(&["run", "--operator=--", "--package=--", "--e=--"]),
+            Read::Run {
+                operator: PathBuf::from("--"),
+                package: PathBuf::from("--"),
+                evidence: OsString::from("--"),
+            },
+        ),
+        (
+            args(&["restore", "--operator=--", "--evidence=--", "--reviewed=--"]),
+            Read::Restore {
+                operator: PathBuf::from("--"),
+                evidence: OsString::from("--"),
+                reviewed: Some(PathBuf::from("--")),
+            },
+        ),
+        (
+            args(&[
+                "seal",
+                "--operator=--",
+                "--operator",
+                "a",
+                "--evidence",
+                "e",
+            ]),
+            Read::Seal {
+                operator: PathBuf::from("a"),
                 evidence: OsString::from("e"),
             },
         ),

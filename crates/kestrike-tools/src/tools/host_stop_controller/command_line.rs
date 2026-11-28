@@ -9,7 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, Reads, any, unrecognized};
+use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, Reads, Values, any, unrecognized};
 use crate::host_stop_controller::Command;
 use crate::text::Text;
 
@@ -19,11 +19,12 @@ pub const HELP: &str = include_str!("help.txt");
 const TOOL: &str = super::NAME;
 const USAGE: &str = "usage: host-stop-controller [-h] {run,restore,seal} ...";
 
-/// One command: its word, its option table and its usage line.
+/// One command: its word, its option table, its usage line and the [`Command`] its values build.
 struct Spec {
     word: &'static str,
     table: &'static [Opt],
     usage: &'static str,
+    command: fn(&Values) -> Command,
 }
 
 const HELP_ROW: Opt = Opt {
@@ -72,16 +73,30 @@ const SPECS: [Spec; 3] = [
         word: "run",
         table: &RUN,
         usage: "usage: host-stop-controller run [-h] --operator F --package F --evidence DIR",
+        command: |values| Command::Run {
+            operator: path(values, "--operator"),
+            package: path(values, "--package"),
+            evidence: value(values, "--evidence"),
+        },
     },
     Spec {
         word: "restore",
         table: &RESTORE,
         usage: "usage: host-stop-controller restore [-h] --operator F --evidence DIR [--reviewed F]",
+        command: |values| Command::Restore {
+            operator: path(values, "--operator"),
+            evidence: value(values, "--evidence"),
+            reviewed: values.get("--reviewed").map(PathBuf::from),
+        },
     },
     Spec {
         word: "seal",
         table: &SEAL,
         usage: "usage: host-stop-controller seal [-h] --operator F --evidence DIR",
+        command: |values| Command::Seal {
+            operator: path(values, "--operator"),
+            evidence: value(values, "--evidence"),
+        },
     },
 ];
 
@@ -93,13 +108,13 @@ pub fn read(args: &[OsString]) -> Parsed<Command> {
     let mut leftover = Vec::new();
     let mut word = None;
     for (at, arg) in args.iter().enumerate() {
-        if arg.as_bytes() == b"--" {
-            if at + 1 < args.len() {
-                word = Some(at);
-            }
-            break;
-        }
         match top.reads(arg) {
+            Ok(Reads::End) => {
+                if at + 1 < args.len() {
+                    word = Some(at);
+                }
+                break;
+            }
             Ok(Reads::Value) => {
                 word = Some(at);
                 break;
@@ -140,27 +155,14 @@ pub fn read(args: &[OsString]) -> Parsed<Command> {
     if !leftover.is_empty() {
         return top.refuse(unrecognized(&leftover));
     }
-    let path = |name| PathBuf::from(value(&values, name));
-    Parsed::Run(match spec.word {
-        "run" => Command::Run {
-            operator: path("--operator"),
-            package: path("--package"),
-            evidence: value(&values, "--evidence"),
-        },
-        "restore" => Command::Restore {
-            operator: path("--operator"),
-            evidence: value(&values, "--evidence"),
-            reviewed: values.get("--reviewed").map(PathBuf::from),
-        },
-        "seal" => Command::Seal {
-            operator: path("--operator"),
-            evidence: value(&values, "--evidence"),
-        },
-        other => unreachable!("SPECS holds no command {other}"),
-    })
+    Parsed::Run((spec.command)(&values))
 }
 
-fn value(values: &crate::args::Values, name: &str) -> OsString {
+fn path(values: &Values, name: &str) -> PathBuf {
+    PathBuf::from(value(values, name))
+}
+
+fn value(values: &Values, name: &str) -> OsString {
     values
         .get(name)
         .map(OsStr::to_owned)

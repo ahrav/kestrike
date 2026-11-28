@@ -16,8 +16,9 @@
 //! a malformed ref line, a Git read that exits nonzero where the read is not a presence test, Git output
 //! that is not UTF-8, a tree entry or a raw diff record of a form Git's manual does not give, a Git
 //! argument the standard library refuses, and a `git worktree add` that exits nonzero, which exits 1
-//! where Git cannot start for the removal; 2 is also signal handlers that cannot be installed, named by a
-//! `pre-push-checks: ` line. A presence read, and a read of the inventory or the registry, whose Git
+//! where Git cannot start for the removal. If `cancel::install()` fails or the checkout's top cannot be
+//! made absolute, the tool prints `pre-push-checks: the signal handlers: <error>` or
+//! `pre-push-checks: the checkout's top <path>: <error>`, respectively, and exits with status 2. A presence read, and a read of the inventory or the registry, whose Git
 //! command exits nonzero reads as an absent file, and a removal that Git refuses is a warning. 120 is a
 //! failed write to standard error; 101 a panic in the scan; and
 //! `128 + n` the first signal `n` that [`cancel`] records, regardless of its inherited disposition. The
@@ -62,7 +63,13 @@ pub fn run(top: &Path, args: &[OsString]) -> u8 {
         return fail(&format!("{NAME}: the signal handlers: {error}"), 2);
     }
     let destination = args.first().map_or(OsStr::new(""), OsString::as_os_str);
-    let top = std::path::absolute(top).unwrap_or_else(|_| top.to_path_buf());
+    let top = match std::path::absolute(top) {
+        Ok(top) => top,
+        Err(error) => {
+            let shown = Text::from_os(top.as_os_str());
+            return fail(&format!("{NAME}: the checkout's top {shown}: {error}"), 2);
+        }
+    };
     push(&top, destination).unwrap_or_else(|code| code)
 }
 

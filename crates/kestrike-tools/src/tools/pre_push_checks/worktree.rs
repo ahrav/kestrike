@@ -13,6 +13,13 @@
 //! rename entries in that parent, as in one writable by others without the sticky bit, that user can swap
 //! the worktree's directory between the steps that name it.
 //!
+//! Cargo and rustup search the ancestors of their working directory for configuration. For a row with
+//! `tools_target`, [`refusal`] fails the row before Cargo starts when [`foreign_toolchain_paths`] names
+//! a path for the worktree's parent: a directory of its lineage that another user owns or can write, or a
+//! Cargo or rustup entry there that another user owns or can write. The default `/tmp` is such a
+//! directory. The failure line names the paths. The check covers configuration another user plants above
+//! the worktree. The check trusts the tip's files and the pusher's environment.
+//!
 //! `git worktree add` and `git worktree remove` each lead a process group of their own, so a signal sent to
 //! the tool's process group reaches them only through the tool. A recorded cancellation signal causes the
 //! tool to stop `git worktree add` as it would a running check, also after Git exits while a process of
@@ -25,8 +32,8 @@
 //! names a tree Git does not know, and the entry stays.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder, File};
-use std::io::{self, Read};
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
@@ -37,6 +44,7 @@ use std::thread;
 use crate::environ::Environ;
 use crate::git::{self, GitError};
 use crate::hook::{Check, TOOLS_TARGET, argument, short};
+use crate::ownership::{self, Opened, foreign_toolchain_paths};
 use crate::text::{Text, strip_str};
 
 use super::cancel::{self, Unwaited};
@@ -129,8 +137,8 @@ pub(super) fn run_checks(
     Ok(failures)
 }
 
-/// `checks_in` adds the worktree at `tree` and runs the checks there. A row with `tools_target` runs
-/// with `CARGO_TARGET_DIR` set to [`TOOLS_TARGET`] under `top`.
+/// A row with `tools_target` keeps its build in [`TOOLS_TARGET`] under `top`, past the worktree's
+/// removal, with Cargo's cache of rustc's answers disabled.
 fn checks_in(
     environ: &Environ,
     top: &Path,
@@ -150,9 +158,22 @@ fn checks_in(
         cancel::check().map_err(Ended::Cancelled)?;
         said.map_err(Ended::Stream)?;
         let (program, args) = argv.split_first().expect("every check has a program");
+        if let Some(line) = unrunnable(*check, cfg!(target_os = "linux")) {
+            say(&format!("pre-push: {}: {line}", short(tip))).map_err(Ended::Stream)?;
+            continue;
+        }
         let mut started = git::command(environ, program);
         if row.tools_target {
-            started.env("CARGO_TARGET_DIR", top.join(TOOLS_TARGET));
+            let target = top.join(TOOLS_TARGET);
+            if let Some(reason) = refusal(tree, &target)? {
+                failures.push(format!("{command}: {reason}"));
+                continue;
+            }
+            copy_lock(top, tree)?;
+            started
+                .env("CARGO_TARGET_DIR", &target)
+                .env("CARGO_BUILD_BUILD_DIR", &target)
+                .env("CARGO_CACHE_RUSTC_INFO", "0");
         }
         let mut child = started
             .args(args)
@@ -167,6 +188,74 @@ fn checks_in(
         }
     }
     Ok(failures)
+}
+
+/// On non-Linux hosts, the push skips the `HostStop` row and reports that the workspace job runs its
+/// cases, which run only on Linux.
+fn unrunnable(check: Check, linux: bool) -> Option<&'static str> {
+    (check == Check::HostStop && !linux).then_some(
+        "the host stop controller's cases run on Linux alone, so this host runs none of them; the workspace job runs them",
+    )
+}
+
+/// A `tools_target` row fails before Cargo starts if [`foreign_toolchain_paths`] finds a path another
+/// user owns or can write for the worktree's parent, or if `target` holds a brace, which Cargo reads in a
+/// build directory as a template.
+///
+/// # Errors
+///
+/// The ownership check fails to read a path.
+fn refusal(tree: &Path, target: &Path) -> Result<Option<String>, Ended> {
+    let parent = tree.parent().unwrap_or(tree);
+    let foreign = foreign_toolchain_paths(parent)
+        .map_err(|error| Ended::Fault(format!("{}: {}", shown(error.path()), error.error())))?;
+    if !foreign.is_empty() {
+        let named: Vec<Text> = foreign.iter().map(|path| shown(path)).collect();
+        return Ok(Some(format!(
+            "another user owns or can write {}, and so can configure Cargo or rustup in the tip's \
+             worktree; set TMPDIR to a directory only you control",
+            Text::join(", ", &named)
+        )));
+    }
+    let bytes = target.as_os_str().as_bytes();
+    if bytes.contains(&b'{') || bytes.contains(&b'}') {
+        return Ok(Some(format!(
+            "{} holds a brace, which Cargo reads in a build directory as a template",
+            shown(target)
+        )));
+    }
+    Ok(None)
+}
+
+/// `copy_lock` uses the checkout's lockfile to supply dependency versions for the tip's manifests.
+/// Exclusive creation preserves any existing worktree `Cargo.lock`, including a symlink.
+///
+/// # Errors
+///
+/// For a lockfile I/O error, `Ended::Fault` identifies the affected path.
+fn copy_lock(top: &Path, tree: &Path) -> Result<(), Ended> {
+    let fault = |path: &Path, error: &io::Error| Ended::Fault(format!("{}: {error}", shown(path)));
+    let source = top.join("Cargo.lock");
+    let opened =
+        ownership::open_regular(&source).map_err(|error| fault(error.path(), error.error()))?;
+    let Opened::File(mut file) = opened else {
+        return Ok(());
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| fault(&source, &error))?;
+    let target = tree.join("Cargo.lock");
+    let mut copy = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        Ok(copy) => copy,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(fault(&target, &error)),
+    };
+    copy.write_all(&bytes)
+        .map_err(|error| fault(&target, &error))
 }
 
 /// `ended` is how a run of `program` ended where [`cancel::wait`] gave no status.

@@ -399,6 +399,7 @@ fn reads_sorts_an_argument_as_parse_does() {
         &OPTIONS,
     );
     for (arg, expected) in [
+        ("--", Ok(Reads::End)),
         ("x", Ok(Reads::Value)),
         ("-", Ok(Reads::Value)),
         ("-1", Ok(Reads::Value)),

@@ -1,7 +1,9 @@
 //! The controller's Rust source, read with the crate's lexer: its calls go through `Controller::aws`
 //! as the five calls alone, `Controller::aws` reaches the seam once, the seam `System` is named once,
-//! in the tool's root, the one `launch` call stands in `src/host_stop/seam.rs` and holds the one
-//! process start, and no other way to start a process or open a connection stands in the source.
+//! in the tool's root, the one `launch` call stands in `src/host_stop/seam.rs`, the one
+//! `Command::new` stands in `src/host_stop/launch.rs`, and no other way to start a process or open a
+//! connection stands in the source. The scans check source sites; that a call starts one child is
+//! the launch cases' to show.
 //!
 //! The scanned source is each production file under `src/host_stop/`, `src/host_stop_controller/`,
 //! `src/gameday/` and the tool's root `src/tools/host_stop_controller/`: every `.rs` file there but
@@ -218,12 +220,23 @@ fn arguments(t: &[Token], open: usize) -> Vec<Vec<Token>> {
     args
 }
 
-/// Whether `t[b]` is `name` bound by `let name =` or `let mut name =`.
+/// Whether `t[b]` is `name` bound by `let name =` or `let mut name =`, with or without a type
+/// written between the name and the `=`.
 fn binds(t: &[Token], b: usize, name: &str) -> bool {
     let before = |back: usize| b.checked_sub(back).and_then(|at| t.get(at));
     let introduced =
         ident(before(1), "let") || (ident(before(1), "mut") && ident(before(2), "let"));
-    ident(t.get(b), name) && introduced && punct(t.get(b + 1), '=')
+    if !(ident(t.get(b), name) && introduced) {
+        return false;
+    }
+    if punct(t.get(b + 1), '=') {
+        return true;
+    }
+    punct(t.get(b + 1), ':')
+        && !punct(t.get(b + 2), ':')
+        && (b + 2..t.len())
+            .take_while(|&at| !punct(t.get(at), ';'))
+            .any(|at| punct(t.get(at), '='))
 }
 
 /// The first two string literals in `tokens`.
@@ -295,18 +308,9 @@ fn call_sites(sources: &[Source]) -> Result<Vec<Site>, String> {
     Ok(found)
 }
 
-/// The five calls' check over `sources`, `Err` naming the first rule that fails.
-fn five_calls(sources: &[Source]) -> Result<(), String> {
-    let sites = call_sites(sources)?;
-    let mut ops: Vec<(String, String)> = sites.iter().map(|(words, _)| words.clone()).collect();
-    ops.sort();
-    let five: Vec<(String, String)> = FIVE
-        .iter()
-        .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
-        .collect();
-    if ops != five {
-        return Err(format!("the call sites name {ops:?}"));
-    }
+/// The stop request alone among `sites` passes `Kind::Stop`, and every other site passes
+/// `Kind::Read`.
+fn kinds_rule(sites: &[Site]) -> Result<(), String> {
     let stops: Vec<&String> = sites
         .iter()
         .filter(|(_, kind)| kind != "Read")
@@ -319,6 +323,22 @@ fn five_calls(sources: &[Source]) -> Result<(), String> {
     {
         return Err(format!("the calls other than reads are {stops:?}"));
     }
+    Ok(())
+}
+
+/// The five calls' check over `sources`, `Err` naming the first rule that fails.
+fn five_calls(sources: &[Source]) -> Result<(), String> {
+    let sites = call_sites(sources)?;
+    let mut ops: Vec<(String, String)> = sites.iter().map(|(words, _)| words.clone()).collect();
+    ops.sort();
+    let five: Vec<(String, String)> = FIVE
+        .iter()
+        .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+        .collect();
+    if ops != five {
+        return Err(format!("the call sites name {ops:?}"));
+    }
+    kinds_rule(&sites)?;
     for source in sources {
         let t = &source.tokens;
         for at in outside_use(t) {
@@ -343,6 +363,14 @@ fn five_calls(sources: &[Source]) -> Result<(), String> {
     let calls = method_calls(sources, "call");
     if calls != ["src/host_stop/call.rs"] {
         return Err(format!("a seam's call is made in {calls:?}"));
+    }
+    for source in sources {
+        let t = &source.tokens;
+        for at in 2..t.len() {
+            if punct(t.get(at - 2), ':') && punct(t.get(at - 1), ':') && ident(t.get(at), "call") {
+                return Err(format!("{}: a seam's call is named by a path", source.path));
+            }
+        }
     }
     Ok(())
 }
@@ -398,10 +426,14 @@ fn named_once(sources: &[Source]) -> Result<(), String> {
     Ok(())
 }
 
-/// The names of `libc` whose call starts a program, replaces this one, or loads code.
-const LAUNCHES: [&str; 17] = [
+/// The names of `libc` whose call starts a program, replaces this one, or loads code, beside every
+/// name that starts with `exec`.
+const LAUNCHES: [&str; 20] = [
     "fork",
     "vfork",
+    "forkpty",
+    "daemon",
+    "syscall",
     "clone",
     "clone3",
     "execv",
@@ -452,13 +484,14 @@ const CRATE_MODULES: [(&str, Option<&str>); 13] = [
 ];
 
 fn barred(name: &str) -> bool {
-    LAUNCHES.contains(&name) || NETWORK_CALLS.contains(&name)
+    LAUNCHES.contains(&name) || name.starts_with("exec") || NETWORK_CALLS.contains(&name)
 }
 
 /// The process check over `sources`: `Command::new` stands once, in the launch's file, which alone
-/// names `process`; no `use` renames an item of `std` or `libc` or takes a launch of `libc`; no
-/// `libc` call starts a program or loads code, no `.exec(` replaces this one, no connection opens,
-/// and each `crate::` path names a library module of [`CRATE_MODULES`].
+/// names `process`; no `use` renames an item of `std` or `libc`, renames `launch`, `call` or
+/// `reply`, takes a launch of `libc` or takes every name of `libc`; no `libc` call starts a program
+/// or loads code, no `.exec(` replaces this one, no connection opens, each `crate::` path names a
+/// library module of [`CRATE_MODULES`] by its own name, and no path climbs by `super::super`.
 fn one_launch(sources: &[Source]) -> Result<(), String> {
     let mut news = Vec::new();
     for source in sources {
@@ -478,6 +511,15 @@ fn one_launch(sources: &[Source]) -> Result<(), String> {
                 && barred(name)
             {
                 return Err(format!("{}: libc::{name} is called", source.path));
+            }
+            if path("crate") && !matches!(t.get(at + 3), Some(Token::Ident(_))) {
+                return Err(format!(
+                    "{}: a crate:: path names no module by its name",
+                    source.path
+                ));
+            }
+            if path("super") && ident(t.get(at + 3), "super") {
+                return Err(format!("{}: a path climbs by super::super", source.path));
             }
             if path("crate")
                 && let Some(Token::Ident(module)) = t.get(at + 3)
@@ -528,6 +570,14 @@ fn one_launch(sources: &[Source]) -> Result<(), String> {
                         source.path
                     ));
                 }
+                let seam = held.iter().any(|token| {
+                    ident(Some(token), "launch")
+                        || ident(Some(token), "call")
+                        || ident(Some(token), "reply")
+                });
+                if renames && seam {
+                    return Err(format!("{}: a use item renames a seam's item", source.path));
+                }
                 let libc = held.iter().any(|token| ident(Some(token), "libc"));
                 let named = held
                     .iter()
@@ -535,6 +585,12 @@ fn one_launch(sources: &[Source]) -> Result<(), String> {
                 if libc && named {
                     return Err(format!(
                         "{}: a use item takes a launch of libc",
+                        source.path
+                    ));
+                }
+                if libc && held.iter().any(|token| punct(Some(token), '*')) {
+                    return Err(format!(
+                        "{}: a use item takes every name of libc",
                         source.path
                     ));
                 }
@@ -577,50 +633,200 @@ fn one_process_launch_and_no_other_way_out() {
     one_launch(&scanned()).unwrap_or_else(|failed| panic!("{failed}"));
 }
 
-/// Each launch written another way, appended to the scanned source as a file of its own, fails
-/// the process check or the seam's check.
+/// Each launch written another way, appended to the scanned source as a file of its own or added to
+/// the launch's own file, fails the rule of the process check or of the seam's check that names it.
 #[test]
 fn the_scan_sees_a_launch_written_another_way() {
+    const PLANT: &str = "src/host_stop/plant.rs";
+    const LAUNCH: &str = "src/host_stop/launch.rs";
     let plants = [
-        "use std::process::Command as Spawn;\n",
-        "use std::process as p;\n",
-        "fn f() { let _ = std::process::Command::new(\"aws\").spawn(); }\n",
-        "fn f() { let _ = unsafe { libc::posix_spawnp(a, b, c, d, e, g) }; }\n",
-        "fn f() { let _ = unsafe { libc::fork() }; }\n",
-        "fn f() { let _ = std::net::TcpStream::connect(\"a:1\"); }\n",
-        "fn f(record: &mut Record<'_>, call: &Call<'_>) { let _ = launch(record, call); }\n",
-        "fn f(record: &mut Record<'_>, call: &Call<'_>) { let _ = System.call(record, call); }\n",
-        "fn f() { let run = launch; }\n",
-        "fn f(r: &mut Record<'_>, c: &Call<'_>) { let _ = crate::host_stop::launch(r, c); }\n",
-        "fn f(r: &mut Record<'_>, c: &Call<'_>) { let _ = super::launch::launch(r, c); }\n",
-        "use libc::{fork};\nfn f() { let _ = unsafe { fork() }; }\n",
-        "use libc as c;\nfn f() { let _ = unsafe { c::fork() }; }\n",
-        "fn f(e: &Environ, d: &Path) { let _ = crate::plants::git::text(e, d, &[]); }\n",
+        (
+            PLANT,
+            "use std::process::Command as Spawn;\n",
+            "process is named",
+        ),
+        (PLANT, "use std::process as p;\n", "process is named"),
+        (
+            PLANT,
+            "fn f() { let _ = std::process::Command::new(\"aws\").spawn(); }\n",
+            "process is named",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = unsafe { libc::posix_spawnp(a, b, c, d, e, g) }; }\n",
+            "libc::posix_spawnp is called",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = unsafe { libc::fork() }; }\n",
+            "libc::fork is called",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = unsafe { libc::forkpty(a, b, c, d) }; }\n",
+            "libc::forkpty is called",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = unsafe { libc::syscall(n) }; }\n",
+            "libc::syscall is called",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = unsafe { libc::daemon(0, 0) }; }\n",
+            "libc::daemon is called",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = unsafe { libc::execveat(a, b, c, d, e) }; }\n",
+            "libc::execveat is called",
+        ),
+        (
+            PLANT,
+            "fn f() { let _ = std::net::TcpStream::connect(\"a:1\"); }\n",
+            "a network module is named",
+        ),
+        (
+            PLANT,
+            "fn f(record: &mut Record<'_>, call: &Call<'_>) { let _ = launch(record, call); }\n",
+            "launch is called in",
+        ),
+        (
+            PLANT,
+            "fn f(record: &mut Record<'_>, call: &Call<'_>) { let _ = System.call(record, call); }\n",
+            "System is named in",
+        ),
+        (
+            PLANT,
+            "fn f() { let run = launch; }\n",
+            "launch is named as a value",
+        ),
+        (
+            PLANT,
+            "fn f(r: &mut Record<'_>, c: &Call<'_>) { let _ = crate::host_stop::launch(r, c); }\n",
+            "launch is called in",
+        ),
+        (
+            PLANT,
+            "fn f(r: &mut Record<'_>, c: &Call<'_>) { let _ = super::launch::launch(r, c); }\n",
+            "launch is called in",
+        ),
+        (
+            PLANT,
+            "use libc::{fork};\nfn f() { let _ = unsafe { fork() }; }\n",
+            "a use item takes a launch of libc",
+        ),
+        (
+            PLANT,
+            "use libc as c;\nfn f() { let _ = unsafe { c::fork() }; }\n",
+            "a use item renames an item of std or libc",
+        ),
+        (
+            PLANT,
+            "use libc::*;\nfn f() { let _ = unsafe { fork() }; }\n",
+            "a use item takes every name of libc",
+        ),
+        (
+            PLANT,
+            "fn f(e: &Environ, d: &Path) { let _ = crate::plants::git::text(e, d, &[]); }\n",
+            "crate::plants is named",
+        ),
+        (
+            PLANT,
+            "use crate::{plants::git};\n",
+            "a crate:: path names no module by its name",
+        ),
+        (
+            PLANT,
+            "fn f(e: &Environ, d: &Path) { let _ = super::super::plants::git::text(e, d, &[]); }\n",
+            "a path climbs by super::super",
+        ),
+        (
+            PLANT,
+            "use super::seam::launch as start;\n",
+            "a use item renames a seam's item",
+        ),
+        (
+            LAUNCH,
+            "fn f() { let _ = Command::new(\"git\"); }\n",
+            "Command::new stands in",
+        ),
+        (
+            LAUNCH,
+            "fn f(c: &mut Command) { let _ = c.exec(); }\n",
+            "exec replaces the process",
+        ),
     ];
     let sources = scanned();
     assert_eq!(one_launch(&sources), Ok(()));
     assert_eq!(named_once(&sources), Ok(()));
-    for plant in plants {
+    for (path, plant, rule) in plants {
         let mut planted = sources.clone();
         planted.push(Source {
-            path: "src/host_stop/plant.rs".to_owned(),
+            path: path.to_owned(),
             tokens: tokens(plant),
         });
-        assert!(
-            one_launch(&planted).is_err() || named_once(&planted).is_err(),
-            "{plant}"
-        );
+        let failed = format!("{:?} {:?}", one_launch(&planted), named_once(&planted));
+        assert!(failed.contains(rule), "{plant}: {failed}");
     }
-    for site in [
-        "fn f(&mut self) { let _ = self.aws(&[\"ec2\", \"start-instances\"], None, Kind::Read); }\n",
-        "fn f(s: &mut System, r: &mut Record<'_>, c: &Call<'_>) { let _ = crate::host_stop::reply(s, r, c); }\n",
+    for (site, rule) in [
+        (
+            "fn f(&mut self) { let _ = self.aws(&[\"ec2\", \"start-instances\"], None, Kind::Read); }\n",
+            "the call sites name",
+        ),
+        (
+            "fn f(s: &mut System, r: &mut Record<'_>, c: &Call<'_>) { let _ = crate::host_stop::reply(s, r, c); }\n",
+            "the seam's reply is called in",
+        ),
+        (
+            "fn f(s: &mut dyn Seam, r: &mut Record<'_>, c: &Call<'_>) { let _ = Seam::call(s, r, c); }\n",
+            "a seam's call is named by a path",
+        ),
+        (
+            "fn f(s: &mut dyn Seam, r: &mut Record<'_>, c: &Call<'_>) { let _ = s.call(r, c); }\n",
+            "a seam's call is made in",
+        ),
+        (
+            "fn f(&mut self) { let run = aws; }\n",
+            "aws is named other than in a call",
+        ),
     ] {
         let mut calls = sources.clone();
         calls.push(Source {
             path: "src/host_stop_controller/plant.rs".to_owned(),
             tokens: tokens(site),
         });
-        assert!(five_calls(&calls).is_err(), "{site}");
+        let failed = format!("{:?}", five_calls(&calls));
+        assert!(failed.contains(rule), "{site}: {failed}");
+    }
+    let typed = Source {
+        path: "src/host_stop_controller/plant.rs".to_owned(),
+        tokens: tokens(
+            "fn f(&mut self) { let argv: Vec<&str> = vec![\"ec2\", \"describe-instances\"]; \
+             let _ = self.aws(&argv, None, Kind::Read); }\n",
+        ),
+    };
+    assert_eq!(
+        call_sites(&[typed]),
+        Ok(vec![(
+            ("ec2".to_owned(), "describe-instances".to_owned()),
+            "Read".to_owned()
+        )]),
+        "a binding with its type written names its words"
+    );
+    let sites = call_sites(&sources).expect("the call sites read");
+    for (from, to, rule) in [
+        ("Stop", "Read", "the calls other than reads are []"),
+        ("Read", "Stop", "the calls other than reads are"),
+    ] {
+        let mut kinds = sites.clone();
+        let site = kinds
+            .iter_mut()
+            .find(|((_, op), kind)| kind == from && (from == "Stop") == (op == "stop-instances"))
+            .expect("a site of that kind stands");
+        site.1 = to.to_owned();
+        let failed = format!("{:?}", kinds_rule(&kinds));
+        assert!(failed.contains(rule), "{from} to {to}: {failed}");
     }
 }
 
@@ -682,4 +888,39 @@ fn the_roots_first_statement_installs_the_handlers() {
         ),
     };
     assert!(installs_first(&planted).is_err());
+}
+
+/// The root's `run` sets the panic hook ahead of its call of `entry`.
+fn hooks_before_entry(source: &Source) -> Result<(), String> {
+    let t = &source.tokens;
+    let hook = (0..t.len()).find(|&at| ident(t.get(at), "set_hook") && punct(t.get(at + 1), '('));
+    let entry = (1..t.len()).find(|&at| {
+        ident(t.get(at), "entry") && punct(t.get(at + 1), '(') && !ident(t.get(at - 1), "fn")
+    });
+    match (hook, entry) {
+        (Some(hook), Some(entry)) if hook < entry => Ok(()),
+        other => Err(format!("set_hook and the call of entry stand at {other:?}")),
+    }
+}
+
+/// The tool's root sets its silent panic hook before it calls the command's entry, so a panic the
+/// entry catches is reported by the entry's line alone; a root that calls the entry first, or sets
+/// no hook, fails the scan.
+#[test]
+fn the_root_sets_the_panic_hook_before_the_entry() {
+    let root = scanned()
+        .into_iter()
+        .find(|source| source.path == "src/tools/host_stop_controller/mod.rs")
+        .expect("the root is scanned");
+    hooks_before_entry(&root).unwrap_or_else(|failed| panic!("{failed}"));
+    for planted in [
+        "fn run() -> u8 { let code = entry(&command, &mut cx); std::panic::set_hook(Box::new(|_| {})); code }\n",
+        "fn run() -> u8 { entry(&command, &mut cx) }\n",
+    ] {
+        let source = Source {
+            path: root.path.clone(),
+            tokens: tokens(planted),
+        };
+        assert!(hooks_before_entry(&source).is_err(), "{planted}");
+    }
 }

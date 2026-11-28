@@ -125,6 +125,8 @@ struct Match<'a> {
 /// How [`Reader::reads`] reads one argument.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reads {
+    /// `--`, which ends the options.
+    End,
     Value,
     Option,
     Unknown,
@@ -324,9 +326,12 @@ impl<'t> Reader<'t> {
             .map(|(option, _)| option)
     }
 
-    /// How [`Reader::parse`] reads `arg`, which is not `--`, by the table: a value, a row's option or an
-    /// unknown option; `Err` holds the refusal's message of an ambiguous prefix.
+    /// How [`Reader::parse`] reads `arg` by the table: the end of the options, a value, a row's option or
+    /// an unknown option; `Err` holds the refusal's message of an ambiguous prefix.
     pub fn reads(&self, arg: &OsStr) -> Result<Reads, String> {
+        if arg.as_bytes() == b"--" {
+            return Ok(Reads::End);
+        }
         Ok(match self.classify(arg.as_bytes())? {
             Arg::Value => Reads::Value,
             Arg::Unknown => Reads::Unknown,

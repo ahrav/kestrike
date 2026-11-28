@@ -188,11 +188,4 @@ impl Repository {
     }
 }
 
-/// `id` is the test id of the fn `name` of the module `module`, as `module_path!` writes it: the path
-/// without the test executable's own name.
-pub fn id(module: &str, name: &str) -> String {
-    let (_, path) = module
-        .split_once("::")
-        .expect("a case module lies under the test executable");
-    format!("{path}::{name}")
-}
+pub use crate::case_id as id;

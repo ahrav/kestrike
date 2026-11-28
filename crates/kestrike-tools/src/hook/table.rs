@@ -274,9 +274,14 @@ pub(super) fn gameday_input(path: &str) -> bool {
 /// `host_stop_own` holds for a path at or under a directory of [`HOST_STOP_OWN`], a change to which runs
 /// the host stop controller's cases at any tip.
 pub(super) fn host_stop_own(path: &str) -> bool {
-    HOST_STOP_OWN
-        .iter()
-        .any(|prefix| path.starts_with(prefix) || prefix.strip_suffix('/') == Some(path))
+    at_or_under(&HOST_STOP_OWN, path)
+}
+
+/// `at_or_under` holds for `path` where it names one of `dirs`, each written with its final `/`, or an
+/// entry under one.
+fn at_or_under(dirs: &[&str], path: &str) -> bool {
+    dirs.iter()
+        .any(|dir| path.starts_with(dir) || dir.strip_suffix('/') == Some(path))
 }
 
 /// `host_stop_input` holds for a path the host stop controller's cases read from the tree, whose change
@@ -364,13 +369,8 @@ pub fn checks_for<S: AsRef<str>>(
     if held.replay && chaos || any(&|path| path == REPLAY) {
         checks.push(Check::Replay);
     }
-    if any(&|path| {
-        JUDGES_DIRS.iter().any(|dir| path.starts_with(dir))
-            || JUDGES_FILES.contains(&path)
-            || JUDGES_DIRS
-                .iter()
-                .any(|dir| dir.strip_suffix('/') == Some(path))
-    }) || held.judges && any(&|path| JUDGES_SOURCES.contains(&path))
+    if any(&|path| at_or_under(&JUDGES_DIRS, path) || JUDGES_FILES.contains(&path))
+        || held.judges && any(&|path| JUDGES_SOURCES.contains(&path))
     {
         checks.push(Check::Judges);
     }

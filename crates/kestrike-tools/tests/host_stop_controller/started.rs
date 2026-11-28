@@ -27,13 +27,17 @@ use kestrike_tools::python::hexdigest;
 
 use super::listing;
 use super::plane::calendar;
+use crate::case_id;
 use crate::host_stop_support::{
-    Scratch, TARGET, json, met, object, operator, package, rewrite, set, tree, value,
+    BLOCKS, Scratch, TARGET, gd2_mut, json, met, object, operator, package, rewrite, set, tree,
+    value,
 };
 
 const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
 /// The variable that names the stand-in's state directory and puts this test in its role.
 const ROLE: &str = "HOST_STOP_AWS_ROLE";
+/// The variable that names this test executable to the stand-in, which starts it by that path.
+const EXE: &str = "HOST_STOP_AWS_EXE";
 /// The longest run of the binary in a case.
 const LIMIT: Duration = Duration::from_secs(120);
 /// The two files that declare the package's list bounds, which the scratch top holds.
@@ -41,6 +45,21 @@ const BOUNDS: [&str; 2] = [
     "crates/kestrike/src/failover/zone_loop/directory.rs",
     "crates/kestrike/src/failover/standbys.rs",
 ];
+
+/// Writes a scratch top at `top`: `catalog` as its game-day catalog and a copy of each file of
+/// [`BOUNDS`].
+fn write_top(top: &Path, catalog: &Value) {
+    let path = top.join("verification/readiness/gamedays.json");
+    fs::create_dir_all(path.parent().expect("the catalog has a parent"))
+        .expect("the catalog's directory is made");
+    fs::write(&path, json(catalog)).expect("the catalog is written");
+    for bound in BOUNDS {
+        let path = top.join(bound);
+        fs::create_dir_all(path.parent().expect("a bound file has a parent"))
+            .expect("the bound file's directory is made");
+        fs::copy(tree().join(bound), &path).expect("the bound file is copied");
+    }
+}
 
 /// The wall clock's whole second.
 fn now() -> i64 {
@@ -74,16 +93,7 @@ impl Started {
     fn new(label: &str) -> Self {
         let scratch = Scratch::new(label);
         let top = scratch.0.join("top");
-        let catalog = top.join("verification/readiness/gamedays.json");
-        fs::create_dir_all(catalog.parent().expect("the catalog has a parent"))
-            .expect("the catalog's directory is made");
-        fs::write(&catalog, json(&met())).expect("the catalog is written");
-        for bound in BOUNDS {
-            let path = top.join(bound);
-            fs::create_dir_all(path.parent().expect("a bound file has a parent"))
-                .expect("the bound file's directory is made");
-            fs::copy(tree().join(bound), &path).expect("the bound file is copied");
-        }
+        write_top(&top, &met());
         let (bin, state) = (scratch.0.join("bin"), scratch.0.join("state"));
         for dir in [&bin, &state] {
             fs::create_dir(dir).expect("the directory is made");
@@ -145,17 +155,16 @@ impl Started {
         started
     }
 
-    /// Writes the stand-in `aws`: a `sh` file that exports the call's words and starts this test
-    /// executable for [`stand_in_aws`] alone.
+    /// Writes the stand-in `aws`: a `sh` file that exports the call's words, keeps an inherited
+    /// descriptor 3 or 4 as 5 or 6, and starts this test executable, which [`EXE`] names, for
+    /// [`stand_in_aws`] alone.
     fn stand_in(&self) {
-        let executable = std::env::current_exe().expect("the test executable is named");
-        let shown = executable
-            .to_str()
-            .expect("the test executable's path is UTF-8");
-        assert!(!shown.contains('\''), "{shown}");
         let text = format!(
             "#!/bin/sh\ni=0\nfor arg; do\n  i=$((i + 1))\n  export \"HOST_STOP_AWS_ARG_$i=$arg\"\ndone\n\
-             export HOST_STOP_AWS_ARGC=$i\nexec '{shown}' --exact {} --nocapture --quiet \
+             export HOST_STOP_AWS_ARGC=$i\n\
+             if [ -e /proc/self/fd/3 ]; then exec 5<&3; fi\n\
+             if [ -e /proc/self/fd/4 ]; then exec 6<&4; fi\n\
+             exec \"${EXE}\" --exact {} --nocapture --quiet \
              --test-threads=1 3>&1 4>&2 >/dev/null 2>/dev/null\n",
             case_id(module_path!(), "stand_in_aws")
         );
@@ -172,18 +181,15 @@ impl Started {
 
     /// The calls the stand-in answered or refused, each as its first two words.
     fn calls(&self) -> Vec<String> {
-        fs::read_to_string(self.state.join("calls"))
-            .unwrap_or_default()
-            .lines()
-            .map(|line| {
-                let words = line.split('\t').next().unwrap_or("");
-                words.split(' ').take(2).collect::<Vec<_>>().join(" ")
-            })
+        self.logged()
+            .into_iter()
+            .map(|(words, _, _)| words.split(' ').take(2).collect::<Vec<_>>().join(" "))
             .collect()
     }
 
     /// The binary as the tool `host-stop-controller` with `args` under `top`, with `PATH` holding
-    /// `path` alone and the stand-in's state named.
+    /// `path` alone, the stand-in's state and this test executable named, and `SIGXFSZ` at its
+    /// default action at the exec, so an ignored `SIGXFSZ` in a child of the tool is the root's.
     fn tool(&self, top: &Path, path: &Path, args: &[&Path]) -> Command {
         let mut command = Command::new(BINARY);
         command
@@ -192,7 +198,23 @@ impl Started {
             .args(args)
             .env_clear()
             .env("PATH", path)
-            .env(ROLE, &self.state);
+            .env(ROLE, &self.state)
+            .env(
+                EXE,
+                std::env::current_exe().expect("the test executable is named"),
+            );
+        // SAFETY: the closure runs in the child between fork and exec and calls only `sigaction`,
+        // which is async-signal-safe, on a zeroed action it owns.
+        unsafe {
+            command.pre_exec(|| {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = libc::SIG_DFL;
+                if libc::sigaction(libc::SIGXFSZ, &action, std::ptr::null_mut()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
         command
     }
 
@@ -237,9 +259,25 @@ impl Started {
 }
 
 /// The output of `command`, started as the leader of a process group of its own, which must end
-/// within `limit`. Two threads read its streams while this one holds the child; past the limit the
-/// child's group is killed while the child stands unreaped, and then the child is reaped.
+/// and close both its streams within `limit`. Two threads read its streams while this one holds the
+/// child, which stays unreaped until both readers end; past the limit the child's group is killed
+/// while the child stands unreaped, and then the child is reaped. The child gets `SIGKILL` when the
+/// thread that started it ends, so a case's processes end with the test executable.
 fn bounded(mut command: Command, limit: Duration) -> Output {
+    let parent = libc::pid_t::try_from(std::process::id()).expect("a process id fits");
+    // SAFETY: the closure runs in the child between fork and exec and calls only `prctl` and
+    // `getppid`, which are async-signal-safe and touch no memory of the parent.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                return Err(std::io::Error::other("the starter ended before the exec"));
+            }
+            Ok(())
+        });
+    }
     let mut child = command
         .process_group(0)
         .stdin(Stdio::null())
@@ -269,7 +307,10 @@ fn bounded(mut command: Command, limit: Duration) -> Output {
     );
     let begun = std::time::Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait().expect("the child is waited for") {
+        if stdout.is_finished()
+            && stderr.is_finished()
+            && let Some(status) = child.try_wait().expect("the child is waited for")
+        {
             break status;
         }
         if begun.elapsed() > limit {
@@ -289,21 +330,15 @@ fn bounded(mut command: Command, limit: Duration) -> Output {
     }
 }
 
-/// The id of the case `name` of the case module `module`, as libtest names it.
-fn case_id(module: &str, name: &str) -> String {
-    let (_, path) = module
-        .split_once("::")
-        .expect("a case module lies under the test executable");
-    format!("{path}::{name}")
-}
-
 /// The variable that puts a case in its child process, where its body runs.
 const APART: &str = "HOST_STOP_STARTED_APART";
 
 /// Runs `body` in a child process of the test executable that runs the case `name` of this module
 /// alone, and passes where the child passes. The cases that start processes start them from that
-/// child, so no child of theirs takes a copy of a descriptor another case of this process holds,
-/// such as the lock of an evidence directory, in the window between its fork and its exec.
+/// child, so the shared test process forks one child per case in place of one per process the body
+/// starts. The window between that fork and its exec, in which the child holds a copy of each
+/// descriptor another case of this process holds, such as the lock of an evidence directory, opens
+/// once per case; the lock cases' bounded retries absorb it.
 pub(crate) fn apart(module: &str, name: &str, body: impl FnOnce()) {
     if std::env::var_os(APART).is_some() {
         body();
@@ -426,8 +461,9 @@ fn reply(state: &Path, words: &[String]) -> Option<String> {
 }
 
 /// The stand-in `aws` in its role, which the variable [`ROLE`] gives it; with the variable unset
-/// the test does nothing. It logs the call, writes its reply to descriptor 3, or refuses a call it
-/// has no reply for on descriptor 4 with exit 254, and exits.
+/// the test does nothing. It logs the call, records in state `inherited` each descriptor it holds
+/// that names a path under the evidence directory, writes its reply to descriptor 3, or refuses a
+/// call it has no reply for on descriptor 4 with exit 254, and exits.
 #[test]
 fn stand_in_aws() {
     let Some(state) = std::env::var_os(ROLE).map(PathBuf::from) else {
@@ -447,6 +483,23 @@ fn stand_in_aws() {
         .trim()
         .to_owned();
     let attempts = std::env::var("AWS_MAX_ATTEMPTS").unwrap_or_else(|_| "unset".to_owned());
+    let evidence = state
+        .parent()
+        .expect("the state directory has a parent")
+        .join("evidence");
+    for entry in fs::read_dir("/proc/self/fd").expect("the descriptors list") {
+        let entry = entry.expect("the descriptors list");
+        if let Ok(target) = fs::read_link(entry.path())
+            && target.starts_with(&evidence)
+        {
+            let mut inherited = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(state.join("inherited"))
+                .expect("the record of inherited descriptors opens");
+            writeln!(inherited, "{}", target.display()).expect("the descriptor is recorded");
+        }
+    }
     writeln!(log, "{}\t{ignored}\t{attempts}", words.join(" ")).expect("the call is logged");
     let (code, stream, line) = match reply(&state, &words) {
         Some(reply) => (0, "/dev/fd/3", reply),
@@ -468,8 +521,9 @@ fn stand_in_aws() {
 /// exits 0 with the restoration pending: the caller's read comes first, the stop request leaves
 /// once, after the second alarm read, and the run writes `roles.json`, `stop.json` and
 /// `stopped.json`, whose request is `stop.json`'s value. The stop request alone runs with the CLI's
-/// retries off and names the target, and every call's child starts with `SIGXFSZ` ignored, as the
-/// root left it.
+/// retries off and names the target, where each read keeps the caller's `AWS_MAX_ATTEMPTS` of 7;
+/// each call names the operator file's region; every call's child starts with `SIGXFSZ` ignored,
+/// as the root left it, and holds no descriptor of the evidence directory.
 #[test]
 fn a_started_run_goes_clean_through_step_seven_with_exit_0() {
     apart(
@@ -477,7 +531,9 @@ fn a_started_run_goes_clean_through_step_seven_with_exit_0() {
         "a_started_run_goes_clean_through_step_seven_with_exit_0",
         || {
             let started = Started::new("started-clean");
-            let ran = started.run(&started.top, &started.bin, &started.command("run"));
+            let mut command = started.tool(&started.top, &started.bin, &started.command("run"));
+            command.env("AWS_MAX_ATTEMPTS", "7");
+            let ran = bounded(command, LIMIT);
             let (stdout, stderr) = (text(&ran.stdout), text(&ran.stderr));
             assert_eq!(ran.status.code(), Some(0), "{stdout}{stderr}");
             assert_eq!(stderr, "");
@@ -523,6 +579,11 @@ fn a_started_run_goes_clean_through_step_seven_with_exit_0() {
             );
             assert!(stdout.contains("restoration"), "{stdout}");
             let xfsz = 1u64 << (libc::SIGXFSZ - 1);
+            assert!(
+                !started.state.join("inherited").exists(),
+                "a call's child held a descriptor of the evidence directory: {:?}",
+                fs::read_to_string(started.state.join("inherited"))
+            );
             for (words, ignored, attempts) in started.logged() {
                 assert_ne!(
                     ignored & xfsz,
@@ -530,7 +591,10 @@ fn a_started_run_goes_clean_through_step_seven_with_exit_0() {
                     "{words}: the child inherits SIGXFSZ ignored"
                 );
                 let stop = words.starts_with("ec2 stop-instances ");
-                assert_eq!(attempts == "1", stop, "{words}: {attempts}");
+                let expected = if stop { "1" } else { "7" };
+                assert_eq!(attempts, expected, "{words}");
+                let split: Vec<String> = words.split(' ').map(str::to_owned).collect();
+                assert_eq!(after(&split, "--region"), ["us-west-2"], "{words}");
                 if stop {
                     assert!(
                         words.starts_with("ec2 stop-instances --instance-ids i-h1 --region "),
@@ -647,9 +711,9 @@ fn a_signal_delivered_at_the_roots_first_statement_is_recorded() {
     );
 }
 
-/// With no `aws` on its `PATH`, the tool refuses `run` at its first step on the committed tree,
-/// whose catalog leaves GD-2's prerequisites unmet, and `restore` of a copy of the held fixture at
-/// the caller check, each with exit 2 and nothing written. The control of the restore is the same
+/// With no `aws` on its `PATH`, the tool refuses `run` at its first step under a scratch top whose
+/// catalog marks one GD-2 prerequisite blocked, and `restore` of a copy of the held fixture at the
+/// caller check on the committed tree, each with exit 2 and nothing written. The control of the restore is the same
 /// start with the stand-in on `PATH`, which writes the restoration; that of the run is the clean
 /// started run, whose met catalog lets it write its marks.
 #[test]
@@ -674,7 +738,18 @@ fn the_tool_without_aws_refuses_run_at_step_one_and_restore_at_the_caller_check(
                 Path::new("--evidence"),
                 &started.evidence,
             ];
-            let ran = started.run(&tree(), &empty, &args);
+            let mut catalog = met();
+            if let Some(Value::Array(prerequisites)) =
+                gd2_mut(&mut catalog).get_mut("prerequisites")
+                && let Some(Value::String(first)) = prerequisites.first_mut()
+            {
+                *first = Text::from(format!("{first}: {BLOCKS}"));
+            } else {
+                panic!("GD-2 lists a prerequisite");
+            }
+            let blocked = started.scratch.0.join("blocked");
+            write_top(&blocked, &catalog);
+            let ran = started.run(&blocked, &empty, &args);
             assert_eq!(ran.status.code(), Some(2), "{ran:?}");
             let stderr = text(&ran.stderr);
             assert!(

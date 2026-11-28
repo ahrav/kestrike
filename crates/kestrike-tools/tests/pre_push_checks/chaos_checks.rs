@@ -4,6 +4,8 @@
 //! `python3 -I` pass `-I`, which the stand-in records apart.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use super::push::{Fixture, STUB, ZERO};
 
@@ -151,6 +153,20 @@ const HOST_STOP_CASES: &str = "crates/kestrike-tools/tests/host_stop_controller/
 /// The line the stand-in `cargo` logs for the host stop controller's row.
 const HOST_STOP_RUN: &str = "cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::";
 
+/// The words the stand-in `cargo` gets for the host stop controller's row, one argument each.
+const HOST_STOP_ARGS: [&str; 10] = [
+    "test",
+    "--package",
+    "kestrike-tools",
+    "--test",
+    "tools",
+    "--",
+    "host_stop::",
+    "host_stop_checks::",
+    "host_stop_controller::",
+    "host_stop_support::",
+];
+
 /// A push that changes no input of the host stop controller's cases asks Git nothing about them, though the
 /// trace records the tool's other lookups; the control, a push that changes a fixture they read, asks
 /// Git for their module and runs them.
@@ -217,6 +233,20 @@ fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
     assert_eq!(fx.push(&[(&head, &held)]).code, Some(0));
     assert_eq!(fx.ran(), [HOST_STOP_RUN]);
     assert_eq!(fx.targets(), [target.as_str()]);
+    assert_eq!(fx.builds(), [format!("{target} 0 checkout")]);
+    let mut words = vec![HOST_STOP_ARGS.len().to_string()];
+    words.extend(HOST_STOP_ARGS.iter().map(|word| (*word).to_owned()));
+    assert_eq!(fx.cargo_args(), words);
+    let tmp = fs::canonicalize(&fx.tmp).expect("the tool's TMPDIR resolves");
+    let dirs = fx.cargo_dirs();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    let dir = Path::new(&dirs[0]);
+    assert_eq!(dir.parent(), Some(tmp.as_path()), "{dirs:?}");
+    assert!(
+        dir.file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("kestrike-pre-push-")),
+        "{dirs:?}"
+    );
     fx.clear();
     let run = fx.push_with(&[(&head, &held)], &[("cargo", 1)]);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
@@ -302,4 +332,92 @@ fn a_new_branch_without_origin_main_runs_the_contract_checks_its_tip_holds() {
     let run = fx.push(&[(&tips[0], ZERO), (&tips[1], ZERO), (&tips[2], ZERO)]);
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert_eq!(fx.ran(), expected);
+}
+
+/// A worktree parent that another user can write fails the host stop controller's row before `cargo`
+/// starts, naming the parent; the control, the fixture's own `TMPDIR` of mode 0700, runs it.
+#[test]
+fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
+    let mut fx = Fixture::new();
+    let held = fx.commit(&[(HOST_STOP_CASES, "")]);
+    let head = fx.commit(&[("scripts/host-stop-fixtures/operator.json", "{}\n")]);
+    assert_eq!(fx.push(&[(&head, &held)]).code, Some(0));
+    assert_eq!(fx.ran(), [HOST_STOP_RUN]);
+    fx.clear();
+    let shared = fx.temp.join("shared");
+    fs::create_dir(&shared).expect("the shared directory is made");
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o777))
+        .expect("the shared directory's mode is set");
+    fx.set("TMPDIR", shared.clone());
+    let run = fx.push(&[(&head, &held)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(
+        run.stderr.contains(&format!(
+            "failed: {HOST_STOP_RUN}: another user owns or can write {}",
+            shared.display()
+        )),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("set TMPDIR to a directory only you control"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(fx.ran(), Vec::<String>::new());
+}
+
+/// A tip that tracks its own `Cargo.lock` keeps it for the host stop controller's row, where a tip without
+/// one gets the checkout's.
+#[test]
+fn a_tip_that_tracks_a_lock_keeps_it_for_the_host_stop_row() {
+    let fx = Fixture::new();
+    let held = fx.commit(&[(HOST_STOP_CASES, ""), ("Cargo.lock", "# own\n")]);
+    let head = fx.commit(&[("scripts/host-stop-fixtures/operator.json", "{}\n")]);
+    assert_eq!(fx.push(&[(&head, &held)]).code, Some(0));
+    assert_eq!(fx.ran(), [HOST_STOP_RUN]);
+    let builds = fx.builds();
+    assert_eq!(builds.len(), 1, "{builds:?}");
+    assert!(builds[0].ends_with(" 0 own"), "{builds:?}");
+}
+
+/// A relative checkout top is made absolute against the tool's working directory before the row names
+/// its target directory; an empty top, which cannot be made absolute, exits 2 before any check.
+#[test]
+fn the_checkout_top_is_made_absolute_and_an_empty_one_is_refused() {
+    let fx = Fixture::new();
+    let held = fx.commit(&[(HOST_STOP_CASES, "")]);
+    let head = fx.commit(&[("scripts/host-stop-fixtures/operator.json", "{}\n")]);
+    let ups = fx.repo.components().count() - 1;
+    let mut relative = PathBuf::new();
+    for _ in 0..ups {
+        relative.push("..");
+    }
+    relative.push(
+        super::push::top()
+            .strip_prefix("/")
+            .expect("the top is absolute"),
+    );
+    let input = format!("refs/heads/x {head} refs/heads/x {held}\n");
+    let mut command = fx.command(super::push::BINARY);
+    command
+        .arg(&relative)
+        .args(["pre-push-checks", "origin", "url"]);
+    let run = super::push::finished(super::push::spawn_with_input(&mut command, &input));
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    let target = fx.repo.join(&relative).join("target/tools");
+    assert_eq!(fx.targets(), [target.to_string_lossy().into_owned()]);
+    fx.clear();
+    let mut command = fx.command(super::push::BINARY);
+    command.arg("").args(["pre-push-checks", "origin", "url"]);
+    let run = super::push::finished(super::push::spawn_with_input(&mut command, &input));
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .starts_with("pre-push-checks: the checkout's top : "),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(fx.ran(), Vec::<String>::new());
 }

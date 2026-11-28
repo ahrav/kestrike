@@ -1357,14 +1357,19 @@ count lowered to match is refused. A collection that was short when sealed
 is the collector's declaration, and a seal removed and written again reads
 as the first, so the operator keeps the digest `seal` printed.
 The five AWS calls of `run` and `restore` run under the environment the run
-read at its start. The tool's help,
-`bash scripts/tool.sh host-stop-controller -h`, states the operator file, the
+read at its start. The tool's help, which
+`bash scripts/tool.sh host-stop-controller -h` prints on Linux and
+`crates/kestrike-tools/src/tools/host_stop_controller/help.txt` holds, states
+the operator file, the
 snapshot's two file shapes, the five AWS calls and the reply fields it reads.
 The controller's Rust cases, under `crates/kestrike-tools/tests/host_stop/`,
-`host_stop_checks/`, `host_stop_controller/` and `host_stop_support/`, run it
-over an in-process stand-in control plane and judge what it wrote on a copy of
-the held fixture; two of them start the built binary against a stand-in `aws`
-that the test executable plays. No test calls a real control plane. The
+`host_stop_checks/` and `host_stop_controller/`, with their helpers under
+`host_stop_support/`, run it over an in-process stand-in control plane and
+judge what it wrote on a copy of the held fixture through the tools library's
+copy of the game-day judge's loader; the started cases run the built binary
+against a stand-in `aws` that the test executable plays. No standing test runs
+`scripts/gameday-judge.py` on a seal the controller writes, and no test calls
+a real control plane. The
 `workspace` job runs the cases with every case of the crate, and the pre-push
 hook runs them for a push that changes the controller's Rust modules, its
 cases, its fixtures, the held fixture or a file they read, as
@@ -1471,15 +1476,34 @@ require:
   the missing file;
 - the host stop controller's Rust cases,
   `cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::`,
-  built with `CARGO_TARGET_DIR` set to `target/tools` under the checkout's
-  top level, the directory `scripts/tool.sh` builds into, so the build
-  outlasts the tip's worktree. A change at or under
+  built with `CARGO_TARGET_DIR` and `CARGO_BUILD_BUILD_DIR` set to
+  `target/tools` under the checkout's top level, the directory
+  `scripts/tool.sh` builds into, so the dependencies' build outlasts the tip's
+  worktree, with `CARGO_CACHE_RUSTC_INFO=0`, and with the checkout's
+  `Cargo.lock` copied into a worktree that holds none. Its `cargo` is the
+  push's first `cargo` on `PATH`, not the launcher's pinned toolchain, and it
+  builds without `--target`, so its outputs stand in `target/tools/debug`
+  beside the launcher's `target/tools/<host>/debug`. The package and its
+  `tools` test executable compile again at each tip, whose worktree has a new
+  path and new file times. While the row's `cargo` runs it holds the
+  directory's build lock, so a `scripts/tool.sh` call in the same checkout
+  waits for it, and two pushes of one checkout that run the row at once share
+  its build directory, so one can run the other's test executable: run such
+  pushes one at a time. The row runs the integration cases of `--test tools`
+  and leaves the modules' unit cases to the `workspace` job. Before `cargo`
+  starts, the row fails where another user owns or can write a directory
+  above the worktree, or a Cargo or rustup configuration entry there, since
+  Cargo and rustup search those directories for configuration; the default
+  `/tmp` is such a directory, so set `TMPDIR` to a directory only you control.
+  On a host other than Linux the row prints that the cases run on Linux alone
+  and runs nothing. A change at or under
   `crates/kestrike-tools/src/host_stop/`,
   `crates/kestrike-tools/src/host_stop_controller/`,
   `crates/kestrike-tools/src/gameday/`, the tool's root
-  `crates/kestrike-tools/src/tools/host_stop_controller/` or one of the case
-  directories `crates/kestrike-tools/tests/host_stop/`, `host_stop_checks/`,
-  `host_stop_controller/` and `host_stop_support/` runs them at any tip; at a
+  `crates/kestrike-tools/src/tools/host_stop_controller/`, one of the case
+  directories `crates/kestrike-tools/tests/host_stop/`, `host_stop_checks/`
+  and `host_stop_controller/`, or their helpers' directory
+  `host_stop_support/` runs them at any tip; at a
   tip that lacks the cases the filter matches no case, and the weakened-test
   scan reports the removal. A change to a path under
   `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`, to
@@ -1562,7 +1586,8 @@ worktree checks still run after it. A ref line with no comparison base prints
 that its scan was skipped and runs every worktree check: the links checks only
 at a tip that holds the registry or the links check, the contract check only
 at a tip that holds `chaos/ledger.json`, the replay only beside it, and the
-judges' test and the two self-tests each only at a tip that holds it; it also
+judges' test, the game-day self-test and the host stop controller's cases each
+only at a tip that holds it; it also
 guards that tip's chaos records. A deleted ref needs no check, and a blank
 line is skipped.
 

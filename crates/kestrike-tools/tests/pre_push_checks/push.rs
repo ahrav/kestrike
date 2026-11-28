@@ -20,7 +20,11 @@
 //! mode 0500.
 //!
 //! A stand-in `cargo`, first on `PATH` beside it, appends `cargo ARGUMENT...` to the file `STUB_LOG`
-//! names and the value of `CARGO_TARGET_DIR` to `STUB_LOG.target`, and exits with the value of
+//! names, the value of `CARGO_TARGET_DIR` to `STUB_LOG.target`, the values of `CARGO_BUILD_BUILD_DIR`
+//! and `CARGO_CACHE_RUSTC_INFO` with the state of its working directory's `Cargo.lock` (`absent`,
+//! `checkout` for the bytes of the lock under `STUB_TOP`, the checkout's top, or `own`) to
+//! `STUB_LOG.build`, the count of its arguments and each argument on a line of its own to
+//! `STUB_LOG.args`, and its physical working directory to `STUB_LOG.cwd`, and exits with the value of
 //! `STUB_CARGO`, or 0.
 
 use std::ffi::OsString;
@@ -94,6 +98,12 @@ line=cargo
 for arg; do line="$line $arg"; done
 printf '%s\n' "$line" >> "$STUB_LOG"
 printf '%s\n' "${CARGO_TARGET_DIR-unset}" >> "$STUB_LOG.target"
+if [ ! -e Cargo.lock ]; then lock=absent
+elif cmp -s Cargo.lock "$STUB_TOP/Cargo.lock"; then lock=checkout
+else lock=own; fi
+printf '%s %s %s\n' "${CARGO_BUILD_BUILD_DIR-unset}" "${CARGO_CACHE_RUSTC_INFO-unset}" "$lock" >> "$STUB_LOG.build"
+printf '%s\n' "$#" "$@" >> "$STUB_LOG.args"
+pwd -P >> "$STUB_LOG.cwd"
 exit "${STUB_CARGO:-0}"
 "#;
 
@@ -219,6 +229,7 @@ impl Fixture {
             ("GIT_COMMITTER_NAME", "t".into()),
             ("GIT_COMMITTER_EMAIL", "t@example.com".into()),
             ("STUB_LOG", log.clone().into_os_string()),
+            ("STUB_TOP", top().as_os_str().to_owned()),
             ("PATH", searched),
             ("TMPDIR", tmp.clone().into_os_string()),
         ] {
@@ -333,6 +344,9 @@ impl Fixture {
             ".where",
             ".release",
             ".target",
+            ".build",
+            ".args",
+            ".cwd",
         ] {
             let _ = fs::remove_file(self.logged(suffix));
         }
@@ -353,6 +367,22 @@ impl Fixture {
     /// `targets` lists the target directories the stand-in `cargo` was given, one for each of its runs.
     pub fn targets(&self) -> Vec<String> {
         self.lines(".target")
+    }
+
+    /// `builds` lists the build directory, the rustc cache setting and the lock's state the stand-in
+    /// `cargo` logged, one line for each of its runs.
+    pub fn builds(&self) -> Vec<String> {
+        self.lines(".build")
+    }
+
+    /// `cargo_args` lists the stand-in `cargo`'s argument counts and arguments, a line each.
+    pub fn cargo_args(&self) -> Vec<String> {
+        self.lines(".args")
+    }
+
+    /// `cargo_dirs` lists the physical working directories of the stand-in `cargo`'s runs.
+    pub fn cargo_dirs(&self) -> Vec<String> {
+        self.lines(".cwd")
     }
 
     /// `isolated` lists the lines of the runs whose first argument was `-I`.
