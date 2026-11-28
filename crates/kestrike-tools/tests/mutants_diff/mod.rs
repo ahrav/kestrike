@@ -595,7 +595,8 @@ fn tree_entries(root: &std::path::Path) -> Vec<String> {
 }
 
 /// The removal of a worktree goes past each entry it cannot remove: with two directories of mode 0500
-/// that each hold a file, among twenty-four other entries and the worktree's own, every other entry of
+/// that each hold a file and a writable directory with a sentinel file, among twenty-four other entries
+/// and the worktree's own, both sentinels and every other entry of
 /// the worktree goes and the run is incomplete with the worktree that remains. Root removes the files
 /// of a directory of mode 0500, so the case does not apply to uid 0 and says so.
 #[test]
@@ -631,18 +632,17 @@ fn the_removal_of_a_worktree_goes_past_each_entry_it_cannot_remove() {
     let [tree] = trees.as_slice() else {
         panic!("one worktree remains: {trees:?}");
     };
-    let left = tree_entries(tree);
-    for name in ["a-locked", "z-locked"] {
-        fs::set_permissions(
-            tree.join(name),
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )
-        .expect("the directory is made writable again");
-    }
     assert_eq!(
-        left,
-        ["a-locked", "a-locked/kept", "z-locked", "z-locked/kept"],
-        "every entry the removal can remove is gone"
+        tree_entries(tree),
+        [
+            "a-locked",
+            "a-locked/kept",
+            "a-locked/open",
+            "z-locked",
+            "z-locked/kept",
+            "z-locked/open"
+        ],
+        "every entry the removal can remove is gone, each locked directory's sentinel included"
     );
 }
 
@@ -1233,6 +1233,7 @@ fn a_relative_path_entry_names_the_same_program_in_the_worktree() {
 
 #[test]
 fn the_lock_copy_keeps_a_lock_file_or_link_the_head_tracks() {
+    use std::os::unix::fs::PermissionsExt;
     let fx = Fixture::new("lock-copy");
     let lock = fx.repo.join("Cargo.lock");
     let mut heads = Vec::new();
@@ -1283,14 +1284,28 @@ fn the_lock_copy_keeps_a_lock_file_or_link_the_head_tracks() {
         "the copy does not create a dangling link's target"
     );
     fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    // SAFETY: `geteuid` takes no argument and cannot fail.
+    let unreadable = unsafe { libc::geteuid() } != 0;
+    if unreadable {
+        fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).expect("the mode is set");
+    }
     let out = fx.start().base(&fx.head).head(&tracked).run();
-    assert_eq!(out.code, 0, "{}", out.all());
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).expect("the mode is restored");
+    assert_eq!(
+        out.code,
+        0,
+        "a source the runner cannot read stays unread: {}",
+        out.all()
+    );
     assert_eq!(
         fx.calls()[0].lock.as_deref(),
         Some("# tracked\n"),
         "the head's own Cargo.lock stays"
     );
     assert_eq!(fs::read_to_string(&lock).expect("UTF-8"), "# lock\n");
+    if !unreadable {
+        eprintln!("the unreadable source row is skipped: uid 0 reads a file of mode 0000");
+    }
 }
 
 #[test]

@@ -115,7 +115,9 @@ fi
 code=$(cat "$plan/exit")
 if [ -e "$plan/drop_git" ]; then rm .git; fi
 if [ -e "$plan/locked" ]; then
-  for name in a-locked z-locked; do mkdir "$name" && : > "$name/kept" && chmod 0500 "$name"; done
+  for name in a-locked z-locked; do
+    mkdir "$name" "$name/open" && : > "$name/kept" && : > "$name/open/sentinel" && chmod 0500 "$name"
+  done
   for name in b-entry m-entry y-entry e1 e2 e3 e4 e5 e6 e7 e8 e9 e10 e11 e12 e13 e14 e15 e16 e17 e18 e19 e20; do
     : > "$name"
   done
@@ -127,7 +129,9 @@ if [ -e "$plan/stray" ]; then
 fi
 out=$(value --output "$@")/mutants.out
 mkdir -p "$out"
-if [ -e "$plan/report_link" ]; then ln -s "$state/victim" "$(value --output "$@")/../report.json"; fi
+if [ -e "$plan/report_link" ]; then
+  ln -s "$state/victim" "$(value --output "$@")/../report.json" || exit 97
+fi
 if [ -e "$plan/raw_outcomes" ]; then
   cp "$plan/raw_outcomes" "$out/outcomes.json"
   exit "$code"

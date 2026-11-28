@@ -17,7 +17,6 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -51,7 +50,6 @@ const HOST_PROGRAMS: [&str; 4] = ["sh", "setsid", "sha256sum", "git"];
 
 pub type Env = Vec<(OsString, OsString)>;
 
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
 static HOST: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// `on_path` returns the first executable file named `program` in a `PATH` entry.
@@ -706,7 +704,22 @@ pub struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        unlock(&self.state);
         let _ = fs::remove_dir_all(&self.state);
+    }
+}
+
+/// `unlock` gives `dir` and each directory below it mode 0700 before it lists them, so a case that ends
+/// early, a panic included, leaves a tree its owner can remove. It follows no link.
+fn unlock(dir: &Path) {
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            unlock(&entry.path());
+        }
     }
 }
 
@@ -737,10 +750,9 @@ impl Fixture {
     /// whose head adds `two`, an untracked `Cargo.lock`, and the `cargo` stand-in.
     pub fn new(name: &str) -> Self {
         let real_git = prepare_host();
-        let count = COUNTER.fetch_add(1, Ordering::SeqCst);
         let parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mutants-diff");
         fs::create_dir_all(&parent).expect("the scratch parent is made");
-        let prefix = format!("{name}-{}-{count}-", std::process::id());
+        let prefix = format!("{name}-");
         let state = kestrike_tools::temp_dir::make_temp_dir(&prefix, &parent)
             .expect("the state directory is made");
         let cargo = state.join("cargo");
