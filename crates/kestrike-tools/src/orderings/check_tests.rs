@@ -2042,3 +2042,27 @@ fn an_empty_scoped_file_refuses_each_of_its_rows() {
         &format!("fill-observe: its find occurs 0 times in {FILL}"),
     );
 }
+
+#[test]
+fn a_word_inside_a_path_attribute_belongs_to_its_refusal() {
+    let loaded = "#[cfg_attr(include, path = \"fill_extra.rs\")]\nmod extra;\n\n";
+    let planted = source(FILL, ANCHOR, &format!("{loaded}{ANCHOR}"));
+    let line = planted[..planted.find(loaded).expect("the plant stands")]
+        .matches('\n')
+        .count()
+        + 1;
+    let (report, code) = checked(vec![(FILL, text(planted))]);
+    assert_eq!(code, 1, "{report:?}");
+    assert_eq!(
+        messages_of(&report, "scope file"),
+        [
+            format!(
+                "{FILL}:{line}: #[cfg_attr(include, path = can load source that the catalog does not scope"
+            ),
+            format!(
+                "{FILL}:{}: mod can load source that the catalog does not scope",
+                line + 1
+            ),
+        ]
+    );
+}
