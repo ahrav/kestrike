@@ -2295,3 +2295,145 @@ fn the_kernel_texts_are_the_packages_sources() {
         ])
     );
 }
+
+/// Kept readings of links: a package link that no `#[path]` names, into a crate file, is an include the
+/// classification reads as production; and a path attribute that names a link loads the link's name, so
+/// the file the link resolves to stands declared by no module file.
+#[test]
+fn a_link_is_classified_by_the_name_it_resolves_to() {
+    let scratch = planted_package(&[], None);
+    let root = root_of(&scratch);
+    let slot = "crates/kestrike/src/storage/slot.rs";
+    fs::create_dir_all(root.join("crates/kestrike/src/storage"))
+        .expect("the crate directory is made");
+    fs::write(root.join(slot), "// slot\n").expect("the file is written");
+    symlink(
+        format!("../../../../../{slot}"),
+        package_of(&scratch).join("src/extra.rs"),
+    )
+    .expect("the link is made");
+    let read = reader(vec![]);
+    let scope = scope_files(&package_of(&scratch), &root, &read, &top()).expect("the scope reads");
+    assert_eq!(
+        (
+            scope.included().iter().any(|path| path == slot),
+            scope.refusals()
+        ),
+        (true, &[][..])
+    );
+    let real = "crates/kestrike/src/storage/real.rs";
+    let scratch = planted_package(&[real], None);
+    let storage = root_of(&scratch).join("crates/kestrike/src/storage");
+    fs::create_dir_all(&storage).expect("the crate directory is made");
+    fs::write(storage.join("real.rs"), "// real\n").expect("the file is written");
+    symlink("real.rs", storage.join("alias.rs")).expect("the link is made");
+    let found = scope_messages(
+        &root_of(&scratch),
+        vec![(
+            STORAGE,
+            text(format!(
+                "{}#[path = \"alias.rs\"]\nmod alias;\n",
+                committed(STORAGE)
+            )),
+        )],
+    );
+    let head = format!("the kernel package includes {real} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+}
+
+/// Two module files that declare each other, where only the first has a live declaration from its
+/// directory's module file, leave the second declared by no module file in either order of the
+/// includes: the classification searches the module files the crate's committed sources name.
+#[test]
+fn a_file_only_a_planted_module_declares_stands_undeclared_in_any_order() {
+    let first = "crates/kestrike/src/storage/s_a.rs";
+    let second = "crates/kestrike/src/storage/s_b.rs";
+    let plants = || {
+        vec![
+            (STORAGE, text(format!("{}mod s_a;\n", committed(STORAGE)))),
+            (first, text("#[path = \"s_b.rs\"]\nmod b;\n".to_owned())),
+            (second, text("#[path = \"s_a.rs\"]\nmod a;\n".to_owned())),
+        ]
+    };
+    let head = format!("the kernel package includes {second} and no module file declares it");
+    for order in [[first, second], [second, first]] {
+        let scratch = planted_package(&order, None);
+        let read = reader(plants());
+        let scope = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &top())
+            .expect("the scope reads");
+        let refused = messages(scope.refusals())
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count();
+        assert_eq!(
+            (scope.included().iter().any(|path| path == first), refused),
+            (true, 1),
+            "{order:?}"
+        );
+    }
+}
+
+/// Build state is set aside after its entries are looked up, so a source under `target` in a directory
+/// the process may list and not search stops the reading of the package's sources and texts.
+#[test]
+fn a_source_under_build_state_is_looked_up_before_it_is_set_aside() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("sources-target");
+    let locked = scratch.0.join("package/target/locked");
+    fs::create_dir_all(&locked).expect("the build directory is made");
+    fs::write(locked.join("x.rs"), "").expect("the output is written");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("the mode is set");
+    let package = scratch.0.join("package");
+    let found = (
+        kernel_texts(&package).map_err(|error| error.kind()).err(),
+        crate::genmc::package_sources(&package)
+            .map_err(|error| error.kind())
+            .err(),
+    );
+    let searchable = fs::metadata(locked.join("x.rs")).is_ok();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).expect("the mode is restored");
+    if searchable {
+        eprintln!(
+            "a_source_under_build_state_is_looked_up_before_it_is_set_aside: this process searches a mode-644 directory; the reading is checked"
+        );
+        assert_eq!(found, (None, None));
+        return;
+    }
+    assert_eq!(
+        found,
+        (
+            Some(io::ErrorKind::PermissionDenied),
+            Some(io::ErrorKind::PermissionDenied)
+        )
+    );
+}
+
+/// The model source is read twice, once to choose the file and once for its text, so a reader whose
+/// second read differs gives the second text.
+#[test]
+fn a_model_source_is_read_again_for_its_text() {
+    use std::cell::Cell;
+    let file = "crates/kestrike/src/a.rs";
+    let reads = Cell::new(0);
+    let read = |path: &str| -> io::Result<String> {
+        match path {
+            TREE => Ok("mod a;\n".to_owned()),
+            _ if path == file => {
+                reads.set(reads.get() + 1);
+                Ok(format!("// read {}\n", reads.get()))
+            }
+            _ => Err(io::Error::from(io::ErrorKind::NotFound)),
+        }
+    };
+    assert_eq!(
+        super::module_file("a::t", &read),
+        Some((file.to_owned(), "// read 2\n".to_owned()))
+    );
+}
