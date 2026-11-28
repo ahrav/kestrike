@@ -281,6 +281,34 @@ fn half() -> Value {
     Value::Float(0.5)
 }
 
+/// A record whose summary is no string earns no verdict and leaves the file readable, so an unlisted
+/// mutant with a null summary beside a listed one the tool caught gives a complete run with that one
+/// caught.
+#[test]
+fn an_unlisted_mutant_with_a_null_summary_leaves_the_run_complete() {
+    let fx = Fixture::new("null-summary");
+    let a = format!("{SOURCE}/lib.rs:2:1: replace two -> u32 with 0");
+    let mut unlisted = match mutant("b", "CaughtMutant", half()) {
+        Value::Object(object) => object,
+        other => panic!("{other:?}"),
+    };
+    unlisted.insert("summary", Value::Null);
+    fx.plan(&Plan {
+        raw_outcomes: Some(outcome_file(vec![
+            baseline("Success", half()),
+            mutant(&a, "CaughtMutant", half()),
+            Value::Object(unlisted),
+        ])),
+        ..Plan::new(&listed(&lib_rs(), std::slice::from_ref(&a)), &[])
+    });
+    let out = fx.start().run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(complete(&report), "{:?}", reason(&report));
+    assert_eq!(outcomes_of(&report), ["caught"]);
+    assert_eq!(counts(&report)[..2], ["1", "1"]);
+}
+
 #[test]
 fn a_malformed_listing_or_outcome_file_makes_the_run_incomplete() {
     let fx = Fixture::new("malformed");
