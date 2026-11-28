@@ -24,7 +24,7 @@ use crate::host_stop::{
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
-use crate::text::Text;
+use crate::text::{Text, text};
 
 const TOOL: &str = "host-stop-controller: ";
 
@@ -100,43 +100,6 @@ fn aborted_text(aborted: &Aborted) -> Text {
     text
 }
 
-trait Piece {
-    fn put(&self, out: &mut Text);
-}
-
-impl Piece for str {
-    fn put(&self, out: &mut Text) {
-        out.push_str(self);
-    }
-}
-
-impl Piece for String {
-    fn put(&self, out: &mut Text) {
-        out.push_str(self);
-    }
-}
-
-impl Piece for Text {
-    fn put(&self, out: &mut Text) {
-        out.push_text(self);
-    }
-}
-
-impl<T: Piece + ?Sized> Piece for &T {
-    fn put(&self, out: &mut Text) {
-        (**self).put(out);
-    }
-}
-
-/// `refused!(a, b, ...)` is the refusal whose sentence is its pieces in order.
-macro_rules! refused {
-    ($($piece:expr),+ $(,)?) => {{
-        let mut sentence = Text::new();
-        $(Piece::put(&$piece, &mut sentence);)+
-        Halt::refused(sentence)
-    }};
-}
-
 fn shown_path(path: &Path) -> Text {
     Text::from_os(path.as_os_str())
 }
@@ -162,11 +125,11 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         self.cx.record.hold();
         if let Err(error) = self.cx.files.mkdir(&injection) {
             self.cx.record.end_hold();
-            return Err(refused!(
+            return Err(Halt::refused(text!(
                 shown_path(&injection),
                 " cannot be made: ",
                 &strerror(&error),
-            ));
+            )));
         }
         self.injection = Some(injection.clone());
         let mut held = None;
@@ -218,7 +181,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 },
                 may_stand: true,
             }),
-            Ok(()) => Err(refused!(what, " is removed")),
+            Ok(()) => Err(Halt::refused(text!(what, " is removed"))),
         }
     }
 
@@ -252,14 +215,16 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         }));
         if !met {
             let shown = owed.map_or_else(|| "None".to_owned(), repr);
-            return Err(refused!(format!(
+            return Err(Halt::refused(text!(format!(
                 "GD-2's prerequisites are not all met, so the catalog blocks its execution: {shown}"
-            )));
+            ))));
         }
         let limit = self.cx.file_limit;
         let raw = read_bytes(package, &Text::from("the package"), limit)?;
         let Some(bounds) = FleetBounds::new(self.cx.top, limit) else {
-            return Err(refused!("the tree's top has a path no file can have"));
+            return Err(Halt::refused(text!(
+                "the tree's top has a path no file can have"
+            )));
         };
         let run = check_run(&raw, self.operator, Number::from(start), &bounds)?;
         self.instance = Some(run.instance().clone());
@@ -271,27 +236,31 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 .lstat(&root)
                 .is_ok_and(|found| found.file_type().is_dir());
         if !directory {
-            return Err(refused!(Text::from_os(evidence).repr(), " is no directory",));
+            return Err(Halt::refused(text!(
+                Text::from_os(evidence).repr(),
+                " is no directory",
+            )));
         }
         let injection = beside(&root, "injection");
         if self.cx.files.lstat(&injection).is_ok() {
-            return Err(refused!(
+            return Err(Halt::refused(text!(
                 shown_path(&injection),
                 " exists: a run's marks are written once",
-            ));
+            )));
         }
         probe(self.cx.files, &root).map_err(|error| probe_refusal(&root, &error))?;
         let copy = beside(&root, "package.json");
         if read_bytes(&copy, &shown_path(&copy), limit)? != raw {
-            return Err(refused!(
+            return Err(Halt::refused(text!(
                 shown_path(&copy),
                 " holds other bytes than --package, so the judge would refuse the run's evidence",
-            ));
+            )));
         }
         match self.before_roles(&run, (start, at)) {
-            Err(Halt::Aborted(aborted)) => {
-                Err(refused!(aborted.detail(), " before injection/ was made",))
-            }
+            Err(Halt::Aborted(aborted)) => Err(Halt::refused(text!(
+                aborted.detail(),
+                " before injection/ was made",
+            ))),
             Ok(roles) => Ok((root, run, roles)),
             Err(other) => Err(other),
         }
@@ -321,10 +290,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         ));
         let states = match self.statuses(self.operator.instances(), None) {
             Err(Halt::Failed(failed)) => {
-                return Err(refused!(
+                return Err(Halt::refused(text!(
                     "the declared instances' status is unknown: ",
                     failed.sentence(),
-                ));
+                )));
             }
             other => other?,
         };
@@ -334,10 +303,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             .map(|(instance, _)| instance)
             .collect();
         if !open.is_empty() {
-            return Err(refused!(format!(
+            return Err(Halt::refused(text!(format!(
                 "declared instances {} are not running: a run is left open",
                 list_repr(open)
-            )));
+            ))));
         }
         let roles = build_roles(
             run.package(),
@@ -722,17 +691,17 @@ fn lock_sentence(directory: &Path, error: &LockError) -> Text {
 
 fn probe_refusal(root: &Path, error: &ProbeError) -> Halt {
     match error {
-        ProbeError::Unnamed(error) => refused!(
+        ProbeError::Unnamed(error) => Halt::refused(text!(
             shown_path(root),
             " takes no unnamed file, so no mark can be written there: ",
             &strerror(error),
-        ),
-        ProbeError::Unresolved(resolved) => refused!(
+        )),
+        ProbeError::Unresolved(resolved) => Halt::refused(text!(
             shown_path(resolved),
             " does not resolve, so no unnamed file in ",
             shown_path(root),
             " can be linked to a mark's name",
-        ),
+        )),
     }
 }
 

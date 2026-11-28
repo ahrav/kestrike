@@ -217,7 +217,7 @@ fn a_run_with_no_aws_on_its_path_exits_2_and_writes_nothing() {
     let mut record = Record::new(delivered);
     let output = Output::default();
     let (mut out, mut err) = (output.clone(), output.clone());
-    let mut seam = System::new();
+    let mut seam = System;
     let top = tree();
     let mut cx = Context {
         seam: &mut seam,

@@ -62,20 +62,15 @@ impl Fault {
 
     /// The fault of a mark's write at `path`: a failed step is its system error, a write that took
     /// no byte is the system error `EIO` with the write's sentence, and a failure after the link is
-    /// the sentence of what stands. That sentence starts with the path, which keeps each byte with
-    /// no UTF-8 form as a lone surrogate, so the abort mark's check refuses the detail that holds it.
+    /// the sentence of what stands.
     pub(crate) fn unwritten(unwritten: &Unwritten, path: &Path) -> Self {
         match unwritten {
             Unwritten::Failed { error, .. } => Self::os(error),
             Unwritten::Stalled => Self::Os {
                 code: Some(libc::EIO),
-                text: unwritten.sentence(path),
+                text: unwritten.sentence(path).to_string(),
             },
-            _ => {
-                let mut sentence = Text::from_os(path.as_os_str());
-                sentence.push_str(&unwritten.sentence(Path::new("")));
-                Self::Unwritten(sentence)
-            }
+            _ => Self::Unwritten(unwritten.sentence(path)),
         }
     }
 

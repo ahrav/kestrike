@@ -43,7 +43,11 @@ fn a_signal_after_the_observations_last_read_takes_the_abort_path() {
     at_reading(
         &case,
         move |state| {
-            let shown = state.log.iter().find(|l| l.op == RECORD).and_then(|l| l.time);
+            let shown = state
+                .log
+                .iter()
+                .find(|l| l.op == RECORD)
+                .and_then(|l| l.time);
             let Some(shown) = shown else {
                 return false;
             };
@@ -114,7 +118,10 @@ fn a_signal_while_the_roles_mark_is_built_ends_the_run_before_any_mark() {
     at_reading(
         &case,
         move |state| {
-            let answered = state.log.last().is_some_and(|l| l.op == STATUS && l.time.is_some());
+            let answered = state
+                .log
+                .last()
+                .is_some_and(|l| l.op == STATUS && l.time.is_some());
             if answered {
                 readings.set(readings.get() + 1);
             }
@@ -190,15 +197,23 @@ fn a_panic_while_the_record_is_held_leaves_it_unheld_for_the_next_entry() {
         let mut record = Record::new(case.delivered);
         let evidence = case.evidence.clone().into_os_string();
         let code = case.run_on(&mut record, evidence.clone());
-        assert!(case.output().contains("a planted file fault"), "{at}: {}", case.output());
-        assert!(!record.is_held() && !record.is_armed(), "{at}: {code} {record:?}");
+        assert!(
+            case.output().contains("a planted file fault"),
+            "{at}: {}",
+            case.output()
+        );
+        assert!(
+            !record.is_held() && !record.is_armed(),
+            "{at}: {code} {record:?}"
+        );
         let (calls, before) = (case.ops(), listing(&case.evidence));
         case.delivered.deliver(Signal::Terminate);
         let code = case.run_on(&mut record, evidence);
         assert_eq!(code, 2, "{at}: {}", case.output());
         assert!(
-            case.stderr()
-                .ends_with("host-stop-controller: signal SIGTERM before any mark; nothing written\n"),
+            case.stderr().ends_with(
+                "host-stop-controller: signal SIGTERM before any mark; nothing written\n"
+            ),
             "{at}: {}",
             case.stderr()
         );
@@ -232,7 +247,10 @@ fn a_deadline_reached_once_the_roles_mark_is_built_is_a_refusal() {
     at_reading(
         &case,
         move |state| {
-            let answered = state.log.last().is_some_and(|l| l.op == STATUS && l.time.is_some());
+            let answered = state
+                .log
+                .last()
+                .is_some_and(|l| l.op == STATUS && l.time.is_some());
             if answered {
                 readings.set(readings.get() + 1);
             }
@@ -282,7 +300,10 @@ fn a_stop_awaited_with_no_target_read_is_an_order_fault() {
         request.insert("time", Value::Float(wall));
         controller.await_stop(&Value::Object(request), monotonic + 60.0)
     });
-    assert!(matches!(ended, Err(Halt::Fault(Fault::Order(_)))), "{ended:?}");
+    assert!(
+        matches!(ended, Err(Halt::Fault(Fault::Order(_)))),
+        "{ended:?}"
+    );
     assert!(case.ops().is_empty());
     assert_eq!(case.plane.borrow().sleeps, 0);
 }
@@ -291,6 +312,9 @@ fn a_stop_awaited_with_no_target_read_is_an_order_fault() {
 fn a_failed_lookup_of_the_evidence_root_is_refused_with_no_call() {
     let mut case = Case::new("root-lookup");
     let root = case.evidence.clone();
-    case.fail_once(libc::EIO, move |step| matches!(step, Step::Lstat(path) if *path == root));
+    case.fail_once(
+        libc::EIO,
+        move |step| matches!(step, Step::Lstat(path) if *path == root),
+    );
     case.assert_refused(&[], "is no directory");
 }
