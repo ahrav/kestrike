@@ -278,50 +278,84 @@ pub fn judge_case(
         .iter()
         .filter_map(|line| ERROR_EVENT.captures(line))
         .collect();
-    let zero = Integer::from(0_u64);
-    let violation = Integer::from(42_u64);
     if equal(
         member(declared, "expect")?,
         &Value::String("positive".into()),
     ) {
-        if *exit_code != zero {
-            let code = if *exit_code == violation {
-                Code::Mismatch
-            } else {
-                Code::ToolFailure
-            };
-            return Err(refused(
-                code,
-                format!("{name} exited {exit_code}, declared positive"),
-            ));
-        }
-        single(&lines, &COMPLETE, name, "Verification complete")?;
-        single(&lines, &NO_ERRORS, name, "No errors")?;
-        if !errors.is_empty() || lines.iter().any(|line| line.starts_with("Error:")) {
-            return Err(tool_failure(format!(
-                "{name} reports an error beside exit 0"
-            )));
-        }
-        if executions == zero {
-            return Err(refused(
-                Code::Mismatch,
-                format!("{name} explored no complete execution"),
-            ));
-        }
-        if let Some(blocked) = lines
-            .iter()
-            .find(|line| line.starts_with("Number of blocked executions seen:"))
-        {
-            return Err(refused(
-                Code::Mismatch,
-                format!("{name} pruned executions: {}", quoted(blocked)),
-            ));
-        }
-        return Ok(Judged {
-            at: None,
-            executions,
-        });
+        positive(name, exit_code, &lines, !errors.is_empty(), executions)
+    } else {
+        violation(
+            root, name, declared, text, exit_code, graph, &lines, &errors, executions,
+        )
     }
+}
+
+/// The rules of a case declared positive, after the rules every case shares.
+fn positive(
+    name: &str,
+    exit_code: &Integer,
+    lines: &[String],
+    errors: bool,
+    executions: Integer,
+) -> Result<Judged, Error> {
+    let zero = Integer::from(0_u64);
+    if *exit_code != zero {
+        let code = if *exit_code == Integer::from(42_u64) {
+            Code::Mismatch
+        } else {
+            Code::ToolFailure
+        };
+        return Err(refused(
+            code,
+            format!("{name} exited {exit_code}, declared positive"),
+        ));
+    }
+    single(lines, &COMPLETE, name, "Verification complete")?;
+    single(lines, &NO_ERRORS, name, "No errors")?;
+    if errors || lines.iter().any(|line| line.starts_with("Error:")) {
+        return Err(tool_failure(format!(
+            "{name} reports an error beside exit 0"
+        )));
+    }
+    if executions == zero {
+        return Err(refused(
+            Code::Mismatch,
+            format!("{name} explored no complete execution"),
+        ));
+    }
+    if let Some(blocked) = lines
+        .iter()
+        .find(|line| line.starts_with("Number of blocked executions seen:"))
+    {
+        return Err(refused(
+            Code::Mismatch,
+            format!("{name} pruned executions: {}", quoted(blocked)),
+        ));
+    }
+    Ok(Judged {
+        at: None,
+        executions,
+    })
+}
+
+/// The rules of a case declared a violation, after the rules every case shares.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one input the violation rules read"
+)]
+fn violation(
+    root: &Path,
+    name: &str,
+    declared: &Value,
+    text: &str,
+    exit_code: &Integer,
+    graph: &Path,
+    lines: &[String],
+    errors: &[regex::Captures<'_>],
+    executions: Integer,
+) -> Result<Judged, Error> {
+    let zero = Integer::from(0_u64);
+    let violation = Integer::from(42_u64);
     if *exit_code != violation {
         let code = if *exit_code == zero {
             Code::Mismatch
@@ -333,8 +367,8 @@ pub fn judge_case(
             format!("{name} exited {exit_code}, declared a violation"),
         ));
     }
-    single(&lines, &SAFETY, name, "Safety violation")?;
-    single(&lines, &UNSUCCESSFUL, name, "Verification unsuccesful")?;
+    single(lines, &SAFETY, name, "Safety violation")?;
+    single(lines, &UNSUCCESSFUL, name, "Verification unsuccesful")?;
     for (pattern, what) in [
         (&*COMPLETE, "Verification complete"),
         (&*NO_ERRORS, "No errors"),
