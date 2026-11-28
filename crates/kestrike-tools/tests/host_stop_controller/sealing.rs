@@ -51,13 +51,21 @@ pub(crate) fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
             continue;
         }
         let (source, target) = (from.join(&relative), to.join(&relative));
-        if fs::symlink_metadata(&source).is_ok_and(|found| found.is_dir()) {
+        let kind = fs::symlink_metadata(&source)
+            .unwrap_or_else(|error| panic!("{}: {error}", source.display()))
+            .file_type();
+        if kind.is_dir() {
             DirBuilder::new()
                 .mode(0o700)
                 .create(&target)
                 .expect("a directory is copied");
-        } else {
+        } else if kind.is_file() {
             fs::copy(&source, &target).expect("a file is copied");
+        } else {
+            panic!(
+                "{} is neither a regular file nor a directory",
+                source.display()
+            );
         }
     }
 }
@@ -164,14 +172,21 @@ impl Case {
         root
     }
 
-    /// Runs `seal` over `root` and returns its exit code.
+    /// Runs `seal` over `root`, asserts that it made no call, and returns its exit code.
     pub(crate) fn seal_at(&mut self, root: &Path) -> u8 {
         let command = Command::Seal {
             operator: self.write_operator(),
             evidence: root.as_os_str().to_owned(),
         };
         let mut record = Record::new(self.delivered);
-        self.in_context_on(&mut record, |cx| entry(&command, cx))
+        let (calls, envs) = (self.log().len(), self.plane.borrow().envs.len());
+        let code = self.in_context_on(&mut record, |cx| entry(&command, cx));
+        assert_eq!(
+            (self.log().len(), self.plane.borrow().envs.len()),
+            (calls, envs),
+            "the seal makes no call"
+        );
+        code
     }
 
     /// Runs `restore` over `root` with `reviewed` and returns its exit code.
@@ -243,16 +258,15 @@ impl Case {
         );
     }
 
-    /// The relative path of each file under `root` whose sync a file step makes, in order, shared
-    /// with the plant that records them. The seal syncs each file it reads once the read ends, so
-    /// the list stands for the files read; a read that fails before its sync is absent from it.
+    /// The relative path of each file under `root` that the seal's reader starts to read, in
+    /// order, shared with the plant that records them. A read that fails at its open or before its
+    /// sync stands in the list too.
     pub(crate) fn reads_under(&self, root: &Path) -> Rc<RefCell<Vec<String>>> {
         let read = Rc::new(RefCell::new(Vec::new()));
         let (seen, root) = (Rc::clone(&read), root.to_path_buf());
         self.plant(Box::new(move |_, step| {
-            if let Step::Fsync(fd) = step
-                && let Ok(rel) = named_fd(*fd).strip_prefix(&root)
-                && !rel.to_string_lossy().ends_with("(deleted)")
+            if let Step::Read(path) = step
+                && let Ok(rel) = path.strip_prefix(&root)
             {
                 seen.borrow_mut().push(rel.to_string_lossy().into_owned());
             }

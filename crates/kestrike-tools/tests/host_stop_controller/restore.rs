@@ -1,18 +1,23 @@
+use std::cell::RefCell;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
+use std::rc::Rc;
 
 use kestrike_tools::gameday::ends_observation;
 use kestrike_tools::host_stop::{
-    Number, Request, Signal, System, check_reviewed, check_stopped, launch_time,
+    Disk, LockError, Number, Request, Signal, System, check_reviewed, check_stopped, launch_time,
+    lock,
 };
-use kestrike_tools::json::{Object, Text, Value};
+use kestrike_tools::json::{Text, Value};
 use kestrike_tools::python::repr_float;
 
+use super::after_stop::flip;
+use super::late_reads::at_reading;
 use super::plane::{Action, CALLER, CHANGES, RECORD, STATUS, Shape, State, calendar, string};
 use super::restoring::{digest, replace_mark, restore_alone, write_json};
-use super::steps::{Step, errno, links};
-use super::stop_run::{operator_seconds, seconds, time};
+use super::steps::{Step, errno, free_lock, links};
+use super::stop_run::{instance_row, mkfifo, operator_seconds, seconds, time};
 use super::{COPY, Case, guardrails, listing, member, set, tail, text_of};
 use crate::host_stop_support::{START, TARGET, object, value};
 
@@ -29,36 +34,10 @@ fn shorten_bounds(case: &mut Case, deadline: i64) {
     }
 }
 
-pub(crate) fn flip_first_guardrail() -> Action {
-    Action::Hook(Box::new(|state: &mut State| {
-        state.flip("gd2-guardrail-1", "ALARM");
-        Action::Answer
-    }))
-}
-
 fn shapes(count: usize, shape: impl Fn(Value) -> Value + Clone + 'static) -> Vec<Shape> {
     (0..count)
         .map(|_| Box::new(shape.clone()) as Shape)
         .collect()
-}
-
-fn instance_row(reply: &mut Value) -> &mut Object {
-    let Value::Object(reply) = reply else {
-        panic!("a reply is an object")
-    };
-    let Some(Value::Array(reservations)) = reply.get_mut("Reservations") else {
-        panic!("a record reply holds its reservations")
-    };
-    let Some(Value::Object(reservation)) = reservations.first_mut() else {
-        panic!("a reservation")
-    };
-    let Some(Value::Array(rows)) = reservation.get_mut("Instances") else {
-        panic!("a reservation holds its instances")
-    };
-    match rows.first_mut() {
-        Some(Value::Object(row)) => row,
-        other => panic!("{other:?} is an instance row"),
-    }
 }
 
 #[test]
@@ -532,13 +511,7 @@ fn after_an_abort_restore_needs_the_reviewed_record_of_that_abort() {
     case.assert_restore_refused(Some(&inside), "inside the evidence directory");
     fs::remove_file(&inside).expect("the review inside is removed");
     let pipe = case.scratch.0.join("pipe.json");
-    let name = std::ffi::CString::new(pipe.to_str().expect("UTF-8").as_bytes()).expect("no NUL");
-    // SAFETY: `name` is a NUL-terminated path that outlives the call.
-    assert_eq!(
-        unsafe { libc::mkfifo(name.as_ptr(), 0o600) },
-        0,
-        "the pipe is made"
-    );
+    mkfifo(&pipe);
     let before = listing(&case.evidence);
     let (operator, catalog, evidence) = (
         case.write_operator(),
@@ -875,7 +848,7 @@ fn restore_refuses_an_abort_before_the_stop_and_a_package_or_caller_other_than_t
 #[test]
 fn restore_after_an_abort_checks_a_stopped_mark_that_stands() {
     let mut case = Case::new("restore-stopped-abort");
-    case.faulted(flip_first_guardrail(), false);
+    case.faulted(flip("gd2-guardrail-1", "ALARM"), false);
     assert_eq!(case.run(), 1, "{}", case.output());
     case.start_target(0);
     let injection = case.evidence.join("injection");
@@ -890,7 +863,7 @@ fn restore_after_an_abort_checks_a_stopped_mark_that_stands() {
 fn a_restoration_reaches_a_stopped_report_dated_after_the_abort_mark() {
     let mut case = Case::new("restore-reaches");
     case.plane.borrow_mut().call_seconds = 0.25;
-    case.faulted(flip_first_guardrail(), false);
+    case.faulted(flip("gd2-guardrail-1", "ALARM"), false);
     assert_eq!(case.run(), 1, "{}", case.output());
     let injection = case.evidence.join("injection");
     let marks = case.marks();
@@ -976,6 +949,7 @@ fn a_signal_during_the_restoration_write_keeps_its_exit_0() {
     case.signal_at(Signal::Terminate, |step| links(step, "restoration.json"));
     assert_eq!(case.restore(None), 0, "{}", case.output());
     assert!(case.marks().contains_key("restoration"));
+    assert_eq!(case.delivered.stored(), Some(Signal::Terminate));
 }
 
 fn delivering(case: &Case, signal: Signal) -> Action {
@@ -1004,9 +978,18 @@ fn a_signal_before_or_during_the_poll_ends_restore_with_exit_1_and_no_mark() {
                     if called == op { planted.take() } else { None }
                 },
             ));
+        let (out, err) = (case.stdout().len(), case.stderr().len());
         assert_eq!(case.restore(None), 1, "{name}: {}", case.output());
-        let line = format!("signal {}: the restoration is unwritten", signal.name());
-        assert!(case.output().contains(&line), "{name}: {}", case.output());
+        let line = format!(
+            "host-stop-controller: signal {}: the restoration is unwritten: ",
+            signal.name()
+        );
+        assert!(
+            case.stdout()[out..].starts_with(&line),
+            "{name}: {}",
+            case.stdout()
+        );
+        assert_eq!(case.stderr()[err..], *"", "{name}");
         assert_eq!(case.after_fault(), Vec::<String>::new(), "{name}");
         assert!(!case.marks().contains_key("restoration"), "{name}");
     }
@@ -1028,14 +1011,15 @@ fn a_signal_during_restores_checks_ends_it_before_any_call() {
                 matches!(step, Step::Lstat(path) if path.ends_with("injection/collected.json"))
             });
         }
-        let start = case.log().len();
+        let (start, out, err) = (case.log().len(), case.stdout().len(), case.stderr().len());
         assert_eq!(case.restore(None), 1, "{name}: {}", case.output());
-        assert!(
-            case.output()
-                .contains("host-stop-controller: signal SIGTERM: the restoration is unwritten: no status read was made\n"),
-            "{name}: {}",
-            case.output()
+        assert_eq!(
+            case.stdout()[out..],
+            *"host-stop-controller: signal SIGTERM: the restoration is unwritten: no status read \
+              was made\n",
+            "{name}"
         );
+        assert_eq!(case.stderr()[err..], *"", "{name}");
         assert_eq!(case.ops()[start..], [] as [String; 0], "{name}");
         assert!(!case.marks().contains_key("restoration"), "{name}");
     }
@@ -1195,12 +1179,12 @@ fn a_ready_read_dated_before_restores_start_writes_no_restoration() {
 #[test]
 fn restore_refuses_a_mark_whose_lookup_fails() {
     let mut case = Case::new("restore-lookup");
-    case.faulted(flip_first_guardrail(), false);
+    case.faulted(flip("gd2-guardrail-1", "ALARM"), false);
     assert_eq!(case.run(), 1, "{}", case.output());
     case.start_target(0);
     let names: Vec<String> = case.marks().keys().cloned().collect();
     assert_eq!(names, ["abort", "roles", "stop", "stopped"]);
-    for name in ["restoration", "stopped", "abort"] {
+    for name in ["restoration", "stopped", "abort", "collected"] {
         let looked = format!("injection/{name}.json");
         let mut failed = false;
         case.plant(Box::new(move |_, step| {
@@ -1314,9 +1298,233 @@ fn restore_refuses_an_injection_that_takes_no_unnamed_file() {
     let mut case = Case::new("restore-probe");
     assert_eq!(case.run(), 0, "{}", case.output());
     case.start_target(0);
+    replace_mark(
+        &case.evidence.join("injection"),
+        "stop.json",
+        &string("not a request"),
+    );
     case.fail_once(libc::EACCES, |step| matches!(step, Step::OpenUnnamed(_)));
     case.assert_restore_refused(
         None,
         "injection takes no unnamed file, so no mark can be written there: Permission denied",
     );
+}
+
+#[test]
+fn a_signal_after_the_last_record_read_ends_restore_with_exit_1_and_no_mark() {
+    let mut case = Case::new("restore-signal-last-read");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let start = case.log().len();
+    let delivered = case.delivered;
+    at_reading(
+        &case,
+        move |state| {
+            state.log.len() > start
+                && state
+                    .log
+                    .last()
+                    .is_some_and(|last| last.op == RECORD && last.time.is_some())
+        },
+        move |_| delivered.deliver(Signal::Terminate),
+    );
+    let (out, err) = (case.stdout().len(), case.stderr().len());
+    assert_eq!(case.restore(None), 1, "{}", case.output());
+    assert_eq!(
+        case.stdout()[out..],
+        *"host-stop-controller: signal SIGTERM: the restoration is unwritten: the target reads \
+          {'state': 'running', 'instance': 'ok', 'system': 'ok'}\n"
+    );
+    assert_eq!(case.stderr()[err..], *"");
+    assert_eq!(case.ops()[start..], [CALLER, STATUS, RECORD]);
+    assert!(!case.marks().contains_key("restoration"));
+}
+
+#[test]
+fn a_restoration_whose_link_finds_an_entry_exits_1_and_a_later_restore_refuses_it() {
+    let mut case = Case::new("restore-link-taken");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let path = case.evidence.join("injection/restoration.json");
+    let planted = path.clone();
+    let mut done = false;
+    case.plant(Box::new(move |_, step| {
+        if !done && links(step, "restoration.json") {
+            done = true;
+            fs::write(&planted, b"{\"planted\": true}").expect("an entry is planted");
+        }
+        None
+    }));
+    let (out, err) = (case.stdout().len(), case.stderr().len());
+    assert_eq!(case.restore(None), 1, "{}", case.output());
+    assert_eq!(
+        case.stderr()[err..],
+        *"host-stop-controller: restoration.json is unwritten: [Errno 17] File exists\n"
+    );
+    assert!(
+        !case.stdout()[out..].contains("runs again"),
+        "{}",
+        case.stdout()
+    );
+    assert_eq!(
+        fs::read(&path).expect("the entry reads"),
+        b"{\"planted\": true}"
+    );
+    case.start_target(0);
+    case.assert_restore_refused(
+        None,
+        "injection/restoration.json exists: the restoration is written once",
+    );
+    assert_eq!(
+        fs::read(&path).expect("the entry reads"),
+        b"{\"planted\": true}"
+    );
+}
+
+#[test]
+fn a_restoration_left_standing_by_a_failed_sync_and_removal_exits_1_and_is_refused_later() {
+    let mut case = Case::new("restore-left-standing");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    case.fail_once(libc::EIO, |step| matches!(step, Step::FsyncDirectory(_)));
+    case.fail_once(libc::EIO, |step| {
+        matches!(step, Step::Unlink(name) if *name == std::ffi::OsStr::new("restoration.json"))
+    });
+    let (out, err) = (case.stdout().len(), case.stderr().len());
+    assert_eq!(case.restore(None), 1, "{}", case.output());
+    let line = &case.stderr()[err..];
+    assert!(
+        line.starts_with("host-stop-controller: ") && line.contains("restoration.json"),
+        "{line}"
+    );
+    assert!(
+        !case.stdout()[out..].contains("runs again"),
+        "{}",
+        case.stdout()
+    );
+    let standing = case.marks()["restoration"].clone();
+    assert_eq!(text_of(&standing, "state"), "running");
+    case.start_target(0);
+    case.assert_restore_refused(
+        None,
+        "injection/restoration.json exists: the restoration is written once",
+    );
+    assert_eq!(case.marks()["restoration"], standing);
+}
+
+#[test]
+fn a_wall_step_during_the_poll_leaves_its_bound_on_the_monotonic_clock() {
+    let mut case = Case::new("restore-wall-step");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    shorten_bounds(&mut case, 20);
+    case.start_target(0);
+    let mut planted = Some(Action::Hook(Box::new(|state: &mut State| {
+        state.step += 3600.0;
+        Action::Answer
+    })));
+    case.plane.borrow_mut().fault = Some(Box::new(move |_, called| {
+        if called == STATUS {
+            planted.take()
+        } else {
+            None
+        }
+    }));
+    let start = case.log().len();
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    assert_eq!(case.ops()[start..], [CALLER, STATUS, STATUS, RECORD]);
+    assert!(case.marks().contains_key("restoration"));
+}
+
+#[test]
+fn a_restoration_decided_by_an_integer_stop_time_keeps_its_integer_kind() {
+    let mut case = Case::new("restore-integer-floor");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    let injection = case.evidence.join("injection");
+    let marks = case.marks();
+    let at = time(&marks["stopped"]).ceil() + 1.0;
+    let mut stop = marks["stop"].clone();
+    set(&mut stop, &["time"], value(&format!("{at:.0}")));
+    let mut stopped = marks["stopped"].clone();
+    set(&mut stopped, &["time"], Value::Float(at));
+    set(&mut stopped, &["request"], stop.clone());
+    replace_mark(&injection, "stop.json", &stop);
+    replace_mark(&injection, "stopped.json", &stopped);
+    case.start_target(0);
+    {
+        let mut plane = case.plane.borrow_mut();
+        plane
+            .instances
+            .get_mut(TARGET)
+            .expect("the target")
+            .launched = at + SKEW;
+    }
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    let text = fs::read_to_string(injection.join("restoration.json")).expect("the mark reads");
+    assert!(text.contains(&format!("\"time\": {at:.0}\n")), "{text}");
+    assert!(matches!(
+        member(&case.marks()["restoration"], "time"),
+        Value::Integer(_)
+    ));
+}
+
+#[test]
+fn restore_refuses_a_restoration_beyond_the_mark_limit() {
+    let mut case = Case::new("restore-limits");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    case.mark_limit = 50;
+    let err = case.stderr().len();
+    assert_eq!(case.restore(None), 2, "{}", case.output());
+    assert!(
+        case.stderr()[err..].contains("injection/restoration.json would hold ")
+            && case.stderr()[err..].contains("more than the judge reads (50)"),
+        "{}",
+        &case.stderr()[err..]
+    );
+    assert!(!case.marks().contains_key("restoration"));
+}
+
+#[test]
+fn launch_text_rounds_a_half_millisecond_tie_to_even() {
+    assert_eq!(
+        super::plane::launch_text(405.0625),
+        "1970-01-01T00:06:45.062+00:00"
+    );
+    assert_eq!(
+        super::plane::launch_text(405.1875),
+        "1970-01-01T00:06:45.188+00:00"
+    );
+}
+
+#[test]
+fn restore_holds_the_evidence_lock_through_its_poll_and_its_mark() {
+    let mut case = Case::new("restore-lock-held");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let injection = case.evidence.join("injection");
+    let probes = Rc::new(RefCell::new(Vec::new()));
+    let (seen, dir) = (Rc::clone(&probes), injection.clone());
+    let mut planted = Some(Action::Hook(Box::new(move |_: &mut State| {
+        let taken = matches!(lock(&Disk, &dir), Err(LockError::Taken(_)));
+        seen.borrow_mut().push(("status", taken));
+        Action::Answer
+    })));
+    case.plane.borrow_mut().fault = Some(Box::new(move |_, called| {
+        if called == STATUS {
+            planted.take()
+        } else {
+            None
+        }
+    }));
+    let (seen, dir) = (Rc::clone(&probes), injection.clone());
+    case.plant(Box::new(move |_, step| {
+        if links(step, "restoration.json") {
+            let taken = matches!(lock(&Disk, &dir), Err(LockError::Taken(_)));
+            seen.borrow_mut().push(("link", taken));
+        }
+        None
+    }));
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    assert_eq!(*probes.borrow(), [("status", true), ("link", true)]);
+    drop(free_lock(&injection));
 }

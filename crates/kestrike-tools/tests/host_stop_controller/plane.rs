@@ -82,6 +82,7 @@ pub(crate) struct Logged {
     pub(crate) left: Option<f64>,
     pub(crate) marks: Vec<String>,
     pub(crate) time: Option<f64>,
+    pub(crate) wall: Option<f64>,
     pub(crate) cut: bool,
     pub(crate) fault: bool,
     /// `stop.json` as it stood at a stop request.
@@ -349,6 +350,7 @@ impl State {
             left: self.deadline.map(|deadline| deadline - begin),
             marks,
             time: None,
+            wall: None,
             cut: false,
             fault: false,
             stop_json,
@@ -413,6 +415,8 @@ impl State {
             after(self, key);
             self.after = Some(after);
         }
+        let wall = self.wall();
+        self.log.last_mut().expect("logged").wall = Some(wall);
         Ok(text(&reply))
     }
 
@@ -595,6 +599,9 @@ pub(crate) fn launch_text(seconds: f64) -> String {
     if fraction == 0.0 {
         format!("{whole}+00:00")
     } else {
-        format!("{whole}.{:03}+00:00", (fraction * 1000.0).round() as i64)
+        format!(
+            "{whole}.{:03}+00:00",
+            (fraction * 1000.0).round_ties_even() as i64
+        )
     }
 }
