@@ -344,6 +344,11 @@ fn archive(args: &[String], place: &Path, log: &Path, out: &mut File) -> i32 {
     write(&output.join("mode"), &mode);
     if mode == "otherlock" {
         write(&output.join("Cargo.lock"), "another resolution\n");
+    } else if mode == "linklock" {
+        fs::copy("Cargo.lock", output.join("kept.lock")).expect("the lockfile is kept");
+        std::os::unix::fs::symlink("kept.lock", output.join("Cargo.lock")).expect("linked");
+    } else if mode == "dirlock" {
+        fs::create_dir(output.join("Cargo.lock")).expect("the directory is made");
     } else if mode != "nolock" && mode != "nolockarchive" {
         fs::copy("Cargo.lock", output.join("Cargo.lock")).expect("the lockfile is kept");
     }

@@ -71,7 +71,7 @@ pub const PLANTS: [(&str, Planted); 11] = [
 
 /// Plants for the cases of one test each, kept out of the default store: each is `p-<mode>`, sweeps `a`,
 /// has a cause and replaces the line `base`.
-pub const MODES: [&str; 89] = [
+pub const MODES: [&str; 91] = [
     "panic",
     "hangconfirm",
     "hangseed",
@@ -112,6 +112,8 @@ pub const MODES: [&str; 89] = [
     "confirmfail",
     "noresult",
     "otherlock",
+    "linklock",
+    "dirlock",
     "nolock",
     "loneline",
     "cutline",

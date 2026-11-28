@@ -253,6 +253,14 @@ fn each_malformed_or_contradictory_record_leaves_no_verdict() {
             "keeps no regular Cargo.lock equal to the run's",
         ),
         ("p-nolock", "keeps no regular Cargo.lock equal to the run's"),
+        (
+            "p-linklock",
+            "keeps no regular Cargo.lock equal to the run's",
+        ),
+        (
+            "p-dirlock",
+            "keeps no regular Cargo.lock equal to the run's",
+        ),
         ("p-loneline", "`suspects.jsonl` lists 1 suspects"),
         ("p-disorder", "gives a counts out of order"),
         ("p-othercampaign", "names campaign 'another' and counts {}"),
