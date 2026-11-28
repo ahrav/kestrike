@@ -12,10 +12,12 @@ use std::fs::File;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::process::{GRACE, Interrupted, exited_within, handled_set};
+use crate::process::{
+    GroupStop, Interrupted, Leader, Stopped, handled_set, leader_left_within, stop_group,
+};
 pub use crate::process::{INTERRUPT, Interrupt, SIGNALS, install_handlers};
 pub(super) use crate::process::{capture, exit_code};
 
@@ -49,44 +51,16 @@ pub fn ignore_signals() -> io::Result<()> {
     Ok(())
 }
 
-/// `signal_group` sends `signal` to the process group `group` and returns false when no member is left.
-///
-/// # Errors
-///
-/// `killpg` fails with an error other than `ESRCH`.
-fn signal_group(group: libc::pid_t, signal: i32) -> Result<bool, Fault> {
-    // SAFETY: `killpg` takes two integers and touches no memory of the caller.
-    if unsafe { libc::killpg(group, signal) } == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        return Ok(false);
-    }
-    Err(Fault::os(&error, None))
-}
-
-/// `stop_group` stops the group the child leads. When the group is gone at SIGTERM it returns. Otherwise
-/// it waits up to [`GRACE`] for the leader, sends SIGKILL to the group if the leader still runs and waits
-/// up to [`GRACE`] again, and ends with SIGKILL to the group in every case. A member the leader left
-/// behind after it exited gets SIGTERM and SIGKILL with no wait between them.
-///
-/// # Errors
-///
-/// A signal cannot be sent for a reason other than an empty group, or the wait fails.
-fn stop_group(child: &mut Child) -> Result<(), Fault> {
-    let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
-    for signal in [libc::SIGTERM, libc::SIGKILL] {
-        if !signal_group(group, signal)? {
-            return Ok(());
-        }
-        let exited = exited_within(child, GRACE, None).map_err(|error| Fault::os(&error, None))?;
-        if exited.is_some() {
-            break;
-        }
-    }
-    signal_group(group, libc::SIGKILL).map(drop)
-}
+/// The stop of a supervised child's group: two graces of 10 s, a reap of up to 10 s and pauses of up to
+/// 20 ms between two reads of the leader's state.
+const STOP: GroupStop<'static> = GroupStop::new(
+    Duration::from_secs(10),
+    true,
+    Some(Duration::from_secs(10)),
+    Duration::from_millis(20),
+);
+/// The longest pause between two reads of a supervised child's state while the run waits for its exit.
+const POLL: Duration = Duration::from_millis(20);
 
 /// `lead_new_session` makes the child started by `command` lead a new session, return each of [`SIGNALS`]
 /// that has a handler to its default action, unblock the three and receive SIGTERM when the starting thread
@@ -137,12 +111,14 @@ fn lead_new_session(command: &mut Command) {
 /// to the two files and the environment `env`, in a new session, and returns its exit code as
 /// [`exit_code`] gives it. A signal recorded in `interrupt` before the child started or while it runs
 /// stops the child's group and returns the interruption. Once the leader has exited, the members of its
-/// group it left behind are stopped. The run passes [`INTERRUPT`].
+/// group it left behind are stopped. The run reads the leader's state while it waits and reaps the leader
+/// only after the group's last signal, and the exit code is that reap's. The run passes [`INTERRUPT`].
 ///
 /// # Errors
 ///
 /// An empty `argv`, a recorded signal, or an output file, the start, the wait or a stop of the group that
-/// fails. An empty `argv` fails before either output file is opened.
+/// fails; a leader that a wait outside the run reaped fails as a wait with `ECHILD`. An empty `argv` fails
+/// before either output file is opened.
 pub fn supervise(
     interrupt: &Interrupt,
     argv: &[&OsStr],
@@ -174,16 +150,29 @@ pub fn supervise(
     let mut child = command
         .spawn()
         .map_err(|error| Stop::failed(&Fault::os(&error, Some(program))))?;
+    let recorded = || interrupt.recorded().is_some();
     let ended = interrupt.check().map_err(Stop::from).and_then(|()| {
-        match exited_within(&mut child, Duration::MAX, Some(interrupt)) {
-            Ok(Some(status)) => Ok(exit_code(status)),
-            Ok(None) => interrupt
+        match leader_left_within(child.id(), Duration::MAX, POLL, &recorded) {
+            Ok(Leader::Exited | Leader::Reaped) => Ok(()),
+            Ok(Leader::Running) => interrupt
                 .check()
                 .map_err(Stop::from)
                 .map(|()| unreachable!("a wait ends early only on a signal")),
             Err(error) => Err(Stop::failed(&Fault::os(&error, None))),
         }
     });
-    stop_group(&mut child).map_err(|fault| Stop::failed(&fault))?;
-    ended
+    let stopped =
+        stop_group(&mut child, &STOP).map_err(|error| Stop::failed(&Fault::os(&error, None)))?;
+    ended?;
+    match stopped {
+        Stopped::Reaped(status) => Ok(exit_code(status)),
+        Stopped::ReapedElsewhere => {
+            let error = io::Error::from_raw_os_error(libc::ECHILD);
+            Err(Stop::failed(&Fault::os(&error, None)))
+        }
+        Stopped::Running => {
+            let error = io::Error::new(io::ErrorKind::TimedOut, "the child outlived its stop");
+            Err(Stop::failed(&Fault::os(&error, None)))
+        }
+    }
 }
