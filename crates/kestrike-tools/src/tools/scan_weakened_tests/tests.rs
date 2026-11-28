@@ -1,9 +1,10 @@
-use super::digits::{integer, is_digits};
+use super::digits::integer;
 use super::hunks::{Hunk, hunks, paired};
 use super::inventory::inventory_changes;
 use super::patterns::*;
 use super::tree::records;
 use super::{Failure, Shown};
+use crate::python::isdigit as is_digits;
 
 type Cases = &'static [(
     &'static str,

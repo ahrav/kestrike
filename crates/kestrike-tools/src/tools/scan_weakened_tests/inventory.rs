@@ -8,11 +8,12 @@ use crate::git::blob_texts;
 use crate::json::{self, Value};
 use crate::text::Text;
 
-use super::digits::{integer, is_digits};
+use super::digits::integer;
 use super::finding::short;
 use super::hunks::paired;
 use super::patterns::{ALIASING, INVENTORY_TEXT_BUDGET, text_of};
 use super::{Change, Class, Failure, Shown};
+use crate::python::isdigit as is_digits;
 
 pub const INVENTORY: &str = "scripts/test-inventory.json";
 const BUDGETS: [&str; 3] = ["seeds", "seconds", "executions"];

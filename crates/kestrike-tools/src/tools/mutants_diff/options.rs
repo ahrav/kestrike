@@ -4,7 +4,9 @@
 use std::ffi::{OsStr, OsString};
 
 use crate::args::{Kind, Opt, Parsed, Prefixes, Reader};
+use crate::classes::is_digit;
 use crate::json::{Integer, MAX_INTEGER_DIGITS};
+use crate::python::{int_digits, isdigit};
 use crate::shell;
 use crate::text::Text;
 
@@ -79,24 +81,28 @@ fn is_ascii_digits(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// `ascii_digits` returns the text when it is one or more ASCII digits.
-fn ascii_digits(value: &Text) -> Option<&str> {
-    value.to_str().filter(|digits| is_ascii_digits(digits))
+/// `limit` reads a `--max-mutants` value as Python's `str.isdigit()` and `int()` read it: a value that is
+/// no digits by [`isdigit`] is no positive integer, a digit outside category `Nd` or a run of more than
+/// [`MAX_INTEGER_DIGITS`] digits is an invalid value, and zero is no positive integer.
+fn limit(value: &Text) -> Result<Integer, String> {
+    let refused = || "a positive integer".to_owned();
+    if !isdigit(value.code_points()) {
+        return Err(refused());
+    }
+    let invalid = || format!("invalid positive value: {}", value.repr());
+    let digits = value.to_str().ok_or_else(invalid)?;
+    if !digits.chars().all(is_digit) {
+        return Err(invalid());
+    }
+    let limit = int_digits(digits).map_err(|_| invalid())?;
+    if limit == Integer::from(0_usize) {
+        return Err(refused());
+    }
+    Ok(limit)
 }
 
-/// A limit is ASCII digits worth one or more. Past [`MAX_INTEGER_DIGITS`] digits the value is refused as
-/// one the integer conversion takes no further.
 fn positive(value: &Text) -> Result<(), String> {
-    let Some(digits) = ascii_digits(value) else {
-        return Err("a positive integer".to_owned());
-    };
-    if digits.len() > MAX_INTEGER_DIGITS {
-        return Err(format!("invalid positive value: {}", value.repr()));
-    }
-    if digits.bytes().all(|byte| byte == b'0') {
-        return Err("a positive integer".to_owned());
-    }
-    Ok(())
+    limit(value).map(drop)
 }
 
 /// `shard_numbers` splits `K/N`, each one or more ASCII digits, into its two numbers.
@@ -149,7 +155,7 @@ pub fn parse(args: &[OsString]) -> Parsed<Options> {
         let or_default =
             |name, default: &str| given(name).unwrap_or_else(|| OsString::from(default));
         let limit = or_default("--max-mutants", DEFAULT_LIMIT);
-        let limit = limit.to_str().expect("a checked limit is ASCII digits");
+        let limit = self::limit(&Text::from_os(&limit)).expect("a checked limit reads");
         let shard = given("--shard").map(|text| {
             let shown = Text::from_os(&text);
             let (k, n) = shard_numbers(&shown).expect("a checked shard is K/N");
@@ -166,7 +172,7 @@ pub fn parse(args: &[OsString]) -> Parsed<Options> {
         Options {
             base: given("--base"),
             head: or_default("--head", "HEAD"),
-            max_mutants: integer(limit),
+            max_mutants: limit,
             shard,
             tests,
             artifacts: given("--artifacts"),

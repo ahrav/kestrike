@@ -44,10 +44,6 @@ fn the_token_after_an_option_is_a_value_unless_it_reads_as_an_option() {
             &["--shard", "1/2\n"][..],
             "mutants-diff: error: argument --shard: K/N with 0 <= K < N",
         ),
-        (
-            &["--max-mutants", "\u{661}"][..],
-            "mutants-diff: error: argument --max-mutants: a positive integer",
-        ),
     ];
     for (args, expected) in refusals {
         assert_eq!(
@@ -118,6 +114,40 @@ fn numbers_keep_their_value_and_past_4300_digits_are_invalid() {
         refused,
         format!("mutants-diff: error: argument --shard: invalid shard_value value: '{shard}'")
     );
+}
+
+/// A limit is a run of Unicode digits: a decimal digit of any script counts by its value, a digit outside
+/// category `Nd` is an invalid value, and zero in any script is no positive integer.
+#[test]
+fn a_limit_reads_unicode_decimal_digits_by_their_value() {
+    for (value, limit) in [
+        ("\u{661}", "1"),
+        ("1\u{661}\u{967}", "111"),
+        ("\u{ff10}7", "7"),
+    ] {
+        assert_eq!(
+            options(read(&["--max-mutants", value]))
+                .max_mutants
+                .to_string(),
+            limit,
+            "int({value:?}) gives {limit}"
+        );
+    }
+    let refusals = [
+        ("\u{b2}", "invalid positive value: '\u{b2}'"),
+        ("1\u{b2}", "invalid positive value: '1\u{b2}'"),
+        ("\u{660}", "a positive integer"),
+        ("\u{660}\u{966}", "a positive integer"),
+        ("\u{bd}", "a positive integer"),
+        ("1 ", "a positive integer"),
+    ];
+    for (value, refusal) in refusals {
+        assert_eq!(
+            self::refusal(read(&["--max-mutants", value])),
+            format!("mutants-diff: error: argument --max-mutants: {refusal}"),
+            "--max-mutants {value:?}"
+        );
+    }
 }
 
 #[test]

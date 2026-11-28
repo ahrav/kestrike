@@ -1,6 +1,7 @@
 //! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` for floats,
-//! [`hexdigest`] for the SHA-256 hex of bytes, and [`say`], which writes one line with its control
-//! characters and surrogates escaped.
+//! [`hexdigest`] for the SHA-256 hex of bytes, [`say`], which writes one line with its control
+//! characters and surrogates escaped, and the digit rules of a string: [`isdigit`], [`digit_value`] and
+//! [`int_digits`].
 //!
 //! A JSON value stands for the Python value `json.loads` gives for it: an object is a `dict`, an array a
 //! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
@@ -9,6 +10,7 @@ use std::io::{self, Write};
 
 use sha2::{Digest, Sha256};
 
+use crate::classes::is_digit;
 use crate::json::{Integer, MAX_INTEGER_DIGITS, Value};
 use crate::text::{Text, is_space, push_backslashed, push_repr};
 
@@ -249,6 +251,98 @@ pub fn hexdigest(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The code points outside category `Nd` for which Python 3.9's `str.isdigit()` holds, under Unicode 13.0.
+const OTHER_DIGITS: [(u32, u32); 20] = [
+    (0xb2, 0xb3),
+    (0xb9, 0xb9),
+    (0x1369, 0x1371),
+    (0x19da, 0x19da),
+    (0x2070, 0x2070),
+    (0x2074, 0x2079),
+    (0x2080, 0x2089),
+    (0x2460, 0x2468),
+    (0x2474, 0x247c),
+    (0x2488, 0x2490),
+    (0x24ea, 0x24ea),
+    (0x24f5, 0x24fd),
+    (0x24ff, 0x24ff),
+    (0x2776, 0x277e),
+    (0x2780, 0x2788),
+    (0x278a, 0x2792),
+    (0x10a40, 0x10a43),
+    (0x10e60, 0x10e68),
+    (0x11052, 0x1105a),
+    (0x1f100, 0x1f10a),
+];
+
+/// `isdigit` holds for one or more code points, each a decimal digit (category `Nd`) or one of
+/// [`OTHER_DIGITS`], as Python's `str.isdigit()` does.
+pub fn isdigit(text: impl IntoIterator<Item = u32>) -> bool {
+    let mut any = false;
+    for code in text {
+        let other = OTHER_DIGITS
+            .iter()
+            .any(|&(low, high)| (low..=high).contains(&code));
+        if !other && !char::from_u32(code).is_some_and(is_digit) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// The value of a decimal digit, a code point of category `Nd`. Those code points stand in runs of ten
+/// from zero to nine, and adjoining runs each start at zero, so the count of digits right before it
+/// gives its value modulo ten.
+pub fn digit_value(c: char) -> Option<u32> {
+    if c.is_ascii_digit() {
+        return c.to_digit(10);
+    }
+    if !is_digit(c) {
+        return None;
+    }
+    let mut before = 0;
+    let mut code = u32::from(c);
+    while let Some(previous) = code.checked_sub(1).and_then(char::from_u32) {
+        if !is_digit(previous) {
+            break;
+        }
+        before += 1;
+        code -= 1;
+    }
+    Some(before % 10)
+}
+
+/// A run of digits that [`int_digits`] refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DigitsError {
+    /// A text that holds no digit.
+    Empty,
+    /// A code point that is neither a decimal digit nor `_`.
+    NotDecimal(char),
+    /// The count of digits, more than [`MAX_INTEGER_DIGITS`].
+    TooMany(usize),
+}
+
+/// `int_digits` reads `digits`, decimal digits (category `Nd`) and underscores, as the nonnegative integer
+/// Python's `int` gives for its digits, each digit by [`digit_value`].
+///
+/// # Errors
+///
+/// No digit, a code point that is neither a decimal digit nor `_`, or more than [`MAX_INTEGER_DIGITS`]
+/// digits.
+pub fn int_digits(digits: &str) -> Result<Integer, DigitsError> {
+    let mut ascii = String::with_capacity(digits.len());
+    for c in digits.chars().filter(|&c| c != '_') {
+        let value = digit_value(c).ok_or(DigitsError::NotDecimal(c))?;
+        ascii.push(char::from_digit(value, 10).expect("a digit's value is below ten"));
+    }
+    if ascii.len() > MAX_INTEGER_DIGITS {
+        return Err(DigitsError::TooMany(ascii.len()));
+    }
+    Integer::from_digits(false, &ascii).ok_or(DigitsError::Empty)
 }
 
 #[cfg(test)]
