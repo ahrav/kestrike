@@ -18,7 +18,7 @@ use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
-use super::tree::files;
+use super::tree::{directory, files};
 use super::{Change, Class, Failure, Finding, Shown};
 
 const TOOL: &str = super::NAME;
@@ -80,9 +80,16 @@ fn findings(environ: &Environ, base: &str, head: &str) -> Result<Vec<Finding>, F
         .copied()
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
-    // A diffed path that is a link, a tree or a submodule at either commit is refused here.
-    files(environ, base, &diffed)?;
-    files(environ, head, &diffed)?;
+    // `files` rejects a checked path at either commit if it names a non-file entry or is missing beneath a link
+    // or a submodule.
+    let mut checked = diffed.clone();
+    for path in std::iter::once(INVENTORY).chain(TIMEOUT_FILES) {
+        if !checked.contains(&path) {
+            checked.push(path);
+        }
+    }
+    let base_held = files(environ, base, &checked)?;
+    let head_held = files(environ, head, &checked)?;
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])
@@ -141,12 +148,16 @@ fn findings(environ: &Environ, base: &str, head: &str) -> Result<Vec<Finding>, F
         }
     };
     if paths.iter().any(within(INVENTORY)) {
-        let old = inventory_text(environ, base)?;
-        let new = inventory_text(environ, head)?;
+        let old = inventory_text(environ, base, base_held.contains(&INVENTORY))?;
+        let new = inventory_text(environ, head, head_held.contains(&INVENTORY))?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
+    // The test directory is checked at the head and then the base on every range; its cases are listed only
+    // when the diff names the directory or a path below it.
+    let cases_head = directory(environ, head, CASES)?;
+    let cases_base = directory(environ, base, CASES)?;
     if paths.iter().any(within(CASES)) {
-        found.extend(removed(environ, base, head)?);
+        found.extend(removed(&cases_base, &cases_head)?);
     }
     Ok(found)
 }
@@ -371,7 +382,7 @@ pub fn scan_range(environ: &Environ, base: &OsStr, head: &OsStr, lines: Borrowed
     let scanned = match scan(environ, base, head) {
         Ok(Some(scanned)) => scanned,
         Ok(None) => return 0,
-        Err(error) => return fail(&format!("{TOOL}: {error}\n"), 2),
+        Err(error) => return fail(&format!("{TOOL}: {}\n", escaped(&error.to_string())), 2),
     };
     report(&scanned, lines).unwrap_or(STREAM_FAILED)
 }

@@ -1,5 +1,5 @@
 use crate::json::{Integer, Text, Value, parse};
-use crate::python::{self, int, repr_float, round};
+use crate::python::{self, int, repr, repr_float, round, str_of, truthy};
 
 #[test]
 fn repr_float_writes_the_shortest_digits_in_python_notation() {
@@ -266,5 +266,93 @@ fn int_refuses_a_surrogate_at_an_edge_and_a_string_of_spaces_naming_the_whole_te
             Err(python.to_owned()),
             "{expression}"
         );
+    }
+}
+
+#[test]
+fn repr_writes_nested_values_quotes_and_escapes_as_python_does() {
+    #[rustfmt::skip]
+    let rows: &[(&str, &str, &str)] = &[
+        ("repr(json.loads('-12'))", "-12", "-12"),
+        ("repr(json.loads('0.1'))", "0.1", "0.1"),
+        (r#"repr(json.loads('"it\'s"'))"#, r#""it's""#, r#""it's""#),
+        (r#"repr(json.loads('"a\\\\b\\n"'))"#, r#""a\\b\n""#, r"'a\\b\n'"),
+        (r#"repr(json.loads('"\\ud800"'))"#, r#""\ud800""#, r"'\ud800'"),
+        ("repr(json.loads('[1, [2.5, null]]'))", "[1, [2.5, null]]", "[1, [2.5, None]]"),
+        (r#"repr(json.loads('{"b": {"a": []}, "a": "x"}'))"#, r#"{"b": {"a": []}, "a": "x"}"#, "{'b': {'a': []}, 'a': 'x'}"),
+    ];
+    for &(expression, text, python) in rows {
+        let value = parse(text).expect("the row is JSON");
+        assert_eq!(python::repr(&value), python, "{expression}");
+    }
+}
+
+/// `repr` of the value `json.loads` gives for each JSON text, recorded from Python 3.9.25. An unassigned
+/// code point, U+0378, is written as it is, where Python escapes it.
+#[test]
+fn repr_writes_a_json_value_as_python_writes_its_value() {
+    let rows: &[(&str, &str)] = &[
+        (r#""paused""#, r#"'paused'"#),
+        (r#"{}"#, r#"{}"#),
+        (r#"{"nodes":5}"#, r#"{'nodes': 5}"#),
+        (r#"1"#, r#"1"#),
+        (r#"false"#, r#"False"#),
+        (r#"0.0"#, r#"0.0"#),
+        (r#"null"#, r#"None"#),
+        (r#"true"#, r#"True"#),
+        (r#"-0.0"#, r#"-0.0"#),
+        (r#"NaN"#, r#"nan"#),
+        (r#"Infinity"#, r#"inf"#),
+        (r#"1e+16"#, r#"1e+16"#),
+        (r#"[]"#, r#"[]"#),
+        (
+            r#"[1,"a'b",null,{"k":[2.5]}]"#,
+            r#"[1, "a'b", None, {'k': [2.5]}]"#,
+        ),
+        (r#""a\"b'c""#, r#"'a"b\'c'"#),
+        (r#""\udcff""#, r#"'\udcff'"#),
+        (r#""\u0378""#, "'\u{378}'"),
+        (r#""\u007f\u2028""#, r#"'\x7f\u2028'"#),
+        (
+            r#"1000000000000000000000000000000"#,
+            r#"1000000000000000000000000000000"#,
+        ),
+    ];
+    for (json, written) in rows {
+        let value = parse(json).expect("JSON");
+        assert_eq!(repr(&value), *written, "repr(json.loads({json:?}))");
+    }
+}
+
+/// `str` of a string is the string itself, and of every other value its `repr`; truth is Python's.
+#[test]
+fn str_and_truth_follow_python() {
+    let rows: &[(&str, &str, bool)] = &[
+        ("\"a'b\"", "a'b", true),
+        ("\"\"", "", false),
+        ("\" \"", " ", true),
+        ("[\"a\"]", "['a']", true),
+        ("[]", "[]", false),
+        ("{}", "{}", false),
+        ("{\"a\": 0}", "{'a': 0}", true),
+        ("0", "0", false),
+        ("-0", "0", false),
+        ("7", "7", true),
+        ("0.0", "0.0", false),
+        ("-0.0", "-0.0", false),
+        ("NaN", "nan", true),
+        ("0.5", "0.5", true),
+        ("true", "True", true),
+        ("false", "False", false),
+        ("null", "None", false),
+    ];
+    for (json, shown, truth) in rows {
+        let value = parse(json).expect("JSON");
+        assert_eq!(
+            str_of(&value),
+            Text::from(*shown),
+            "str(json.loads({json:?}))"
+        );
+        assert_eq!(truthy(&value), *truth, "bool(json.loads({json:?}))");
     }
 }

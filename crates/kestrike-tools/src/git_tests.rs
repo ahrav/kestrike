@@ -46,8 +46,8 @@ fn a_reply_that_ends_before_an_answer_is_truncated() {
 
 /// A reply is `<id> <type> <size>`, a line feed, `size` bytes and a line feed, or `<name> missing` for its own
 /// request's name. A body cut before its size or its line feed, a header of another form and a `missing` line
-/// for another name are each the reader's truncation error, which names the request with its control
-/// characters escaped; bytes after the last reply are a truncation error that names the count of answers.
+/// for another name are each the reader's truncation error, which names the request as it is, a carriage
+/// return included; bytes after the last reply are a truncation error that names the count of answers.
 #[test]
 fn a_reply_of_another_form_is_truncated() {
     for (reply, name) in [
@@ -85,7 +85,7 @@ fn a_reply_of_another_form_is_truncated() {
         batch_texts(b"1111 blob 2\nab", &specs(&["HEAD:a\r::b"])).expect_err("the body is cut");
     assert_eq!(
         error.to_string(),
-        "git cat-file --batch: the reply ends before its answer for HEAD:a\\r::b"
+        "git cat-file --batch: the reply ends before its answer for HEAD:a\r::b"
     );
 }
 
