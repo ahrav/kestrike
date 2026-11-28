@@ -383,9 +383,19 @@ sample: a rerun at the same commit builds another archive and sweeps other
 seeds, and the work directory the run prints holds the archives and roots
 that replay it. A plant with no expected profile is missed with no sweep, on
 its `miss_cause` alone. `bash scripts/tool.sh plant-runner --help` gives each
-result, the score's fields and the exit codes. Run its cases,
-`cargo test -p kestrike-tools`, before you push a change to the tool or to the
-library modules under `crates/kestrike-tools/src/plants/`.
+result, the score's fields and the exit codes. Before you push a change to the
+tool or to the library modules under `crates/kestrike-tools/src/plants/`, run
+those modules' unit tests with the unit tests of
+`crates/kestrike-tools/src/process.rs`, then the tool's cases with the case of
+`crates/kestrike-tools/tests/ignored_sigchld.rs`:
+
+```sh
+CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo test -p kestrike-tools --lib -- plants:: process::
+CARGO_PROFILE_DEV_OPT_LEVEL=1 CARGO_PROFILE_DEV_DEBUG=line-tables-only cargo test -p kestrike-tools --test tools -- plant_runner:: ignored_sigchld::
+```
+
+These two runs are the base selection. Add the tests of every other module
+whose callers the change reaches, as `AGENTS.md` directs.
 
 Before you add a plant, show that its `proof` exits 0 on the head and 1 on the
 plant, with a Cargo target directory of each tree's own:
