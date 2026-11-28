@@ -52,6 +52,26 @@ const CLEARED: [&str; 13] = [
     "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
 ];
 
+/// Names the launcher's attribute check reads: each fixed name, and one of each prefix class.
+const CHECKED: [&str; 16] = [
+    "RUSTUP_HOME",
+    "CARGO_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUSTUP_AUTO_INSTALL",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTDOCFLAGS",
+    "RUSTDOC",
+    "RUSTC",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_BUILD_DIR",
+    "CARGO_PROFILE_DEV_OPT_LEVEL",
+    "CARGO_BUILD_TARGET",
+    "CARGO_TARGET_DIR",
+];
+
 const RUSTUP: &str = r#"#!/bin/sh
 root='@ROOT@'
 args=
@@ -1002,8 +1022,9 @@ fn a_rustc_path_with_an_equals_sign_gets_the_empty_wrappers() {
 /// one before the host, a host with a `/`, a failing `toolchain list`, a list without the pin, a failing
 /// `which` or one whose reply is no absolute path, a `rustc` missing or not executable beside `cargo`, a
 /// `rustc -vV` that fails or cannot start, a cache path that is a link, a dangling link or a directory,
-/// a variable the launcher clears or sets made readonly through `BASH_ENV`, and a failed build, which
-/// also prints Cargo's output. The calls a refusal needs come first in the log, and nothing after them. A
+/// a variable the launcher clears or sets given an attribute other than export through `BASH_ENV`, a read
+/// of those variables' attributes that gives no record, and a failed build, which also prints Cargo's
+/// output. The calls a refusal needs come first in the log, and nothing after them. A
 /// failed probe or build removes the cache file, and the call after it builds again; a refused link
 /// leaves its target unchanged. A launcher whose directory is gone, read through a descriptor of its
 /// deleted file, cannot find the top level.
@@ -1207,19 +1228,12 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
         );
     }
 
-    let readonly = [
-        ("an exported RUSTFLAGS", "readonly RUSTFLAGS\n", "RUSTFLAGS"),
-        ("an unset RUSTC", "declare -r RUSTC\n", "RUSTC"),
-        (
-            "a CARGO_PROFILE_ name",
-            "readonly CARGO_PROFILE_DEV_OPT_LEVEL\n",
-            "CARGO_PROFILE_DEV_OPT_LEVEL",
-        ),
-    ];
-    for (row, startup, name) in readonly {
+    // Each startup file runs in the launcher's shell through `BASH_ENV`, with `RUSTFLAGS` and
+    // `CARGO_PROFILE_DEV_OPT_LEVEL` set by the caller.
+    let refused_at_startup = |row: &str, startup: &str, line: &str| {
         let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
-        fs::write(tree.at("readonly.sh"), startup).expect("the startup file is written");
-        let file = tree.at("readonly.sh").display().to_string();
+        fs::write(tree.at("startup.sh"), startup).expect("the startup file is written");
+        let file = tree.at("startup.sh").display().to_string();
         let env = [
             ("BASH_ENV", file.as_str()),
             ("RUSTFLAGS", "caller's value"),
@@ -1232,8 +1246,145 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
             &env,
             &["scan-weakened-tests"],
         );
-        let line = format!("the variable {name} is readonly");
-        refused_early(&tree, row, &output, &line);
+        refused_early(&tree, row, &output, line);
+    };
+
+    let readonly = [
+        ("an exported RUSTFLAGS", "readonly RUSTFLAGS\n", "RUSTFLAGS"),
+        ("an unset RUSTC", "declare -r RUSTC\n", "RUSTC"),
+        (
+            "a CARGO_PROFILE_ name",
+            "readonly CARGO_PROFILE_DEV_OPT_LEVEL\n",
+            "CARGO_PROFILE_DEV_OPT_LEVEL",
+        ),
+        (
+            "a RUSTC made readonly with no value",
+            "readonly RUSTC\n",
+            "RUSTC",
+        ),
+        (
+            "a readonly RUSTC_WRAPPER that holds a value",
+            "readonly RUSTC_WRAPPER=/usr/bin/true\n",
+            "RUSTC_WRAPPER",
+        ),
+    ];
+    for (row, startup, name) in readonly {
+        refused_at_startup(row, startup, &format!("the variable {name} is readonly"));
+    }
+
+    // `unset` and `export` of a name reference act on its target, so the name itself would reach the
+    // build unset or with the target's name as its value.
+    let references = [
+        (
+            "a reference named RUSTC",
+            "declare -n RUSTC=OTHER\n",
+            "RUSTC",
+        ),
+        (
+            "a reference named RUSTC_WRAPPER",
+            "declare -n RUSTC_WRAPPER=OTHER\n",
+            "RUSTC_WRAPPER",
+        ),
+        (
+            "a reference to a variable that holds a value",
+            "OTHER=/usr/bin/true\ndeclare -n RUSTC=OTHER\n",
+            "RUSTC",
+        ),
+        ("a reference with no target", "declare -n RUSTC\n", "RUSTC"),
+        ("a readonly reference", "declare -rn RUSTC=OTHER\n", "RUSTC"),
+        (
+            "a reference named as the caller's RUSTFLAGS",
+            "declare -n RUSTFLAGS=OTHER\n",
+            "RUSTFLAGS",
+        ),
+        (
+            "a reference named as the caller's CARGO_PROFILE_ name",
+            "declare -n CARGO_PROFILE_DEV_OPT_LEVEL=OTHER\n",
+            "CARGO_PROFILE_DEV_OPT_LEVEL",
+        ),
+    ];
+    for (row, startup, name) in references {
+        let line = format!("the variable {name} is a name reference");
+        refused_at_startup(row, startup, &line);
+    }
+
+    // An array is not exported, and an assignment stores its value changed under the integer and case
+    // attributes. The trace attribute stands for every attribute the launcher names no line for.
+    let attributes = [
+        (
+            "an indexed array",
+            "declare -a RUSTC\n",
+            "RUSTC is an indexed array",
+        ),
+        (
+            "an exported indexed array",
+            "declare -ax RUSTC_WRAPPER\n",
+            "RUSTC_WRAPPER is an indexed array",
+        ),
+        (
+            "an associative array",
+            "declare -A RUSTC_WORKSPACE_WRAPPER\n",
+            "RUSTC_WORKSPACE_WRAPPER is an associative array",
+        ),
+        (
+            "an integer",
+            "declare -i CARGO_BUILD_BUILD_DIR\n",
+            "CARGO_BUILD_BUILD_DIR is an integer",
+        ),
+        (
+            "the caller's RUSTFLAGS made an integer",
+            "declare -i RUSTFLAGS\n",
+            "RUSTFLAGS is an integer",
+        ),
+        (
+            "a lower case attribute",
+            "declare -l RUSTC\n",
+            "RUSTC carries a case attribute",
+        ),
+        (
+            "an upper case attribute",
+            "declare -u RUSTUP_TOOLCHAIN\n",
+            "RUSTUP_TOOLCHAIN carries a case attribute",
+        ),
+        (
+            "a capitalizing attribute",
+            "declare -c RUSTUP_AUTO_INSTALL\n",
+            "RUSTUP_AUTO_INSTALL carries a case attribute",
+        ),
+        (
+            "a trace attribute on an exported name",
+            "declare -tx RUSTDOC=/usr/bin/true\n",
+            "RUSTDOC carries the attribute t",
+        ),
+        (
+            "an array named as the caller's CARGO_PROFILE_ name",
+            "declare -a CARGO_PROFILE_DEV_OPT_LEVEL\n",
+            "CARGO_PROFILE_DEV_OPT_LEVEL is an indexed array",
+        ),
+    ];
+    for (row, startup, tail) in attributes {
+        refused_at_startup(row, startup, &format!("the variable {tail}"));
+    }
+
+    // A shell function takes the place of a builtin of the same name, so the read gets no record from
+    // `declare`, or no chunk from `mapfile`, for a name that is readonly.
+    let unread = [
+        (
+            "a declare that prints no record",
+            "readonly RUSTC\ndeclare() { :; }\n",
+        ),
+        (
+            "a declare that prints another text",
+            "readonly RUSTC\ndeclare() { echo text; }\n",
+        ),
+        (
+            "a mapfile that reads no chunk",
+            "readonly RUSTC\nmapfile() { :; }\n",
+        ),
+    ];
+    for (row, startup) in unread {
+        let line = "cannot read the attributes of the build's variables";
+        refused_at_startup(row, startup, line);
     }
 
     let tree = Tree::new(workflow_text("\n").as_bytes());
@@ -1258,6 +1409,98 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     );
     assert!(output.stdout.is_empty(), "{output:?}");
     assert_eq!(tree.take_log(), Vec::<String>::new());
+}
+
+/// The attribute check reads each name from that name's own record and passes a name that carries the
+/// export attribute or none. A call runs where a caller's value holds lines that read as the records of
+/// other names, where each name is exported and empty, set and not exported, exported with no value or
+/// declared with no value, and where `CARGO_BUILD_JOBS`, which the launcher neither clears nor sets, is
+/// readonly or an array.
+#[test]
+fn a_writable_variable_passes_the_attribute_check() {
+    let tree = Tree::new(workflow_text("\n").as_bytes());
+    let rustc = tree.at("toolchain/bin/rustc").display().to_string();
+    let file = tree.at("startup.sh").display().to_string();
+
+    let caller = [
+        ("RUSTFLAGS", "a\ndeclare -r RUSTC\nb"),
+        (
+            "CARGO_ENCODED_RUSTFLAGS",
+            "a\ndeclare -n RUSTC_WRAPPER=\"OTHER\"\n",
+        ),
+        ("CARGO_PROFILE_DEV_OPT_LEVEL", "3\ndeclare -rx CARGO_HOME"),
+        ("CARGO_TARGET_DIR", "\ndeclare -r RUSTFLAGS=\"a"),
+    ];
+    let output = tree.start(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.default_path(),
+        &caller,
+        &["x"],
+    );
+    ran("values that hold lines like records", &output, 1);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 1));
+    built_with(&tree, &caller, &rustc, WRAPPER);
+
+    let names = CHECKED.join(" ");
+    let empty: Vec<(&str, &str)> = CHECKED.iter().map(|&name| (name, "")).collect();
+    let output = tree.start(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.default_path(),
+        &empty,
+        &["x"],
+    );
+    ran("each name exported and empty", &output, 2);
+    assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", ""), 2));
+    built_with(&tree, &[("CARGO_HOME", "")], &rustc, WRAPPER);
+
+    let assigned: String = CHECKED
+        .iter()
+        .map(|name| format!("{name}=/value\n"))
+        .collect();
+    let rows = [
+        ("each name set and not exported", assigned, None),
+        (
+            "each name exported with no value",
+            format!("export {names}\n"),
+            None,
+        ),
+        (
+            "each name declared with no value",
+            format!("declare {names}\n"),
+            None,
+        ),
+        (
+            "a readonly CARGO_BUILD_JOBS",
+            "readonly CARGO_BUILD_JOBS\n".to_owned(),
+            Some("3"),
+        ),
+        (
+            "an array CARGO_BUILD_JOBS",
+            "declare -a CARGO_BUILD_JOBS\n".to_owned(),
+            None,
+        ),
+    ];
+    for (build, (row, startup, jobs)) in (3..).zip(rows) {
+        fs::write(tree.at("startup.sh"), startup).expect("the startup file is written");
+        let mut caller = vec![("BASH_ENV", file.as_str())];
+        caller.extend(jobs.map(|jobs| ("CARGO_BUILD_JOBS", jobs)));
+        let output = tree.start(
+            &tree.launcher(),
+            &tree.at("caller"),
+            &tree.default_path(),
+            &caller,
+            &["x"],
+        );
+        ran(row, &output, build);
+        assert_eq!(
+            tree.take_log(),
+            tree.resolved(PIN, ("unset", "unset"), build),
+            "{row}"
+        );
+        built_with(&tree, &caller, &rustc, WRAPPER);
+    }
 }
 
 /// The launcher's preparation reads no byte of the caller's standard input, so the binary receives every
