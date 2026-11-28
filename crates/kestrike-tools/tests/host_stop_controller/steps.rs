@@ -65,7 +65,12 @@ impl Steps {
 }
 
 fn named(file: &File) -> PathBuf {
-    super::sealing::named_fd(file.as_raw_fd())
+    named_fd(file.as_raw_fd())
+}
+
+/// The path the descriptor `fd` of this process names, or an empty path once it is closed.
+pub(crate) fn named_fd(fd: i32) -> PathBuf {
+    fs::read_link(format!("/proc/self/fd/{fd}")).unwrap_or_default()
 }
 
 impl Files for Steps {
@@ -183,7 +188,9 @@ pub(crate) fn free_lock(directory: &Path) -> Lock {
     loop {
         match lock(&Disk, directory) {
             Ok(held) => return held,
-            Err(LockError::Taken(_)) if Instant::now() < until => {
+            Err(LockError::Taken(error))
+                if error.raw_os_error() == Some(libc::EWOULDBLOCK) && Instant::now() < until =>
+            {
                 std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => panic!("{}: the lock is not free: {error:?}", directory.display()),

@@ -10,7 +10,7 @@ use kestrike_tools::host_stop_controller::{Command, entry};
 use kestrike_tools::json::{Value, indented_in_order};
 
 use super::restoring::dumps;
-use super::steps::Step;
+use super::steps::{Step, named_fd};
 use super::stop_run::{seconds, time};
 use super::{Case, listing, member};
 use crate::host_stop_support::{bounds, object, tree, value};
@@ -36,31 +36,41 @@ pub(crate) fn parse(path: &Path) -> Value {
     value(&fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display())))
 }
 
-/// `copy_tree` creates `to` and each directory with mode 0700 and copies each file of `from`,
-/// skipping each entry `skip` names and its descendants.
+/// `copy_tree` creates `to` and each directory with mode 0700 and copies each regular file of
+/// `from` byte for byte under its own name, skipping each entry `skip` names by its relative path
+/// and its descendants before reading its type. A link, a special file or a failed read of a
+/// directory, an entry or a type fails the copy.
 pub(crate) fn copy_tree(from: &Path, to: &Path, skip: &[&str]) {
     DirBuilder::new()
         .mode(0o700)
         .create(to)
-        .expect("the copy's root is made");
-    for relative in listing(from) {
-        let skipped = skip
-            .iter()
-            .any(|name| relative == *name || relative.starts_with(&format!("{name}/")));
-        if skipped {
+        .unwrap_or_else(|error| panic!("{}: {error}", to.display()));
+    copy_under(from, to, Path::new(""), skip);
+}
+
+fn copy_under(from: &Path, to: &Path, relative: &Path, skip: &[&str]) {
+    let source = from.join(relative);
+    let listed =
+        fs::read_dir(&source).unwrap_or_else(|error| panic!("{}: {error}", source.display()));
+    for entry in listed {
+        let entry = entry.unwrap_or_else(|error| panic!("{}: {error}", source.display()));
+        let rel = relative.join(entry.file_name());
+        if skip.iter().any(|name| rel == Path::new(name)) {
             continue;
         }
-        let (source, target) = (from.join(&relative), to.join(&relative));
-        let kind = fs::symlink_metadata(&source)
-            .unwrap_or_else(|error| panic!("{}: {error}", source.display()))
-            .file_type();
+        let (source, target) = (from.join(&rel), to.join(&rel));
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
         if kind.is_dir() {
             DirBuilder::new()
                 .mode(0o700)
                 .create(&target)
-                .expect("a directory is copied");
+                .unwrap_or_else(|error| panic!("{}: {error}", target.display()));
+            copy_under(from, to, &rel, skip);
         } else if kind.is_file() {
-            fs::copy(&source, &target).expect("a file is copied");
+            fs::copy(&source, &target)
+                .unwrap_or_else(|error| panic!("{}: {error}", source.display()));
         } else {
             panic!(
                 "{} is neither a regular file nor a directory",
@@ -103,11 +113,6 @@ pub(crate) fn standing_marks(root: &Path) -> Vec<String> {
         .filter(|name| name != "collected.json")
         .map(|name| format!("injection/{name}"))
         .collect()
-}
-
-/// The path the descriptor `fd` of this process names, or an empty path once it is closed.
-pub(crate) fn named_fd(fd: i32) -> PathBuf {
-    fs::read_link(format!("/proc/self/fd/{fd}")).unwrap_or_default()
 }
 
 /// Whether `step` syncs the file or the directory at `path`.

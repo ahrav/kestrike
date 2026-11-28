@@ -1,9 +1,15 @@
-//! The `run`, `restore`, and `seal` commands use [`host_stop`](crate::host_stop).
+//! The host stop controller's commands `run`, `restore` and `seal` over the library of
+//! [`host_stop`](crate::host_stop).
 //!
-//! [`entry`] reads the game-day catalog and the operator file, then [`Controller::run`] takes the
-//! run's seven steps through one [`Context`]: the call, the two clocks and the sleep, the file steps,
-//! the signal record, the environment read at the tool's start, the two output streams, the
-//! catalog's path, the tree's top and the two size limits.
+//! [`entry`] reads the game-day catalog and the operator file, then runs one command through one
+//! [`Context`]: the call, the two clocks and the sleep, the file steps, the signal record, the
+//! environment read at the tool's start, the two output streams, the catalog's path, the tree's top
+//! and the two size limits. [`Controller::run`] takes the run's seven steps; [`Controller::restore`]
+//! and [`Controller::seal`] state their own signal points and lock spans: `restore` holds the lock
+//! of `injection/` from after its stop and identity checks through its mark's write and raises a
+//! signal in its caller check and its poll (exit 1), and `seal` makes no call, holds the lock through
+//! its collection and its mark's write, and raises a signal from the lock to the mark's write, which
+//! writes nothing (exit 2).
 //!
 //! The run holds these invariants. No call precedes a refusal of the first step, and
 //! `sts get-caller-identity` is the first call. `ec2 stop-instances` leaves at most once, with the
@@ -33,8 +39,10 @@
 //! roles' write, and later ones take the abort path. The abort path and the final `stopped.json` run
 //! unarmed, after a panic as well.
 //!
-//! [`entry`] is the command's one path. The other public items are the steps the cases take alone,
-//! and each assumes the state the run's earlier steps set. The run acts with its starter's authority
+//! [`entry`] is each command's one path. The other public items, [`Controller::restore`] and
+//! [`Controller::seal`] included, are the steps the cases take alone: each assumes the state the
+//! earlier steps set, and leaves to [`entry`] the disarm of the record and the end of its hold after
+//! a panic. The run acts with its starter's authority
 //! in the evidence directory and trusts that directory, every directory above it, and the package
 //! file it names: it reaches the evidence root and `injection/` by name at each step, and the lock
 //! of `injection/` excludes another run, restore or seal of the directory it opened, and keeps no

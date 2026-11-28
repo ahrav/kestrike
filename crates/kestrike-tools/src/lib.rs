@@ -23,6 +23,8 @@ pub mod ownership;
 pub mod paths;
 #[cfg(target_os = "linux")]
 pub mod plants;
+#[cfg(target_os = "linux")]
+pub mod process;
 pub mod production_text;
 pub mod python;
 pub mod rust_text;

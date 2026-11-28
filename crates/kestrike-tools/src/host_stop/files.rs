@@ -1,5 +1,6 @@
 //! [`Files`] exposes each file operation used for mark writes, evidence locking, probes, lookups,
-//! and seal reads and syncs. Each default method calls the corresponding system call. A test
+//! and seal reads and syncs. Each default method but [`Files::read_synced`] calls the corresponding
+//! system call; `read_synced` reads a file and syncs it through [`Files::fsync`]. A test
 //! implements [`Files`] to fail or observe one step and keeps the defaults for the rest; [`Disk`]
 //! keeps every default. Every descriptor opens with `O_CLOEXEC`.
 
@@ -21,7 +22,8 @@ pub enum Links {
     Refuse,
 }
 
-/// The file steps, one method each, every argument the one the system call takes.
+/// The file steps, one method each: every method but [`Files::read_synced`] takes the arguments of
+/// its one system call.
 pub trait Files {
     /// `open(path, O_RDONLY | O_DIRECTORY)`, with `O_NOFOLLOW` under [`Links::Refuse`].
     fn open_directory(&self, path: &Path, links: Links) -> io::Result<File> {
@@ -103,9 +105,13 @@ pub trait Files {
         fs::remove_dir(path)
     }
 
-    /// The bytes of the regular file `name` in the open `directory`, at most `limit` of them, read as
-    /// [`read_file`](crate::gameday::read_file) reads them and then synced through [`Files::fsync`].
-    /// Every refusal names `what`.
+    /// The bytes of the regular file `name`, opened relative to the open `directory`, at most
+    /// `limit` of them, read as [`read_file`](crate::gameday::read_file) reads them and then synced
+    /// through [`Files::fsync`]. `directory` anchors a relative `name` and confines nothing: an
+    /// absolute `name` ignores it and `..` reaches its parent, and only the last component opens
+    /// with `O_NOFOLLOW`, so a caller that reads a direct child passes one normal component. Within
+    /// this default, only the sync goes through another method of [`Files`]. Every refusal names
+    /// `what`.
     ///
     /// # Errors
     ///

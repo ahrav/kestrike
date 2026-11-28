@@ -19,7 +19,7 @@ use crate::tools;
 /// for writing. `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and a child
 /// that another test thread forks inherits every descriptor of this process until its own `execve`. No
 /// descriptor of the stand-in is open here, so the stand-in starts whatever the other threads fork.
-fn script(path: &Path, text: &str) {
+pub(crate) fn script(path: &Path, text: &str) {
     let mut writer = Command::new("sh")
         .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
         .arg(path)

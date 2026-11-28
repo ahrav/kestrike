@@ -1,9 +1,9 @@
-//! The cases of the host stop controller's `run`, each over the plane of [`plane`], the clock it
-//! holds and the file steps of [`steps`], in a scratch directory that holds the operator file, the
-//! snapshot, the package, a catalog in which each GD-2 prerequisite reads as met, and an evidence
-//! directory that holds the operator's copy of the package. The cases of [`started`] and
-//! [`command_line`] start the built binary instead, and those of [`script`] read the controller's
-//! Rust source.
+//! The cases of the host stop controller's `run`, `restore` and `seal`, each over the plane of
+//! [`plane`], the clock it holds and the file steps of [`steps`], in a scratch directory that holds
+//! the operator file, the snapshot, the package, a catalog in which each GD-2 prerequisite reads as
+//! met, and an evidence directory that holds the operator's copy of the package.
+//! The cases of [`started`] and [`command_line`] start the built binary instead, and those of
+//! [`script`] read the controller's Rust source.
 
 #![cfg(target_os = "linux")]
 
@@ -690,7 +690,13 @@ pub(crate) fn killed_run(name: &str, label: &str) -> (Scratch, PathBuf) {
     let (status, shown) = child(name, &place.0, &[]);
     assert_eq!(status.signal(), Some(libc::SIGKILL), "{shown}");
     let named = fs::read(place.0.join("evidence")).expect("the child named it");
-    (place, PathBuf::from(OsString::from_vec(named)))
+    let evidence = PathBuf::from(OsString::from_vec(named));
+    assert!(
+        evidence.starts_with(&place.0) && evidence != place.0,
+        "{} stands outside the child's scratch directory",
+        evidence.display()
+    );
+    (place, evidence)
 }
 
 /// The variable that tells a test executable started again by [`child`] to run its case's body.

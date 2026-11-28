@@ -1,76 +1,4 @@
-use std::path::Path;
-use std::process::Command;
-use std::time::{Duration, Instant};
-
-use super::process::{Interrupt, capture};
-
-#[test]
-fn a_recorded_signal_kills_a_captured_child_and_returns_the_interruption() {
-    let interrupt = Interrupt::new();
-    let scratch = crate::paths::tests::Scratch::new("capture");
-    let marker = scratch.0.join("marker");
-    let mut command = Command::new("sh");
-    command
-        .args([
-            "-c",
-            "echo $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; exec sleep 600",
-            "sh",
-        ])
-        .arg(&marker);
-    let (stop, elapsed) = std::thread::scope(|scope| {
-        let signaled = scope.spawn(|| {
-            let start = Instant::now();
-            while !marker.exists() && start.elapsed() < Duration::from_secs(30) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            interrupt.record(libc::SIGTERM);
-            interrupt.record(libc::SIGINT);
-            Instant::now()
-        });
-        let stop =
-            capture(&mut command, &interrupt).expect_err("the recorded signal ends the capture");
-        let returned = Instant::now();
-        let signaled = signaled.join().expect("the signalling thread ends");
-        (stop, returned.saturating_duration_since(signaled))
-    });
-    assert_eq!(
-        interrupt.recorded(),
-        Some(libc::SIGTERM),
-        "a later signal changes nothing"
-    );
-    assert_eq!(
-        stop.reason().to_string(),
-        format!("interrupted by signal {}", libc::SIGTERM)
-    );
-    let pid = std::fs::read_to_string(&marker).expect("the child wrote its pid");
-    let pid = pid.trim();
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
-        "the child {pid} is killed and reaped"
-    );
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "the capture returned {elapsed:?} after the signal"
-    );
-}
-
-#[test]
-fn a_capture_waits_for_the_child_and_its_output() {
-    let interrupt = Interrupt::new();
-    let mut command = Command::new("sh");
-    command.args(["-c", "printf out; printf err >&2; exit 3"]);
-    let output = capture(&mut command, &interrupt)
-        .expect("no signal")
-        .expect("the child runs");
-    assert_eq!(
-        (
-            output.status.code(),
-            output.stdout.as_slice(),
-            output.stderr.as_slice()
-        ),
-        (Some(3), &b"out"[..], &b"err"[..])
-    );
-}
+use super::process::Interrupt;
 
 #[test]
 fn an_empty_command_fails_and_leaves_both_output_files_unchanged() {
@@ -87,5 +15,83 @@ fn an_empty_command_fails_and_leaves_both_output_files_unchanged() {
             std::fs::read_to_string(&stderr).expect("read")
         ),
         ("out before".to_owned(), "err before".to_owned())
+    );
+}
+
+/// Each output file is created new: an entry at either path, a link to a file included, fails the start
+/// and leaves the entry and the file it names as they were.
+#[test]
+fn an_output_file_that_exists_fails_the_start_and_stays_as_it_was() {
+    let scratch = crate::paths::tests::Scratch::new("taken-output");
+    let (target, link, err) = (
+        scratch.0.join("target"),
+        scratch.0.join("out"),
+        scratch.0.join("err"),
+    );
+    std::fs::write(&target, "target before").expect("written");
+    std::os::unix::fs::symlink(&target, &link).expect("the link is made");
+    let argv = [std::ffi::OsStr::new("true")];
+    let stop = super::process::supervise(&Interrupt::new(), &argv, &link, &err, None, &[])
+        .expect_err("a taken output path fails the start");
+    assert_eq!(stop.code(), 1);
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok_and(|status| status.is_symlink()),
+        "the link stays"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read"),
+        "target before"
+    );
+    std::fs::write(&err, "err before").expect("written");
+    let out = scratch.0.join("out2");
+    let stop = super::process::supervise(&Interrupt::new(), &argv, &out, &err, None, &[])
+        .expect_err("a taken error path fails the start");
+    assert_eq!(stop.code(), 1);
+    assert_eq!(std::fs::read_to_string(&err).expect("read"), "err before");
+}
+
+/// A supervised run's result takes a failed stop first, then a failed wait, then the stop's outcome: a
+/// reap gives the exit code, a leader reaped elsewhere fails as a wait with `ECHILD`, and a leader that
+/// outlived its stop fails as a wait that timed out.
+#[test]
+fn a_supervised_run_concludes_from_its_wait_and_then_its_stop() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+
+    use super::process::concluded;
+    use super::stop::{Fault, Stop};
+    use crate::process::GroupStopped;
+    let failed = |error: std::io::Error| Stop::failed(&Fault::os(&error, None));
+    let reaped = |raw: i32| Ok(GroupStopped::Reaped(ExitStatus::from_raw(raw)));
+    assert_eq!(concluded(Ok(()), reaped(3 << 8)), Ok(3));
+    assert_eq!(concluded(Ok(()), reaped(libc::SIGKILL)), Ok(-libc::SIGKILL));
+    let probe = failed(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "the state reads no state",
+    ));
+    assert_eq!(concluded(Err(probe.clone()), reaped(0)), Err(probe.clone()));
+    let refused = || std::io::Error::from_raw_os_error(libc::EPERM);
+    assert_eq!(
+        concluded(Err(probe), Err(refused())),
+        Err(failed(refused()))
+    );
+    assert_eq!(
+        concluded(Ok(()), Ok(GroupStopped::ReapedElsewhere)),
+        Err(failed(std::io::Error::from_raw_os_error(libc::ECHILD)))
+    );
+    let outlived = concluded(Ok(()), Ok(GroupStopped::Running)).expect_err("a leader still runs");
+    assert_eq!(
+        outlived,
+        failed(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the child outlived its stop"
+        ))
+    );
+    assert_eq!(
+        concluded(
+            Err(Stop::interrupted(libc::SIGTERM)),
+            Ok(GroupStopped::Running)
+        ),
+        Err(Stop::interrupted(libc::SIGTERM))
     );
 }
