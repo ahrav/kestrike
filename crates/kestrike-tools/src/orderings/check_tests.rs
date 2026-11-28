@@ -4352,6 +4352,12 @@ fn the_report_keeps_the_order_of_its_members_rows_and_refusals() {
         ANCHOR,
         &format!("use std::sync::atomic::Ordering::*;\n{peek}{ANCHOR}"),
     );
+    let line = fill[..fill
+        .find("use std::sync::atomic::Ordering::*;")
+        .expect("the plant stands")]
+        .matches('\n')
+        .count()
+        + 1;
     let planted = catalog_with(|catalog| {
         rows(catalog).push(string("it is no object"));
         let visit = row(catalog, "grace-visit");
@@ -4379,7 +4385,7 @@ fn the_report_keeps_the_order_of_its_members_rows_and_refusals() {
         ("scope file", format!("{GRACE} cannot be read")),
         (
             "spelling",
-            format!("{FILL}:294: Ordering::* hides the sites it names from the matcher"),
+            format!("{FILL}:{line}: Ordering::* hides the sites it names from the matcher"),
         ),
         (
             "disposition",
@@ -4395,7 +4401,10 @@ fn the_report_keeps_the_order_of_its_members_rows_and_refusals() {
         ),
         (
             "unrowed site",
-            format!("{FILL}:296: Ordering::Acquire lies in no row's find"),
+            format!(
+                "{FILL}:{}: Ordering::Acquire lies in no row's find",
+                line + 2
+            ),
         ),
     ]
     .map(|(name, message)| (name.to_owned(), message));
