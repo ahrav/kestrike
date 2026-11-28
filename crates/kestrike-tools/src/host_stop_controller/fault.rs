@@ -127,7 +127,7 @@ impl fmt::Display for Fault {
 
 /// The class name Python 3 gives an `OSError` of the error number `code`: the subclass its fixed
 /// table maps the number to, else `OSError`.
-pub fn os_error_class(code: i32) -> &'static str {
+fn os_error_class(code: i32) -> &'static str {
     match code {
         libc::EAGAIN | libc::EALREADY | libc::EINPROGRESS => "BlockingIOError",
         libc::ECHILD => "ChildProcessError",
@@ -151,7 +151,7 @@ pub fn os_error_class(code: i32) -> &'static str {
 /// abort path; a signal the record raised; a failed call; or an unforeseen failure.
 #[derive(Debug)]
 pub enum Halt {
-    Refused { sentence: Text, written: bool },
+    Refused { sentence: Text, may_stand: bool },
     Aborted(Aborted),
     Interrupted(Interrupted),
     Failed(FailedCall),
@@ -162,7 +162,7 @@ impl Halt {
     pub(crate) fn refused(sentence: Text) -> Self {
         Self::Refused {
             sentence,
-            written: false,
+            may_stand: false,
         }
     }
 

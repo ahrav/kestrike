@@ -110,6 +110,9 @@ pub(crate) struct State {
     pub(crate) stop_reply: String,
     pub(crate) stop_code: String,
     pub(crate) stopping: Option<String>,
+    /// Makes the call that runs now read the record once it is answered and end with the signal
+    /// the read raises, as a launch whose wait reads the record does.
+    pub(crate) interrupt: bool,
 }
 
 pub(crate) type Shared = Rc<RefCell<State>>;
@@ -175,6 +178,7 @@ impl State {
             stop_reply: "stopping".to_owned(),
             stop_code: "Client.UserInitiatedShutdown".to_owned(),
             stopping: None,
+            interrupt: false,
         }
     }
 
@@ -268,8 +272,12 @@ pub(crate) fn string(text: &str) -> Value {
 pub(crate) struct Plane(pub(crate) Shared);
 
 impl Seam for Plane {
-    fn call(&mut self, _record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
-        self.0.borrow_mut().answer(call)
+    fn call(&mut self, record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
+        let answer = self.0.borrow_mut().answer(call);
+        if std::mem::take(&mut self.0.borrow_mut().interrupt) {
+            record.read().map_err(Ended::Interrupted)?;
+        }
+        answer
     }
 
     fn wall(&self) -> f64 {

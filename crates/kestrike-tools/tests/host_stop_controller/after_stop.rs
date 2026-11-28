@@ -36,6 +36,14 @@ fn check(
     assert_eq!(case.stops().len(), 1);
     let abort = time(&found["abort"]);
     assert!(abort >= time(&found["stop"]), "{found:?}");
+    let (log, step) = (case.log(), case.plane.borrow().step);
+    let fault = &log[case.fault_index()];
+    let faulted = fault.time.unwrap_or(fault.start) + step;
+    let read = log.last().expect("the abort's status read").start + step;
+    assert!(
+        faulted <= abort && abort <= read,
+        "{faulted} {abort} {read}"
+    );
     if let Some(stopped) = found.get("stopped") {
         assert!(abort >= time(stopped), "{found:?}");
     }
@@ -200,7 +208,7 @@ fn an_exception() {
     assert!(
         text.starts_with("the stop request was sent and answered; panic: a planted fault"),
         "{}",
-        &text[..100]
+        text.chars().take(100).collect::<String>()
     );
     assert_eq!(text.chars().count(), DETAIL_MAX);
     assert!(
@@ -631,6 +639,11 @@ fn a_deadline_reached_between_two_calls_aborts_before_the_next() {
         .map(|l| l.start)
         .fold(f64::MIN, f64::max);
     assert!(latest < deadline, "{latest} {deadline}");
+    let read = log.last().expect("the abort's status read").start;
+    assert!(
+        (read - deadline).abs() < 1e-6,
+        "the last pause ends at the deadline: {read}"
+    );
     assert!(
         detail(&found).contains("the stop request was sent and answered"),
         "{}",

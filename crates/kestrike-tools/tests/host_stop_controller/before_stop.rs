@@ -9,7 +9,7 @@ use kestrike_tools::json::{Object, Value};
 use super::plane::{ALARMS, Action, CALLER, STATUS, State, string};
 use super::steps::{Step, errno, links};
 use super::{Case, guardrails, member, set, text_of};
-use crate::host_stop_support::{START, object, remove, value};
+use crate::host_stop_support::{START, object, value};
 
 fn number(text: &str) -> Value {
     value(text)
@@ -163,13 +163,6 @@ fn each(rows: &mut [Value], key: &str, new: Value) {
 /// guardrail it names with no stop request sent.
 #[test]
 fn an_alarm_not_quiet_or_unread_before_the_stop_aborts_with_no_stop() {
-    let metrics = |expression: &str| {
-        let mut query = Object::new();
-        query.insert("Id", string("e"));
-        query.insert("Expression", string(expression));
-        Some(Value::Array(vec![Value::Object(query)]))
-    };
-    let _ = metrics;
     type Change = Box<dyn Fn(&mut State)>;
     let rows: Vec<(&str, Change, usize, &str)> = vec![
         (
@@ -750,5 +743,4 @@ fn a_failed_stop_mark_sends_no_stop() {
     }));
     case.assert_aborted("exception", &["roles", "abort"], None, Some("Unwritten: "));
     assert!(case.stops().is_empty());
-    let _ = remove;
 }

@@ -10,12 +10,12 @@ use std::path::Path;
 
 use kestrike_tools::host_stop::{Interrupted, Signal};
 use kestrike_tools::host_stop_controller::Halt;
-use kestrike_tools::json::{Text, Value};
+use kestrike_tools::json::Value;
 
 use super::plane::{Action, CALLER, STATUS, string};
 use super::steps::{Step, errno};
 use super::{COPY, Case, listing, set};
-use crate::host_stop_support::{START, remove, value};
+use crate::host_stop_support::{START, value};
 
 /// A row's name, its change of the case and the reason its refusal holds.
 type Row<R> = (&'static str, fn(&mut Case), R);
@@ -401,6 +401,26 @@ fn a_deadline_passed_before_injection_is_a_refusal() {
     );
     assert_eq!(case.log()[0].timeout, 30.0);
 
+    let mut case = Case::new("deadline-origin");
+    short_bounds(&mut case);
+    let mut moved = false;
+    case.plant(Box::new(move |state, step| {
+        if !moved && matches!(step, Step::OpenUnnamed(_)) {
+            moved = true;
+            state.t += 10.0;
+        }
+        None
+    }));
+    case.plane
+        .borrow_mut()
+        .script(CALLER, vec![Action::Delay(40.0)]);
+    case.assert_refused(&[CALLER], "the deadline of 30 s passed");
+    assert_eq!(
+        case.log()[0].timeout,
+        20.0,
+        "the deadline runs from the reading before the evidence directory's probe"
+    );
+
     let mut case = Case::new("deadline-status");
     short_bounds(&mut case);
     case.plane
@@ -493,5 +513,4 @@ fn an_evidence_directory_with_no_unnamed_file_or_no_link_to_one_is_refused() {
             .then(|| errno(libc::ENOENT))
     }));
     case.assert_refused(&[], "does not resolve");
-    let _ = (remove, Text::new());
 }

@@ -64,6 +64,9 @@ fn a_signal_during_the_abort_path_is_ignored() {
         Some(&guardrails()[3]),
         None,
     );
+    let output = case.output();
+    assert!(!output.contains("Interrupted"), "{output}");
+    assert!(!output.contains("durability unknown"), "{output}");
 }
 
 /// A SIGTERM delivered during the evidence directory's sync waits for the roles mark, then aborts

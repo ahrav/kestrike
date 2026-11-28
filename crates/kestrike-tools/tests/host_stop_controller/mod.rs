@@ -5,6 +5,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod abort_path;
 mod after_stop;
 mod before_stop;
 mod marks;
@@ -43,6 +44,12 @@ const COPY: &str = "package.json";
 #[derive(Clone, Default)]
 pub(crate) struct Output(Rc<RefCell<Vec<u8>>>);
 
+impl Output {
+    pub(crate) fn text(&self) -> String {
+        String::from_utf8(self.0.borrow().clone()).expect("the lines are UTF-8")
+    }
+}
+
 impl Write for Output {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.borrow_mut().extend_from_slice(bytes);
@@ -57,14 +64,16 @@ impl Write for Output {
 /// What a case's stream does at one write: `None` takes the bytes into the case's [`Output`].
 pub(crate) type Writes = Rc<dyn Fn(&[u8]) -> Option<io::Result<usize>>>;
 
-/// The run's stream over a case's [`Output`], through the case's [`Writes`] when it has one.
-struct Hooked(Output, Option<Writes>);
+/// One of the run's two streams: it takes its bytes into the case's [`Output`] of both streams and
+/// into its own, through the case's [`Writes`] when it has one.
+struct Hooked(Output, Output, Option<Writes>);
 
 impl Write for Hooked {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if let Some(ended) = self.1.as_ref().and_then(|writes| writes(bytes)) {
+        if let Some(ended) = self.2.as_ref().and_then(|writes| writes(bytes)) {
             return ended;
         }
+        self.1.write_all(bytes)?;
         self.0.write(bytes)
     }
 
@@ -142,6 +151,8 @@ pub(crate) struct Case {
     pub(crate) stall: Rc<Cell<bool>>,
     pub(crate) delivered: &'static Delivered,
     pub(crate) output: Output,
+    pub(crate) stdout: Output,
+    pub(crate) stderr: Output,
     pub(crate) writes: Option<Writes>,
     pub(crate) env: Vec<(OsString, OsString)>,
     pub(crate) file_limit: u64,
@@ -187,6 +198,8 @@ impl Case {
             stall: Rc::new(Cell::new(false)),
             delivered: Box::leak(Box::new(Delivered::new())),
             output: Output::default(),
+            stdout: Output::default(),
+            stderr: Output::default(),
             writes: None,
             env: vec![(OsString::from("PATH"), OsString::from("/nonexistent"))],
             file_limit: FILE_LIMIT,
@@ -230,11 +243,27 @@ impl Case {
             package: self.package.clone(),
             evidence,
         };
+        self.in_context(|cx| entry(&command, cx))
+    }
+
+    /// Runs `body` on a context over this case's plane, file steps, record, environment and streams.
+    pub(crate) fn in_context<T>(
+        &self,
+        body: impl FnOnce(&mut Context<'_, Plane, Steps>) -> T,
+    ) -> T {
         let mut seam = Plane(Rc::clone(&self.plane));
         let files = self.steps();
         let mut record = Record::new(self.delivered);
-        let mut out = Hooked(self.output.clone(), self.writes.clone());
-        let mut err = Hooked(self.output.clone(), self.writes.clone());
+        let mut out = Hooked(
+            self.output.clone(),
+            self.stdout.clone(),
+            self.writes.clone(),
+        );
+        let mut err = Hooked(
+            self.output.clone(),
+            self.stderr.clone(),
+            self.writes.clone(),
+        );
         let top = tree();
         let mut cx = Context {
             seam: &mut seam,
@@ -248,7 +277,7 @@ impl Case {
             file_limit: self.file_limit,
             mark_limit: self.mark_limit,
         };
-        entry(&command, &mut cx)
+        body(&mut cx)
     }
 
     pub(crate) fn steps(&self) -> Steps {
@@ -265,8 +294,17 @@ impl Case {
         self.run_with(evidence)
     }
 
+    /// The lines of both streams in the order the run wrote them.
     pub(crate) fn output(&self) -> String {
-        String::from_utf8(self.output.0.borrow().clone()).expect("the lines are UTF-8")
+        self.output.text()
+    }
+
+    pub(crate) fn stdout(&self) -> String {
+        self.stdout.text()
+    }
+
+    pub(crate) fn stderr(&self) -> String {
+        self.stderr.text()
     }
 
     pub(crate) fn ops(&self) -> Vec<String> {
@@ -337,6 +375,17 @@ impl Case {
         assert!(output.contains(reason), "{reason:?} in {output}");
         assert_eq!(self.ops(), calls, "{output}");
         assert_eq!(listing(&self.evidence), [COPY], "{output}");
+        assert_eq!(
+            self.stdout(),
+            "",
+            "a refusal prints on standard error alone"
+        );
+        let stderr = self.stderr();
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(
+            stderr.starts_with("host-stop-controller: refused: "),
+            "{stderr}"
+        );
         self.assert_retries();
     }
 
@@ -384,6 +433,7 @@ impl Case {
         }
         assert!(text.ends_with(&tail()), "{text}");
         assert!(output.contains(&steps()), "{output}");
+        self.assert_abort_lines(cause, guardrail, &text);
         let ops = self.ops();
         assert!(
             !ops.iter()
@@ -400,6 +450,48 @@ impl Case {
             assert!(last.marks.iter().any(|mark| mark == "abort"), "{last:?}");
         }
         found
+    }
+}
+
+impl Case {
+    /// Standard output ends with the abort's line, the target's status line when a stop request may
+    /// have left, and GD-2's restoration steps; standard error holds only the lines of an abort
+    /// path's mark that failed.
+    pub(crate) fn assert_abort_lines(&self, cause: &str, guardrail: Option<&str>, detail: &str) {
+        let stdout = self.stdout();
+        let lines: Vec<&str> = stdout.lines().collect();
+        let sent = !self.stops().is_empty();
+        let count = if sent { 3 } else { 2 };
+        assert!(lines.len() >= count, "{stdout}");
+        let last = &lines[lines.len() - count..];
+        let shown = guardrail.map_or_else(String::new, |guardrail| format!(" ({guardrail})"));
+        assert_eq!(
+            last[0],
+            format!("host-stop-controller: aborted on {cause}{shown}: {detail}"),
+            "{stdout}"
+        );
+        if sent {
+            assert!(
+                last[1].starts_with("host-stop-controller: the target reads {")
+                    || last[1].starts_with("host-stop-controller: the target's state is unknown: "),
+                "{stdout}"
+            );
+        }
+        assert_eq!(
+            last[count - 1],
+            format!("GD-2's restoration steps: {}", steps()),
+            "{stdout}"
+        );
+        for line in self.stderr().lines() {
+            let named = ["abort", "stopped"].iter().any(|name| {
+                [" stands with its durability unknown: ", " is unwritten: "]
+                    .iter()
+                    .any(|standing| {
+                        line.starts_with(&format!("host-stop-controller: {name}.json{standing}"))
+                    })
+            });
+            assert!(named, "{line}");
+        }
     }
 }
 
@@ -455,26 +547,11 @@ impl Case {
         let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
         let operator =
             read_operator(&self.write_operator(), &gd2, FILE_LIMIT).expect("the operator file");
-        let mut seam = Plane(Rc::clone(&self.plane));
-        let files = self.steps();
-        let mut record = Record::new(self.delivered);
-        let (mut out, mut err) = (self.output.clone(), self.output.clone());
-        let top = tree();
-        let mut cx = Context {
-            seam: &mut seam,
-            files: &files,
-            record: &mut record,
-            env: &self.env,
-            out: &mut out,
-            err: &mut err,
-            catalog: &self.catalog,
-            top: &top,
-            file_limit: self.file_limit,
-            mark_limit: self.mark_limit,
-        };
-        let mut written = Vec::new();
-        let mut controller = Controller::new(&mut cx, &mut written, &operator, gd2);
-        step(&mut controller)
+        self.in_context(|cx| {
+            let mut written = Vec::new();
+            let mut controller = Controller::new(cx, &mut written, &operator, gd2);
+            step(&mut controller)
+        })
     }
 
     /// Delivers `signal` into the case's record at each step `when` names, once.

@@ -704,6 +704,9 @@ fn a_lost_stop_reply_or_status_read_is_never_resent_and_the_polls_show_the_stop(
     assert_eq!(code, 0, "{}", case.output());
     assert_eq!(case.stops().len(), 1);
     assert_eq!(names(&case), ["roles", "stop", "stopped"]);
+    let line = "host-stop-controller: the stop request's outcome is unknown: ec2 stop-instances \
+                gave no answer: the reply was lost; the polls decide\n";
+    assert!(case.stdout().contains(line), "{}", case.stdout());
 }
 
 /// A stop call cut at half the effect timeout, counted from the reading after the first quiet alarm
@@ -734,6 +737,12 @@ fn a_stop_call_that_runs_to_its_cut_leaves_the_polls_half_the_effect_timeout() {
     );
     assert_eq!(log[at + 2].op, STATUS);
     assert_eq!(names(&case), ["roles", "stop", "stopped"]);
+    let line = format!(
+        "host-stop-controller: the stop request's outcome is unknown: ec2 stop-instances gave no \
+         answer: timed out after {} seconds; the polls decide\n",
+        stop.timeout
+    );
+    assert!(case.stdout().contains(&line), "{}", case.stdout());
 }
 
 /// A stop shown at the eighth status read, within the effect timeout, writes the stopped mark.
@@ -851,11 +860,16 @@ fn changed_environment() {
     let code = case.run();
     assert_eq!(code, 0, "{}", case.output());
     let log = case.log();
-    assert!(
-        !format!("{log:?}").contains("a-planted-secret"),
-        "the log holds an environment value"
-    );
     let envs = case.plane.borrow().envs.clone();
+    let secret = ("AWS_SECRET_ACCESS_KEY".into(), "a-planted-secret".into());
+    assert!(
+        envs[0].contains(&secret),
+        "the snapshot carries the run's starting environment"
+    );
+    assert!(
+        !case.output().contains("a-planted-secret"),
+        "a line holds an environment value"
+    );
     assert_eq!((log[0].op.as_str(), envs.len()), (CALLER, log.len()));
     assert_eq!(
         envs[0], before,

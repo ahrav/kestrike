@@ -17,8 +17,8 @@ use super::fault::{Fault, Halt};
 use crate::gameday::{Names, conform, layout};
 use crate::host_stop::{
     Alarm, CALL_SECONDS, Call, CallError, FailedCall, Files, Gd2, InstanceRecord, MISSING_DATA,
-    Number, Operator, POLL_SECONDS, SKEW_SECONDS, Seam, Status, encoded, iso_time, publish,
-    read_alarms, read_record, read_statuses, reply,
+    Number, Operator, POLL_SECONDS, SKEW_SECONDS, Seam, Status, caller_arn, encoded, iso_time,
+    publish, read_alarms, read_record, read_statuses, reply,
 };
 use crate::json::{Object, Value};
 use crate::python::{repr, repr_float};
@@ -149,9 +149,11 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
     }
 
     /// One call of `argv` with `--region`, cut at [`CALL_SECONDS`], at the deadline and at `until`.
-    /// The deadline is checked before the call and after it returns or fails; a signal the record
-    /// raises when the call returns comes before its reply or failure. With `mutating`, the call
-    /// counts as sent from its launch, and its monotonic times, its answer and its failure are kept.
+    /// The deadline is checked before the call and after it returns or fails. The record is read
+    /// before the call starts, so a signal that stands then ends the step with no call made, and
+    /// again when the call returns, so a signal raised then comes before its reply or failure. With
+    /// `mutating`, the call counts as sent from its launch, and its monotonic times, its answer and
+    /// its failure are kept; a second mutating call is a failure the controller names.
     pub(crate) fn aws(
         &mut self,
         argv: &[&str],
@@ -170,6 +172,10 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
                 "{what} has no time left before its window ends"
             )))));
         }
+        if mutating && self.sent {
+            return Err(order("a second stop request was asked for"));
+        }
+        self.cx.record.read()?;
         if mutating {
             self.sent = true;
             self.launched = Some(self.monotonic());
@@ -189,33 +195,27 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         };
         let answer = reply(&mut *self.cx.seam, self.cx.record, &call);
         let raised = self.cx.record.read();
-        let answer = match (answer, raised) {
+        if mutating {
+            self.returned = Some(self.monotonic());
+        }
+        match (answer, raised) {
             (_, Err(raised)) | (Err(CallError::Interrupted(raised)), Ok(())) => {
-                if mutating {
-                    self.returned = Some(self.monotonic());
-                }
-                return Err(Halt::Interrupted(raised));
+                Err(Halt::Interrupted(raised))
             }
-            (answer, Ok(())) => answer,
-        };
-        match answer {
-            Err(CallError::Failed(failed)) => {
+            (Err(CallError::Failed(failed)), Ok(())) => {
                 if mutating {
-                    self.returned = Some(self.monotonic());
                     self.stop_failure = Some(failed.sentence());
                 }
                 self.within_deadline()?;
                 Err(Halt::Failed(failed))
             }
-            Ok(object) => {
+            (Ok(object), Ok(())) => {
                 if mutating {
-                    self.returned = Some(self.monotonic());
                     self.answered = true;
                 }
                 self.within_deadline()?;
                 Ok(object)
             }
-            Err(CallError::Interrupted(_)) => unreachable!("a raised signal returned above"),
         }
     }
 
@@ -290,17 +290,7 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             Err(Halt::Failed(failed)) => return Err(unknown(failed.sentence())),
             other => other?,
         };
-        let arn = match reply.get("Arn") {
-            Some(Value::String(arn)) => arn,
-            other => {
-                let shown = other.map_or_else(|| "None".to_owned(), repr);
-                let cut: String = format!("Arn is no str: {shown}")
-                    .chars()
-                    .take(400)
-                    .collect();
-                return Err(unknown(Text::from(cut)));
-            }
-        };
+        let arn = caller_arn(&reply).map_err(|failed| unknown(failed.sentence()))?;
         if arn == self.operator.identity() {
             return Ok(());
         }
@@ -331,58 +321,56 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         };
         for text in self.gd2.guardrails() {
             let name = self.alarm_of(text);
-            let shown = |words: &[&dyn Fn(&mut Text)]| {
+            let shown = |rest: &dyn Fn(&mut Text)| {
                 let mut detail = Text::from("alarm ");
                 detail.push_text(name);
-                for word in words {
-                    word(&mut detail);
-                }
+                rest(&mut detail);
                 Halt::aborted("guardrail", Some(text.clone()), detail)
             };
             let Some(alarm) = alarms.get(name).filter(|alarm| *alarm.state() == "OK") else {
                 let state = alarms.get(name).map(Alarm::state);
-                return Err(shown(&[&|d| {
+                return Err(shown(&|d| {
                     d.push_str(" reads ");
                     match state {
                         Some(state) => d.push_text(state),
                         None => d.push_str("no answer"),
                     }
-                }]));
+                }));
             };
             if !alarm
                 .missing()
                 .is_some_and(|missing| MISSING_DATA.iter().any(|way| *missing == *way))
             {
-                return Err(shown(&[&|d| {
+                return Err(shown(&|d| {
                     d.push_str(" treats missing data as ");
                     match alarm.missing() {
                         Some(missing) => d.push_text(missing),
                         None => d.push_str("None"),
                     }
                     d.push_str(", so it can read OK without data");
-                }]));
+                }));
             }
             if let Some(evaluation) = alarm.evaluation() {
-                return Err(shown(&[&|d| {
+                return Err(shown(&|d| {
                     d.push_str(" reads OK with evaluation state ");
                     d.push_text(evaluation);
-                }]));
+                }));
             }
             if let Some(kind) = alarm.kind() {
-                return Err(shown(&[&|d| {
+                return Err(shown(&|d| {
                     d.push_str(&format!(" is {kind}, which reads OK without data"));
-                }]));
+                }));
             }
             if let Some(before) = self.transitions.as_ref().and_then(|seen| seen.get(name))
                 && before != alarm.transitioned()
             {
-                return Err(shown(&[&|d| {
+                return Err(shown(&|d| {
                     d.push_str(" changed state at ");
                     d.push_text(alarm.transitioned());
                     d.push_str(" since the read before the stop (");
                     d.push_text(before);
                     d.push_str(")");
-                }]));
+                }));
             }
         }
         if self.transitions.is_none() {
@@ -437,8 +425,8 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             &Text::from("approval not_after"),
         )
         .map_err(Halt::from)?;
+        let baseline_end = window(&preflight.package, "baseline").1;
         let window = window(&preflight.package, "run");
-        let baseline_end = window_end(&preflight.package, "baseline");
         let reading = Number::from(now);
         let admitted = now + SKEW_SECONDS as f64 <= lapse as f64
             && baseline_end <= reading
@@ -543,8 +531,4 @@ pub(crate) fn window(package: &Object, name: &str) -> (Number, Number) {
         number_at(package, name, "start"),
         number_at(package, name, "end"),
     )
-}
-
-fn window_end(package: &Object, name: &str) -> Number {
-    number_at(package, name, "end")
 }

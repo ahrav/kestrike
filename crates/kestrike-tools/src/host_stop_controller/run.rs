@@ -62,19 +62,20 @@ pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -
         }
     };
     match halt {
-        Halt::Refused { sentence, written } => {
+        Halt::Refused {
+            sentence,
+            may_stand,
+        } => {
             line.push_str("refused: ");
             line.push_text(&sentence);
-            if !written {
+            if !may_stand {
                 line.push_str("; nothing written");
             }
         }
         Halt::Interrupted(raised) => {
             line.push_str(&format!("signal {raised} before any mark; nothing written"));
         }
-        Halt::Aborted(aborted) => unforeseen(&mut line, aborted_text(&aborted)),
-        Halt::Failed(failed) => unforeseen(&mut line, Fault::Call(failed).text()),
-        Halt::Fault(fault) => unforeseen(&mut line, fault.text()),
+        halt => unforeseen(&mut line, halt_text(halt)),
     }
     cx.say(Stream::Err, &line);
     2
@@ -154,6 +155,8 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             );
             self.inject(&root, &run, &roles)
         }));
+        self.cx.record.disarm();
+        self.cx.record.end_hold();
         let (cause, guardrail, detail) = match ended {
             Ok(Ok(code)) => return Ok(code),
             Ok(Err(Halt::Aborted(aborted))) => (
@@ -164,11 +167,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             Ok(Err(Halt::Interrupted(raised))) => {
                 ("signal", None, Text::from(format!("signal {raised}")))
             }
-            Ok(Err(Halt::Refused { sentence, .. })) => {
-                ("exception", None, Fault::Refusal(sentence).text())
-            }
-            Ok(Err(Halt::Failed(failed))) => ("exception", None, Fault::Call(failed).text()),
-            Ok(Err(Halt::Fault(fault))) => ("exception", None, fault.text()),
+            Ok(Err(halt)) => ("exception", None, halt_text(halt)),
             Err(payload) => ("exception", None, Fault::panic(&*payload).text()),
         };
         if self.written.contains(&"roles") {
@@ -196,7 +195,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                     ));
                     sentence
                 },
-                written: true,
+                may_stand: true,
             }),
             Ok(()) => Err(refused!(what, " is removed")),
         }
@@ -568,33 +567,12 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         mark.insert("time", Value::Float(self.wall()));
         mark.insert("detail", Value::String(cut.clone()));
         let mark = Value::Object(mark);
-        for name in ["abort", "stopped"] {
-            let value = if name == "abort" {
-                mark.clone()
-            } else {
-                match &self.shown {
-                    Some(shown)
-                        if self.written.contains(&"abort")
-                            && !self.written.contains(&"stopped") =>
-                    {
-                        shown.clone()
-                    }
-                    _ => continue,
-                }
-            };
-            let failed = match catch_unwind(AssertUnwindSafe(|| self.mark(name, &value))) {
-                Ok(Ok(())) => continue,
-                Ok(Err(halt)) => halt_text(halt),
-                Err(payload) => Fault::panic(&*payload).text(),
-            };
-            let standing = if self.written.contains(&name) {
-                "stands with its durability unknown"
-            } else {
-                "is unwritten"
-            };
-            let mut line = Text::from(format!("{TOOL}{name}.json {standing}: "));
-            line.push_text(&failed);
-            self.cx.say(Stream::Err, &line);
+        self.abort_mark("abort", &mark);
+        if let Some(shown) = self.shown.clone()
+            && self.written.contains(&"abort")
+            && !self.written.contains(&"stopped")
+        {
+            self.abort_mark("stopped", &shown);
         }
         let mut line = Text::from(format!("{TOOL}aborted on {cause}"));
         if let Some(guardrail) = &guardrail {
@@ -628,6 +606,26 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             &Text::from(format!("GD-2's restoration steps: {steps}")),
         );
         1
+    }
+}
+
+impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
+    /// Writes the mark `name` in the abort path, and prints on standard error a line that says it
+    /// stands with its durability unknown or is unwritten when the write fails or panics.
+    fn abort_mark(&mut self, name: &'static str, value: &Value) {
+        let failed = match catch_unwind(AssertUnwindSafe(|| self.mark(name, value))) {
+            Ok(Ok(())) => return,
+            Ok(Err(halt)) => halt_text(halt),
+            Err(payload) => Fault::panic(&*payload).text(),
+        };
+        let standing = if self.written.contains(&name) {
+            "stands with its durability unknown"
+        } else {
+            "is unwritten"
+        };
+        let mut line = Text::from(format!("{TOOL}{name}.json {standing}: "));
+        line.push_text(&failed);
+        self.cx.say(Stream::Err, &line);
     }
 }
 
