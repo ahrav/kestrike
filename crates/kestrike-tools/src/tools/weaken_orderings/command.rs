@@ -37,7 +37,8 @@ const RUN: [Opt; 3] = [
 ];
 
 /// `checked` prints the report `check` gives as JSON indented by two spaces in document order, with a
-/// newline, on `out`, and returns the check's exit code.
+/// newline, on `out`, and returns the check's exit code, or [`UNANNOUNCED`] where the write or the flush
+/// of `out` fails.
 pub(super) fn checked(check: impl FnOnce() -> (Value, u8), out: &mut impl Write) -> u8 {
     let (report, code) = check();
     match writeln!(out, "{}", json::indented_in_order(&report)).and_then(|()| out.flush()) {
@@ -46,8 +47,11 @@ pub(super) fn checked(check: impl FnOnce() -> (Value, u8), out: &mut impl Write)
     }
 }
 
-/// `run` reads the command word and its options from `args` and runs that command on the checkout
-/// `top`.
+/// `run` ignores SIGXFSZ for the whole process, so a write past the file size limit fails with `EFBIG`
+/// and ends no process of the tool (each child takes the signal at its default action again), then reads
+/// the command word and its options from `args` and runs that command on the checkout `top`. It returns
+/// 1 where SIGXFSZ cannot be ignored, [`UNANNOUNCED`] where the help, the check's report or the run's
+/// result line cannot be written to standard output, and otherwise the command's own code.
 pub fn run(top: &Path, args: &[OsString]) -> u8 {
     if let Err(error) = ignore_file_size_signal() {
         let _ = writeln!(

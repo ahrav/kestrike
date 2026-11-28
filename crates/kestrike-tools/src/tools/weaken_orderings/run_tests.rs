@@ -4,16 +4,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use super::super::execute::{LOOM_DEADLINE, Launch, execute, seconds};
+use super::super::execute::{Launch, execute, seconds};
 use super::super::halt::Halt;
 use super::super::runner::Runner;
-use super::{Report, plant_of, rows, selection};
+use super::{Report, Scoped, plant_of, publish_report, rows, selection, settled};
 use crate::json::{self, Text, Value};
 use crate::paths::tests::Scratch;
 use crate::process::Interrupt;
 
 const RUN_FENCE: &str = "fill-run-fence";
 const FIRST: &str = "storage::fill_model::two_owners_on_one_key_and_a_servicer_observing_the_run";
+const SECOND: &str = "storage::fill_model::three_participants_over_two_keys_observing_the_run";
 
 fn top() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -52,7 +53,8 @@ fn between(
     output: &Path,
 ) -> Result<(Option<i32>, f64), Halt> {
     assert_eq!(
-        deadline, LOOM_DEADLINE,
+        deadline,
+        Duration::from_secs(3600),
         "a loom test runs under the loom deadline"
     );
     let log = BETWEEN_LOG
@@ -130,7 +132,51 @@ fn restore(
     ran
 }
 
-/// `planted_run` runs the plant of `fill-run-fence` in a copy of this checkout's `HEAD` under `work`,
+/// `seed` gives `fill-run-fence` of the catalog in `copy` one disposition, an `unrun` entry that names
+/// [`FIRST`] and then [`SECOND`], whatever the committed row holds, through a new file renamed over the
+/// catalog.
+fn seed(copy: &Path) {
+    let path = copy.join(crate::orderings::check::CATALOG);
+    let mut catalog = json::parse(&fs::read_to_string(&path).expect("reads")).expect("parses");
+    let Value::Object(object) = &mut catalog else {
+        panic!("the catalog is an object");
+    };
+    let Some(Value::Array(rows)) = object.get_mut("rows") else {
+        panic!("the catalog lists rows");
+    };
+    let row = rows
+        .iter_mut()
+        .find_map(|row| match row {
+            Value::Object(row) if row.get("id") == Some(&Value::String(Text::from(RUN_FENCE))) => {
+                Some(row)
+            }
+            _ => None,
+        })
+        .expect("the row stands");
+    for kind in ["kill", "survives", "unrun", "revision"] {
+        row.remove(kind);
+    }
+    row.insert(
+        "unrun",
+        json::parse(&format!(
+            r#"{{"needs": [{{"lane": "loom", "tests": ["{FIRST}", "{SECOND}"], "failure": "a departed record whose owner had not ended"}}]}}"#
+        ))
+        .expect("parses"),
+    );
+    let staged = copy.join(".catalog.seeded");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .and_then(|mut file| {
+            std::io::Write::write_all(&mut file, json::indented_in_order(&catalog).as_bytes())
+        })
+        .expect("the seeded catalog writes");
+    fs::rename(&staged, &path).expect("the seeded catalog takes the catalog's place");
+}
+
+/// `planted_run` runs the plant of `fill-run-fence`, seeded as [`seed`] says, in a copy of this checkout's
+/// `HEAD` under `work`,
 /// each loom test run by `fake`, and returns the end of the rows' run and the scoped file's bytes.
 fn planted_run(
     work: &Path,
@@ -147,17 +193,13 @@ fn planted_run(
     };
     let mut runner = Runner::new(&top(), work, Vec::new(), &launch).expect("the copy is made");
     runner.execute = fake;
+    seed(&runner.copy);
     runner.prepare().expect("the declaration reads");
     let (selection, scoped) =
         selection(&runner, &[Text::from(RUN_FENCE)]).expect("the row is selected");
     let Some(Value::String(path)) = selection.rows[0].get("path") else {
         panic!("the row names its file");
     };
-    let needs = json::line(selection.rows[0].get("unrun").expect("the row is unrun"));
-    assert!(
-        needs.contains(&format!("[\"{FIRST}\", \"storage::fill_model::")),
-        "the committed row names two loom tests, {FIRST} first: {needs}"
-    );
     let planted = work.join("copy").join(path.to_string());
     let unweakened = fs::read(&planted).expect("reads");
     let mut report = Report {
@@ -289,4 +331,160 @@ fn seconds_round_to_a_tenth_as_python_rounds() {
     assert_eq!(seconds(Duration::from_millis(1260)), 1.3);
     assert_eq!(seconds(Duration::from_millis(250)), 0.2);
     assert_eq!(seconds(Duration::from_millis(350)), 0.3);
+}
+
+/// `scoped_copy` is a copy under `scratch` that holds `f.rs` with `text`, the one scoped file, and a row
+/// whose plant replaces `find` with `replace` there.
+fn scoped_copy(scratch: &Scratch, text: &str, find: &str, replace: &str) -> (Scoped, json::Object) {
+    let copy = scratch.0.join("copy");
+    fs::create_dir(&copy).expect("made");
+    fs::write(copy.join("f.rs"), text).expect("written");
+    let name = Text::from("f.rs");
+    let scoped = Scoped {
+        copy,
+        files: vec![name.clone()],
+        originals: [(name.clone(), text.to_owned())].into(),
+        digests: [(name, crate::python::hexdigest(text.as_bytes()))].into(),
+    };
+    let row = json::parse(&format!(
+        r#"{{"id": "r", "path": "f.rs", "find": "{find}", "replace": "{replace}"}}"#
+    ))
+    .expect("parses");
+    let Value::Object(row) = row else {
+        panic!("an object");
+    };
+    (scoped, row)
+}
+
+const SCOPED: &str = "fn a() { x.load(Acquire); }\n";
+
+/// A body that panics under the plant leaves the scoped file with its unweakened bytes and no staging
+/// file, and the body's own panic reaches the caller.
+#[test]
+fn a_panic_under_the_plant_restores_the_file_and_resumes() {
+    let scratch = Scratch::new("weaken-panic");
+    let (scoped, row) = scoped_copy(&scratch, SCOPED, "x.load(Acquire)", "x.load(Relaxed)");
+    let path = scratch.0.join("copy/f.rs");
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        scoped.planted(&row, || {
+            assert_eq!(
+                fs::read_to_string(&path).expect("reads"),
+                "fn a() { x.load(Relaxed); }\n"
+            );
+            panic!("the body's own panic")
+        })
+    }));
+    let payload = caught.expect_err("the panic resumes");
+    assert_eq!(
+        payload.downcast_ref::<&str>(),
+        Some(&"the body's own panic")
+    );
+    assert_eq!(fs::read_to_string(&path).expect("reads"), SCOPED);
+    assert_eq!(staged(&scratch.0.join("copy")), Vec::<PathBuf>::new());
+}
+
+const FSIZE_ROLE: &str = "KESTRIKE_WEAKEN_PLANT_FSIZE_ROLE";
+
+/// A plant whose staged write fails, here past the soft file size limit with SIGXFSZ ignored, reads as a
+/// plant that changed: exit 4 with that sentence, the body never runs, and the file holds its unweakened
+/// bytes, which fit the limit. The case runs in this test executable started again in that role, so the
+/// limit binds no other case.
+#[test]
+fn a_plant_that_cannot_be_written_reads_as_a_changed_plant() {
+    if let Some(at) = std::env::var_os(FSIZE_ROLE) {
+        let scratch = Scratch(PathBuf::from(at));
+        let (scoped, row) = scoped_copy(
+            &scratch,
+            SCOPED,
+            "x.load(Acquire)",
+            "x.load(AcquireAndMore)",
+        );
+        let limit = libc::rlim_t::try_from(SCOPED.len()).expect("a length fits");
+        // SAFETY: `signal` takes a signal number and a disposition constant and touches no memory of
+        // the caller; `setrlimit` reads the limit record, which outlives the call.
+        let set = unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let mut limits: libc::rlimit = std::mem::zeroed();
+            libc::getrlimit(libc::RLIMIT_FSIZE, &mut limits);
+            limits.rlim_cur = limit.min(limits.rlim_max);
+            libc::setrlimit(libc::RLIMIT_FSIZE, &limits)
+        };
+        assert_eq!(set, 0, "the limit is set");
+        let ran = std::cell::Cell::new(false);
+        let ended = scoped.planted(&row, || {
+            ran.set(true);
+            Ok(())
+        });
+        std::mem::forget(scratch);
+        let held = fs::read_to_string(scoped.copy.join("f.rs")).expect("reads");
+        let ok = matches!(&ended, Err(Halt::Stop { code: 4, reason })
+            if *reason == "the plant of f.rs changed while r's tests ran")
+            && !ran.get()
+            && held == SCOPED;
+        eprintln!("{ended:?}, ran {}, held {held:?}", ran.get());
+        std::process::exit(if ok { 0 } else { 3 });
+    }
+    let scratch = Scratch::new("weaken-fsize");
+    let name = module_path!()
+        .split_once("::")
+        .map_or("", |(_, rest)| rest)
+        .to_owned()
+        + "::a_plant_that_cannot_be_written_reads_as_a_changed_plant";
+    let status = std::process::Command::new(std::env::current_exe().expect("the test executable"))
+        .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(FSIZE_ROLE, &scratch.0)
+        .status()
+        .expect("the role runs");
+    assert_eq!(status.code(), Some(0));
+}
+
+/// A signal recorded before the report's last check leaves no `report.json` and no staging file and
+/// ends as that signal's interruption; with none recorded the report is written whole.
+#[test]
+fn a_signal_recorded_before_the_report_s_rename_leaves_no_report() {
+    let scratch = Scratch::new("weaken-report-gate");
+    let path = scratch.0.join("report.json");
+    let report = json::parse(r#"{"mismatched": [], "no verdict": []}"#).expect("parses");
+    let interrupt = Interrupt::new();
+    interrupt.record(libc::SIGHUP);
+    let ended = publish_report(&path, &report, &interrupt);
+    assert!(
+        matches!(ended, Err(Halt::Interrupted(libc::SIGHUP))),
+        "{ended:?}"
+    );
+    assert!(!path.exists());
+    assert_eq!(staged(&scratch.0), Vec::<PathBuf>::new());
+    let quiet = Interrupt::new();
+    publish_report(&path, &report, &quiet).expect("the report is written");
+    assert_eq!(
+        fs::read_to_string(&path).expect("reads"),
+        format!("{}\n", json::indented_in_order(&report))
+    );
+    assert_eq!(staged(&scratch.0), Vec::<PathBuf>::new());
+}
+
+/// A signal recorded once the handlers stand turns a refusal or a failed step into that signal's
+/// interruption, an interruption keeps its own signal, and with no signal a halt stays as it is.
+#[test]
+fn a_recorded_signal_settles_any_halt_as_its_interruption() {
+    let interrupt = Interrupt::new();
+    interrupt.record(libc::SIGHUP);
+    interrupt.record(libc::SIGTERM);
+    assert!(matches!(
+        settled(Halt::stop(2, "refused"), &interrupt),
+        Halt::Interrupted(libc::SIGHUP)
+    ));
+    assert!(matches!(
+        settled(Halt::failed("failed"), &interrupt),
+        Halt::Interrupted(libc::SIGHUP)
+    ));
+    assert!(matches!(
+        settled(Halt::Interrupted(libc::SIGINT), &interrupt),
+        Halt::Interrupted(libc::SIGINT)
+    ));
+    let quiet = Interrupt::new();
+    assert!(matches!(
+        settled(Halt::stop(3, "red"), &quiet),
+        Halt::Stop { code: 3, .. }
+    ));
 }

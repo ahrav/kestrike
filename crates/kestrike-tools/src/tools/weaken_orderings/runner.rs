@@ -22,12 +22,12 @@ use crate::genmc::refusal::Error;
 use crate::genmc::transcription::check_transcription;
 use crate::genmc::{is_file, read_source};
 use crate::json::{self, Integer, Object, Text, Value};
-use crate::orderings::check::{GENMC, family_kernel};
-use crate::orderings::sources::{kernel_texts, loom_site};
+use crate::orderings::check::{CATALOG, GENMC, family_kernel, row_entries};
+use crate::orderings::sources::{diagnostic_sites, kernel_texts, module_file};
 use crate::orderings::verdicts::{LOOM_REBUILT, case_exit, genmc_result, loom_result};
 use crate::ownership::PathError;
 use crate::process::{Interrupt, captured};
-use crate::python::{hexdigest, returncode, str_of, truthy};
+use crate::python::{hexdigest, returncode, truthy};
 use crate::shell::join;
 use crate::text::{newlines, text};
 
@@ -51,9 +51,6 @@ pub(super) struct Ran {
     evidence: PathBuf,
 }
 
-/// A read of [`Runner::read`] as kept: the text, or the error's kind and text.
-pub(super) type Read = Result<String, (io::ErrorKind, String)>;
-
 /// The runs of one plant, by lane and test.
 pub(super) type Runs = BTreeMap<(&'static str, Text), Ran>;
 
@@ -73,9 +70,10 @@ pub(super) struct Runner<'l> {
     rebuilt: Option<Text>,
     declared: Value,
     kernels: BTreeMap<String, String>,
-    /// Each file [`Runner::read`] has read, with its text or its error, so the copy's check, the selection
-    /// and every loom site's judgment read one text of a file: the one the check read before any plant.
-    pub(super) reads: RefCell<BTreeMap<String, Read>>,
+    /// The model source each loom test's first lookup found, `None` where it found none: the run looks up
+    /// the tests of every `kill` and `unrun` loom entry of the catalog right after the copy's check, and
+    /// any other test at its first judgment with a failure, under the plant then in place.
+    pub(super) models: RefCell<BTreeMap<Text, Option<(String, String)>>>,
 }
 
 /// `text_of` is `path` as Python's `str` of a path writes it.
@@ -214,38 +212,73 @@ impl<'l> Runner<'l> {
             rebuilt: None,
             declared: Value::Null,
             kernels: BTreeMap::new(),
-            reads: RefCell::new(BTreeMap::new()),
+            models: RefCell::new(BTreeMap::new()),
         })
     }
 
-    /// `read` is the text of `path` in the copy, with `\r\n` and a lone `\r` read as `\n`, as the first
-    /// read of `path` in this run found it.
+    /// `read` is the text of `path` in the copy as it stands, with `\r\n` and a lone `\r` read as `\n`.
     ///
     /// # Errors
     ///
-    /// The first read of `path` failed, as when the file cannot be read as UTF-8.
+    /// The read fails, as when the file cannot be read as UTF-8.
     pub(super) fn read(&self, path: &str) -> io::Result<String> {
-        if let Some(read) = self.reads.borrow().get(path) {
-            return read
-                .clone()
-                .map_err(|(kind, text)| io::Error::new(kind, text));
+        read_source(&self.copy, path)
+    }
+
+    /// `model` is the repository path and the text of loom test `test`'s model source, as its first lookup
+    /// in this run found them, `None` where that lookup found none or `test` holds a lone surrogate.
+    pub(super) fn model(&self, test: &Text) -> Option<(String, String)> {
+        if let Some(found) = self.models.borrow().get(test) {
+            return found.clone();
         }
-        let read = read_source(&self.copy, path);
-        let kept = match &read {
-            Ok(text) => Ok(text.clone()),
-            Err(error) => Err((error.kind(), error.to_string())),
+        let read = |path: &str| self.read(path);
+        let found = test.to_str().and_then(|name| module_file(name, &read));
+        self.models.borrow_mut().insert(test.clone(), found.clone());
+        found
+    }
+
+    /// `remember_models` looks up the model source of each test of every loom entry of a `kill` or
+    /// `unrun` disposition of the copy's catalog, a catalog the check has accepted, so those tests are
+    /// judged against the text the check read before any plant.
+    ///
+    /// # Errors
+    ///
+    /// The catalog cannot be read, or is no object whose `rows` is an array of objects with one
+    /// disposition each.
+    pub(super) fn remember_models(&self) -> Result<(), Halt> {
+        let source = self.read(CATALOG).map_err(Halt::failed)?;
+        let catalog = json::parse(&source).map_err(Halt::failed)?;
+        let Some(Value::Array(rows)) = json_path(&catalog, &["rows"]) else {
+            return Err(Halt::failed("KeyError: 'rows'"));
         };
-        self.reads.borrow_mut().insert(path.to_owned(), kept);
-        read
+        for row in rows {
+            let Value::Object(row) = row else {
+                return Err(Halt::failed("a catalog row is no object"));
+            };
+            let (entries, wanted) =
+                row_entries(row).map_err(|reason| Halt::failed(text!("ValueError: ", reason)))?;
+            if wanted == Some("survived") {
+                continue;
+            }
+            for entry in entries {
+                if entry.get("lane") != Some(&Value::String(Text::from("loom"))) {
+                    continue;
+                }
+                if let Some(Value::Array(tests)) = entry.get("tests") {
+                    for test in tests {
+                        if let Value::String(test) = test {
+                            self.model(test);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The kernel package's directory in the copy.
     fn package(&self) -> Result<PathBuf, Halt> {
-        let package = match &self.declared {
-            Value::Object(declared) => declared.get("package"),
-            _ => None,
-        };
-        match package {
+        match json_path(&self.declared, &["package"]) {
             Some(Value::String(package)) => Ok(self.copy.join(os_of(package)?)),
             _ => Err(Halt::failed("KeyError: 'package'")),
         }
@@ -258,9 +291,10 @@ impl<'l> Runner<'l> {
     ///
     /// The declaration or a kernel file cannot be read.
     pub(super) fn prepare(&mut self) -> Result<(), Halt> {
+        let source = self
+            .read(GENMC)
+            .map_err(|error| Halt::failed(PathError::new(&self.copy.join(GENMC), error)))?;
         let path = self.copy.join(GENMC);
-        let source = fs::read_to_string(&path)
-            .map_err(|error| Halt::failed(PathError::new(&path, error)))?;
         self.declared = json::parse(&source)
             .map_err(|error| Halt::failed(format!("{}: {error}", path.display())))?;
         self.kernels = kernel_texts(&self.package()?)?;
@@ -443,17 +477,21 @@ fn code_value(code: Option<i32>) -> Value {
 }
 
 impl Runner<'_> {
-    /// `loom` is the result of loom test `test` judged for `failure`, running the test once per plant
-    /// into `runs`: on the unweakened copy where `row` is `None`, else under the plant of the row it
-    /// labels.
+    /// `loom` is the result of loom test `test` judged for `failure`, the entry's JSON value, running the
+    /// test once per plant into `runs`: on the unweakened copy where `row` is `None`, else under the plant
+    /// of the row it labels. A failure Python reads as false names no site. Otherwise the site is the one
+    /// message literal of the test's model source, as [`Runner::model`] gives it, that holds a text
+    /// failure; a text with a lone surrogate is held by no literal.
     ///
     /// # Errors
     ///
-    /// The run of the test halts, its output cannot be read, or the judgment fails.
+    /// The run of the test halts or its output cannot be read; after the run, a failure Python reads as
+    /// true that is no text, where the model source holds a message literal, fails with Python's type
+    /// error; or the judgment fails.
     pub(super) fn loom(
         &mut self,
         test: &Text,
-        failure: &str,
+        failure: &Value,
         row: Option<&Text>,
         runs: &mut Runs,
     ) -> Result<Value, Halt> {
@@ -514,20 +552,25 @@ impl Runner<'_> {
                 },
             );
         }
-        let ran = &runs[&key];
-        let site = if failure.is_empty() {
-            None
+        let site = if truthy(failure) {
+            match self.model(test) {
+                None => None,
+                Some((path, text)) => site_of(&path, &text, failure)?,
+            }
         } else {
-            let read = |path: &str| self.read(path);
-            test.to_str()
-                .and_then(|test| loom_site(test, failure, &read))
+            None
+        };
+        let ran = &runs[&key];
+        let text = match failure {
+            Value::String(failure) => failure.to_str().unwrap_or_default(),
+            _ => "",
         };
         let code = ran.code;
         let rebuilt = row.is_none() || self.rebuilt.as_ref() == row;
         let (verdict, reason) = loom_result(
             &ran.text,
             code,
-            failure,
+            text,
             rebuilt,
             site.as_ref().map(|(path, line)| (path.as_str(), *line)),
         )
@@ -537,19 +580,49 @@ impl Runner<'_> {
     }
 }
 
+/// `site_of` is the site in the model source `text` at `path` of `failure`, a value Python reads as true:
+/// the line of its one message literal that holds the failure's text, `None` where no literal or more
+/// than one does or the text holds a lone surrogate.
+///
+/// # Errors
+///
+/// A failure that is no text, where `text` holds a message literal, fails with Python's type error.
+fn site_of(path: &str, text: &str, failure: &Value) -> Result<Option<(String, usize)>, Halt> {
+    let sites = diagnostic_sites(text);
+    let failure = match failure {
+        Value::String(failure) => failure.to_str(),
+        _ if sites.is_empty() => return Ok(None),
+        other => {
+            return Err(Halt::failed(format!(
+                "TypeError: 'in <string>' requires string as left operand, not {}",
+                type_name(other)
+            )));
+        }
+    };
+    let lines: Vec<usize> = sites
+        .into_iter()
+        .filter(|(content, _)| failure.is_some_and(|failure| content.contains(failure)))
+        .map(|(_, line)| line)
+        .collect();
+    Ok(match lines.as_slice() {
+        [line] => Some((path.to_owned(), *line)),
+        _ => None,
+    })
+}
+
 impl Runner<'_> {
-    /// `genmc` is the results of GenMC `cases` judged for `failure`, running each case once per plant
-    /// into `runs`: the cases not yet run go to one lane call, with the `pr` profile where it holds each
-    /// of them and `scheduled` otherwise.
+    /// `genmc` is the results of GenMC `cases` judged for `failure`, the entry's JSON value, running each
+    /// case once per plant into `runs`: the cases not yet run go to one lane call, with the profile
+    /// [`profile`] chooses.
     ///
     /// # Errors
     ///
-    /// The lane call halts, its evidence directory cannot be made, an output cannot be read, or a
-    /// judgment fails.
+    /// The profile's failure as [`profile`] gives it, before the lane call; the lane call halts, its
+    /// evidence directory cannot be made, an output cannot be read, or a judgment fails.
     pub(super) fn genmc(
         &mut self,
         cases: &[Text],
-        failure: &str,
+        failure: &Value,
         row: Option<&Text>,
         runs: &mut Runs,
     ) -> Result<Vec<Value>, Halt> {
@@ -561,24 +634,7 @@ impl Runner<'_> {
         }
         if !fresh.is_empty() {
             let evidence = self.output(&label_of(row), "genmc");
-            let pr = match json_path(&self.declared, &["profiles", "pr"]) {
-                Some(pr) => listed(pr, "the pr profile").map_err(Halt::failed)?,
-                None => return Err(Halt::failed("KeyError: 'profiles'")),
-            };
-            if let Some(unhashable) = pr
-                .iter()
-                .find(|named| matches!(named, Value::Array(_) | Value::Object(_)))
-            {
-                return Err(Halt::failed(format!(
-                    "TypeError: unhashable type: '{}'",
-                    type_name(unhashable)
-                )));
-            }
-            let held = fresh.iter().all(|case| {
-                pr.iter()
-                    .any(|named| *named == Value::String((*case).clone()))
-            });
-            let profile = if held { "pr" } else { "scheduled" };
+            let profile = profile(&self.declared, &fresh)?;
             let mut words: Vec<Text> = ["bash", "scripts/rust-lane.sh", "genmc", profile]
                 .map(Text::from)
                 .into();
@@ -675,12 +731,13 @@ impl Runner<'_> {
     }
 
     /// `each` gives `yielded` the results of one lane entry as each is judged: a list per loom test, and
-    /// one list for a GenMC batch. `runs` holds each test's run under the same plant, so a test that two
-    /// entries name runs once.
+    /// one list for a GenMC batch. The entry's `failure` reaches the lane as its JSON value, `null` where
+    /// it is missing. `runs` holds each test's run under the same plant, so a test that two entries name
+    /// runs once.
     ///
     /// # Errors
     ///
-    /// A run or a judgment halts, or `yielded` does.
+    /// A run or a judgment halts, as [`Runner::loom`] and [`Runner::genmc`] say, or `yielded` does.
     pub(super) fn each(
         &mut self,
         entry: &Object,
@@ -688,19 +745,8 @@ impl Runner<'_> {
         runs: &mut Runs,
         yielded: &mut dyn FnMut(Vec<Value>) -> Result<(), Halt>,
     ) -> Result<(), Halt> {
-        let raw = entry.get("failure").unwrap_or(&Value::Null);
+        let failure = entry.get("failure").unwrap_or(&Value::Null);
         let loom = entry.get("lane") == Some(&Value::String(Text::from("loom")));
-        let failure = match raw {
-            Value::String(failure) => failure.to_string(),
-            other if !truthy(other) => String::new(),
-            other if loom => {
-                return Err(Halt::failed(format!(
-                    "TypeError: 'in <string>' requires string as left operand, not {}",
-                    type_name(other)
-                )));
-            }
-            other => str_of(other).to_string(),
-        };
         let tests: Vec<Text> = match entry.get("tests") {
             Some(Value::Array(tests)) => tests
                 .iter()
@@ -713,12 +759,12 @@ impl Runner<'_> {
         };
         if loom {
             for test in &tests {
-                let result = self.loom(test, &failure, row, runs)?;
+                let result = self.loom(test, failure, row, runs)?;
                 yielded(vec![result])?;
             }
             Ok(())
         } else {
-            let results = self.genmc(&tests, &failure, row, runs)?;
+            let results = self.genmc(&tests, failure, row, runs)?;
             yielded(results)
         }
     }
@@ -736,6 +782,38 @@ fn result_record(lane: &str, test: &Text, members: &Object, verdict: &str, reaso
     result.insert("result", Value::String(Text::from(verdict)));
     result.insert("reason", Value::String(Text::from(reason)));
     result
+}
+
+/// `profile` is the lane profile of a call that runs the `fresh` cases of the declaration `declared`:
+/// `pr` where the set Python builds of `profiles.pr`, an array's elements, an object's keys or a string's
+/// code points, holds each case, and `scheduled` otherwise.
+///
+/// # Errors
+///
+/// Python's `KeyError` where `declared` holds no `profiles` object with a `pr` member, its `TypeError`
+/// where `pr` is a number, a boolean or null, or where it holds an array or an object.
+fn profile(declared: &Value, fresh: &[&Text]) -> Result<&'static str, Halt> {
+    let pr = match json_path(declared, &["profiles"]) {
+        None => return Err(Halt::failed("KeyError: 'profiles'")),
+        Some(profiles) => match json_path(profiles, &["pr"]) {
+            Some(pr) => listed(pr, "the pr profile").map_err(Halt::failed)?,
+            None => return Err(Halt::failed("KeyError: 'pr'")),
+        },
+    };
+    if let Some(unhashable) = pr
+        .iter()
+        .find(|named| matches!(named, Value::Array(_) | Value::Object(_)))
+    {
+        return Err(Halt::failed(format!(
+            "TypeError: unhashable type: '{}'",
+            type_name(unhashable)
+        )));
+    }
+    let held = fresh.iter().all(|case| {
+        pr.iter()
+            .any(|named| *named == Value::String((*case).clone()))
+    });
+    Ok(if held { "pr" } else { "scheduled" })
 }
 
 /// `type_name` is the name Python gives the type of the JSON value `value` reads as.

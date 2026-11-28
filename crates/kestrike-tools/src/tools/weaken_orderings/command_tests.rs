@@ -179,54 +179,57 @@ const CLAUSES: [(&str, &[&str]); 11] = [
 ];
 
 /// The bodies of the check's cases, by test name, read from the case file as text: each `fn` that a
-/// `#[test]` line precedes, up to the brace that closes its first `{`, braces inside comments and string
-/// literals passed over.
+/// `#[test]` line precedes, up to the brace that closes its first `{`. The markers and the braces are read
+/// from the file with its comments and string literals blanked, so neither inside them counts.
 fn bodies(source: &str) -> BTreeMap<String, String> {
+    let view = crate::rust_text::code(source);
     let mut found = BTreeMap::new();
-    for piece in source.split("#[test]").skip(1) {
-        let Some(rest) = piece.trim_start().strip_prefix("fn ") else {
+    for (marker, _) in view.match_indices("#[test]") {
+        let rest = &view[marker + "#[test]".len()..];
+        let trimmed = rest.trim_start();
+        let Some(after) = trimmed.strip_prefix("fn ") else {
             continue;
         };
-        let name: String = rest
+        let name: String = after
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
             .collect();
-        let view = crate::rust_text::code(piece);
-        let mut depth = 0usize;
-        let mut end = piece.len();
-        for (at, byte) in view.bytes().enumerate() {
-            match byte {
-                b'{' => depth += 1,
-                b'}' if depth == 1 => {
-                    end = at + 1;
-                    break;
-                }
-                b'}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-        }
-        found.insert(name, piece[..end].to_owned());
+        let start = view.len() - trimmed.len();
+        let Some(open) = view[start..].find('{').map(|at| start + at) else {
+            continue;
+        };
+        let end = crate::production_text::closing(&view, open).unwrap_or(view.len());
+        found.insert(name, source[start..end].to_owned());
     }
     found
 }
 
+/// `uncommented` is `text` with its comments taken out and the rest trimmed.
+fn uncommented(text: &str) -> String {
+    let mut kept = String::new();
+    let mut at = 0;
+    for (kind, start, end) in crate::rust_text::lexemes(text) {
+        if kind == crate::rust_text::Lexeme::Comment {
+            kept.push_str(&text[at..start]);
+            at = end;
+        }
+    }
+    kept.push_str(&text[at..]);
+    kept.trim().to_owned()
+}
+
 /// `arguments` is the text of each top-level argument of the call whose `(` stands at `open` in
-/// `source`, string literals read whole.
-fn arguments(source: &str, open: usize) -> Vec<&str> {
-    let bytes = source.as_bytes();
-    let (mut depth, mut at, mut start) = (0usize, open, open + 1);
+/// `source`, with its brackets and commas read from `view`, `source` with its comments and string
+/// literals blanked at the same offsets.
+fn arguments<'s>(source: &'s str, view: &str, open: usize) -> Vec<&'s str> {
+    let mut depth = 0usize;
+    let mut start = open + 1;
     let mut found = Vec::new();
-    while at < bytes.len() {
-        match bytes[at] {
-            b'"' => {
-                at += 1;
-                while at < bytes.len() && bytes[at] != b'"' {
-                    at += if bytes[at] == b'\\' { 2 } else { 1 };
-                }
-            }
+    for (at, byte) in view.bytes().enumerate().skip(open) {
+        match byte {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => {
-                depth -= 1;
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     found.push(source[start..at].trim());
                     return found;
@@ -238,16 +241,15 @@ fn arguments(source: &str, open: usize) -> Vec<&str> {
             }
             _ => {}
         }
-        at += 1;
     }
     found
 }
 
 /// `plants` holds where `body`'s code, its comments and string literals passed over, calls one of the
-/// check cases' refusing helpers with `refusal` as the argument that names the refusal: `refused(` and `refused_at(`, which assert exit 1, no credit and the refusal; `sentence(`,
-/// which asserts the refusal with its whole message, which the check gives only with exit 1 and no
-/// credit; `refused_in(`, which is `refused_at(` of `scope file`; or `messages_of(` in a body that also
-/// asserts exit 1 and no credit.
+/// check cases' refusing helpers with `refusal` as the argument that names the refusal: `refused(` and
+/// `refused_at(`, which assert exit 1, no credit and the refusal; `sentence(`, which asserts the refusal
+/// with its whole message, which the check gives only with exit 1 and no credit; `refused_in(`, which is
+/// `refused_at(` of `scope file`; or `messages_of(` in a body that also asserts exit 1 and no credit.
 fn plants(body: &str, refusal: &str) -> bool {
     let literal = format!("\"{refusal}\"");
     let view = crate::rust_text::code(body);
@@ -263,9 +265,11 @@ fn plants(body: &str, refusal: &str) -> bool {
             .collect::<Vec<_>>()
     };
     let called = |helper: &str, name_at: usize| {
-        calls(helper)
-            .into_iter()
-            .any(|open| arguments(body, open).get(name_at) == Some(&literal.as_str()))
+        calls(helper).into_iter().any(|open| {
+            arguments(body, &view, open)
+                .get(name_at)
+                .is_some_and(|argument| uncommented(argument) == literal)
+        })
     };
     let asserted = view.contains("assert_eq!(code, 1") && view.contains("Value::Bool(false)");
     called("refused(", 1)
@@ -282,10 +286,10 @@ fn every_documented_refusal_names_the_tests_that_plant_it() {
     let documented = documented(include_str!("help.md"));
     let named: BTreeSet<String> = CLAUSES.iter().map(|(name, _)| (*name).to_owned()).collect();
     assert_eq!(documented, named);
-    let bodies = bodies(include_str!("../../orderings/check_tests.rs"));
+    let cases = bodies(include_str!("../../orderings/check_tests.rs"));
     for (refusal, tests) in CLAUSES {
         for test in tests {
-            let body = bodies
+            let body = cases
                 .get(*test)
                 .unwrap_or_else(|| panic!("{test} names no test"));
             assert!(plants(body, refusal), "{test} plants {refusal:?}");
@@ -317,5 +321,27 @@ fn every_documented_refusal_names_the_tests_that_plant_it() {
     assert!(
         !plants("refused(plants, \"row\");", "find"),
         "another refusal is not this one"
+    );
+    assert!(
+        !plants("refused(plants, /* \"row\", */ \"find\", \"x\");", "row"),
+        "a refusal's name in a comment inside the call plants nothing"
+    );
+    assert!(plants(
+        "refused(plants, /* \"row\", */ \"find\", \"x\");",
+        "find"
+    ));
+    let commented = "/*\n#[test]\nfn hidden() { refused(plants, \"row\", \"x\"); }\n*/\n";
+    assert!(
+        bodies(commented).is_empty(),
+        "a test in a block comment is no test"
+    );
+    let raw = "#[test]\nfn live() {\n    let s = r##\"#[test]\nfn ghost() {\"##;\n    \
+               refused(plants, \"row\", \"x\");\n}\nfn helper() { refused(plants, \"find\", \"x\"); }\n";
+    let found = bodies(raw);
+    assert_eq!(found.keys().collect::<Vec<_>>(), ["live"]);
+    assert!(plants(&found["live"], "row"), "{found:?}");
+    assert!(
+        !plants(&found["live"], "find"),
+        "a helper after the test is no part of it"
     );
 }

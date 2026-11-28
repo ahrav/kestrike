@@ -206,11 +206,7 @@ fn supervised(
 /// # Errors
 ///
 /// A read of the leader's state fails as [`leader`] states.
-fn waited(
-    pid: u32,
-    cutoff: Option<Instant>,
-    interrupt: &Interrupt,
-) -> io::Result<(Leader, usize)> {
+fn waited(pid: u32, cutoff: Option<Instant>, interrupt: &Interrupt) -> io::Result<(Leader, usize)> {
     let mut pause = FIRST_PAUSE;
     loop {
         let state = leader(pid)?;

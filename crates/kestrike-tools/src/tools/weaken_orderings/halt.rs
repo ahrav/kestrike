@@ -65,7 +65,8 @@ impl From<io::Error> for Halt {
 /// this process, which then ends by that signal.
 fn end_by_sigint() {
     // SAFETY: `signal`, `sigemptyset`, `sigaddset`, `pthread_sigmask`, `getpid` and `kill` take plain
-    // values and a local signal set that outlives the calls; `sigemptyset` initializes the set before it is read.
+    // values and a local signal set that outlives the calls; `sigemptyset` initializes the set before it
+    // is read.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         let mut set: libc::sigset_t = std::mem::zeroed();

@@ -7,7 +7,8 @@ use crate::paths::tests::Scratch;
 
 /// A fresh write is a new file, a link beside it named after the file and the staging suffix stays, it
 /// keeps the replaced file's mode and takes a time later than that file's, even one in the future; a link
-/// at the path is replaced and its target keeps its bytes.
+/// at the path is replaced and its target keeps its bytes. The write runs under umask 077, which a plain
+/// create of mode 0640 would lessen to 0600.
 #[test]
 fn a_fresh_write_is_a_new_later_file_and_follows_no_link() {
     let scratch = Scratch::new("weaken-fresh");
@@ -36,7 +37,21 @@ fn a_fresh_write_is_a_new_later_file_and_follows_no_link() {
     assert_eq!(set, 0);
     drop(file);
     let inode = fs::metadata(&target).expect("stats").ino();
-    fresh_write(&target, "b", None).expect("written");
+    let written = target.clone();
+    std::thread::spawn(move || {
+        // SAFETY: on success, `unshare(CLONE_FS)` gives the calling thread a private filesystem
+        // context.
+        let unshared = unsafe { libc::unshare(libc::CLONE_FS) };
+        assert_eq!(
+            unshared, 0,
+            "the thread takes a filesystem context of its own"
+        );
+        // SAFETY: `umask` sets the mask of the private context unshared above.
+        unsafe { libc::umask(0o077) };
+        fresh_write(&written, "b", None).expect("written");
+    })
+    .join()
+    .expect("the thread ends");
     let status = fs::symlink_metadata(&target).expect("stats");
     assert_eq!(fs::read_to_string(&target).expect("reads"), "b");
     assert_ne!(status.ino(), inode);
@@ -89,7 +104,8 @@ fn a_digest_is_read_from_a_regular_file_and_no_link() {
     assert_eq!(regular_digest(&scratch.0.join("absent")), None);
 }
 
-/// A fresh write over a file with a time in the past takes the wall clock's time, read around the write.
+/// A fresh write over a file with a time in 2001 takes the wall clock's time, read around the write
+/// within two seconds, a margin for a filesystem's time granularity and a step of the clock.
 #[test]
 fn a_fresh_write_over_an_old_file_takes_the_wall_clock() {
     let scratch = Scratch::new("weaken-fresh-clock");
@@ -109,7 +125,7 @@ fn a_fresh_write_over_an_old_file_takes_the_wall_clock() {
         .expect("stats")
         .modified()
         .expect("a time");
-    let slack = std::time::Duration::from_millis(20);
+    let slack = std::time::Duration::from_secs(2);
     assert!(
         written + slack >= before && written <= after + slack,
         "{written:?}"

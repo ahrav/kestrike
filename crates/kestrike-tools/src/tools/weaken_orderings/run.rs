@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use super::execute::{Launch, holding, seconds, with_defaults};
-use super::files::{fresh_write, regular_digest, save, save_unless, sha256};
+use super::files::{fresh_write, regular_digest, save, save_through, sha256};
 use super::halt::Halt;
 use super::pins::{lane_env, pin};
 use super::runner::{Runner, Runs, json_path, os_of, text_of};
@@ -46,12 +46,12 @@ fn texts(items: &[Text]) -> String {
 
 /// `differs` holds where `git status` in `top` names a path of [`JUDGING`]: a change against `HEAD`,
 /// staged or not, or an untracked file that no ignore rule covers; a status that exits nonzero counts as
-/// a difference.
+/// a difference, and its standard error is written to `err`.
 ///
 /// # Errors
 ///
 /// A recorded signal, or a status that cannot start or whose output cannot be read.
-fn differs(top: &Path) -> Result<bool, Halt> {
+fn differs(top: &Path, err: &mut impl Write) -> Result<bool, Halt> {
     let mut git = Command::new("git");
     git.args(["--no-optional-locks", "-C"])
         .arg(top)
@@ -60,17 +60,21 @@ fn differs(top: &Path) -> Result<bool, Halt> {
     with_defaults(&mut git);
     let listed = capture(&mut git, &INTERRUPT)??;
     if !listed.status.success() {
-        let mut err = std::io::stderr();
         let _ = err.write_all(&listed.stderr);
         let _ = err.flush();
     }
     Ok(!listed.status.success() || !listed.stdout.is_empty())
 }
 
-/// `checked_work` refuses a work directory inside the checkout, one that cannot be listed, one that is
-/// not empty, a checkout whose judging paths differ from `HEAD`, and a work directory that cannot hold
-/// the copy, in that order, and then makes `work/copy` and `work/evidence`.
-fn checked_work(top: &Path, work: &Path) -> Result<(), Halt> {
+/// `checked_work` refuses a work directory inside the checkout, `top` resolved, which the refusal names;
+/// one that cannot be listed; one that is not empty; a checkout whose judging paths differ from `HEAD`,
+/// with Git's standard error on `err` where its status fails; and a work directory that cannot hold the
+/// copy, in that order, and then makes `work/copy` and `work/evidence`.
+///
+/// # Errors
+///
+/// Each refusal above, `top` that cannot be resolved, or a status that cannot run, as [`differs`] says.
+fn checked_work(top: &Path, work: &Path, err: &mut impl Write) -> Result<(), Halt> {
     let resolved = crate::paths::resolve(top).map_err(Halt::failed)?;
     if work.starts_with(&resolved) {
         return Err(Halt::stop(
@@ -79,7 +83,7 @@ fn checked_work(top: &Path, work: &Path) -> Result<(), Halt> {
                 "the work directory ",
                 work,
                 " lies inside the checkout ",
-                top
+                &resolved
             ),
         ));
     }
@@ -109,7 +113,7 @@ fn checked_work(top: &Path, work: &Path) -> Result<(), Halt> {
         }
         Ok(false) => {}
     }
-    if differs(top)? {
+    if differs(top, err)? {
         return Err(Halt::stop(
             2,
             text!(
@@ -136,7 +140,9 @@ fn checked_work(top: &Path, work: &Path) -> Result<(), Halt> {
 
 /// `run_command` runs `run` with the work directory `work` and the selected rows `selected`, writes
 /// `report.json` and prints its path, `mismatched` and `no verdict` as one JSON line on `out`, and
-/// returns the run's exit code; a halt prints its line on `err` and returns its own code.
+/// returns the run's exit code, or [`UNANNOUNCED`] where that line or its flush fails, with the report
+/// written. A halt prints its line on `err` and returns its own code; a signal recorded once the handlers
+/// stand makes any halt, and a report written as the signal arrives, end as that signal's interruption.
 pub(super) fn run_command(
     top: &Path,
     work: &OsStr,
@@ -149,24 +155,16 @@ pub(super) fn run_command(
         .map_err(|refusal| Halt::stop(2, refusal))
         .and_then(|()| crate::paths::resolve(Path::new(work)).map_err(Halt::failed))
         .and_then(|work| {
-            checked_work(top, &work)?;
+            checked_work(top, &work, err)?;
             install_handlers()?;
             let selected: Vec<Text> = selected.iter().map(|row| Text::from_os(row)).collect();
             let (report, code) = run(top, &work, &selected, &launch, err)?;
-            INTERRUPT.check()?;
             let path = work.join("report.json");
-            let signalled = || {
-                INTERRUPT
-                    .check()
-                    .map_err(|Interrupted(signal)| io::Error::other(format!("signal {signal}")))
-            };
-            if let Err(error) = save_unless(&path, &report, &signalled) {
-                INTERRUPT.check()?;
-                return Err(Halt::failed(error));
-            }
+            publish_report(&path, &report, &INTERRUPT)?;
+            INTERRUPT.check()?;
             Ok((path, report, code))
         });
-    match ran {
+    match ran.map_err(|halt| settled(halt, &INTERRUPT)) {
         Ok((path, report, code)) => {
             let member = |key: &str| json_path(&report, &[key]).cloned().unwrap_or(Value::Null);
             let mut line = Object::new();
@@ -180,6 +178,42 @@ pub(super) fn run_command(
         }
         Err(halt) => halt.end(err),
     }
+}
+
+/// `settled` is `halt`, or the interruption of the first signal `interrupt` records where `halt` is a
+/// refusal or a failed step: a handled signal ends the run whatever step it came during.
+fn settled(halt: Halt, interrupt: &Interrupt) -> Halt {
+    match interrupt.recorded() {
+        Some(signal) if !halt.is_interrupt() => Halt::Interrupted(signal),
+        _ => halt,
+    }
+}
+
+/// `publish_report` writes `report` to `path` as [`save`] does unless `interrupt` records a signal. The
+/// last read of the record and the rename run with the handled signals blocked in the calling thread, the
+/// run's one thread at this point, so a signal recorded by that read leaves no report and one that
+/// arrives during the read or the rename is recorded once the rename is done.
+///
+/// # Errors
+///
+/// The interruption of a recorded signal, with `path` as it stood and an attempt to remove the staging
+/// file, or a failed write.
+fn publish_report(path: &Path, report: &Value, interrupt: &Interrupt) -> Result<(), Halt> {
+    interrupt.check()?;
+    let gate = |rename: &mut dyn FnMut() -> io::Result<()>| {
+        blocked(|| {
+            interrupt
+                .check()
+                .map_err(|Interrupted(signal)| io::Error::other(format!("signal {signal}")))?;
+            rename()
+        })
+        .and_then(|renamed| renamed)
+    };
+    if let Err(error) = save_through(path, report, &gate) {
+        interrupt.check()?;
+        return Err(Halt::failed(error));
+    }
+    Ok(())
 }
 
 /// `matched` is `text`'s production text `production` with one space for each code point a test-only
@@ -260,14 +294,14 @@ impl Scoped {
 
     /// `planted` holds `row`'s plant in its scoped file while `body` runs, then, with the handled signals
     /// blocked, checks that the plant stayed in place, writes the unweakened file back and compares each
-    /// scoped file's digest.
+    /// scoped file's digest. Where `body` panics, the same restore runs and the panic then resumes.
     ///
     /// # Errors
     ///
     /// A refusal of exit 2 for a find that does not occur once; of exit 4 for a plant that changed, which a
-    /// plant that cannot be written reads as, an
-    /// unweakened file that cannot be written back or a scoped file that then differs; otherwise
-    /// `body`'s halt or a failed write of the plant.
+    /// plant that cannot be written reads as, an unweakened file that cannot be written back or a scoped
+    /// file that then differs; a failed read of the scoped file's status before the plant; a failed
+    /// change of the signal mask; otherwise `body`'s halt.
     fn planted(&self, row: &Object, body: impl FnOnce() -> Result<(), Halt>) -> Result<(), Halt> {
         let (id, name) = (string(row, "id"), string(row, "path"));
         let text = self.originals.get(&name).cloned().unwrap_or_default();
@@ -289,9 +323,11 @@ impl Scoped {
             )
         })?;
         let unweakened = fs::metadata(&path).map_err(Halt::failed)?;
-        let ran = fresh_write(&path, &plant, None)
-            .map_err(Halt::failed)
-            .and_then(|()| body());
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fresh_write(&path, &plant, None)
+                .map_err(Halt::failed)
+                .and_then(|()| body())
+        }));
         let restored = blocked(|| -> Result<(bool, Vec<Text>), Halt> {
             let moved = regular_digest(&path) != Some(hexdigest(plant.as_bytes()));
             fresh_write(&path, &text, moved.then_some(&unweakened)).map_err(|error| {
@@ -308,8 +344,9 @@ impl Scoped {
                 )
             })?;
             Ok((moved, self.drifted()?))
-        })??;
-        match restored {
+        });
+        let ran = ran.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        match restored?? {
             (true, _) => Err(Halt::stop(
                 4,
                 text!("the plant of ", name, " changed while ", id, "'s tests ran"),
@@ -598,6 +635,7 @@ fn run(
             text!("check refuses the copy's catalog: ", str_of(&shown)),
         ));
     }
+    runner.remember_models()?;
     launch.interrupt.check()?;
     runner.prepare()?;
     let (selection, scoped) = selection(&runner, selected)?;

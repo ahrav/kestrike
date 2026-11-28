@@ -440,8 +440,8 @@ fn an_output_name_already_taken_is_refused_before_the_child_starts() {
 }
 
 /// A test whose exit is first seen after its deadline counts as an exit, not a timeout: the poll reads the
-/// leader's state before the clock, as the script's loop polls the child before its clock. The child has
-/// exited before the wait starts, with a budget already spent.
+/// leader's state before the clock. The child has exited before the wait starts, with a budget already
+/// spent.
 #[test]
 fn an_exit_first_seen_after_the_deadline_counts_as_an_exit() {
     let scratch = Scratch::new("weaken-late-exit");
@@ -528,4 +528,51 @@ fn a_test_that_its_own_signal_ends_gives_the_negated_number() {
     )
     .expect("the run ends");
     assert_eq!(code, Some(-libc::SIGKILL));
+}
+
+const FSIZE_ROLE: &str = "KESTRIKE_WEAKEN_CHILD_FSIZE_ROLE";
+
+/// A child started through the run's launch hook takes SIGXFSZ at its default action, though the run
+/// ignores it: past the soft file size limit the child's write ends it by SIGXFSZ. The run is this test
+/// executable started again in that role, with SIGXFSZ ignored and a limit of 100 bytes.
+#[test]
+fn a_child_takes_sigxfsz_at_its_default_action() {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(at) = std::env::var_os(FSIZE_ROLE) {
+        let at = PathBuf::from(at);
+        // SAFETY: `signal` takes a signal number and a disposition constant; `getrlimit` and `setrlimit`
+        // read and write a local record that outlives the calls.
+        let set = unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let mut limits: libc::rlimit = std::mem::zeroed();
+            libc::getrlimit(libc::RLIMIT_FSIZE, &mut limits);
+            limits.rlim_cur = limits.rlim_max.min(100);
+            libc::setrlimit(libc::RLIMIT_FSIZE, &limits)
+        };
+        assert_eq!(set, 0);
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", r#"exec head -c 200 /dev/zero > "$1""#, "sh"])
+            .arg(at.join("big"));
+        super::with_defaults(&mut command);
+        let status = command.status().expect("the child runs");
+        eprintln!("{status:?}");
+        std::process::exit(if status.signal() == Some(libc::SIGXFSZ) {
+            0
+        } else {
+            3
+        });
+    }
+    let scratch = Scratch::new("weaken-child-fsize");
+    let name = module_path!()
+        .split_once("::")
+        .map_or("", |(_, rest)| rest)
+        .to_owned()
+        + "::a_child_takes_sigxfsz_at_its_default_action";
+    let status = Command::new(std::env::current_exe().expect("the test executable"))
+        .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(FSIZE_ROLE, &scratch.0)
+        .status()
+        .expect("the role runs");
+    assert_eq!(status.code(), Some(0));
 }
