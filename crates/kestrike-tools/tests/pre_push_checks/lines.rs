@@ -648,8 +648,10 @@ static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::n
 static FAILING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The number of Git commands the trace held when the failing call ran.
 static TRACED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// The number of skipped-scan notes the running plan gave.
-static NOTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The number of Git commands the trace held at each probe call of the running plan, in call order.
+static SEEN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+/// The number of probe calls the running plan had made when it gave each skipped-scan note.
+static NOTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
 /// `traced` counts the Git commands that `GIT_TRACE` has logged so far.
 fn traced() -> usize {
@@ -661,24 +663,29 @@ fn traced() -> usize {
         .count()
 }
 
-/// `counting` reports `Err(143)` on the call [`FAILING`] names and `Ok` on every other call.
+/// `counting` reports `Err(143)` on the call [`FAILING`] names and `Ok` on every other call, and adds the
+/// trace's count of Git commands at the call to [`SEEN`].
 fn counting() -> Result<(), u8> {
     use std::sync::atomic::Ordering;
     let call = CALLS.fetch_add(1, Ordering::SeqCst) + 1;
+    let traced = traced();
+    SEEN.lock().expect("the list is held").push(traced);
     if call == FAILING.load(Ordering::SeqCst) {
-        TRACED.store(traced(), Ordering::SeqCst);
+        TRACED.store(traced, Ordering::SeqCst);
         return Err(143);
     }
     Ok(())
 }
 
 /// `probed_plan` plans `lines` and then the guard with [`counting`], failing at call `failing`, and
-/// returns the first error, with no note given after the failing call. [`NOTES`] counts the notes given.
+/// returns the first error, with no note given after the failing call. It empties [`SEEN`] and [`NOTED`]
+/// first, and each note adds the plan's count of probe calls to [`NOTED`].
 fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
     use std::sync::atomic::Ordering;
     CALLS.store(0, Ordering::SeqCst);
     FAILING.store(failing, Ordering::SeqCst);
-    NOTES.store(0, Ordering::SeqCst);
+    SEEN.lock().expect("the list is held").clear();
+    NOTED.lock().expect("the list is held").clear();
     let mut plan = match Plan::new("origin".as_ref(), counting) {
         Ok(plan) => plan,
         Err(failure) => return Some(failure),
@@ -686,7 +693,10 @@ fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
     for line in lines {
         let mut late = false;
         let planned = plan.line(line, |_| {
-            NOTES.fetch_add(1, Ordering::SeqCst);
+            NOTED
+                .lock()
+                .expect("the list is held")
+                .push(CALLS.load(Ordering::SeqCst));
             late = failing != 0 && CALLS.load(Ordering::SeqCst) >= failing;
         });
         assert!(!late, "the note is given after the failing call");
@@ -700,10 +710,11 @@ fn probed_plan(lines: &[OsString], failing: usize) -> Option<Failure> {
 /// A probe that reports `Err` once any read of a plan returns ends the plan as [`Failure::Cancelled`]
 /// with its code and starts no later Git read, for a line with no comparison base, a line whose remote
 /// commit the clone lacks so the merge base is read, a changed Rust file whose ignore spans are read in a
-/// batch, and the guard's batch read of a pushed chaos record. The plan with no failing call runs the
-/// probe once for each Git command the trace logged and once more for its skipped-scan note, so a Git
-/// read with no probe behind it leaves the probe's calls short of the trace, and the loop over the calls
-/// then reaches every read.
+/// batch, and the guard's batch read of a pushed chaos record. In the plan with no failing call, each
+/// probe call finds one more Git command in the trace than the call before it, but for the call that
+/// follows the skipped-scan note, which finds the same count, and no Git command follows the last call.
+/// A Git read with no probe behind it therefore fails the row, and the loop over the calls reaches every
+/// read.
 #[test]
 fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read() {
     use std::sync::atomic::Ordering;
@@ -728,11 +739,22 @@ fn a_probe_that_reports_err_at_any_read_ends_the_plan_and_starts_no_later_read()
             batches, 2,
             "the ignore spans and the guard each read a batch"
         );
-        assert_eq!(NOTES.load(Ordering::SeqCst), 1, "the unbased line is noted");
+        let noted = NOTED.lock().expect("the list is held").clone();
+        let [noted] = noted.as_slice() else {
+            panic!("the unbased line alone is noted: {noted:?}");
+        };
+        let expected: Vec<usize> = (1..=reads)
+            .map(|call| if call <= *noted { call } else { call - 1 })
+            .collect();
         assert_eq!(
-            reads,
-            traced() + 1,
-            "each Git command is followed by one probe call, and the note by one more"
+            *SEEN.lock().expect("the list is held"),
+            expected,
+            "each probe call follows one Git command of its own, but for the call after the note"
+        );
+        assert_eq!(
+            traced(),
+            reads - 1,
+            "a Git command follows the last probe call"
         );
         for failing in 1..=reads {
             let failure = probed_plan(&lines, failing);
