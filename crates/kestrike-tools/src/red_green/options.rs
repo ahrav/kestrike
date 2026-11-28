@@ -15,7 +15,7 @@ use crate::text::{self, Text, text};
 /// The tool's word in the repeat command.
 const TOOL: &str = "red-green";
 
-pub const WATCHDOG: f64 = 1500.0;
+pub const DEFAULT_WATCHDOG: f64 = 1500.0;
 
 /// The longest wait in seconds the platform's timed lock takes, `threading.TIMEOUT_MAX` on 64-bit Linux.
 pub const TIMEOUT_MAX: f64 = 9_223_372_036.0;
@@ -104,7 +104,7 @@ pub fn read(args: &[OsString], tool: &str, usage: &str, help: &str) -> Parsed<Op
     reader.parse(args).map(|values| {
         let given = |name| values.get(name).map(Text::from_os);
         let or = |name, default: &str| given(name).unwrap_or_else(|| Text::from(default));
-        let watchdog = given("--watchdog").map_or(WATCHDOG, |value| {
+        let watchdog = given("--watchdog").map_or(DEFAULT_WATCHDOG, |value| {
             parsed_float(&value).expect("a checked float parses")
         });
         Options {
@@ -129,8 +129,8 @@ pub fn read(args: &[OsString], tool: &str, usage: &str, help: &str) -> Parsed<Op
 
 /// `check_given` requires at least one `--carry` path. It rejects `--` for every option value it checks
 /// and accepts an empty value only for `--expect`.
-pub fn check_given(options: &Options) -> Result<(), &'static str> {
-    let values = [
+pub fn check_given(options: &Options) -> Result<(), Text> {
+    let mut values = [
         &options.package,
         &options.target,
         &options.test,
@@ -141,17 +141,17 @@ pub fn check_given(options: &Options) -> Result<(), &'static str> {
     .chain(&options.carry)
     .chain(options.base.iter())
     .chain(options.artifacts.iter());
-    let mut given = true;
-    for value in values {
-        given &= !value.is_empty() && *value != "--";
-    }
+    let given = values.all(|value| !value.is_empty() && *value != "--");
     if options.carry.is_empty() || !given || options.expect == "--" {
-        return Err("an option has no value, or --carry names no path");
+        return Err(Text::from(
+            "an option has no value, or --carry names no path",
+        ));
     }
     Ok(())
 }
 
-pub fn check_expect(expect: &Text, test: &Text) -> Result<(), Text> {
+pub fn check_expect(options: &Options) -> Result<(), Text> {
+    let (expect, test) = (&options.expect, &options.test);
     if expect.strip().is_empty() {
         return Err(Text::from("--expect is empty"));
     }
@@ -162,12 +162,12 @@ pub fn check_expect(expect: &Text, test: &Text) -> Result<(), Text> {
 }
 
 /// A NaN fails the bound.
-pub fn check_watchdog(watchdog: f64) -> Result<(), String> {
+pub fn check_watchdog(watchdog: f64) -> Result<(), Text> {
     if 0.0 < watchdog && watchdog <= TIMEOUT_MAX {
         return Ok(());
     }
-    Err(format!(
-        "--watchdog must be a positive number of seconds up to {}",
+    Err(text!(
+        "--watchdog must be a positive number of seconds up to ",
         python::repr_float(TIMEOUT_MAX)
     ))
 }

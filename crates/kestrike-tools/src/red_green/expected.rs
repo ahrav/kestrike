@@ -5,12 +5,15 @@
 //! whole, with `TEST` standing for the test ID as literal text, `.` for any byte and `\s` for
 //! [`classes::SPACE`]. A backtrace runs from a line that opens with `stack backtrace:` through each next
 //! line that opens with a space. Each framing and backtrace line becomes one NUL, which no argument holds,
-//! so a match of the expected text lies within one run of adjacent kept lines. The search reads bytes: a
-//! last line without LF and bytes outside UTF-8 stand as they are.
+//! so a match of the expected text lies within one run of adjacent kept lines.
+
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 
 use regex::bytes::Regex;
 
 use crate::classes;
+use crate::text::Text;
 
 /// `unframed` retains libtest's `running N tests (shuffle seed: S)` header under `--shuffle`.
 pub const FRAMING: [&str; 13] = [
@@ -30,20 +33,13 @@ pub const FRAMING: [&str; 13] = [
 ];
 
 fn literal(text: &[u8]) -> String {
-    text.iter()
-        .map(|&byte| {
-            if byte.is_ascii_alphanumeric() {
-                char::from(byte).to_string()
-            } else {
-                format!(r"\x{byte:02x}")
-            }
-        })
-        .collect()
+    text.iter().map(|byte| format!(r"\x{byte:02x}")).collect()
 }
 
-/// Every shape runs with `.` as any byte; `\d` and `\s` keep their Unicode classes.
-fn framing(test: &[u8]) -> Regex {
-    let test = literal(test);
+/// Every shape runs with `.` as any byte of a [`Text`]'s encoding; `\d` and `\s` keep their Unicode
+/// classes.
+fn framing(test: &Text) -> Regex {
+    let test = literal(test.as_bytes());
     let shapes: Vec<String> = FRAMING
         .iter()
         .map(|shape| {
@@ -56,31 +52,38 @@ fn framing(test: &[u8]) -> Regex {
     classes::compiled_bytes(&format!("(?s-u)^(?:{})$", shapes.join("|")))
 }
 
-pub fn unframed(output: &[u8], test: &[u8]) -> Vec<u8> {
-    let framing = framing(test);
-    let mut kept: Vec<&[u8]> = Vec::new();
+fn unframed_by(framing: &Regex, output: &[u8]) -> Text {
+    let nul = Text::from("\0");
+    let mut kept = Vec::new();
     let mut backtrace = false;
     for line in output.split(|&byte| byte == b'\n') {
-        let body = line.strip_suffix(b"\r").unwrap_or(line);
+        let line = Text::from_os(OsStr::from_bytes(line));
+        let bytes = line.as_bytes();
+        let body = bytes.strip_suffix(b"\r").unwrap_or(bytes);
         backtrace = body.starts_with(b"stack backtrace:") || (backtrace && body.starts_with(b" "));
         kept.push(if backtrace || framing.is_match(body) {
-            b"\0"
+            nul.clone()
         } else {
             line
         });
     }
-    kept.join(&b'\n')
+    Text::join("\n", &kept)
+}
+
+pub fn unframed(output: &[u8], test: &Text) -> Text {
+    unframed_by(&framing(test), output)
 }
 
 /// The streams whose unframed output holds `expect`, in the order of `outputs`.
 pub fn expect_streams<'a>(
     outputs: &[(&'a str, Vec<u8>)],
-    expect: &[u8],
-    test: &[u8],
+    expect: &Text,
+    test: &Text,
 ) -> Vec<&'a str> {
+    let framing = framing(test);
     outputs
         .iter()
-        .filter(|(_, data)| super::holds(&unframed(data, test), expect))
+        .filter(|(_, data)| super::holds(unframed_by(&framing, data).as_bytes(), expect.as_bytes()))
         .map(|(stream, _)| *stream)
         .collect()
 }

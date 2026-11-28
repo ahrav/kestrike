@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use super::{NO_EVIDENCE, base_reason, head_reason, tree_reason};
 use crate::red_green::evidence::{Evidence, Readings};
+use crate::red_green::options::{DEFAULT_WATCHDOG, Options};
+use crate::red_green::record::Leg;
 use crate::text::Text;
 
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
@@ -16,6 +18,32 @@ fn read(outputs: &[(&'static str, &str)]) -> Evidence {
             .map(|(stream, data)| (*stream, data.as_bytes().to_vec()))
             .collect(),
     })
+}
+
+pub(crate) fn options(test: &str, expect: &str) -> Options {
+    Options {
+        package: Text::from("p"),
+        target: Text::from("lib"),
+        test: Text::from(test),
+        expect: Text::from(expect),
+        carry: vec![Text::from("t.rs")],
+        base: None,
+        head: Text::from("HEAD"),
+        watchdog: DEFAULT_WATCHDOG,
+        artifacts: None,
+        cargo: Text::from("cargo"),
+        release: false,
+    }
+}
+
+pub(crate) fn leg(exit: i32, verdict: &str, evidence: Evidence) -> Leg {
+    Leg {
+        exit,
+        verdict: Text::from(verdict),
+        seconds: 1.0,
+        evidence,
+        expect_streams: None,
+    }
 }
 
 fn both() -> Evidence {
@@ -67,14 +95,9 @@ fn base_reason_names_each_outcome_of_the_base_leg() {
          Some(incomplete(7, "\"x\\u2028'y\"")), None),
     ];
     for (name, code, verdict, evidence, reason, streams) in rows {
-        let judged = base_reason(
-            code,
-            &Text::from(verdict),
-            &evidence,
-            EXPECT.as_bytes(),
-            TEST.as_bytes(),
-        );
-        assert_eq!(judged.reason, reason.map(Text::from), "{name}");
+        let mut judged = leg(code, verdict, evidence);
+        let found = base_reason(&mut judged, &options(TEST, EXPECT));
+        assert_eq!(found, reason.map(Text::from), "{name}");
         assert_eq!(judged.expect_streams, streams, "{name}");
     }
 }
@@ -99,7 +122,7 @@ fn head_reason_names_each_outcome_of_the_head_leg() {
     ];
     for (name, code, verdict, evidence, reason) in rows {
         assert_eq!(
-            head_reason(code, &Text::from(verdict), &evidence),
+            head_reason(&leg(code, verdict, evidence)),
             reason.map(Text::from),
             "{name}"
         );

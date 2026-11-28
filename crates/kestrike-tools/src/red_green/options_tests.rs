@@ -3,7 +3,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use super::{
-    Options, TIMEOUT_MAX, WATCHDOG, check_expect, check_given, check_receipt_directory,
+    DEFAULT_WATCHDOG, Options, TIMEOUT_MAX, check_expect, check_given, check_receipt_directory,
     check_watchdog, repeat,
 };
 use crate::args::Parsed;
@@ -34,7 +34,7 @@ fn options() -> Options {
         carry: vec![Text::from("a")],
         base: None,
         head: Text::from("HEAD"),
-        watchdog: WATCHDOG,
+        watchdog: DEFAULT_WATCHDOG,
         artifacts: None,
         cargo: Text::from("cargo"),
         release: false,
@@ -181,13 +181,17 @@ fn check_given_refuses_an_empty_or_double_dash_value() {
         ("a blank expect", Options { expect: Text::from(" "), ..options() }, Ok(())),
     ];
     for (name, options, expected) in rows {
-        assert_eq!(check_given(&options), expected, "{name}");
+        assert_eq!(
+            check_given(&options),
+            expected.map_err(Text::from),
+            "{name}"
+        );
     }
 }
 
 #[test]
 fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
-    let rows: [(&str, Text, Text, Option<&str>); 8] = [
+    let rows: [(&str, Text, Text, Option<&str>); 9] = [
         (
             "a text",
             Text::from("lost a completion"),
@@ -233,6 +237,12 @@ fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
             Some("--expect '\\udcff' is part of the test ID"),
         ),
         (
+            "a byte inside a UTF-8 sequence of the test ID",
+            bytes(b"\xc3"),
+            Text::from("caf\u{e9}"),
+            None,
+        ),
+        (
             "an ID that holds no part",
             Text::from("poll\n"),
             Text::from(TEST),
@@ -241,7 +251,11 @@ fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
     ];
     for (name, expect, test, expected) in rows {
         assert_eq!(
-            check_expect(&expect, &test),
+            check_expect(&Options {
+                expect,
+                test,
+                ..options()
+            }),
             expected.map_or(Ok(()), |reason| Err(Text::from(reason))),
             "{name}"
         );
@@ -267,7 +281,7 @@ fn check_watchdog_takes_a_positive_wait_up_to_the_platform_bound() {
         let expected = if accepted {
             Ok(())
         } else {
-            Err(refused.to_owned())
+            Err(Text::from(refused))
         };
         assert_eq!(check_watchdog(watchdog), expected, "{watchdog}");
     }

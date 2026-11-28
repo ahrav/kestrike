@@ -104,7 +104,10 @@ const TREE_ROWS: &[(&str, Setup, Named, Option<&[u8]>)] = &[
         write(r, "d/x", b"x\n", 0o644);
         fs::set_permissions(r.join("d"), fs::Permissions::from_mode(0o000)).expect("locked");
     }, |mut n| { n.insert(Text::from("d/x"), entry("100644", &blob_id::<Sha1>(b"x\n"))); n }, Some(b"d")),
-    ("a named file the tree lacks", |r| fs::remove_file(r.join("src/lib.rs")).expect("removed"), same, Some(b"src")),
+    ("a named file the tree lacks, which leaves its directory empty",
+     |r| fs::remove_file(r.join("src/lib.rs")).expect("removed"), same, Some(b"src")),
+    ("a named file the tree lacks beside others", |r| fs::remove_file(r.join("a.txt")).expect("removed"), same,
+     Some(b"a.txt")),
     ("a named link the tree lacks", |r| fs::remove_file(r.join("link")).expect("removed"), same, Some(b"link")),
     ("a link the commit lacks", |r| symlink("a.txt", r.join("x")).expect("made"), same, Some(b"x")),
     ("a file for a named link", |r| {
@@ -112,6 +115,21 @@ const TREE_ROWS: &[(&str, Setup, Named, Option<&[u8]>)] = &[
         write(r, "link", b"a.txt", 0o644);
     }, same, Some(b"link")),
     ("a link for a named file", |r| relink(r, "a.txt", "src/lib.rs"), same, Some(b"a.txt")),
+    ("a link to a file of the same bytes for a named file", |r| {
+        let outside = r.parent().expect("the tree has a parent").join("outside-a.txt");
+        fs::write(&outside, b"a\n").expect("written");
+        fs::remove_file(r.join("a.txt")).expect("removed");
+        symlink(outside, r.join("a.txt")).expect("linked");
+    }, same, Some(b"a.txt")),
+    ("a named link to a directory", |r| symlink("src", r.join("ld")).expect("linked"), |mut n| {
+        n.insert(Text::from("ld"), entry("120000", &blob_id::<Sha1>(b"src")));
+        n
+    }, None),
+    ("a link to a directory the commit lacks", |r| symlink("src", r.join("ld")).expect("linked"), same,
+     Some(b"ld")),
+    ("an execute bit on a file that cannot be read", |r| {
+        fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o100)).expect("set");
+    }, same, Some(b"a.txt")),
     ("a directory for a named file", |r| {
         fs::remove_file(r.join("src/lib.rs")).expect("removed");
         fs::create_dir(r.join("src/lib.rs")).expect("made");
@@ -164,6 +182,10 @@ fn tree_difference_names_the_first_differing_path_of_each_kind() {
             .expect("the tree is made");
         layout(&root);
         setup(&root);
+        if root.join("d").exists() && fs::read_dir(root.join("d")).is_ok() {
+            eprintln!("{name}: a mode 000 directory lists for this user, so the row is not run");
+            continue;
+        }
         let found = tree_difference(&root, &adjust(named(false)));
         if root.join("d").exists() {
             fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o700))
@@ -185,6 +207,10 @@ fn a_named_file_that_cannot_be_read_is_an_error_with_its_path() {
         .expect("the tree is made");
     layout(&root);
     fs::set_permissions(root.join("a.txt"), fs::Permissions::from_mode(0o200)).expect("set");
+    if fs::File::open(root.join("a.txt")).is_ok() {
+        eprintln!("a mode 0200 file opens for this user, so the property is not exercised");
+        return;
+    }
     let error = tree_difference(&root, &named(false)).expect_err("an unreadable file fails");
     assert_eq!(error.path(), root.join("a.txt"));
     assert_eq!(error.error().kind(), std::io::ErrorKind::PermissionDenied);

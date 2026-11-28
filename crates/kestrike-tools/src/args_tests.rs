@@ -469,3 +469,38 @@ fn a_flag_takes_no_value_and_a_many_option_takes_each_value_up_to_the_next_optio
         }
     }
 }
+
+/// `p.add_argument('--plant', nargs='+', action='append', required=True, type=given)` refuses the first
+/// value its type refuses, in either form, with the type's message.
+#[test]
+fn a_many_option_checks_each_value() {
+    const CHECKED: [Opt; 2] = [
+        HELP,
+        Opt {
+            names: &["--plant"],
+            kind: Kind::Many {
+                required: true,
+                check: given,
+            },
+        },
+    ];
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &CHECKED,
+    );
+    for args in [
+        &["--plant", "a", ""][..],
+        &["--plant", "", "a"],
+        &["--plant="],
+    ] {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        assert_eq!(
+            reader.parse(&args),
+            refused("argument --plant: a value"),
+            "{args:?}"
+        );
+    }
+}

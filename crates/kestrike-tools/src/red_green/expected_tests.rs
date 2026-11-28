@@ -1,4 +1,8 @@
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+
 use super::{expect_streams, unframed};
+use crate::text::Text;
 
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
 const EXPECT: &str = "a poll counts that completion as delivered";
@@ -37,6 +41,8 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
         "      panic message: `\"lost\"`,".to_owned(),
         " expected substring: `\"kept\"`".to_owned(),
         "  found non-string value: 7".to_owned(),
+        format!("\u{1c}{TEST}"),
+        format!("\u{85}{TEST}"),
         "running \u{661} test".to_owned(),
         format!("\u{3000}{TEST}"),
     ]
@@ -46,6 +52,7 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
     rows.extend(
         [
             "running 1 tests (shuffle seed: 7)".to_owned(),
+            format!("\u{1c}{TEST}x"),
             format!("test {TEST}x ... ok"),
             "FAILED here".to_owned(),
             "note: test did not panic as expected".to_owned(),
@@ -83,17 +90,27 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
         ),
     ]);
     for (output, expected) in rows {
-        let found = unframed(output.as_bytes(), TEST.as_bytes());
-        assert_eq!(String::from_utf8_lossy(&found), expected, "{output:?}");
+        let found = unframed(output.as_bytes(), &Text::from(TEST));
+        assert_eq!(found, Text::from(expected), "{output:?}");
     }
-    let invalid = unframed(b"a\xff\n\xc3\nfailures:\n", TEST.as_bytes());
+    let bytes = |data: &[u8]| Text::from_os(OsStr::from_bytes(data));
+    let invalid = unframed(b"a\xff\n\xc3\nfailures:\n", &Text::from(TEST));
     assert_eq!(
-        invalid, b"a\xff\n\xc3\n\0\n",
+        invalid,
+        bytes(b"a\xff\n\xc3\n\0\n"),
         "bytes outside UTF-8 stand as they are"
+    );
+    let test = bytes(b"t\xff");
+    let framed = unframed(b"---- t\xff stdout ----\n---- t\xfe stdout ----\n", &test);
+    assert_eq!(
+        framed,
+        bytes(b"\0\n---- t\xfe stdout ----\n"),
+        "a test ID outside UTF-8 frames its own lines"
     );
 }
 
-/// The search reads bytes, so an expected text that ends inside a UTF-8 sequence of the output matches it.
+/// The search compares code points: an expected text that ends inside a UTF-8 sequence of the output
+/// misses it, and a byte outside UTF-8 matches the same byte.
 #[test]
 fn expect_streams_lists_the_streams_whose_kept_lines_hold_the_text() {
     let stdout = |data: &str| vec![("stdout", data.as_bytes().to_vec()), ("stderr", Vec::new())];
@@ -149,12 +166,22 @@ fn expect_streams_lists_the_streams_whose_kept_lines_hold_the_text() {
             "part of a UTF-8 sequence",
             stdout("caf\u{e9}"),
             b"caf\xc3",
+            &[],
+        ),
+        (
+            "a byte outside UTF-8",
+            vec![("stdout", b"x\xffy\n".to_vec()), ("stderr", Vec::new())],
+            b"\xff",
             &["stdout"],
         ),
     ];
     for (name, outputs, expect, expected) in rows {
         assert_eq!(
-            expect_streams(&outputs, expect, TEST.as_bytes()),
+            expect_streams(
+                &outputs,
+                &Text::from_os(OsStr::from_bytes(expect)),
+                &Text::from(TEST)
+            ),
             expected,
             "{name}"
         );

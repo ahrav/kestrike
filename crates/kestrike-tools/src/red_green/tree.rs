@@ -29,6 +29,9 @@ pub const EXECUTABLE: &str = "100755";
 pub const LINK: &str = "120000";
 pub const SUBMODULE: &str = "160000";
 
+/// The modes whose entries the comparison reads; any other named mode differs.
+const COMPARED: [&str; 3] = [FILE, EXECUTABLE, LINK];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     pub mode: Text,
@@ -142,68 +145,64 @@ fn present(tree: &Path) -> BTreeSet<Text> {
     let mut present = BTreeSet::new();
     let mut pending = vec![Vec::new()];
     while let Some(relative) = pending.pop() {
-        let shown = if relative.is_empty() {
-            b".".to_vec()
-        } else {
-            relative.clone()
-        };
-        let Ok(listing) = fs::read_dir(tree.join(OsStr::from_bytes(&relative))) else {
-            present.insert(decoded(&shown));
+        let Ok(entries) = fs::read_dir(tree.join(OsStr::from_bytes(&relative)))
+            .and_then(|listing| listing.collect::<io::Result<Vec<_>>>())
+        else {
+            let shown: &[u8] = if relative.is_empty() { b"." } else { &relative };
+            present.insert(decoded(shown));
             continue;
         };
-        let (mut directories, mut others) = (Vec::new(), Vec::new());
-        let mut complete = true;
-        for entry in listing {
-            let Ok(entry) = entry else {
-                complete = false;
-                break;
-            };
-            let path = joined(&relative, entry.file_name().as_bytes());
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => directories.push(path),
-                _ => others.push(path),
-            }
-        }
-        if !complete {
-            present.insert(decoded(&shown));
-            continue;
-        }
-        if directories.is_empty() && others.is_empty() && !relative.is_empty() {
+        if entries.is_empty() && !relative.is_empty() {
             present.insert(decoded(&relative));
         }
-        present.extend(others.iter().map(|path| decoded(path)));
-        pending.extend(directories);
+        for entry in entries {
+            let path = joined(&relative, entry.file_name().as_bytes());
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => pending.push(path),
+                _ => {
+                    present.insert(decoded(&path));
+                }
+            }
+        }
     }
     present
 }
 
-enum Found {
-    Other,
-    Regular { executable: bool, file: fs::File },
-}
-
-/// For `Found::Regular`, `open_regular` checks the file type and owner execute bit on the same handle that
-/// `tree_difference` reads.
-fn open_regular(path: &Path) -> io::Result<Found> {
+/// `named_bytes` returns the bytes to hash: the link target or the regular file contents, read through the
+/// descriptor whose type and owner execute bit it checks against the mode. `None` means the kind or the
+/// execute bit differs.
+fn named_bytes(full: &Path, entry: &Entry) -> io::Result<Option<Vec<u8>>> {
+    if entry.mode == LINK {
+        return match fs::read_link(full) {
+            Ok(target) => Ok(Some(target.into_os_string().into_vec())),
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => Ok(None),
+            Err(error) => Err(error),
+        };
+    }
+    let executable = |mode: u32| mode & 0o100 != 0;
+    let named = entry.mode == EXECUTABLE;
     let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY;
-    let file = match OpenOptions::new().read(true).custom_flags(flags).open(path) {
+    let mut file = match OpenOptions::new().read(true).custom_flags(flags).open(full) {
         Ok(file) => file,
         Err(error) => {
-            return match fs::symlink_metadata(path) {
-                Ok(status) if !status.file_type().is_file() => Ok(Found::Other),
+            return match fs::symlink_metadata(full) {
+                Ok(status) if !status.file_type().is_file() => Ok(None),
+                Ok(status) if executable(status.permissions().mode()) != named => Ok(None),
                 _ => Err(error),
             };
         }
     };
     let status = file.metadata()?;
-    if !status.file_type().is_file() {
-        return Ok(Found::Other);
+    if !status.file_type().is_file() || executable(status.permissions().mode()) != named {
+        return Ok(None);
     }
-    let executable = status.permissions().mode() & 0o100 != 0;
-    Ok(Found::Regular { executable, file })
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    Ok(Some(data))
 }
 
-/// The first path at which the worktree at `tree` differs from `named`, or `None`.
+/// The first path at which the worktree at `tree` differs from `named`, or `None`. The caller trusts
+/// `tree` and the entries in it.
 ///
 /// # Errors
 ///
@@ -221,10 +220,7 @@ pub fn tree_difference(tree: &Path, named: &Entries) -> Result<Option<Text>, Pat
         let Some(entry) = named.get(&path).filter(|_| present.contains(&path)) else {
             return Ok(Some(path));
         };
-        if ![FILE, EXECUTABLE, LINK]
-            .iter()
-            .any(|mode| entry.mode == *mode)
-        {
+        if !COMPARED.iter().any(|mode| entry.mode == *mode) {
             return Ok(Some(path));
         }
         let Some(relative) = path.to_os() else {
@@ -232,30 +228,9 @@ pub fn tree_difference(tree: &Path, named: &Entries) -> Result<Option<Text>, Pat
             return Err(PathError::new(tree, error));
         };
         let full = tree.join(relative);
-        let failed = |error| PathError::new(&full, error);
-        let data = if entry.mode == LINK {
-            let status = fs::symlink_metadata(&full).map_err(failed)?;
-            if !status.file_type().is_symlink() {
-                return Ok(Some(path));
-            }
-            fs::read_link(&full)
-                .map_err(failed)?
-                .into_os_string()
-                .into_vec()
-        } else {
-            let Found::Regular {
-                executable,
-                mut file,
-            } = open_regular(&full).map_err(failed)?
-            else {
-                return Ok(Some(path));
-            };
-            if executable != (entry.mode == EXECUTABLE) {
-                return Ok(Some(path));
-            }
-            let mut data = Vec::new();
-            file.read_to_end(&mut data).map_err(failed)?;
-            data
+        let Some(data) = named_bytes(&full, entry).map_err(|error| PathError::new(&full, error))?
+        else {
+            return Ok(Some(path));
         };
         let id = if entry.id.len() == 40 {
             blob_id::<Sha1>(&data)

@@ -60,22 +60,21 @@ fn digest(data: &[u8]) -> Value {
 
 fn leg(leg: &Leg) -> Value {
     let seconds = python::round(&Value::Float(leg.seconds), 3).expect("a float rounds");
-    let (mut artifact, mut sha256, mut outputs) = (Value::Null, Value::Null, object([]));
-    let mut error = None;
-    match &leg.evidence {
-        Evidence::Absent => {}
-        Evidence::Unreadable(text) => error = Some(string(text)),
-        Evidence::Read(readings) => {
-            artifact = string(&Text::from_os(readings.artifact.as_os_str()));
-            sha256 = digest(&readings.data);
-            outputs = object(
+    let (artifact, sha256, outputs, error) = match &leg.evidence {
+        Evidence::Absent => (Value::Null, Value::Null, object([]), None),
+        Evidence::Unreadable(text) => (Value::Null, Value::Null, object([]), Some(string(text))),
+        Evidence::Read(readings) => (
+            string(&Text::from_os(readings.artifact.as_os_str())),
+            digest(&readings.data),
+            object(
                 readings
                     .outputs
                     .iter()
                     .map(|(stream, data)| (*stream, digest(data))),
-            );
-        }
-    }
+            ),
+            None,
+        ),
+    };
     let mut entry = vec![
         ("exit", integer(leg.exit)),
         ("verdict", string(&leg.verdict)),

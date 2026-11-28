@@ -10,11 +10,8 @@
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-
-use regex::bytes::Regex;
 
 use super::STREAMS;
 use super::runner;
@@ -55,18 +52,18 @@ impl Evidence {
     }
 }
 
-fn literal(text: &[u8]) -> String {
-    text.iter().map(|byte| format!(r"\x{byte:02x}")).collect()
-}
-
-fn own(receipt: &Path, attempt: &Text, leg: &str) -> Regex {
+fn own(receipt: &Path, attempt: &Text, leg: &str, name: &OsStr) -> bool {
     let run = Text::from_os(receipt.file_name().unwrap_or_default());
-    let name = runner::leg_directory(&run, attempt, leg);
-    let name = name.to_os().unwrap_or_default();
-    classes::compiled_bytes(&format!(
-        r"(?-u)^{}(?:\.(?u:\d)+)?$",
-        literal(name.as_bytes())
-    ))
+    let prefix = runner::leg_directory(&run, attempt, leg);
+    let name = Text::from_os(name);
+    let Some(rest) = name.as_bytes().strip_prefix(prefix.as_bytes()) else {
+        return false;
+    };
+    let suffix = rest
+        .strip_prefix(b".")
+        .and_then(|digits| std::str::from_utf8(digits).ok());
+    rest.is_empty()
+        || suffix.is_some_and(|digits| !digits.is_empty() && digits.chars().all(classes::is_digit))
 }
 
 fn unreadable(path: &Path, error: io::Error) -> Evidence {
@@ -108,6 +105,9 @@ fn ignored(error: &io::Error) -> bool {
     )
 }
 
+/// The caller must pass the canonical path to the run's receipt directory as `receipt`, and trusts that
+/// directory and its entries.
+///
 /// # Errors
 ///
 /// `evidence` propagates errors from `paths::realpath`.
@@ -117,16 +117,15 @@ pub fn evidence(
     leg: &str,
     announced: Option<&Text>,
 ) -> io::Result<Evidence> {
-    let Some(announced) = announced else {
+    let Some(announced) = announced.and_then(Text::to_os) else {
         return Ok(Evidence::Absent);
     };
-    let announced = announced.to_os().unwrap_or_default();
     let artifact = paths::realpath(Path::new(&announced))?;
     let directory = artifact.parent().unwrap_or(Path::new("/"));
     let name = directory.file_name().unwrap_or_default();
     if artifact.file_name() != Some(OsStr::new("artifact.json"))
         || directory.parent().unwrap_or(Path::new("/")) != receipt
-        || !own(receipt, attempt, leg).is_match(name.as_bytes())
+        || !own(receipt, attempt, leg, name)
     {
         return Ok(Evidence::Absent);
     }

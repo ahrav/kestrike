@@ -1,9 +1,10 @@
 use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use super::{Evidence, Readings, evidence};
 use crate::paths::tests::Scratch;
+use crate::red_green::reasons::tests::{leg, options};
 use crate::red_green::reasons::{NO_EVIDENCE, base_reason, head_reason};
 use crate::text::Text;
 
@@ -58,6 +59,17 @@ fn receipt(scratch: &Scratch) -> PathBuf {
     )
     .expect("linked");
     symlink(receipt.join("local-1-1-1-base"), scratch.0.join("via")).expect("linked");
+    fs::create_dir(receipt.join("local-1-1-1-base.7")).expect("made");
+    symlink(
+        "artifact.json",
+        receipt.join("local-1-1-1-base.7/artifact.json"),
+    )
+    .expect("linked");
+    fs::create_dir(receipt.join("local-1-1-1-base.8")).expect("made");
+    fs::write(receipt.join("local-1-1-1-base.8/artifact.json"), "{}\n").expect("written");
+    let locked = receipt.join("local-1-1-1-base.8/attempt-1.stderr");
+    fs::write(&locked, "").expect("written");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("locked");
     receipt
 }
 
@@ -93,7 +105,7 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
     let scratch = Scratch::new("red-green-evidence");
     let receipt = receipt(&scratch);
     let at = |name: &str| receipt.join(name).join("artifact.json");
-    let rows: Vec<(&str, &str, Option<PathBuf>, &str, Expected)> = vec![
+    let mut rows: Vec<(&str, &str, Option<PathBuf>, &str, Expected)> = vec![
         (
             "its own artifact",
             "base",
@@ -199,8 +211,29 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
             "1",
             Expected::Absent,
         ),
+        (
+            "an artifact that links to itself",
+            "base",
+            Some(at("local-1-1-1-base.7")),
+            "1",
+            Expected::Unreadable,
+        ),
         ("no announcement", "base", None, "1", Expected::Absent),
     ];
+    let locked = receipt.join("local-1-1-1-base.8/attempt-1.stderr");
+    if fs::File::open(&locked).is_err() {
+        rows.push((
+            "an attempt output that cannot be read",
+            "base",
+            Some(at("local-1-1-1-base.8")),
+            "1",
+            Expected::Unreadable,
+        ));
+    } else {
+        eprintln!(
+            "a mode 000 file opens for this user, so the unreadable attempt output row is not run"
+        );
+    }
     for (name, leg, announced, attempt, expected) in rows {
         let announced = announced.map(|path| Text::from_os(path.as_os_str()));
         let found = evidence(&receipt, &Text::from(attempt), leg, announced.as_ref())
@@ -217,37 +250,27 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
         }
     }
     let artifact = at("local-1-1-1-base");
+    let options = options(TEST, EXPECT);
     for code in [0, 6] {
-        let judged = base_reason(
-            code,
-            &Text::new(),
-            &Evidence::Absent,
-            EXPECT.as_bytes(),
-            TEST.as_bytes(),
-        );
+        let found = base_reason(&mut leg(code, "", Evidence::Absent), &options);
         let expected = format!("the runner did not complete the base leg: exit {code}, verdict ''");
-        assert_eq!(judged.reason, Some(Text::from(expected)));
+        assert_eq!(found, Some(Text::from(expected)));
     }
-    let unreported = head_reason(
-        1,
-        &Text::new(),
-        &read(artifact.clone(), &["stdout", "stderr"]),
-    );
+    let unreported = head_reason(&leg(1, "", read(artifact.clone(), &["stdout", "stderr"])));
     assert_eq!(
         unreported,
         Some(Text::from("the head leg did not pass: exit 1, verdict ''"))
     );
     let (red, green) = (
-        Text::from("reproduced: reproduced on attempt 1"),
-        Text::from("not reproduced in 1 attempts"),
+        "reproduced: reproduced on attempt 1",
+        "not reproduced in 1 attempts",
     );
     for streams in [&["stdout"][..], &["stderr"], &["stdout", "stderr"]] {
-        let evidence = read(artifact.clone(), streams);
         let complete = streams.len() == 2;
-        let base = base_reason(1, &red, &evidence, EXPECT.as_bytes(), TEST.as_bytes()).reason;
+        let base = base_reason(&mut leg(1, red, read(artifact.clone(), streams)), &options);
         let refused = Text::from(format!("the base leg failed but {NO_EVIDENCE}: {red}"));
         assert_eq!(base, (!complete).then_some(refused), "{streams:?}");
-        let head = head_reason(0, &green, &evidence);
+        let head = head_reason(&leg(0, green, read(artifact.clone(), streams)));
         let refused = Text::from(format!("the head leg passed but {NO_EVIDENCE}: {green}"));
         assert_eq!(head, (!complete).then_some(refused), "{streams:?}");
     }
