@@ -16,7 +16,7 @@
 //! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::decimal::{nearest_double, spells_shortest};
@@ -308,11 +308,12 @@ pub fn parse(text: &str) -> Result<Value, Error> {
 }
 
 /// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`,
-/// with that object's keys in the order the text spells them, each repeat included.
+/// with that object's keys in the order the text spells them, each repeat included, as runs of one key
+/// and the count of its spellings in a row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UniqueError {
     Syntax(Error),
-    Repeated(Text, Vec<Text>),
+    Repeated(Text, Vec<(Text, usize)>),
 }
 
 impl fmt::Display for UniqueError {
@@ -370,7 +371,7 @@ pub(crate) enum Unnumber {
 pub(crate) enum StrictError {
     Syntax(Error),
     Repeated(Text),
-    Listed(Text, Vec<Text>),
+    Listed(Text, Vec<(Text, usize)>),
     Number(Unnumber),
 }
 
@@ -431,6 +432,47 @@ pub fn parse_members(text: &str) -> Result<Value, Error> {
                 unreachable!("a read that keeps every member and every number refuses neither")
             }
         })
+}
+
+/// The keys an object of the unique read spells from its first repeated key on, in order: each distinct
+/// key once, and the order as runs of one key's index, so a key repeated many times in a row costs one
+/// run.
+#[derive(Default)]
+struct Later {
+    index: HashMap<Text, usize>,
+    runs: Vec<(usize, usize)>,
+}
+
+impl Later {
+    fn push(&mut self, key: Text) {
+        let next = self.index.len();
+        let id = *self.index.entry(key).or_insert(next);
+        match self.runs.last_mut() {
+            Some((last, count)) if *last == id => *count += 1,
+            _ => self.runs.push((id, 1)),
+        }
+    }
+
+    /// The runs of the keys of `object`, the members read before the first repeat, then of these keys.
+    fn runs(self, object: Object) -> Vec<(Text, usize)> {
+        let mut names = vec![Text::new(); self.index.len()];
+        for (key, id) in self.index {
+            names[id] = key;
+        }
+        let mut runs: Vec<(Text, usize)> = Vec::new();
+        let keys = object.0.into_iter().map(|(key, _)| (key, 1));
+        let later = self
+            .runs
+            .into_iter()
+            .map(|(id, count)| (names[id].clone(), count));
+        for (key, count) in keys.chain(later) {
+            match runs.last_mut() {
+                Some((last, total)) if *last == key => *total += count,
+                _ => runs.push((key, count)),
+            }
+        }
+        runs
+    }
 }
 
 struct Reader<'a> {
@@ -563,7 +605,7 @@ impl<'a> Reader<'a> {
         }
         let mut repeated = None;
         let mut keys = HashSet::new();
-        let mut listed = Vec::new();
+        let mut later = Later::default();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -576,9 +618,6 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.mode == Mode::Unique {
-                listed.push(key.clone());
-            }
             if self.mode == Mode::Members {
                 members.extend([Value::String(key), value]);
             } else if self.mode == Mode::Keep {
@@ -589,14 +628,19 @@ impl<'a> Reader<'a> {
                 if keys.insert(key.clone()) {
                     object.0.push((key, value));
                 } else {
+                    if self.mode == Mode::Unique {
+                        later.push(key.clone());
+                    }
                     repeated = Some(key);
                 }
+            } else if self.mode == Mode::Unique {
+                later.push(key);
             }
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
                     return Err(if self.mode == Mode::Unique {
-                        StrictError::Listed(name, listed)
+                        StrictError::Listed(name, later.runs(object))
                     } else {
                         StrictError::Repeated(name)
                     });

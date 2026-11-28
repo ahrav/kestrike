@@ -883,6 +883,22 @@ fn check_row(
     check_references(row, refusals, references)
 }
 
+/// The `repr` of each key of `runs`, a run of one key and its count standing for that many keys, joined
+/// by `, `.
+fn listed(runs: &[(Text, usize)]) -> String {
+    let mut out = String::new();
+    for (key, count) in runs {
+        let shown = key.repr();
+        for _ in 0..*count {
+            if !out.is_empty() {
+                out.push_str(", ");
+            }
+            out.push_str(&shown);
+        }
+    }
+    out
+}
+
 fn failed(prefix: &str, reason: &str) -> (Value, u8) {
     let mut report = Object::new();
     report.insert("error", Value::String(text!(prefix, reason)));
@@ -904,10 +920,9 @@ fn inputs(read: Reader<'_>, root: &Path) -> Result<Inputs, String> {
     let load = |path: &str| {
         let source = read(path).map_err(|error| format!("{path}: {error}"))?;
         parse_unique(&source).map_err(|error| match error {
-            UniqueError::Repeated(_, keys) => format!(
-                "an object repeats a key among {}",
-                repr(&Value::Array(keys.into_iter().map(Value::String).collect()))
-            ),
+            UniqueError::Repeated(_, keys) => {
+                format!("an object repeats a key among [{}]", listed(&keys))
+            }
             UniqueError::Syntax(error) => format!("{path}: {error}"),
         })
     };

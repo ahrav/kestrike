@@ -279,7 +279,25 @@ fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
         panic!("the repeat is refused");
     };
     assert_eq!(name, Text::from("k"));
-    assert_eq!(keys, ["k", "j", "k"].map(Text::from));
+    assert_eq!(
+        keys,
+        [("k", 1), ("j", 1), ("k", 1)].map(|(key, count)| (Text::from(key), count))
+    );
+    let Err(UniqueError::Repeated(name, keys)) =
+        parse_unique(r#"{"k": 1, "j": 2, "k": 3, "m": 4, "k": 5, "k": 6, "j": 7}"#)
+    else {
+        panic!("the repeat is refused");
+    };
+    assert_eq!(name, Text::from("k"));
+    assert_eq!(
+        keys,
+        [("k", 1), ("j", 1), ("k", 1), ("m", 1), ("k", 2), ("j", 1)]
+            .map(|(key, count)| (Text::from(key), count))
+    );
+    let Err(UniqueError::Repeated(_, keys)) = parse_unique(r#"{"a": 0, "a": 0, "a": 0}"#) else {
+        panic!("the repeat is refused");
+    };
+    assert_eq!(keys, [(Text::from("a"), 3)]);
     assert_eq!(
         parse(r#"{"a": 1, "a": 2}"#).map(|value| text(&value)),
         Ok(r#"{"a":2}"#.to_owned()),
