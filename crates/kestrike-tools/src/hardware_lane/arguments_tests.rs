@@ -1,5 +1,7 @@
 //! The episode name, the seconds reader, the platform refusal and the lane's constants.
 
+use std::error::Error as _;
+use std::io;
 use std::path::Path;
 
 use crate::hardware_lane::{
@@ -70,7 +72,9 @@ fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
             "{seconds:?}"
         );
     }
-    for seconds in ["x", "", "\u{1c}2", "\u{1e}2", "\u{1f}2", "1_0", "\u{661}"] {
+    for seconds in [
+        "x", "", "\u{1c}2", "\u{1d}2", "\u{1e}2", "\u{1f}2", "1_0", "\u{661}",
+    ] {
         assert!(
             matches!(finite_seconds(&Text::from(seconds)), Err(Error::NoNumber)),
             "{seconds:?} is no number"
@@ -131,4 +135,30 @@ fn the_constants_hold_the_lanes_values() {
     assert_eq!(identity_lines(&Text::from("x86_64")), lines[1].1);
     assert_eq!(identity_lines(&Text::from("aarch64")), lines[0].1);
     assert!(identity_lines(&Text::from("riscv64")).is_empty());
+}
+
+/// A refusal writes its sentence, text that is no number writes its own statement, and a system error
+/// writes the system's text and is the error's source.
+#[test]
+fn an_error_writes_its_kind_and_a_system_error_is_its_source() {
+    let refused = platform_refusal(None, "X");
+    assert_eq!(
+        refused.to_string(),
+        "no platform row named; name the host's row with X"
+    );
+    assert!(refused.source().is_none());
+    assert_eq!(Error::NoNumber.to_string(), "the text is no number");
+    let system = Error::System(io::Error::from_raw_os_error(2));
+    assert_eq!(
+        system.to_string(),
+        io::Error::from_raw_os_error(2).to_string()
+    );
+    assert!(system.sentence().is_none());
+    let source = system.source().expect("a system error has its source");
+    assert_eq!(
+        source
+            .downcast_ref::<io::Error>()
+            .and_then(io::Error::raw_os_error),
+        Some(2)
+    );
 }

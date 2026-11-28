@@ -14,7 +14,7 @@ use crate::text::Text;
 
 const COPIES: &str = include_str!("copies.json");
 
-const COPY_COUNT: usize = 189;
+const COPY_COUNT: usize = 211;
 
 fn top() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -86,7 +86,7 @@ fn names(platforms: &Object) -> Vec<Text> {
 
 /// Each copy passes with the platform rows of its document under the names it records, or is refused with
 /// its sentence: the copy's `tool` sentence where it holds one, and its `lane` sentence otherwise. The 35
-/// copies named `check N:` each fail the check of that number alone; the copies named `order` fail two
+/// copies named `check N:` each fail the check of that number first; the copies named `order` fail two
 /// checks and are refused with the first.
 #[test]
 fn each_copy_passes_or_is_refused_with_its_recorded_sentence() {
