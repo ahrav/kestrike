@@ -34,7 +34,7 @@
 mod campaign;
 mod child;
 mod entry;
-mod files;
+pub(crate) mod files;
 pub mod git;
 mod judgment;
 mod lock;
