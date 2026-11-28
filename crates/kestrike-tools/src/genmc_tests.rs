@@ -294,3 +294,40 @@ fn an_include_path_with_a_nul_byte_is_an_error() {
     let error = package_sources(&scratch.0).expect_err("the include holds a NUL byte");
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+/// A declared list iterates as Python iterates its JSON value: an array's elements, an object's keys and a
+/// string's code points; a number, a boolean and null refuse as Python's iteration does.
+#[test]
+fn a_declared_list_iterates_an_array_an_object_or_a_string() {
+    use crate::genmc::input::listed;
+    use crate::genmc::refusal::Error;
+    use crate::json::{Text, Value, parse};
+    let read = |text: &str| parse(text).expect("parses");
+    let strings = |items: &[&str]| -> Vec<Value> {
+        items
+            .iter()
+            .map(|item| Value::String(Text::from(*item)))
+            .collect()
+    };
+    let array = read(r#"["-a", 7]"#);
+    assert_eq!(
+        listed(&array, "x").expect("an array").to_vec(),
+        vec![Value::String(Text::from("-a")), read("7")]
+    );
+    let object = read(r#"{"-b": 1, "-c": 2}"#);
+    assert_eq!(
+        listed(&object, "x").expect("an object").to_vec(),
+        strings(&["-b", "-c"])
+    );
+    let string = read(r#""ab""#);
+    assert_eq!(
+        listed(&string, "x").expect("a string").to_vec(),
+        strings(&["a", "b"])
+    );
+    for text in ["7", "true", "null"] {
+        assert!(
+            matches!(listed(&read(text), "x"), Err(Error::Type(_))),
+            "{text}"
+        );
+    }
+}

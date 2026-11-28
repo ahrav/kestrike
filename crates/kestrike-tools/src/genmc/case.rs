@@ -209,7 +209,7 @@ fn integer(digits: &str) -> Result<Integer, Error> {
 
 fn sorted_texts(value: &Value, what: &str) -> Result<Vec<Text>, Error> {
     let mut texts = Vec::new();
-    for item in listed(value, what)? {
+    for item in listed(value, what)?.iter() {
         let Value::String(text) = item else {
             return Err(Error::Type(format!("{what} is no string")));
         };
@@ -393,7 +393,7 @@ fn violation(
     let checks = member(declared, "checks")?;
     let checks = listed(checks, "the declared checks")?;
     let mut wanted = Vec::new();
-    for message in checks {
+    for message in checks.iter() {
         let kernel = string(member(declared, "file")?, "the declared kernel file")?;
         wanted.push((
             crate::paths::name(kernel).to_owned(),
