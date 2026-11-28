@@ -1445,6 +1445,12 @@ holds the pull request's commits alone. The hook's range starts at the remote
 tip, so a pushed tip that merges `main` also brings `main`'s commits and their
 acknowledgements into it. The scanner compares the head with the merge base of
 the base and the head, so a change made only on the base side is no finding.
+It reads acknowledgements from the commits that the head reaches and the base
+does not, the range its hint names. A base that is no ancestor of the head can
+have two merge bases with it, as an amended merge commit has with the merge it
+replaces. The comparison then starts at the one `git merge-base` prints, so a
+change that the base and the head both took from the other one is a finding,
+and a commit of the range has to carry its line.
 
 A change that ignores an existing test or changes the condition of its
 conditional ignore (`ignore-existing`), lowers a declared test budget

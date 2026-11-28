@@ -294,13 +294,21 @@ fn resolve(rev: &OsStr) -> Result<String, Failure> {
     Ok(strip_str(&git(&args)?).to_owned())
 }
 
+/// `base` is the caller's base revision, resolved to a commit, and the exclusive boundary of the
+/// acknowledgement range `base..head`. `fork` is the merge base of `base` and `head`, which the findings
+/// compare with `head`.
 struct Scan {
     base: String,
+    fork: String,
     head: String,
     found: Vec<Finding>,
     reasons: HashMap<String, String>,
 }
 
+/// `scan` compares `head` with the merge base of `base` and `head`, and reads acknowledgements from the
+/// commits that `head` reaches and `base` does not. When `base` is an ancestor of `head`, `base` is also the
+/// merge base. When `base` and `head` have several best common ancestors, `fork` identifies one of them, and
+/// the acknowledgement range remains `base..head` for every choice of `fork`.
 fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
     let (base, head) = (resolve(base)?, resolve(head)?);
     let range = format!("{base}..{head}");
@@ -325,9 +333,10 @@ fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
             keys.push(key);
         }
     }
-    let reasons = acknowledgements(&fork, &head, &keys)?;
+    let reasons = acknowledgements(&base, &head, &keys)?;
     Ok(Some(Scan {
-        base: fork,
+        base,
+        fork,
         head,
         found,
         reasons,
@@ -392,6 +401,7 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             }
         }
     }
+    let compared = format!("{}..{}", short(&scanned.fork), short(&scanned.head));
     let range = format!("{}..{}", short(&scanned.base), short(&scanned.head));
     let mut code = u8::from(!unacknowledged.is_empty());
     if !lines.is_empty() {
@@ -402,7 +412,7 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
         if let Some(summary) =
             std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty())
         {
-            let text = format!("Weakened-test scan of {range}:\n\n```text\n{lines}```\n");
+            let text = format!("Weakened-test scan of {compared}:\n\n```text\n{lines}```\n");
             let written = OpenOptions::new()
                 .append(true)
                 .create(true)

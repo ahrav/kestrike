@@ -2144,10 +2144,72 @@ fn a_base_past_the_fork_point_charges_the_head_with_its_own_commits_only() {
     );
     let range = format!(
         "in {}..{}: Weakens-Test: {KEY}: <reason>",
-        &repo.base[..12],
+        &ahead[..12],
         &weakened[..12]
     );
     assert!(run.stderr.contains(&range), "{}", run.stderr);
+}
+
+/// The scan credits acknowledgements in the requested `base..head` range. `left` and `right` are the two best
+/// common ancestors of `old` and `head`, and each carries the line, so `old` reaches a commit with the line
+/// whichever of the two `git merge-base` prints.
+#[test]
+fn an_acknowledgement_in_a_commit_the_requested_base_reaches_is_not_credited() {
+    let repo = Repo::new("two-merge-bases");
+    let line = format!("Weakens-Test: {KEY}: written before the range");
+    let left = repo.commit(&[], &format!("left\n\n{line}"), &[]);
+    repo.reset(&repo.base);
+    let right = repo.commit(&[], &format!("right\n\n{line}"), &[]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "old merge", &left]);
+    let old = repo.git(&["rev-parse", "HEAD"]);
+    repo.reset(&left);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "new merge", &right]);
+    let head = repo.ignore_second("ignore");
+    let mut forks: Vec<String> = repo
+        .git(&["merge-base", "--all", &old, &head])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    forks.sort();
+    let mut parents = [left, right];
+    parents.sort();
+    assert_eq!(forks, parents, "the range has two best common ancestors");
+    let finding = format!("{KEY} second: not ignored -> #[ignore]");
+
+    let run = repo.scan(&["--base", &old, "--head", &head]);
+    let hint = format!(
+        "scan-weakened-tests: {KEY} blocks; acknowledge it with a commit-message line in {}..{}: \
+         Weakens-Test: {KEY}: <reason>\n",
+        &old[..12],
+        &head[..12]
+    );
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (
+            Some(1),
+            format!("blocks {finding}\n").as_str(),
+            hint.as_str()
+        )
+    );
+
+    let within = repo.commit(
+        &[],
+        &format!("acknowledge\n\nWeakens-Test: {KEY}: written in the range"),
+        &[],
+    );
+    let run = repo.scan(&["--base", &old, "--head", &within]);
+    let credited = format!("acknowledged {finding} (Weakens-Test: written in the range)\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(0), credited.as_str(), "")
+    );
+
+    let run = repo.scan_head(&head);
+    let credited = format!("acknowledged {finding} (Weakens-Test: written before the range)\n");
+    assert_eq!(
+        (run.code, run.stdout.as_str(), run.stderr.as_str()),
+        (Some(0), credited.as_str(), "")
+    );
 }
 
 #[test]
