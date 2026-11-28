@@ -4,7 +4,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use kestrike_tools::fis_controller::{
@@ -666,7 +666,11 @@ fn a_failed_check_of_the_marker_removes_nothing() {
                 scratch.norm(&error.to_string()),
                 "[Errno 13] Permission denied: '<d>/check-true/fis-e1.json'"
             );
-            assert!(section.contains("quarantine"), "the section is unchanged");
+            assert_eq!(
+                section.get("quarantine"),
+                Some(&Value::String(marker.shown().clone())),
+                "the section is unchanged"
+            );
             assert_eq!(listing(&directory), ["fis-e1.json@"], "the marker stays");
         } else {
             assert_eq!(removed, Ok(()));
@@ -681,4 +685,50 @@ fn line(name: &str) -> &'static str {
         .iter()
         .find_map(|(row, line)| (*row == name).then_some(*line))
         .unwrap_or_else(|| panic!("{name} is a row of LINES"))
+}
+
+/// A link at the marker's name into a directory the run cannot search fails the check of what stands
+/// there, followed, before any removal: the link stays. Control: the same link into a directory it
+/// can search is removed. An account that searches every directory, as root does, runs the control
+/// alone.
+#[test]
+fn a_link_into_an_unsearchable_directory_fails_the_check() {
+    let scratch = Scratch::new("marker-locked");
+    for locked in [true, false] {
+        let directory = scratch.path().join(format!("locked-{locked}"));
+        let closed = directory.join("closed");
+        fs::create_dir_all(&closed).expect("the directories are made");
+        let marker = marker(&directory, directory.join("boot_id"));
+        symlink(closed.join("x"), marker.path()).expect("linked");
+        let mode = if locked { 0o000 } else { 0o755 };
+        fs::set_permissions(&closed, fs::Permissions::from_mode(mode)).expect("the mode is set");
+        let searched = fs::symlink_metadata(closed.join("x"))
+            .err()
+            .and_then(|error| error.raw_os_error())
+            == Some(libc::EACCES);
+        let mut section = section(&[("quarantine", Value::String(marker.shown().clone()))]);
+        let removed = marker.remove(&Steps::default(), &mut section);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).expect("the mode is set");
+        if locked && searched {
+            let Err(Unremoved::Check(error)) = removed else {
+                panic!("{removed:?} is the check's error");
+            };
+            assert_eq!(
+                scratch.norm(&error.to_string()),
+                "[Errno 13] Permission denied: '<d>/locked-true/fis-e1.json'"
+            );
+            assert_eq!(
+                listing(&directory),
+                ["closed/", "fis-e1.json@"],
+                "the link stays"
+            );
+        } else if !locked {
+            assert_eq!(removed, Ok(()));
+            assert_eq!(
+                listing(&directory),
+                ["closed/"],
+                "the control removes the link"
+            );
+        }
+    }
 }

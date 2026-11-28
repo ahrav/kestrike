@@ -1,7 +1,7 @@
 //! [`Case`], a lane's case whose end the test sets: at once, at a time on the plane's clock, or a
 //! delay after SIGTERM. A wait moves the clock to the end where it comes within the bound, else by
 //! the whole bound. A signal is sent, and logged, only to a case that runs: SIGTERM ends it where the
-//! test set a close after SIGTERM, and SIGKILL ends it with `-9` at once, which no later end
+//! test set a close after SIGTERM, unless an earlier end stands, and SIGKILL ends it with `-9` at once, which no later end
 //! changes.
 
 use std::cell::{Cell, RefCell};
@@ -108,7 +108,8 @@ impl fis_controller::Case for Case {
             self.state.signals.borrow_mut().push("SIGTERM");
             if let Some((delay, code)) = self.state.closes.take() {
                 let at = self.clock.now().saturating_add(delay);
-                self.state.ends_at.set(Some((at, code)));
+                let earlier = self.state.ends_at.get().filter(|(end, _)| *end <= at);
+                self.state.ends_at.set(Some(earlier.unwrap_or((at, code))));
             }
         }
         Ok(())

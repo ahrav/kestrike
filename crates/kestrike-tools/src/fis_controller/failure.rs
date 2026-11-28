@@ -93,41 +93,39 @@ impl From<Interrupted> for Failure {
     }
 }
 
-/// [`Failure::from`] of an observer log's failure, with a failed open of the log naming the log's
-/// path.
-pub fn observed(error: ObserverError, observer: &Observer) -> Failure {
-    match (&error, observer.path()) {
-        (ObserverError::Open(cause), Some(path)) => {
-            Failure::System(SystemError::of(cause, &[path]))
-        }
-        _ => Failure::from(error),
-    }
-}
-
 /// An observer log's failure by its kind: a signal is [`Failure::Interrupted`]; a log or an event of
 /// another shape, and a field nested past what a read takes, are [`Failure::Unreadable`]; a lock
 /// another holder kept past the limit is the system error of its refused attempt, worded as the
-/// observer's error names the wait; every other failure is the system error it carries, which names
-/// no file; [`observed`] names the log for a failed open.
-impl From<ObserverError> for Failure {
-    fn from(error: ObserverError) -> Self {
-        match error {
-            ObserverError::Interrupted(signal) => Self::Interrupted(signal),
-            ObserverError::Held { errno, .. } => {
-                Self::System(SystemError::worded(Some(errno), &error.to_string(), &[]))
-            }
+/// observer's error names the wait; a failed open of the log is the system error naming the log's
+/// path, and a log that cannot seek is the error naming none; every other failure is the system
+/// error it carries, which names no file.
+pub fn observed(error: ObserverError, observer: &Observer) -> Failure {
+    let named = |cause: &io::Error| cause.raw_os_error() != Some(libc::ESPIPE);
+    match (error, observer.path()) {
+        (ObserverError::Open(cause), Some(path)) if named(&cause) => {
+            Failure::System(SystemError::of(&cause, &[path]))
+        }
+        (ObserverError::Interrupted(signal), _) => Failure::Interrupted(signal),
+        (error @ ObserverError::Held { errno, .. }, _) => {
+            Failure::System(SystemError::worded(Some(errno), &error.to_string(), &[]))
+        }
+        (
             ObserverError::Directory(cause)
             | ObserverError::Open(cause)
             | ObserverError::Lock(cause)
             | ObserverError::Clock(cause)
             | ObserverError::Read(cause)
             | ObserverError::Node(cause)
-            | ObserverError::Write(cause) => Self::System(SystemError::of(&cause, &[])),
-            ObserverError::Undecodable { .. }
+            | ObserverError::Write(cause),
+            _,
+        ) => Failure::System(SystemError::of(&cause, &[])),
+        (
+            error @ (ObserverError::Undecodable { .. }
             | ObserverError::Malformed { .. }
             | ObserverError::Line { .. }
             | ObserverError::Depth { .. }
-            | ObserverError::Event(_) => Self::Unreadable(Text::from(error.to_string())),
-        }
+            | ObserverError::Event(_)),
+            _,
+        ) => Failure::Unreadable(Text::from(error.to_string())),
     }
 }

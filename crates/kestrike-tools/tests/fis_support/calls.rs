@@ -1,7 +1,8 @@
 //! [`Calls`], the plane's AWS calls: each call takes its reply, in order, from the list a case gives,
 //! and is logged with its words and its limit. A call under an armed record with a signal stored
 //! raises before it is logged, as a call raises before its child starts; a reply given to a call of
-//! another operation stops the case.
+//! another operation, and a call whose words do not end with `--region <region> --output json`, stop
+//! the case.
 //!
 //! A reply takes the time the case sets for it on the plane's clock. A reply that takes longer than
 //! its call's limit is no reply, and the call takes its limit, as a call the limit cuts does.
@@ -77,6 +78,17 @@ impl Calls {
                 .as_deref(),
             Some(reply.operation),
             "the reply answers the call's operation"
+        );
+        let tail: Vec<&str> = words
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(String::as_str)
+            .collect();
+        assert!(
+            matches!(tail.as_slice(), ["--region", _, "--output", "json"]),
+            "the phase ends the call's words with its region and output: {words:?}"
         );
         if reply.takes > limit {
             clock.pass(record, limit)?;

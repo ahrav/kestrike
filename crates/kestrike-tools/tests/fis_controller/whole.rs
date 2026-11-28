@@ -2,10 +2,11 @@
 //! the directories a write makes and syncs. Each row's error text, the file's text and the
 //! directory's entries after the write are the write's steps' on each arrangement.
 
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use kestrike_tools::fis_controller::{create_partial, write_file, write_file_by};
 use kestrike_tools::host_stop::Disk;
@@ -183,12 +184,11 @@ fn a_write_that_fails_leaves_the_previous_version_and_no_partial_file() {
     );
 }
 
-/// Step 4 creates `<name>.partial` exclusively, refusing a link at its name, with mode 0644 under the
-/// process's umask, and the rename keeps that mode at the name.
+/// Step 4 creates `<name>.partial` exclusively, refusing an entry or a link at its name.
 #[test]
-fn the_partial_file_is_made_exclusively_and_its_mode_stands_at_the_name() {
+fn the_partial_file_is_made_exclusively() {
     let scratch = Scratch::new("write-create");
-    let (directory, target) = place(&scratch, "create");
+    let (directory, _) = place(&scratch, "create");
     let partial = directory.join("f.json.partial");
     fs::write(&partial, "junk").expect("the file is written");
     let error = create_partial(&partial).expect_err("an existing file is refused");
@@ -196,29 +196,51 @@ fn the_partial_file_is_made_exclusively_and_its_mode_stands_at_the_name() {
     fs::remove_file(&partial).expect("removed");
     symlink(directory.join("nowhere"), &partial).expect("linked");
     let error = create_partial(&partial).expect_err("a link is refused");
-    assert_eq!(
-        error.raw_os_error(),
-        Some(libc::EEXIST),
-        "O_EXCL refuses a link at the name"
+    assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+    assert!(
+        !directory.join("nowhere").exists(),
+        "the link's target is not made"
     );
     fs::remove_file(&partial).expect("removed");
-    let reference = directory.join("reference");
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&reference)
-        .expect("the reference is made");
+    drop(create_partial(&partial).expect("the control is made"));
+    assert!(
+        partial.is_file(),
+        "with nothing at the name the create succeeds"
+    );
+}
+
+/// The variable that marks the child of [`the_partial_file_has_mode_0644_and_keeps_it_at_the_name`].
+const UNMASKED: &str = "KESTRIKE_TOOLS_FIS_UNMASKED";
+
+/// The partial file is made with mode 0644 and the rename keeps it at the name. A umask of 0 is
+/// process-wide, so the case runs again in a child started by `/bin/sh` after `umask 0`, where any
+/// other requested mode would show, and asserts the exact mode there.
+#[test]
+fn the_partial_file_has_mode_0644_and_keeps_it_at_the_name() {
     let mode = |path: &Path| fs::metadata(path).expect("stat").permissions().mode() & 0o7777;
-    drop(create_partial(&partial).expect("the partial file is made"));
-    assert_eq!(
-        mode(&partial),
-        mode(&reference),
-        "mode 0644 under the umask"
-    );
-    fs::remove_file(&partial).expect("removed");
-    write_file(&Disk, &target, "new\n").expect("the file is written");
-    assert_eq!(mode(&target), mode(&reference), "the rename keeps the mode");
+    if std::env::var_os(UNMASKED).is_some() {
+        let scratch = Scratch::new("write-mode");
+        let (directory, target) = place(&scratch, "mode");
+        let partial = directory.join("f.json.partial");
+        drop(create_partial(&partial).expect("the partial file is made"));
+        assert_eq!(mode(&partial), 0o644, "the partial file's mode");
+        fs::remove_file(&partial).expect("removed");
+        write_file(&Disk, &target, "new\n").expect("the file is written");
+        assert_eq!(mode(&target), 0o644, "the mode at the name");
+        return;
+    }
+    let exe = std::env::current_exe().expect("the test executable resolves");
+    let status = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("umask 0 && exec \"$0\" --exact --test-threads=1 \"$1\"")
+        .arg(&exe)
+        .arg("fis_controller::whole::the_partial_file_has_mode_0644_and_keeps_it_at_the_name")
+        .env(UNMASKED, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .expect("the child runs");
+    assert!(status.success(), "the child's case passes: {status}");
 }
 
 /// A `mkdir` that fails because another maker's directory stands at the path goes on: the parent is

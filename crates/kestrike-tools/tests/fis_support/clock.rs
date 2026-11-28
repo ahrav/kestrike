@@ -54,7 +54,12 @@ impl Clock {
     }
 
     /// Delivers `signal` to `delivered` once the clock passes `seconds`.
+    ///
+    /// # Panics
+    ///
+    /// Where a signal is set and not yet delivered: one signal at a time.
     pub(crate) fn signal_at(&self, seconds: f64, signal: Signal, delivered: &'static Delivered) {
+        assert!(self.0.signal.get().is_none(), "one signal at a time");
         self.0
             .signal
             .set(Some((nanoseconds(seconds), signal, delivered)));

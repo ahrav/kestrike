@@ -204,10 +204,17 @@ fn a_call_under_a_stored_signal_raises_before_it_is_made() {
         let mut plane = Plane::new(clock, vec![reply]);
         let mut record = Record::new(store);
         record.arm();
-        let words: Vec<OsString> = ["fis", "get-experiment"]
-            .iter()
-            .map(OsString::from)
-            .collect();
+        let words: Vec<OsString> = [
+            "fis",
+            "get-experiment",
+            "--region",
+            "r-1",
+            "--output",
+            "json",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
         let called = plane.call(&mut record, &words, Duration::from_secs(1));
         assert_eq!(called.is_err(), signalled);
         assert_eq!(
@@ -252,19 +259,75 @@ fn the_fake_clock_keeps_the_contract_the_system_s_clock_keeps() {
     clocks_contract(&mut Clock::at(100.0));
 }
 
-/// What a case of a phase does, run over the fake case: a running case is not ended, a wait within
-/// a bound it outlives returns none, and a kill ends it with `-9` that a check then reads. The case
-/// a later phase starts for real runs the same function over a real child.
-fn case_contract(mut case: impl fis_controller::Case) {
+/// What a case of a phase does, here run over the fake case alone: a running case is not ended,
+/// SIGTERM leaves it running, a wait within a bound it outlives returns none, and a kill ends it
+/// with `-9` that a check then reads; a case that ended keeps its own code through a kill. `ended`
+/// makes a second case end with 0 before the contract reads it.
+fn case_contract<C: fis_controller::Case>(mut case: C, mut ended: C, end: impl FnOnce(&mut C)) {
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
     assert_eq!(case.ended().expect("the check runs"), None);
+    case.terminate().expect("the signal is sent");
+    assert_eq!(
+        case.ended().expect("the check runs"),
+        None,
+        "SIGTERM alone ends nothing"
+    );
     assert_eq!(case.wait(&mut record, Duration::from_millis(20)), Ok(None));
     assert_eq!(case.kill(&mut record), Ok(-9));
     assert_eq!(case.ended().expect("the check runs"), Some(-9));
+    end(&mut ended);
+    assert_eq!(ended.wait(&mut record, Duration::from_secs(5)), Ok(Some(0)));
+    assert_eq!(
+        ended.kill(&mut record),
+        Ok(0),
+        "a kill keeps an ended case's code"
+    );
 }
 
 #[test]
 fn the_fake_case_keeps_the_case_contract() {
-    case_contract(Case::new(Clock::at(100.0)).0);
+    let clock = Clock::at(100.0);
+    let (ended, handle) = Case::new(clock.clone());
+    case_contract(Case::new(clock).0, ended, |_| handle.end(0));
+}
+
+/// SIGTERM never puts off an end the case was set to reach first: a case set to end at 101 s and to
+/// close 5 s after SIGTERM, terminated at 100 s, ends at 101 s. Control: with no earlier end it
+/// closes at 105 s.
+#[test]
+fn sigterm_keeps_an_earlier_end() {
+    for earlier in [true, false] {
+        let clock = Clock::at(100.0);
+        let (mut case, handle) = Case::new(clock.clone());
+        if earlier {
+            handle.end_at(101.0, 0);
+        }
+        handle.close_on_sigterm(5.0, 0);
+        case.terminate().expect("the signal is sent");
+        let delivered = Delivered::new();
+        let mut record = Record::new(&delivered);
+        assert_eq!(case.wait(&mut record, Duration::from_secs(10)), Ok(Some(0)));
+        let at = if earlier { 101.0 } else { 105.0 };
+        assert_eq!(clock.now(), nanoseconds(at), "earlier {earlier}");
+    }
+}
+
+/// A signal set for a time a reading's step reaches is delivered at that reading, with no sleep
+/// between. Control: a signal set past the readings stays undelivered.
+#[test]
+fn a_reading_s_step_delivers_a_signal_it_reaches() {
+    for (at, delivered_after) in [(100.5, true), (102.5, false)] {
+        let store = crate::fis_support::delivered();
+        let clock = Clock::at(100.0);
+        clock.step(Duration::from_secs(1));
+        clock.signal_at(at, Signal::Terminate, store);
+        clock.monotonic_ns().expect("the clock reads");
+        clock.monotonic_ns().expect("the clock reads");
+        assert_eq!(
+            store.stored(),
+            delivered_after.then_some(Signal::Terminate),
+            "signal at {at}"
+        );
+    }
 }

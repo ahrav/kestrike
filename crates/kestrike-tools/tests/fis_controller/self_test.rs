@@ -34,6 +34,7 @@ fn a_file_is_written_whole_or_left_as_it_was_and_its_directories_are_synced() {
     );
     let failing = Steps {
         file_sync: true,
+        probe: Some(target.with_file_name("file.json.partial")),
         ..Steps::default()
     };
     assert!(write_file(&failing, &target, "two\n").is_err());
@@ -41,6 +42,11 @@ fn a_file_is_written_whole_or_left_as_it_was_and_its_directories_are_synced() {
         fs::read_to_string(&target).expect("reads"),
         "one\n",
         "the previous version stands"
+    );
+    assert_eq!(
+        *failing.probed.borrow(),
+        Some(true),
+        "the partial file stood at the failure"
     );
     assert_eq!(
         listing(target.parent().expect("a parent")),

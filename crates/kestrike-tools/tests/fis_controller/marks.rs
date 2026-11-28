@@ -493,17 +493,21 @@ fn an_event_of_another_shape_before_the_one_found_is_refused() {
 }
 
 /// An append that fails changes nothing of the section: a signal stored under an armed record ends
-/// it in the wait for a lock another holder keeps, and a regular file in place of the log's directory fails its
-/// making. Control: the same mark with neither appends and records its window.
+/// it in the wait for a lock another holder keeps, a regular file in place of the log's directory
+/// fails its making, and a directory at the log's name fails its open, which names the log. Control:
+/// the same mark with none of these appends and records its window.
 #[test]
 fn a_failed_append_leaves_the_section_and_the_mark_as_they_were() {
     let scratch = Scratch::new("marks-append");
-    for arm in ["signal", "file", "control"] {
+    for arm in ["signal", "file", "open", "control"] {
         let directory = scratch.path().join(format!("append-{arm}"));
         fs::create_dir(&directory).expect("the directory is made");
         let log = directory.join("obs");
         if arm == "file" {
             fs::write(&log, "x").expect("the file is written");
+        }
+        if arm == "open" {
+            fs::create_dir_all(log.join("deeper/e1.jsonl")).expect("the directory is made");
         }
         let observer = observer(log.join("deeper").as_os_str(), OsStr::new("e1"), text("p"));
         let marks = Marks::new(&directory.join("art"), OsStr::new("e1")).expect("resolves");
@@ -530,6 +534,16 @@ fn a_failed_append_leaves_the_section_and_the_mark_as_they_were() {
         match arm {
             "signal" => assert!(matches!(marked, Err(Failure::Interrupted(_))), "{marked:?}"),
             "file" => assert!(matches!(marked, Err(Failure::System(_))), "{marked:?}"),
+            "open" => {
+                let Err(Failure::System(error)) = &marked else {
+                    panic!("{marked:?} is a system error");
+                };
+                assert_eq!(
+                    scratch.norm(&error.to_string()),
+                    "[Errno 21] Is a directory: '<d>/append-open/obs/deeper/e1.jsonl'",
+                    "a failed open names the log"
+                );
+            }
             _ => assert_eq!(marked, Ok(Integer::from(1u64))),
         }
         assert_eq!(section.contains("effect_window"), arm == "control", "{arm}");
