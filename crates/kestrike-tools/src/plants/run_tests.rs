@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use super::{listed, lock_bytes, open_lock};
+use crate::plants::tests::Opens;
 
 /// The listing is split at each of Python's line breaks, a form feed included, so a worktree whose path
 /// holds a form feed matches no line, while the plain path matches its line.
@@ -56,31 +57,26 @@ fn the_lockfile_check_reads_one_regular_file_through_one_descriptor_and_a_bound(
     assert_eq!(read.map(|bytes| bytes.len()), Some(lock.len() + 1));
 }
 
-/// A signal recorded before a Git step starts no Git: the step returns the interruption, and the `git`
-/// first on `PATH`, which would leave a marker, never runs.
+/// A signal recorded before a Git step starts no Git: the step returns the interruption, and the watch
+/// holds no open of the `git` first on `PATH`. The same step with no signal recorded starts that `git`,
+/// which the watch shows first.
 #[test]
 fn a_signal_recorded_before_a_git_step_starts_no_git() {
     let scratch = crate::paths::tests::Scratch::new("git-signal");
-    let marker = scratch.0.join("ran");
-    let git = scratch.0.join("git");
-    let written = std::process::Command::new("sh")
-        .args([
-            "-c",
-            "printf '%s' \"$2\" > \"$1\" && chmod 755 \"$1\"",
-            "sh",
-        ])
-        .arg(&git)
-        .arg(format!("#!/bin/sh\ntouch '{}'\n", marker.display()))
-        .status()
-        .expect("the writer starts");
-    assert!(written.success());
+    let opens = Opens::inert(&scratch.0.join("git"));
     let env = vec![(
         std::ffi::OsString::from("PATH"),
         scratch.0.clone().into_os_string(),
     )];
     let interrupt = crate::process::Interrupt::new();
-    interrupt.record(libc::SIGINT);
     let args = [std::ffi::OsStr::new("status")];
+    let called = super::git::text_until(&env, &scratch.0, &args, &interrupt);
+    assert!(
+        matches!(called, Ok(ref done) if done.code == 0),
+        "{called:?}"
+    );
+    assert!(opens.any(), "a Git that starts is opened");
+    interrupt.record(libc::SIGINT);
     let called = super::git::text_until(&env, &scratch.0, &args, &interrupt);
     assert!(
         matches!(
@@ -90,5 +86,5 @@ fn a_signal_recorded_before_a_git_step_starts_no_git() {
         ),
         "{called:?}"
     );
-    assert!(!marker.exists(), "no Git started");
+    assert!(!opens.any(), "no Git started");
 }
