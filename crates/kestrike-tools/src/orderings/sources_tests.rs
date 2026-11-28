@@ -500,7 +500,7 @@ fn added(file: &str, appended: &str) -> Added {
     let attributed = declared
         .attributed
         .iter()
-        .filter(|entry| !base.attributed.contains(entry))
+        .filter(|(path, names)| base.attributed.get(*path) != Some(*names))
         .map(|(path, names)| (path.clone(), names.iter().cloned().collect()))
         .collect();
     let refusals = messages(&declared.refusals)
@@ -1705,4 +1705,234 @@ fn an_inline_module_is_found_by_its_name_as_written() {
         let path = super::module_file(&format!("{name}::t"), &read).map(|(path, _)| path);
         assert_eq!(path.as_deref(), found.then_some(TREE), "{label}");
     }
+}
+
+/// A name joined to a root keeps the root: one slash, or exactly two.
+#[test]
+fn a_join_keeps_the_root_of_its_base() {
+    assert_eq!(
+        (
+            super::joined("/", "child.rs"),
+            super::joined("//", "child.rs")
+        ),
+        ("/child.rs".to_owned(), "//child.rs".to_owned())
+    );
+}
+
+/// An include path that holds a NUL byte names no file, so the includes cannot be read.
+#[test]
+fn an_include_path_with_a_nul_byte_cannot_be_read() {
+    let kernels = BTreeMap::from([(
+        "src/p.rs".to_owned(),
+        "#[path = \"bad\0/../join.rs\"]\nmod j;\n".to_owned(),
+    )]);
+    let error =
+        include_defects(&top().join(PACKAGE), &kernels).expect_err("the include holds a NUL byte");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+}
+
+/// An include that resolves to a name that is no UTF-8 is no kernel text, even beside a source whose
+/// name the same bytes would spell after a lossy decoding.
+#[test]
+fn an_include_that_resolves_to_no_utf8_name_is_no_kernel_source() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let scratch = planted_package(&[], Some("#[path = \"alias.rs\"]\nmod alias;\n"));
+    let package = package_of(&scratch);
+    fs::write(package.join("src/\u{fffd}.rs"), "").expect("the source is written");
+    symlink(OsStr::from_bytes(b"\xff.rs"), package.join("src/alias.rs")).expect("the link is made");
+    let kernels = kernel_texts(&package).expect("the package reads");
+    let defects = include_defects(&package, &kernels).expect("the includes resolve");
+    assert_eq!(
+        messages(&defects),
+        [
+            "kernels/src/planted.rs:1: the include 'alias.rs' is no Rust source of the package the scan reads"
+        ]
+    );
+}
+
+/// A chain of module files, each declared by a path attribute of the next, longer than the
+/// classification follows stops it with an error.
+#[test]
+fn a_chain_of_module_files_past_its_bound_is_an_error() {
+    let tree = Scratch::new("sources-chain");
+    let storage = tree.0.join("crates/kestrike/src/storage");
+    fs::create_dir_all(&storage).expect("the storage directory is made");
+    for at in 1..=super::CHAIN + 2 {
+        fs::write(
+            storage.join(format!("c{at}.rs")),
+            format!("#[path = \"c{}.rs\"]\nmod p;\n", at - 1),
+        )
+        .expect("a link of the chain is written");
+    }
+    let scratch = planted_package(&["crates/kestrike/src/storage/c0.rs"], None);
+    let root = tree.0.clone();
+    let read = move |path: &str| read_source(&root, path);
+    let error = scope_files(&package_of(&scratch), &root_of(&scratch), &read, &tree.0)
+        .expect_err("the chain passes the bound");
+    assert!(
+        error.to_string().starts_with(&format!(
+            "module files chain more than {} deep",
+            super::CHAIN
+        )),
+        "{error}"
+    );
+}
+
+/// Planted files by path and text.
+type Files = Vec<(&'static str, &'static str)>;
+
+/// A reader of the planted `files` alone.
+fn root_reader(files: Files) -> impl Fn(&str) -> io::Result<String> {
+    move |path: &str| {
+        files
+            .iter()
+            .find(|(name, _)| *name == path)
+            .map(|(_, text)| (*text).to_owned())
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+    }
+}
+
+/// Kept readings of a model source. The lookup counts one declaration of each form, so a module a
+/// parent declares bare twice has its file; it finds an inline module anywhere in the parent's code, so
+/// an inline decoy nested in another module doubles a bare declaration, and alone makes the parent the
+/// source; and it reads an attribute a comment separates from its `mod` as none, so the bare file is the
+/// source.
+#[test]
+fn the_model_source_lookup_keeps_its_counting() {
+    let a = "crates/kestrike/src/a.rs";
+    let rows: [(&str, Files, Option<&str>); 4] = [
+        (
+            "a bare declaration twice",
+            vec![(TREE, "mod a;\nmod a;\n"), (a, "// a\n")],
+            Some(a),
+        ),
+        (
+            "an inline decoy beside a bare declaration",
+            vec![(TREE, "mod a;\nmod helper { mod a {} }\n"), (a, "// a\n")],
+            None,
+        ),
+        (
+            "an inline decoy alone",
+            vec![(TREE, "mod helper { mod a {} }\n")],
+            Some(TREE),
+        ),
+        (
+            "an attribute a comment separates",
+            vec![
+                (TREE, "#[path = \"other.rs\"]\n// note\nmod a;\n"),
+                (a, "// a\n"),
+                ("crates/kestrike/src/other.rs", "// o\n"),
+            ],
+            Some(a),
+        ),
+    ];
+    for (label, files, expected) in rows {
+        let read = root_reader(files);
+        let path = super::module_file("a::t", &read).map(|(path, _)| path);
+        assert_eq!(path.as_deref(), expected, "{label}");
+    }
+}
+
+/// Kept readings of message literals: every string literal in an assertion's brackets is a message, and
+/// a window that opens inside a longer name reads the name's tail as a name.
+#[test]
+fn the_message_literals_keep_their_reading() {
+    assert_eq!(
+        diagnostic_sites("assert!(state == \"ready\", \"other\");\n"),
+        [("ready".to_owned(), 1), ("other".to_owned(), 1)]
+    );
+    let padded = format!("my_assert!{}(x, \"m\");\n", " ".repeat(33));
+    assert_eq!(diagnostic_sites(&padded), [("m".to_owned(), 1)]);
+    let checked = format!("xcheck!{}(x, c\"n\");\n", " ".repeat(34));
+    assert_eq!(c_literals(&checked), ["n"]);
+}
+
+/// A macro call inside an inline module blanks its tokens and leaves its bracket, so the module's block
+/// runs to the end of the text and a later declaration loads from inside it.
+#[test]
+fn a_macro_inside_an_inline_module_keeps_the_module_open() {
+    let declared = loads(
+        "d/m.rs",
+        "d/m",
+        "mod helpers { fn f() { assert!(true); } }\nmod x;\n",
+        false,
+    );
+    assert_eq!(
+        declared.bare.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["d/m/helpers/x.rs", "d/m/helpers/x/mod.rs"]
+    );
+}
+
+/// A bare declaration inside an inline module of a module file that is no root declares nothing the
+/// classification finds: the file it loads is refused as declared by no module file.
+#[test]
+fn a_bare_child_of_an_inline_module_stands_undeclared() {
+    let include = "crates/kestrike/src/storage/nested/probe.rs";
+    let scratch = planted_package(&[include], None);
+    let parent = format!("{}mod nested {{\n    mod probe;\n}}\n", committed(STORAGE));
+    let found = scope_messages(&root_of(&scratch), vec![(STORAGE, text(parent))]);
+    let head = format!("the kernel package includes {include} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+}
+
+/// A path holder that cannot be read loses its path attributes without a refusal: the file only it
+/// declares stands declared by no module file.
+#[test]
+fn an_unreadable_path_holder_declares_nothing() {
+    let holder = "crates/kestrike/src/failover/reconcile_tests.rs";
+    let moved = planted(
+        STORAGE,
+        "\nmod fill;\n",
+        "\n#[path = \"fill_v2.rs\"]\nmod fill;\n",
+    );
+    let found = scope_messages(
+        &top(),
+        vec![(STORAGE, text(moved)), (holder, Plant::Refused)],
+    );
+    let head = format!("the kernel package includes {FILL} and no module file declares it");
+    assert_eq!(
+        found
+            .iter()
+            .filter(|message| message.starts_with(&head))
+            .count(),
+        1,
+        "{found:?}"
+    );
+    assert!(
+        !found.iter().any(|message| message.contains(holder)),
+        "{found:?}"
+    );
+}
+
+/// A kernel source named exactly `.rs` is a kernel text, while its includes stay unread: the
+/// production file it includes is neither classified nor refused.
+#[test]
+fn a_source_named_dot_rs_is_a_kernel_text_with_unread_includes() {
+    let scratch = planted_package(&[], Some(""));
+    let package = package_of(&scratch);
+    fs::write(
+        package.join("src/.rs"),
+        "#[path = \"../../../../../crates/kestrike/src/storage/slot.rs\"]\nmod s;\n",
+    )
+    .expect("the source is written");
+    let kernels = kernel_texts(&package).expect("the package reads");
+    let read = reader(vec![]);
+    let scope = scope_files(&package, &root_of(&scratch), &read, &top()).expect("the scope reads");
+    let slot = "crates/kestrike/src/storage/slot.rs";
+    assert_eq!(
+        (
+            kernels.contains_key("src/.rs"),
+            scope.included().iter().any(|path| path == slot),
+            scope.refusals().is_empty()
+        ),
+        (true, false, true)
+    );
 }

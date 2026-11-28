@@ -218,3 +218,59 @@ fn a_lookup_refused_permission_is_an_error() {
     let error = found.expect_err("the lookup is refused");
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
 }
+
+/// The walk enters a directory, passes over an entry whose type lookup names no file or is refused
+/// permission, and returns every other lookup error.
+#[test]
+fn an_entry_type_lookup_error_stops_the_walk() {
+    let scratch = Scratch::new("genmc");
+    let directory = fs::symlink_metadata(&scratch.0)
+        .expect("the scratch directory reads")
+        .file_type();
+    let error = |code: i32| Err(std::io::Error::from_raw_os_error(code));
+    let found = (
+        super::descends(Ok(directory)).ok(),
+        super::descends(error(libc::ENOENT)).ok(),
+        super::descends(error(libc::EACCES)).ok(),
+        super::descends(error(libc::EIO)).map_err(|error| error.raw_os_error()),
+    );
+    assert_eq!(
+        found,
+        (Some(true), Some(false), Some(false), Err(Some(libc::EIO)))
+    );
+}
+
+/// Directories nested past the walk's depth stop it with an error.
+#[test]
+fn a_walk_stops_past_its_depth() {
+    let scratch = Scratch::new("genmc");
+    let mut deep = scratch.0.clone();
+    for _ in 0..=super::WALK_DEPTH {
+        deep.push("d");
+    }
+    fs::create_dir_all(&deep).expect("the nested directories are made");
+    let error = walk(&scratch.0).expect_err("the nesting passes the depth");
+    assert!(
+        error.to_string().ends_with(&format!(
+            "nests directories more than {} deep",
+            super::WALK_DEPTH
+        )),
+        "{error}"
+    );
+    let shallow = Scratch::new("genmc");
+    fs::create_dir_all(shallow.0.join("d/d/d")).expect("the directories are made");
+    assert_eq!(walk(&shallow.0).expect("a shallow walk reads").len(), 3);
+}
+
+/// An include path that holds a NUL byte names no file, so the package's sources cannot be read.
+#[test]
+fn an_include_path_with_a_nul_byte_is_an_error() {
+    let scratch = Scratch::new("genmc");
+    fs::write(
+        scratch.0.join("a.rs"),
+        "#[path = \"bad\0/../a.rs\"]\nmod a;\n",
+    )
+    .expect("the source is written");
+    let error = package_sources(&scratch.0).expect_err("the include holds a NUL byte");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
