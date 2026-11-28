@@ -27,6 +27,7 @@ fn receipt(scratch: &Scratch) -> PathBuf {
         "local-1-1-1-base.\u{663}",
         "local-1-1-2-base",
         "local-1-1-1-base.x",
+        "local-1-1-1-base.",
     ] {
         DirBuilder::new()
             .mode(0o700)
@@ -40,6 +41,7 @@ fn receipt(scratch: &Scratch) -> PathBuf {
         "local-1-1-1-base.\u{663}",
         "local-1-1-2-base",
         "local-1-1-1-base.x",
+        "local-1-1-1-base.",
     ] {
         fs::write(receipt.join(name).join("artifact.json"), "{}\n").expect("written");
     }
@@ -94,7 +96,7 @@ fn read(artifact: PathBuf, streams: &[&'static str]) -> Evidence {
 
 enum Expected {
     Absent,
-    Unreadable,
+    Unreadable(PathBuf),
     Read(&'static str, &'static [&'static str]),
 }
 
@@ -146,14 +148,14 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
             "base",
             Some(at("local-1-1-1-base.3")),
             "1",
-            Expected::Unreadable,
+            Expected::Unreadable(at("local-1-1-1-base.3")),
         ),
         (
             "an artifact that is absent",
             "base",
             Some(at("local-1-1-1-base.4")),
             "1",
-            Expected::Unreadable,
+            Expected::Unreadable(at("local-1-1-1-base.4")),
         ),
         (
             "a suffix of other decimal digits",
@@ -216,7 +218,14 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
             "base",
             Some(at("local-1-1-1-base.7")),
             "1",
-            Expected::Unreadable,
+            Expected::Unreadable(at("local-1-1-1-base.7")),
+        ),
+        (
+            "an empty suffix",
+            "base",
+            Some(at("local-1-1-1-base.")),
+            "1",
+            Expected::Absent,
         ),
         ("no announcement", "base", None, "1", Expected::Absent),
     ];
@@ -227,7 +236,7 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
             "base",
             Some(at("local-1-1-1-base.8")),
             "1",
-            Expected::Unreadable,
+            Expected::Unreadable(locked.clone()),
         ));
     } else {
         eprintln!(
@@ -240,10 +249,14 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         match expected {
             Expected::Absent => assert_eq!(found, Evidence::Absent, "{name}"),
-            Expected::Unreadable => assert!(
-                matches!(found, Evidence::Unreadable(_)),
-                "{name}: {found:?}"
-            ),
+            Expected::Unreadable(path) => {
+                let Evidence::Unreadable(error) = &found else {
+                    panic!("{name}: {found:?}");
+                };
+                let named = Text::from_os(path.as_os_str());
+                let opening = crate::text::text!(named, ": ");
+                assert!(error.starts_with(&opening), "{name}: {error:?}");
+            }
             Expected::Read(directory, streams) => {
                 assert_eq!(found, read(at(directory), streams), "{name}");
             }

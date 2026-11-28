@@ -182,8 +182,9 @@ fn tree_difference_names_the_first_differing_path_of_each_kind() {
             .expect("the tree is made");
         layout(&root);
         setup(&root);
-        if root.join("d").exists() && fs::read_dir(root.join("d")).is_ok() {
-            eprintln!("{name}: a mode 000 directory lists for this user, so the row is not run");
+        let unread = name.contains("cannot be read") && fs::File::open(root.join("a.txt")).is_ok();
+        if unread || (root.join("d").exists() && fs::read_dir(root.join("d")).is_ok()) {
+            eprintln!("{name}: the locked entry opens for this user, so the row is not run");
             continue;
         }
         let found = tree_difference(&root, &adjust(named(false)));
