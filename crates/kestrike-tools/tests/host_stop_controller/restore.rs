@@ -16,10 +16,10 @@ use super::after_stop::flip;
 use super::late_reads::at_reading;
 use super::plane::{Action, CALLER, CHANGES, RECORD, STATUS, Shape, State, calendar, string};
 use super::restoring::{digest, replace_mark, restore_alone, write_json};
-use super::steps::{Step, errno, free_lock, links};
+use super::steps::{Step, errno, links};
 use super::stop_run::{instance_row, mkfifo, operator_seconds, seconds, time};
 use super::{COPY, Case, guardrails, listing, member, set, tail, text_of};
-use crate::host_stop_support::{START, TARGET, object, value};
+use crate::host_stop_support::{START, TARGET, free_lock, object, value};
 
 const POLL: f64 = 5.0;
 const SKEW: f64 = 5.0;

@@ -12,10 +12,10 @@ use kestrike_tools::host_stop_controller::Halt;
 use kestrike_tools::json::Value;
 
 use super::plane::{ALARMS, Action, CALLER, MONOTONIC, RECORD, STATUS, State};
-use super::steps::{Step, errno, free_lock, links};
+use super::steps::{Step, errno, links};
 use super::stop_run::{int, operator_seconds, time};
 use super::{CHILD, COPY, Case, child, guardrails, killed_run, listing, set, tail, text_of};
-use crate::host_stop_support::{START, Scratch, TARGET};
+use crate::host_stop_support::{START, Scratch, TARGET, free_lock};
 
 const ALL: [&str; 4] = ["roles", "stop", "stopped", "abort"];
 const STOPPING: [&str; 3] = ["roles", "stop", "abort"];

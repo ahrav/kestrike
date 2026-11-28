@@ -19,10 +19,10 @@ use super::sealing::{
     copy_tree, ends, held, indented_one, judged, marks_in, parse, standing_marks, syncs_at,
     window_end,
 };
-use super::steps::{Step, errno, free_lock, links};
+use super::steps::{Step, errno, links};
 use super::stop_run::time;
 use super::{CHILD, Case, child, killed_run, member, set};
-use crate::host_stop_support::{Scratch, TARGET, remove, value};
+use crate::host_stop_support::{Scratch, TARGET, free_lock, remove, value};
 
 const SKEW: f64 = 5.0;
 
