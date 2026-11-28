@@ -105,10 +105,21 @@ fn each_rust_source_beside_the_controls_runs_the_judges_test_of_a_tip_that_holds
 
 /// `literal_strings` returns the double-quoted string literals of the one top-level assignment of `name`
 /// in the Python file `path` at the checkout's top, and fails unless the file assigns `name` exactly once.
-/// The literal runs from the `=` to the line where its brackets close.
+/// The literal runs from the `=` to the line where its brackets close, and holds brackets, double-quoted
+/// strings without escapes, commas, colons and white space alone; anything else in it, and anything but
+/// white space or a comment after it on its closing line, a second statement included, fails the read, so
+/// no member of the table is skipped.
 fn literal_strings(path: &str, name: &str) -> Vec<String> {
     let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let text = fs::read_to_string(top.join(path)).expect("the Python file reads");
+    literals(
+        path,
+        &fs::read_to_string(top.join(path)).expect("the Python file reads"),
+        name,
+    )
+}
+
+/// `literals` is [`literal_strings`] over `text`, the file `path` holds.
+fn literals(path: &str, text: &str, name: &str) -> Vec<String> {
     let starts: Vec<&str> = text
         .split('\n')
         .filter(|line| {
@@ -121,11 +132,23 @@ fn literal_strings(path: &str, name: &str) -> Vec<String> {
     let at = text
         .find(starts[0])
         .expect("the assignment stands in the text");
+    let value = &text[at..][text[at..].find('=').expect("an assignment holds `=`") + 1..];
     let mut depth = 0_i32;
     let mut strings = Vec::new();
-    let mut chars = text[at..].chars();
+    let mut chars = value.chars();
     let mut opened = false;
     while let Some(c) = chars.next() {
+        if opened && depth == 0 {
+            match c {
+                '\n' => break,
+                '#' => {
+                    chars.by_ref().find(|&c| c == '\n');
+                    break;
+                }
+                c if c.is_whitespace() => continue,
+                c => panic!("{path}: {name} is followed by {c:?} on its closing line"),
+            }
+        }
         match c {
             '(' | '[' | '{' => {
                 depth += 1;
@@ -137,11 +160,35 @@ fn literal_strings(path: &str, name: &str) -> Vec<String> {
                 assert!(!literal.contains('\\'), "{literal} holds no escape");
                 strings.push(literal);
             }
-            '\n' if opened && depth == 0 => break,
-            _ => {}
+            ',' | ':' => {}
+            c if c.is_whitespace() => {}
+            c => panic!("{path}: {name} holds {c:?}, which the read does not take"),
         }
     }
     strings
+}
+
+/// The table read takes the two forms of the tables it reads and fails on a member that is no
+/// double-quoted string and on a second statement after the table's closing line.
+#[test]
+fn the_table_read_fails_on_a_member_it_does_not_read() {
+    let read =
+        |text: &str| std::panic::catch_unwind(|| literals("t.py", text, "T")).map_err(|_| ());
+    assert_eq!(
+        read("T = (\"a\", \"b\",\n     \"c\")  # note\nU = 1\n"),
+        Ok(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()])
+    );
+    assert_eq!(
+        read("T = {\"k\": (\"p\", \"N\"),\n     \"j\": (\"q\", \"M\")}\n"),
+        Ok(["k", "p", "N", "j", "q", "M"].map(str::to_owned).to_vec())
+    );
+    for refused in [
+        "T = (\"a\", 'b')\n",
+        "T = (\"a\", NAME)\n",
+        "T = (\"a\",); T = ()\n",
+    ] {
+        assert_eq!(read(refused), Err(()), "{refused}");
+    }
 }
 
 /// Each game-day judge input runs the judge's self-test at a tip that holds it, and the judge and its

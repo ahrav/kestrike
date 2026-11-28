@@ -53,27 +53,29 @@ impl<S: AsRef<str>> FromIterator<S> for Members {
     }
 }
 
-/// `items` returns what iterating `value` yields: an object's keys, an array's items, and a string's code
-/// points, each a one-code-point string. A number, a Boolean and `null` cannot be iterated.
-fn items(value: &Value) -> Option<Vec<Value>> {
+/// `each` gives `visit` each value iterating `value` yields, in order, and stops at the first `None`: an
+/// object's keys, an array's items, and a string's code points, each a one-code-point string. A number, a
+/// Boolean and `null` cannot be iterated and read as `None`.
+fn each(value: &Value, mut visit: impl FnMut(&Value) -> Option<()>) -> Option<()> {
     match value {
-        Value::Object(object) => Some(
-            object
-                .iter()
-                .map(|(key, _)| Value::String(key.clone()))
-                .collect(),
-        ),
-        Value::Array(items) => Some(items.clone()),
-        Value::String(text) => Some(
-            text.code_points()
-                .map(|code| {
-                    Value::String(
-                        Text::from_code_points([code]).expect("a code point of a text is one"),
-                    )
-                })
-                .collect(),
-        ),
+        Value::Object(object) => object
+            .iter()
+            .try_for_each(|(key, _)| visit(&Value::String(key.clone()))),
+        Value::Array(items) => items.iter().try_for_each(visit),
+        Value::String(text) => text.code_points().try_for_each(|code| {
+            visit(&Value::String(
+                Text::from_code_points([code]).expect("a code point of a text is one"),
+            ))
+        }),
         Value::Integer(_) | Value::Float(_) | Value::Bool(_) | Value::Null => None,
+    }
+}
+
+/// `path` is the value of the key `path` of an object, and `None` for another value or a missing key.
+fn path(item: &Value) -> Option<&Value> {
+    match item {
+        Value::Object(object) => object.get("path"),
+        _ => None,
     }
 }
 
@@ -91,9 +93,7 @@ pub(super) fn verus_sources(bytes: &[u8]) -> Option<Members> {
     };
     let mut members = Members::default();
     if let Some(sources) = inventory.get("sources") {
-        for item in items(sources)? {
-            members.insert(&item)?;
-        }
+        each(sources, |item| members.insert(item))?;
     }
     Some(members)
 }
@@ -107,22 +107,17 @@ pub(super) fn link_inputs(bytes: &[u8]) -> Option<Members> {
         return None;
     };
     let mut members: Members = [LINKS_REGISTRY].into_iter().chain(LINKS_SCRIPTS).collect();
-    let path = |item: &Value| match item {
-        Value::Object(object) => object.get("path").cloned(),
-        _ => None,
-    };
-    for model in items(registry.get("models")?)? {
-        members.insert(&path(&model)?)?;
-    }
-    for row in items(registry.get("rows")?)? {
+    each(registry.get("models")?, |model| {
+        members.insert(path(model)?)
+    })?;
+    each(registry.get("rows")?, |row| {
         let Value::Object(row) = row else {
             return None;
         };
-        if let Some(anchors) = row.get("anchors") {
-            for anchor in items(anchors)? {
-                members.insert(&path(&anchor)?)?;
-            }
+        match row.get("anchors") {
+            Some(anchors) => each(anchors, |anchor| members.insert(path(anchor)?)),
+            None => Some(()),
         }
-    }
+    })?;
     Some(members)
 }

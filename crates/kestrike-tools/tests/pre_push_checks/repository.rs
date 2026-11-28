@@ -5,8 +5,8 @@
 //! environment stay as they are. The child reads the row's values from variables named `ROW_<name>`.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::os::unix::fs::symlink;
+use std::fs::{self, DirBuilder};
+use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -33,8 +33,8 @@ impl Values {
     }
 }
 
-/// A repository of its own under `CARGO_TARGET_TMPDIR`, removed on drop, with an environment that keeps
-/// the caller's Git configuration and identity out.
+/// A repository of its own in a new directory of mode 0700 under `CARGO_TARGET_TMPDIR`, which drop removes,
+/// with an environment that keeps the caller's Git configuration and identity out.
 pub struct Repository {
     temp: PathBuf,
     pub top: PathBuf,
@@ -48,7 +48,8 @@ impl Drop for Repository {
 }
 
 impl Repository {
-    /// `new` makes an empty repository on the branch `main`.
+    /// `new` makes an empty repository on the branch `main`, in a directory it creates under a name no
+    /// other entry holds; a name another entry holds is left alone and the next is tried.
     pub fn new(name: &str) -> Self {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(root).expect("the scratch root is made");
@@ -59,7 +60,7 @@ impl Repository {
                     std::process::id()
                 ))
             })
-            .find(|temp| fs::create_dir(temp).is_ok())
+            .find(|temp| DirBuilder::new().mode(0o700).create(temp).is_ok())
             .expect("a new scratch directory is made");
         let top = temp.join("repo");
         fs::create_dir(&top).expect("the repository directory is made");
@@ -150,8 +151,20 @@ impl Repository {
 
     /// `in_child_at` is [`Repository::in_child`] with the child started in `dir`.
     pub fn in_child_at(&self, dir: &Path, id: &str, values: &[(&str, &str)]) -> Output {
+        self.in_child_with(dir, id, values, &[])
+    }
+
+    /// `in_child_with` is [`Repository::in_child_at`] with `extra` added to the child's environment alone.
+    pub fn in_child_with(
+        &self,
+        dir: &Path,
+        id: &str,
+        values: &[(&str, &str)],
+        extra: &[(&str, &OsStr)],
+    ) -> Output {
         let output = self
             .command(std::env::current_exe().expect("the test executable is known"))
+            .envs(extra.iter().copied())
             .current_dir(dir)
             .args(["--exact", id, "--nocapture", "--test-threads", "1"])
             .env(ROLE, "1")

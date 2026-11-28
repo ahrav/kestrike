@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 
-use crate::environ::{Environ, get, remove, set};
+use crate::environ::{Environ, first_of_each, get, remove, set};
 
 fn environ(pairs: &[(&str, &str)]) -> Environ {
     pairs
@@ -32,4 +32,14 @@ fn remove_drops_every_variable_of_its_name() {
     assert_eq!(env, environ(&[("B", "2")]));
     remove(&mut env, "D");
     assert_eq!(env, environ(&[("B", "2")]));
+}
+
+/// `first_of_each` keeps the first variable of each name, the one `get` reads, and the others in order.
+#[test]
+fn first_of_each_keeps_the_variable_get_reads() {
+    let env = environ(&[("A", "1"), ("B", "2"), ("A", "3"), ("C", ""), ("B", "4")]);
+    assert_eq!(
+        first_of_each(env),
+        environ(&[("A", "1"), ("B", "2"), ("C", "")])
+    );
 }

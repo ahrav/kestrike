@@ -21,7 +21,8 @@ fn revision(commit: &Text, suffix: &str) -> OsString {
     revision
 }
 
-/// `holds` holds when the tree of `commit` holds `path`, as `git cat-file -e` reports it.
+/// `holds` holds when `git cat-file -e` of `path` at `commit` passes; a lookup that fails for any reason,
+/// an object the clone lacks included, reads as `path` absent.
 fn holds(environ: &Environ, commit: &Text, path: &str) -> Result<bool, Failure> {
     let spec = revision(commit, &format!(":{path}"));
     Ok(
@@ -75,7 +76,8 @@ pub(super) fn comparison_base(
     Ok(merge_base(environ, OsString::from("origin/main"), argument(local))?.map(Text::from))
 }
 
-/// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it fails.
+/// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it fails for any
+/// reason, an object the clone lacks included; the callers read `None` as an absent file.
 fn shown_file(environ: &Environ, commit: &Text, path: &str) -> Result<Option<Vec<u8>>, Failure> {
     let shown = output(
         environ,
@@ -148,14 +150,24 @@ pub fn destination_refs(name: &Text, remotes: &[Text]) -> Vec<Text> {
 }
 
 /// `ignored_tests` returns the text of each ignore attribute of `text` through the name of the fn it
-/// precedes, skipping the attributes between the two, so a string inside `should_panic` cannot stand in for
-/// the fn name. A span with no fn after its attribute runs to the end of the text. A fn found after one
-/// attribute is the next attribute's fn too while it starts before that attribute's end, and once no fn
-/// follows an attribute none follows a later one, so each search runs once per fn.
+/// precedes, skipping the attributes between the two, so a `should_panic` string that holds no `]` cannot
+/// stand in for the fn name. The search reads the raw text: a `fn <name>` inside a comment or a string, and
+/// a `]` inside an attribute's string, end a span where they stand. A span with no fn after its attribute
+/// runs to the end of the text.
 pub fn ignored_tests(text: &str) -> Vec<&str> {
+    spans(text, |from| FUNCTION.find_at(text, from))
+}
+
+/// `spans` is [`ignored_tests`] with `search` finding the first fn at or after an offset. A fn found after
+/// one attribute is the next attribute's fn too while its match starts at or after that attribute's end,
+/// and once no fn follows an attribute none follows a later one, so the attributes that end before one fn's
+/// match share one search.
+pub(super) fn spans<'t>(
+    text: &'t str,
+    mut search: impl FnMut(usize) -> Option<regex::Match<'t>>,
+) -> Vec<&'t str> {
     let mut spans = Vec::new();
-    // Each attribute `IGNORE` matches holds the word `ignore`, so a text without it has no span and skips
-    // the search, whose Unicode word boundaries run slowly on text outside ASCII.
+    // Each attribute `IGNORE` matches holds the word `ignore`, so a text without it has no span.
     if !text.contains("ignore") {
         return spans;
     }
@@ -165,7 +177,7 @@ pub fn ignored_tests(text: &str) -> Vec<&str> {
         let stale =
             function.is_some_and(|function: regex::Match<'_>| function.start() < found.end());
         if !searched || stale {
-            function = FUNCTION.find_at(text, found.end());
+            function = search(found.end());
             searched = true;
         }
         spans.push(&text[found.start()..function.map_or(text.len(), |function| function.end())]);
@@ -201,7 +213,10 @@ pub(super) fn changes_ignore(
         .collect();
     let texts: Vec<String> = blob_bytes(environ, &names)?
         .into_iter()
-        .map(|bytes| String::from_utf8_lossy(&bytes.unwrap_or_default()).into_owned())
+        .map(|bytes| {
+            String::from_utf8(bytes.unwrap_or_default())
+                .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+        })
         .collect();
     Ok(texts
         .chunks(2)

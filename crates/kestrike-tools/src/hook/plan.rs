@@ -1,6 +1,7 @@
 //! [`Plan`] reads a push's ref lines one at a time and keeps, in first-seen order, each tip's checks, the
 //! scan ranges, the tips whose chaos records are guarded and the commits the push may send.
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 
@@ -33,7 +34,7 @@ impl fmt::Display for Skipped {
 }
 
 /// The decisions for one push so far. Every Git read starts in [`push_environ`], built once at [`Plan::new`].
-#[derive(Debug)]
+/// `Debug` writes the decisions and leaves the environment out.
 pub struct Plan {
     environ: Environ,
     tracked: Vec<OsString>,
@@ -41,6 +42,19 @@ pub struct Plan {
     scans: Vec<(Text, Text)>,
     guarded: Vec<Text>,
     pushed: Vec<Text>,
+    seen: HashSet<Text>,
+}
+
+impl fmt::Debug for Plan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Plan")
+            .field("tracked", &self.tracked)
+            .field("planned", &self.planned)
+            .field("scans", &self.scans)
+            .field("guarded", &self.guarded)
+            .field("pushed", &self.pushed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Plan {
@@ -71,6 +85,7 @@ impl Plan {
             scans: Vec::new(),
             guarded: Vec::new(),
             pushed: Vec::new(),
+            seen: HashSet::new(),
         })
     }
 
@@ -105,10 +120,11 @@ impl Plan {
     /// with that read's text: the comparison base, the links registry, and then either the presence at the
     /// tip of the contract (twice), the replay after a held contract, the judges' test, the game-day and the
     /// host stop self-tests, or the changed paths, the Verus inventory, the changed Rust files, the judges'
-    /// test where a source it reads changed, the replay, and each self-test where an input of it other than
-    /// its own scripts changed. Then the commits under the record directories that the tip reaches and the
-    /// destination is not known to hold. A plan that returned an error holds part of that line and serves
-    /// no push.
+    /// test where a source it reads changed, the replay, and each self-test where none of its own scripts
+    /// changed and another of its inputs did. Then the commits under the record directories that the tip
+    /// reaches and the destination is not known to hold. A presence read, and a read of the inventory or the
+    /// registry, whose Git command fails for any reason reads as an absent file. A line that returns an
+    /// error leaves the plan as it stood before the line.
     ///
     /// # Errors
     ///
@@ -132,21 +148,24 @@ impl Plan {
                 (unbased_checks(&self.environ, &local, links.as_ref())?, true)
             }
             Some(base) => {
-                let pair = (base.clone(), local.clone());
-                if !self.scans.contains(&pair) {
-                    self.scans.push(pair);
-                }
                 let paths = changed_paths(&self.environ, base, &local)?;
                 let checks = based_checks(&self.environ, base, &local, &paths, links.as_ref())?;
                 (checks, chaos_change(&paths))
             }
         };
+        let known = base.as_ref() == Some(&remote);
+        let commits = self.record_commits(&local, known.then_some(&remote))?;
+        if let Some(base) = base {
+            let pair = (base, local.clone());
+            if !self.scans.contains(&pair) {
+                self.scans.push(pair);
+            }
+        }
         if guard && !self.guarded.contains(&local) {
             self.guarded.push(local.clone());
         }
-        let known = base.as_ref() == Some(&remote);
-        for commit in self.record_commits(&local, known.then_some(&remote))? {
-            if !self.pushed.contains(&commit) {
+        for commit in commits {
+            if self.seen.insert(commit.clone()) {
                 self.pushed.push(commit);
             }
         }

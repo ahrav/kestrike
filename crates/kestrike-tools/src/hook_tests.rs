@@ -1,30 +1,45 @@
+use std::ffi::OsStr;
+
+use crate::git::push_environ;
 use crate::hook::guard::CHAOS_RECORD;
 use crate::hook::members::{Members, link_inputs, verus_sources};
+use crate::hook::reads::spans;
 use crate::hook::table::{Check, Held, ORDER, checks_for};
-use crate::hook::{Failure, account_number, ignored_tests, record_values, shown};
+use crate::hook::{Failure, Plan, account_number, ignored_tests, record_values, shown};
+use crate::rust_text::FUNCTION;
 use crate::text::Text;
 
 /// The run order holds the ten checks of the hook, each at the index of its `Check`, with the argument
 /// vectors the hook runs.
 #[test]
 fn the_rows_hold_the_hooks_checks_in_run_order() {
-    let argvs: Vec<String> = ORDER.iter().map(|row| row.argv.join(" ")).collect();
-    assert_eq!(
-        argvs,
-        [
-            "python3 scripts/test-select-tests.py",
-            "python3 scripts/verify-receipts.py admit",
-            "python3 scripts/judge-verus.py reconcile",
-            "python3 scripts/model-links.py check",
-            "python3 scripts/test-model-links.py",
-            "python3 -I chaos/tools/validate_contract.py chaos/ledger.json --root . --project chaos/project.yaml \
-             --receipts chaos/receipts --check-claim chaos/READINESS.md",
-            "python3 -I scripts/chaos-receipt-replay.py",
-            "python3 -I chaos/tests/test_judges.py",
-            "python3 -I scripts/test-gameday-judge.py",
-            "python3 -I scripts/test-host-stop-controller.py",
-        ]
-    );
+    let argvs: Vec<&[&str]> = ORDER.iter().map(|row| row.argv).collect();
+    let expected: [&[&str]; 10] = [
+        &["python3", "scripts/test-select-tests.py"],
+        &["python3", "scripts/verify-receipts.py", "admit"],
+        &["python3", "scripts/judge-verus.py", "reconcile"],
+        &["python3", "scripts/model-links.py", "check"],
+        &["python3", "scripts/test-model-links.py"],
+        &[
+            "python3",
+            "-I",
+            "chaos/tools/validate_contract.py",
+            "chaos/ledger.json",
+            "--root",
+            ".",
+            "--project",
+            "chaos/project.yaml",
+            "--receipts",
+            "chaos/receipts",
+            "--check-claim",
+            "chaos/READINESS.md",
+        ],
+        &["python3", "-I", "scripts/chaos-receipt-replay.py"],
+        &["python3", "-I", "chaos/tests/test_judges.py"],
+        &["python3", "-I", "scripts/test-gameday-judge.py"],
+        &["python3", "-I", "scripts/test-host-stop-controller.py"],
+    ];
+    assert_eq!(argvs, expected);
     for (at, row) in ORDER.iter().enumerate() {
         assert_eq!(row.check as usize, at);
     }
@@ -372,8 +387,27 @@ fn the_ignore_spans_end_at_the_fn_each_attribute_precedes() {
     assert_eq!(ignored_tests("fn plain() {}\n"), Vec::<&str>::new());
 }
 
-/// The record read takes nesting up to the reader's 1,000 levels and refuses deeper; the script's reader
-/// refuses from 993 levels on Python 3.9.25, a stated difference.
+/// The span search reads the raw text: a `fn` name in a comment ends the span there, and so does a `]`
+/// inside an attribute's string followed by `fn` and a name, so renaming the real test leaves both spans
+/// as they were.
+#[test]
+fn a_fn_name_in_a_comment_or_after_a_bracket_in_a_string_ends_the_span() {
+    let commented = |name: &str| format!("#[ignore]\n// fn stale\nfn {name}() {{}}\n");
+    let (old, new) = (commented("a"), commented("b"));
+    assert_eq!(ignored_tests(&old), ["#[ignore]\n// fn stale"]);
+    assert_eq!(ignored_tests(&old), ignored_tests(&new));
+    let quoted = |name: &str| {
+        format!("#[ignore]\n#[should_panic(expected = \"]fn stale\")]\nfn {name}() {{}}\n")
+    };
+    let (old, new) = (quoted("a"), quoted("b"));
+    assert_eq!(
+        ignored_tests(&old),
+        ["#[ignore]\n#[should_panic(expected = \"]fn stale"]
+    );
+    assert_eq!(ignored_tests(&old), ignored_tests(&new));
+}
+
+/// The record read takes nesting up to the reader's 1,000 levels and refuses deeper.
 #[test]
 fn a_record_nested_past_the_readers_depth_is_not_json() {
     let nested = |depth: usize| "[".repeat(depth) + &"]".repeat(depth);
@@ -389,4 +423,32 @@ fn an_unencodable_commit_names_itself_by_its_repr() {
         Failure::Unencodable(commit).to_string(),
         "the batch name of 'a\\udcff' is not UTF-8"
     );
+}
+
+/// The attributes that end before a found fn's match starts share its search, and an attribute the match
+/// starts before searches again: three attributes before `a` and two before `b`, each behind a comment
+/// the fn's match cannot span, search twice, and the spans run through each attribute's own fn.
+#[test]
+fn the_attributes_before_one_fn_share_its_search() {
+    let text = "#[ignore]\n// a\n#[ignore]\n// b\n#[ignore]\n// c\nfn a() {}\n#[ignore]\n// d\n#[ignore]\n// e\nfn b() {}\n";
+    let mut searches = 0;
+    let found = spans(text, |from| {
+        searches += 1;
+        FUNCTION.find_at(text, from)
+    });
+    assert_eq!(searches, 2);
+    assert_eq!(found.len(), 5);
+    assert!(found[..3].iter().all(|span| span.ends_with("fn a")));
+    assert!(found[3..].iter().all(|span| span.ends_with("fn b")));
+}
+
+/// A plan's environment is the push's, and its `Debug` leaves the environment out.
+#[test]
+fn a_plan_reads_git_in_the_push_environment_and_debug_leaves_it_out() {
+    let plan = Plan::new(OsStr::new("")).expect("an empty destination reads no remote");
+    assert_eq!(plan.environ(), &push_environ());
+    let path = std::env::var("PATH").unwrap_or_default();
+    let shown = format!("{plan:?}");
+    assert!(path.is_empty() || !shown.contains(&path), "{shown}");
+    assert!(!shown.contains("GIT_NO_REPLACE_OBJECTS"), "{shown}");
 }

@@ -1,9 +1,9 @@
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 
-use crate::environ::get;
+use crate::environ::{Environ, first_of_each, get};
 use crate::git::{
-    GitError, PATHSPEC_MODES, batch_texts, blob_bytes, blob_texts, caller_environ, git, label,
+    Bodyless, GitError, batch_texts, blob_bytes, blob_texts, caller_environ, command, git, label,
     merge_base, push_environ, replies, without_pathspec_modes,
 };
 use crate::text::strip_str;
@@ -174,23 +174,58 @@ fn the_repository_variables_are_the_five_in_order() {
     );
 }
 
-/// The bytes reader answers a missing name and a tree with `None` and an empty blob with its empty bytes, and
-/// reads the missing reply of a name with a final carriage return under the name Git read.
+/// `bytes` reads `reply` for `names` as the bytes reader does.
+fn bytes(reply: &[u8], names: &[String]) -> Result<Vec<Option<Vec<u8>>>, GitError> {
+    let read = replies(
+        reply,
+        names,
+        Bodyless::Absent,
+        |_, kind: &[u8], body: &[u8]| Ok((kind == b"blob").then(|| body.to_vec())),
+    )?;
+    Ok(read.into_iter().map(Option::flatten).collect())
+}
+
+/// The bytes reader answers a missing name and a tree with `None` and an empty blob with its empty bytes.
 #[test]
 fn a_batch_reply_of_bytes_tells_an_absent_name_and_a_tree_from_an_empty_blob() {
-    let reply = b"1111 blob 3\nabc\nHEAD:gone missing\n3333 tree 4\n\x01\x02\x03\x04\n4444 blob 0\n\nHEAD:x missing\n";
-    let names = specs(&["HEAD:a", "HEAD:gone", "HEAD:dir", "HEAD:empty", "HEAD:x\r"]);
-    let read: Vec<Option<Vec<u8>>> = replies(reply, &names, |_, kind, body| {
-        Ok((kind == b"blob").then(|| body.to_vec()))
-    })
-    .expect("the reply reads")
-    .into_iter()
-    .map(Option::flatten)
-    .collect();
+    let reply =
+        b"1111 blob 3\nabc\nHEAD:gone missing\n3333 tree 4\n\x01\x02\x03\x04\n4444 blob 0\n\n";
+    let names = specs(&["HEAD:a", "HEAD:gone", "HEAD:dir", "HEAD:empty"]);
     assert_eq!(
-        read,
-        [Some(b"abc".to_vec()), None, None, Some(Vec::new()), None]
+        bytes(reply, &names).expect("the reply reads"),
+        [Some(b"abc".to_vec()), None, None, Some(Vec::new())]
     );
+}
+
+/// The bytes reader reads an ambiguous name and a submodule's answer, which carry no body, as absent and
+/// pairs the next reply with the next name; the text reader refuses both, and the bytes reader refuses an
+/// ambiguous reply for another name and a submodule answer whose id is no full object id.
+#[test]
+fn a_batch_reply_of_bytes_reads_an_ambiguous_name_and_a_submodule_as_absent() {
+    let module = "c".repeat(40);
+    let reply = format!("HEAD:x ambiguous\n{module} submodule\n1111 blob 2\nab\n");
+    let names = specs(&["HEAD:x", "HEAD:m", "HEAD:a"]);
+    assert_eq!(
+        bytes(reply.as_bytes(), &names).expect("the reply reads"),
+        [None, None, Some(b"ab".to_vec())]
+    );
+    assert!(matches!(
+        batch_texts(reply.as_bytes(), &names),
+        Err(GitError::Truncated(_))
+    ));
+    for refused in ["HEAD:y ambiguous\n", "cccc submodule\n"] {
+        let error = bytes(refused.as_bytes(), &specs(&["HEAD:x"])).expect_err("another form");
+        assert_eq!(
+            error.to_string(),
+            "git cat-file --batch: the answer for HEAD:x has another form"
+        );
+    }
+    let asked = "a".repeat(40);
+    let other = format!("{module} submodule\n");
+    assert!(matches!(
+        bytes(other.as_bytes(), &specs(&[&asked])),
+        Err(GitError::Truncated(_))
+    ));
 }
 
 /// A reply that answers a full object id with another id is refused, and a name that is no object id may be
@@ -199,33 +234,57 @@ fn a_batch_reply_of_bytes_tells_an_absent_name_and_a_tree_from_an_empty_blob() {
 fn a_reply_for_another_object_id_is_refused() {
     let asked = "a".repeat(40);
     let reply = format!("{} blob 1\nx\n", "b".repeat(40));
-    let error =
-        replies(reply.as_bytes(), &specs(&[&asked]), |_, _, _| Ok(())).expect_err("the id differs");
+    let error = replies(
+        reply.as_bytes(),
+        &specs(&[&asked]),
+        Bodyless::Refused,
+        |_, _, _| Ok(()),
+    )
+    .expect_err("the id differs");
     assert!(matches!(error, GitError::Truncated(_)), "{error:?}");
     assert_eq!(
         error.to_string(),
         format!("git cat-file --batch: the answer for {asked} has another form")
     );
-    assert!(replies(reply.as_bytes(), &specs(&["HEAD:a"]), |_, _, _| Ok(())).is_ok());
+    assert!(
+        replies(
+            reply.as_bytes(),
+            &specs(&["HEAD:a"]),
+            Bodyless::Refused,
+            |_, _, _| Ok(())
+        )
+        .is_ok()
+    );
     let same = format!("{asked} blob 1\nx\n");
-    assert!(replies(same.as_bytes(), &specs(&[&asked]), |_, _, _| Ok(())).is_ok());
+    assert!(
+        replies(
+            same.as_bytes(),
+            &specs(&[&asked]),
+            Bodyless::Refused,
+            |_, _, _| Ok(())
+        )
+        .is_ok()
+    );
 }
 
-/// The bytes reader refuses a name Git would split or cut, and sends a name with a final carriage return.
+/// The bytes reader refuses a name Git would split, cut or read without its final carriage return, and
+/// keeps a carriage return inside a name.
 #[test]
-fn the_bytes_reader_refuses_a_line_feed_or_a_nul_in_a_name() {
+fn the_bytes_reader_refuses_a_line_feed_a_nul_or_a_final_carriage_return_in_a_name() {
     for (name, said) in [
         ("HEAD:a\nb", "'HEAD:a\\nb' holds a line feed"),
         ("HEAD:a\0b", "'HEAD:a\\x00b' holds a NUL"),
+        ("HEAD:a\r", "'HEAD:a\\r' ends in a carriage return"),
     ] {
         let error = blob_bytes(&caller_environ(), &specs(&["HEAD:a", name])).expect_err("refused");
+        assert!(matches!(error, GitError::Name(_)), "{error:?}");
         assert_eq!(
             error.to_string(),
             format!("git cat-file --batch: the name {said}")
         );
     }
     assert!(!matches!(
-        blob_bytes(&caller_environ(), &specs(&["HEAD:a\r"])),
+        blob_bytes(&caller_environ(), &specs(&["HEAD:a\rb"])),
         Err(GitError::Name(_))
     ));
 }
@@ -243,11 +302,45 @@ fn the_push_environment_removes_the_pathspec_modes() {
         Some(&"1".into())
     );
     let pair = |name: &str, value: &str| (OsString::from(name), OsString::from(value));
-    let mut given = vec![pair("A", "1")];
-    given.extend(PATHSPEC_MODES.iter().map(|mode| pair(mode, "1")));
-    given.push(pair("B", "2"));
+    let given = vec![
+        pair("A", "1"),
+        pair("GIT_LITERAL_PATHSPECS", "1"),
+        pair("GIT_GLOB_PATHSPECS", "1"),
+        pair("B", "2"),
+        pair("GIT_NOGLOB_PATHSPECS", "1"),
+        pair("A", "3"),
+        pair("GIT_ICASE_PATHSPECS", "1"),
+        pair("GIT_GLOB_PATHSPECS", "1"),
+    ];
     assert_eq!(
-        without_pathspec_modes(given),
+        without_pathspec_modes(first_of_each(given)),
         [pair("A", "1"), pair("B", "2")]
     );
+}
+
+/// A command started in an environment sets only the variables whose values differ from this process's
+/// and removes those the environment lacks, so it leaves `PATH` to the process when the value's is the
+/// same; of a repeated name it sets the last value.
+#[test]
+fn a_command_sets_only_the_variables_that_differ_from_the_process() {
+    let mut environ: Environ = std::env::vars_os()
+        .filter(|(name, _)| name != "HOME")
+        .collect();
+    environ.push((OsString::from("KESTRIKE_GIT_TEST_A"), OsString::from("1")));
+    environ.push((OsString::from("KESTRIKE_GIT_TEST_A"), OsString::from("2")));
+    let changed: Vec<(OsString, Option<OsString>)> = command(&environ, "git")
+        .get_envs()
+        .map(|(name, value)| (name.to_owned(), value.map(OsStr::to_owned)))
+        .collect();
+    let mut expected = vec![(
+        OsString::from("KESTRIKE_GIT_TEST_A"),
+        Some(OsString::from("2")),
+    )];
+    if std::env::var_os("HOME").is_some() {
+        expected.push((OsString::from("HOME"), None));
+    }
+    expected.sort();
+    let mut changed = changed;
+    changed.sort();
+    assert_eq!(changed, expected);
 }

@@ -361,10 +361,12 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
 }
 
 /// `scan_range` scans the commits of `head` that `base` lacks, with every Git child started in `environ`,
-/// and returns the tool's exit code. It writes the report lines to `lines` and the refusals to standard
-/// error, and with report lines it appends them to the file `GITHUB_STEP_SUMMARY` names in this process's
-/// environment. A range with no commit returns 0 and writes nothing, a failed scan returns 2, and a failed
-/// write to `lines` or to standard error returns 120.
+/// and returns the tool's exit code. It writes the report lines to `lines`, the refusals and the
+/// acknowledgement hints to standard error, and with report lines it appends them to the file
+/// `GITHUB_STEP_SUMMARY` names in this process's environment. It returns 0 for a range with no commit,
+/// writing nothing, and for a scan with no unacknowledged blocking finding; 1 for a scan with one; 2 for a
+/// failed scan and for a step summary that cannot be appended after the lines were written; and 120 for a
+/// failed write to `lines` or to standard error.
 pub fn scan_range(environ: &Environ, base: &OsStr, head: &OsStr, lines: BorrowedFd<'_>) -> u8 {
     let scanned = match scan(environ, base, head) {
         Ok(Some(scanned)) => scanned,
