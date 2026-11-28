@@ -4,6 +4,7 @@
 //! `restore` names the evidence by the pathname `DIR/injection` and trusts the operator to keep that
 //! directory under that name until `restore` returns.
 
+use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -21,19 +22,29 @@ use crate::json::{Object, Value};
 use crate::python::{repr, repr_float};
 use crate::text::Text;
 
+/// The times a ready read is dated against: restore's start, a wall reading; the latest time among
+/// the stop, the stopped report and the abort; and the stopped report's time where one stands.
 #[derive(Clone, Copy)]
-struct Window {
+struct Times {
     start: f64,
     floor: Number,
     stopped_at: Option<Number>,
 }
 
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
-    /// A return of 0 means `restore` wrote `restoration.json`. It returns 1 with no mark after a
-    /// signal in the caller check or the poll, a poll that reaches its bound, or a write that fails
-    /// before its link, and returns 1 after a write that fails after its link. Where
-    /// `injection/collected.json` stands, `restore` first reads the evidence as the judge does, and
-    /// returns 1 after writing a restoration that ends observation.
+    /// A return of 0 means `restore` wrote `restoration.json`. It returns 1 and writes no mark after
+    /// a signal in the caller check or the poll, or a poll that reaches its bound. It returns 1
+    /// after a write that fails: a failure through the link leaves the name as it found it, so an
+    /// entry found at the link keeps its bytes and a later `restore` refuses it; a sync that fails
+    /// after the link leaves the mark removed with the removal synced, removed with the removal
+    /// unsynced, so the mark may stand again after a crash, or standing whole with its durability
+    /// unknown, as the line on stderr says. Where `injection/collected.json` stands, `restore`
+    /// first reads the evidence as the judge does, and returns 1 after writing a restoration that
+    /// ends observation; that mark stands.
+    ///
+    /// A panic in the armed span or the mark's write unwinds out of `restore` and can leave the
+    /// record armed or held and the poll's deadline set; [`entry`](super::entry) disarms the record
+    /// and ends its hold.
     ///
     /// # Errors
     ///
@@ -117,17 +128,14 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 floor = at;
             }
         }
-        let span = Window {
+        let times = Times {
             start,
             floor,
             stopped_at,
         };
         self.injection = Some(injection);
         let mut seen = Text::from("no status read was made");
-        self.cx.record.arm();
-        let polled = self.poll(&instance, span, &mut seen);
-        let polled = self.raised(polled);
-        self.cx.record.disarm();
+        let polled = self.armed(|c| c.poll(&instance, times, &mut seen));
         self.deadline = None;
         let ready = match polled {
             Ok(ready) => ready,
@@ -180,7 +188,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     }
 
     /// The approved package of a sealed run: the evidence directory at `root` as the judge's
-    /// [`read_evidence`] admits it, with `package.json` of the approval's digest.
+    /// [`read_evidence`] admits it, with `package.json` of the approval's digest. Only the package
+    /// is kept: the checks that follow read `stopped.json` and `abort.json` again by name, so the
+    /// floor and the review rest on those reads and not on the bytes the load verified. The load
+    /// drops a failed close of a directory it opened.
     fn sealed(&mut self, root: &Path) -> Result<Object, Halt> {
         let bounds = self.bounds()?;
         let evidence = read_evidence(root, self.cx.file_limit, &bounds).map_err(read_halt)?;
@@ -193,7 +204,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     fn poll(
         &mut self,
         instance: &Text,
-        window: Window,
+        times: Times,
         seen: &mut Text,
     ) -> Result<Option<Number>, Halt> {
         self.cx.record.release()?;
@@ -202,7 +213,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let deadline = self.monotonic() + seconds(self.operator.deadline_seconds());
         self.deadline = Some(deadline);
         while self.monotonic() < deadline {
-            match self.ready_read(instance, window, seen) {
+            match self.ready_read(instance, times, seen) {
                 Ok(Some(ready)) => return Ok(Some(ready)),
                 Ok(None) => {}
                 Err(Halt::Failed(failed)) => {
@@ -219,7 +230,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     fn ready_read(
         &mut self,
         instance: &Text,
-        window: Window,
+        times: Times,
         seen: &mut Text,
     ) -> Result<Option<Number>, Halt> {
         let states = self.statuses(std::slice::from_ref(instance), None)?;
@@ -230,15 +241,20 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         if !(*status.state() == "running" && ok(status.instance()) && ok(status.system())) {
             return Ok(None);
         }
-        if at < window.start {
+        // A reading that does not compare at or after the start, NaN included, leads to another
+        // poll.
+        if !matches!(
+            at.partial_cmp(&times.start),
+            Some(Ordering::Greater | Ordering::Equal)
+        ) {
             seen.push_str(&format!(
                 " at {}, before restore's start {}",
                 repr_float(at),
-                repr_float(window.start)
+                repr_float(times.start)
             ));
             return Ok(None);
         }
-        match self.dated(instance, at, window)? {
+        match self.dated(instance, at, times)? {
             Ok(ready) => Ok(Some(ready)),
             Err(shown) => {
                 *seen = shown;
@@ -249,13 +265,13 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
 
     /// For the ready read at wall reading `at`, `dated` returns `Ok(Err(reason))` when the record
     /// provides insufficient evidence to establish a restoration time. When the record establishes
-    /// a time, `dated` returns `Ok(Ok(time))`, where `time` is the greater of `window.floor` and
+    /// a time, `dated` returns `Ok(Ok(time))`, where `time` is the greater of `times.floor` and
     /// the record's `LaunchTime` minus [`SKEW_SECONDS`].
     fn dated(
         &mut self,
         instance: &Text,
         at: f64,
-        window: Window,
+        times: Times,
     ) -> Result<Result<Number, Text>, Halt> {
         let record = self.instance_record(instance, None)?;
         let launch = launch_time(record.launch()).map_err(Halt::Failed)?;
@@ -265,7 +281,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Ok(Err(shown));
         }
         let skew = Number::from(SKEW_SECONDS);
-        if let Some(stopped_at) = window.stopped_at
+        if let Some(stopped_at) = times.stopped_at
             && launch.plus(skew) < stopped_at
         {
             let shown = format!(
@@ -283,10 +299,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Ok(Err(Text::from(shown)));
         }
         let earliest = launch.minus(skew);
-        Ok(Ok(if earliest > window.floor {
+        Ok(Ok(if earliest > times.floor {
             earliest
         } else {
-            window.floor
+            times.floor
         }))
     }
 

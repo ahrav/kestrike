@@ -12,6 +12,7 @@
 //! pages whose writeback failed under the earlier descriptors, so the bytes a second seal names can
 //! differ from the bytes on storage.
 
+use std::cmp::Ordering;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -40,16 +41,33 @@ const SEAL: &str = "injection/collected.json";
 /// The bytes `seal` read by relative path, and the package's list bounds.
 type Collected = (BTreeMap<Text, Vec<u8>>, FleetBounds);
 
+/// The mark's bytes the judge's loader admitted, the number of files it names, and the SHA-256
+/// digest of the bytes.
+struct Sealing {
+    data: Vec<u8>,
+    count: usize,
+    digest: String,
+}
+
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
-    /// `seal` returns 0 when it writes `injection/collected.json`, and 1 when the write fails; for
-    /// a mark it linked, it prints the mark's SHA-256 too. `seal` publishes the mark bytes the
-    /// judge's loader admitted.
+    /// `seal` returns 0 when it writes `injection/collected.json`. A link that finds an entry at
+    /// that name is the refusal that the seal is written once, and the entry keeps its bytes. Any
+    /// other failed write returns 1: a failure before the link leaves no mark, and a sync that
+    /// fails after the link leaves the mark removed with the removal synced, removed with the
+    /// removal unsynced, or standing whole with its durability unknown, and `seal` prints the
+    /// SHA-256 of the bytes it linked. `seal` publishes the mark bytes the judge's loader admitted.
     ///
     /// After taking the lock, `seal` arms the signal record, ends a hold an earlier command left on
     /// it and reads it. It reads the record again before each file read and once more at the end of
     /// its armed span. A signal reported by the final read takes precedence over a refusal. It then
     /// disarms the record and writes the mark. If a record read reports a signal, `seal` returns
-    /// [`Halt::Interrupted`] before writing `injection/collected.json`.
+    /// [`Halt::Interrupted`] before writing `injection/collected.json`. A panic in the armed span or
+    /// the mark's write unwinds out of `seal` and can leave the record armed or held;
+    /// [`entry`](super::entry) disarms the record and ends its hold.
+    ///
+    /// A seal that succeeds after an earlier seal's refused sync of a collected file does not show
+    /// that the bytes of the failed writeback reached storage; the collections are restored from
+    /// their source before sealing again.
     ///
     /// # Errors
     ///
@@ -64,38 +82,30 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let (root, injection) = self.evidence_dirs(evidence, "no run to seal")?;
         let _held = lock(self.cx.files, &injection)
             .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
-        self.cx.record.arm();
-        let sealing = self.sealing(evidence, &root, &injection, now);
-        let sealing = self.raised(sealing);
-        self.cx.record.disarm();
-        let (data, count) = sealing?;
+        let sealed = self.armed(|c| c.sealing(evidence, &root, &injection, now))?;
         self.injection = Some(injection);
-        self.write_seal(&data, count, now)
+        self.write_seal(&sealed, now)
     }
 
-    /// `sealing` returns the mark bytes and the number of files the mark names after the judge's
-    /// loader accepts the collected files together with the mark.
+    /// `sealing` returns the mark bytes, the number of files the mark names and the bytes' SHA-256
+    /// digest once the judge's loader accepts the collected files together with the mark.
     fn sealing(
         &mut self,
         evidence: &OsStr,
         root: &Path,
         injection: &Path,
         now: f64,
-    ) -> Result<(Vec<u8>, usize), Halt> {
+    ) -> Result<Sealing, Halt> {
         self.cx.record.release()?;
         if self.stands_in(injection, "collected.json")? {
             return Err(written_once());
         }
         let (files, bounds) = self.collect(evidence, root, now)?;
-        let sealed: BTreeSet<&Text> = files.keys().filter(|rel| **rel != "package.json").collect();
         let mut digests = Object::new();
-        for rel in &sealed {
-            digests.insert(
-                (*rel).clone(),
-                Value::String(Text::from(hexdigest(&files[*rel]))),
-            );
+        for (rel, data) in files.iter().filter(|(rel, _)| **rel != "package.json") {
+            digests.insert(rel.clone(), Value::String(Text::from(hexdigest(data))));
         }
-        let count = sealed.len();
+        let count = digests.len();
         let mut mark = Object::new();
         mark.insert("time", Value::Float(now));
         mark.insert("files", Value::Object(digests));
@@ -103,11 +113,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let data = encoded(&Value::Object(mark), &seal, self.cx.mark_bound())?;
         let mut judged = files;
         judged.insert(seal.clone(), data);
-        load_evidence(&judged, &bounds)?;
+        let digest = load_evidence(&judged, &bounds)?.seal_sha256().to_owned();
         let data = judged
             .remove(&seal)
             .expect("the seal's bytes stand among the judged");
-        Ok((data, count))
+        Ok(Sealing {
+            data,
+            count,
+            digest,
+        })
     }
 
     /// `collect` indexes the bytes of `package.json`, `injection/roles.json` and each other listed
@@ -151,7 +165,11 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Err(Halt::refused(sentence));
         }
         let end = window(&p, "run").1;
-        if end > Number::from(now) {
+        // A seal time that does not compare at or after the end, NaN included, is refused.
+        if !matches!(
+            end.partial_cmp(&Number::from(now)),
+            Some(Ordering::Less | Ordering::Equal)
+        ) {
             return Err(Halt::refused(Text::from(format!(
                 "the run window ends at {end}, after the seal's time {}, so its collections may \
                  still grow",
@@ -228,12 +246,16 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             .map_err(read_halt)
     }
 
-    /// On success, `write_seal` reports the file count `count`, the seal time `now`, and the SHA-256
-    /// digest of `data`. If `injection/collected.json` already exists, `write_seal` returns
-    /// `Err(written_once())`. For other write failures, `write_seal` propagates errors from
-    /// `failed_write` and otherwise returns `Ok(1)`.
-    fn write_seal(&mut self, data: &[u8], count: usize, now: f64) -> Result<u8, Halt> {
-        let digest = hexdigest(data);
+    /// On success, `write_seal` reports the file count, the seal time `now`, and the SHA-256 digest
+    /// the judge's loader computed over the mark's bytes. If `injection/collected.json` already
+    /// exists, `write_seal` returns `Err(written_once())`. For other write failures, `write_seal`
+    /// propagates errors from `failed_write` and otherwise returns `Ok(1)`.
+    fn write_seal(&mut self, sealed: &Sealing, now: f64) -> Result<u8, Halt> {
+        let Sealing {
+            data,
+            count,
+            digest,
+        } = sealed;
         match self.publish_mark("collected", data) {
             Ok(()) => {}
             Err(Halt::Fault(Fault::Os {

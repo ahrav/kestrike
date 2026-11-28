@@ -57,13 +57,28 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         })
     }
 
+    /// Arms the record, runs `span`, passes its end through [`Controller::raised`] and disarms the
+    /// record on every return. A panic in `span` unwinds with the record armed.
+    pub(super) fn armed<T>(
+        &mut self,
+        span: impl FnOnce(&mut Self) -> Result<T, Halt>,
+    ) -> Result<T, Halt> {
+        self.cx.record.arm();
+        let ended = span(self);
+        let ended = self.raised(ended);
+        self.cx.record.disarm();
+        ended
+    }
+
     pub(super) fn bounds(&self) -> Result<FleetBounds, Halt> {
         FleetBounds::new(self.cx.top, self.cx.file_limit)
             .ok_or_else(|| refused("the tree's top has a path no file can have"))
     }
 
-    /// `Ok(true)` means the failed write linked the mark; `Ok(false)` means it failed before
-    /// linking.
+    /// Prints the failed write of `file` on stderr. `Ok(true)` means the write linked the mark
+    /// before it failed, so the mark is removed with the removal synced, removed with the removal
+    /// unsynced, or standing whole, as the printed sentence says; `Ok(false)` means it failed
+    /// through the link and left the name as it found it.
     pub(super) fn failed_write(&mut self, file: &str, failed: Halt) -> Result<bool, Halt> {
         let mut line = Text::from(TOOL);
         let linked = match failed {
