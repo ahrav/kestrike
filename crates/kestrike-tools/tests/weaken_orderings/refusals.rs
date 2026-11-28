@@ -109,9 +109,33 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
             "{name}: {}",
             ran.stderr
         );
-        assert!(ran.report.is_none());
-        assert_eq!(fixture.lines(".log"), Vec::<String>::new());
+        nothing_ran(&fixture, &ran);
     }
+    let staged = fixture.repo.join("scripts/judge-rc11.py");
+    let original = fs::read(&staged).expect("reads");
+    fs::write(&staged, [original.as_slice(), b"\n"].concat()).expect("written");
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&fixture.repo)
+            .args(args)
+            .status()
+            .expect("git starts");
+        assert!(done.success());
+    };
+    git(&["add", "scripts/judge-rc11.py"]);
+    fs::write(&staged, &original).expect("written");
+    let ran = fixture.run_with(
+        &[RUN_FENCE],
+        Opts {
+            work: Some(fixture.work("staged")),
+            ..Opts::default()
+        },
+    );
+    git(&["reset", "-q", "--", "scripts/judge-rc11.py"]);
+    assert_eq!(ran.code(), Some(2), "a staged change: {}", ran.stderr);
+    assert!(ran.stderr.contains("differ from HEAD"), "{}", ran.stderr);
+    nothing_ran(&fixture, &ran);
     let stray = fixture.repo.join("crates/kestrike-tools/src/stray.rs");
     fs::write(&stray, "").expect("written");
     let ran = fixture.run_with(
@@ -124,7 +148,7 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
     fs::remove_file(&stray).expect("removed");
     assert_eq!(ran.code(), Some(2), "{}", ran.stderr);
     assert!(ran.stderr.contains("differ from HEAD"), "{}", ran.stderr);
-    assert!(ran.report.is_none());
+    nothing_ran(&fixture, &ran);
     let classifier = fixture.repo.join("scripts/classify-atomics.py");
     let original = fs::read(&classifier).expect("reads");
     let mut changed = original.clone();
@@ -157,6 +181,7 @@ fn a_refused_catalog_or_declaration_stops_the_run() {
         "{}",
         ran.stderr
     );
+    nothing_ran(&fixture, &ran);
     let declaration = fixture.repo.join(GENMC);
     let mut declared = read_json(&declaration);
     let Value::Object(object) = &mut declared else {
@@ -179,6 +204,15 @@ fn a_refused_catalog_or_declaration_stops_the_run() {
         ran.stderr
     );
     assert_eq!(ran.stderr.lines().count(), 2, "{}", ran.stderr);
+    nothing_ran(&fixture, &ran);
+}
+
+/// The refusal precedes the report, every `cargo` call, every test and every lane call of the run.
+fn nothing_ran(fixture: &Fixture, ran: &Ran) {
+    assert!(ran.report.is_none());
+    assert_eq!(fixture.stub_calls(), Vec::<Value>::new());
+    assert_eq!(fixture.lines(".log"), Vec::<String>::new());
+    assert_eq!(fixture.lines(".lane"), Vec::<String>::new());
 }
 
 #[test]

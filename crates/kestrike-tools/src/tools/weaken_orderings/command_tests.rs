@@ -235,24 +235,30 @@ fn arguments(source: &str, open: usize) -> Vec<&str> {
 /// asserts exit 1 and no credit.
 fn plants(body: &str, refusal: &str) -> bool {
     let literal = format!("\"{refusal}\"");
+    let calls = |helper: &str| {
+        body.match_indices(helper)
+            .filter(|(at, _)| {
+                body[..*at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+            })
+            .map(|(at, _)| at + helper.len() - 1)
+            .collect::<Vec<_>>()
+    };
     let called = |helper: &str| {
-        body.match_indices(helper).any(|(at, _)| {
-            let named = body[..at]
-                .chars()
-                .next_back()
-                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-            named
-                && arguments(body, at + helper.len() - 1)
-                    .iter()
-                    .skip(1)
-                    .any(|argument| *argument == literal)
+        calls(helper).into_iter().any(|open| {
+            arguments(body, open)
+                .iter()
+                .skip(1)
+                .any(|argument| *argument == literal)
         })
     };
     let asserted = body.contains("assert_eq!(code, 1") && body.contains("Value::Bool(false)");
     called("refused(")
         || called("refused_at(")
         || called("sentence(")
-        || (refusal == "scope file" && body.contains("refused_in("))
+        || (refusal == "scope file" && !calls("refused_in(").is_empty())
         || (asserted && called("messages_of("))
 }
 
@@ -281,6 +287,11 @@ fn every_documented_refusal_names_the_tests_that_plant_it() {
         "a read with no assertion of the exit plants nothing"
     );
     assert!(plants("sentence(plants, \"row\", \"x\");", "row"));
+    assert!(plants("refused_in(plants, \"x.rs\");", "scope file"));
+    assert!(
+        !plants("not_refused_in(plants, \"x.rs\");", "scope file"),
+        "a call of another helper whose name ends in refused_in plants nothing"
+    );
     assert!(
         !plants("refused(plants, \"row\");", "find"),
         "another refusal is not this one"

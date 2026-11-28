@@ -195,7 +195,7 @@ pub fn number(value: &Value) -> i64 {
 }
 
 pub fn results(report: &Value, id: &str) -> Vec<String> {
-    items(get(get(get(report, "rows"), id), "results"))
+    row_results(report, id)
         .iter()
         .map(|result| string(get(result, "result")))
         .collect()
@@ -538,6 +538,23 @@ impl Fixture {
             );
         }
         assert_eq!(staged(&work.join("copy")), Vec::<PathBuf>::new());
+        let listing = |directory: &Path| {
+            let mut names: Vec<_> = fs::read_dir(directory)
+                .expect("lists")
+                .map(|entry| entry.expect("lists").file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        for name in super::standins::scoped_files(&self.repo) {
+            let parent = Path::new(&name).parent().expect("a parent");
+            assert_eq!(
+                listing(&work.join("copy").join(parent)),
+                listing(&self.repo.join(parent)),
+                "{}",
+                parent.display()
+            );
+        }
     }
 }
 
@@ -580,7 +597,11 @@ fn default_signals(command: &mut Command) {
 pub struct Running(Child);
 
 impl Running {
-    pub fn signal(&self, number: libc::c_int) {
+    pub fn signal(&mut self, number: libc::c_int) {
+        assert!(
+            matches!(self.0.try_wait(), Ok(None)),
+            "the run still runs unreaped"
+        );
         let pid = libc::pid_t::try_from(self.0.id()).expect("a pid");
         // SAFETY: `kill` takes two integers; the child is unreaped, so its pid names it.
         assert_eq!(unsafe { libc::kill(pid, number) }, 0);

@@ -18,6 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kestrike_tools::genmc::case::check_line;
@@ -224,8 +225,13 @@ fn cargo(args: &[String], plan: &Path, out: &mut File) -> i32 {
 }
 
 static STOPPED: OnceLock<CString> = OnceLock::new();
+static TWICE: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn stopped(_: libc::c_int) {
+    if TWICE.load(Ordering::SeqCst) {
+        // SAFETY: `getppid` and `kill` take plain values and are async-signal-safe.
+        unsafe { libc::kill(libc::getppid(), libc::SIGHUP) };
+    }
     if let Some(path) = STOPPED.get() {
         // SAFETY: `open`, `close` and `_exit` are async-signal-safe, and the path outlives the call.
         unsafe {
@@ -244,7 +250,8 @@ extern "C" fn stopped(_: libc::c_int) {
     unsafe { libc::_exit(143) };
 }
 
-fn sleep_until_stopped(plan: &Path) {
+fn sleep_until_stopped(plan: &Path, twice: bool) {
+    TWICE.store(twice, Ordering::SeqCst);
     let path = CString::new(suffixed(plan, ".stopped").as_os_str().as_bytes()).expect("no NUL");
     let _ = STOPPED.set(path);
     // SAFETY: `stopped` is an `extern "C"` handler that calls only async-signal-safe functions.
@@ -283,7 +290,7 @@ fn loom_test(test: &str, plan: &Path, out: &mut File) -> i32 {
         ),
     );
     if mode.starts_with("sleep") {
-        sleep_until_stopped(plan);
+        sleep_until_stopped(plan, mode == "sleep-twice");
     }
     if let Some(rewritten) = mode.strip_prefix("rewrite:") {
         rewrite(plan, rewritten);

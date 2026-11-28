@@ -5,7 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::{fresh_write, regular_digest};
 use crate::paths::tests::Scratch;
 
-/// A fresh write is a new file, a link at its staging name's place stays, it keeps the replaced file's
+/// A fresh write is a new file, a link beside it named after the file and the staging suffix stays, it
+/// keeps the replaced file's
 /// mode and takes a time later than that file's, even one in the future; a link at the path is replaced
 /// and its target keeps its bytes.
 #[test]

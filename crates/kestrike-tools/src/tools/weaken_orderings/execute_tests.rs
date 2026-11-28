@@ -86,17 +86,13 @@ fn wait_for(path: &Path) {
 const ROLE: &str = "KESTRIKE_WEAKEN_EXECUTE_ROLE";
 
 /// A run whose handlers stand gets SIGTERM while its test runs; the test's group is stopped before the
-/// run ends, so no process of it stays. The run is this test executable started again in that role.
+/// run ends, so no process of it stays, its worker that ignores SIGTERM included. The run is this test executable started again in that role.
 #[test]
 fn an_interrupted_command_leaves_no_process_behind() {
     if let Some(marker) = std::env::var_os(ROLE) {
         let marker = PathBuf::from(marker);
         install_handlers().expect("the handlers stand");
-        let argv = words(&[
-            "sh",
-            "-c",
-            &format!("echo $$ > {}/pid; exec sleep 60", marker.display()),
-        ]);
+        let argv = group(&marker, false);
         let ran = execute(
             &Launch::new(&INTERRUPT),
             &argv,
@@ -112,6 +108,7 @@ fn an_interrupted_command_leaves_no_process_behind() {
         });
     }
     let scratch = Scratch::new("weaken-execute");
+    let _reaper = Reaper(scratch.0.clone());
     let name = module_path!()
         .split_once("::")
         .map_or("", |(_, rest)| rest)
@@ -122,8 +119,11 @@ fn an_interrupted_command_leaves_no_process_behind() {
         .env(ROLE, &scratch.0)
         .spawn()
         .expect("the role starts");
-    wait_for(&scratch.0.join("pid"));
-    let pid = read(&scratch.0.join("pid"));
+    wait_for(&scratch.0.join("leader"));
+    let (pid, worker) = (
+        read(&scratch.0.join("leader")),
+        read(&scratch.0.join("worker")),
+    );
     let role = libc::pid_t::try_from(child.id()).expect("a pid");
     // SAFETY: `kill` takes two integers and touches no memory of the caller.
     assert_eq!(unsafe { libc::kill(role, libc::SIGTERM) }, 0);
@@ -143,7 +143,11 @@ fn an_interrupted_command_leaves_no_process_behind() {
         Some(0),
         "the run ended by its signal's interruption"
     );
-    assert!(gone(&pid), "the test's process {pid} is gone");
+    assert!(gone(&pid), "the test's leader {pid} is gone");
+    assert!(
+        gone(&worker),
+        "the test's worker {worker}, which ignores SIGTERM, is gone"
+    );
 }
 
 /// A deadline ends the wait with no exit code, the stop ends the worker that ignores SIGTERM, and the
@@ -236,6 +240,7 @@ fn a_signal_while_a_child_starts_stops_that_child() {
         started: &on_start,
         ..Launch::new(&interrupt)
     };
+    let start = Instant::now();
     let ran = execute(
         &launch,
         &words(&["sleep", "60"]),
@@ -247,6 +252,11 @@ fn a_signal_while_a_child_starts_stops_that_child() {
     assert!(
         matches!(ran, Err(Halt::Interrupted(libc::SIGTERM))),
         "{ran:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "the wait ended at once: {:?}",
+        start.elapsed()
     );
     assert!(!interrupt.held());
     let pid = started.borrow().expect("the child started").to_string();

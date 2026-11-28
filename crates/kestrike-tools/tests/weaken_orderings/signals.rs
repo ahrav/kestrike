@@ -102,3 +102,29 @@ fn report_files_take_the_umask_mode() {
         }
     }
 }
+
+/// A planted test that sends the run SIGHUP as its own SIGTERM stops it leaves a second delivery recorded
+/// before the restore; the run still writes the plant back, leaves no staging file and ends by SIGINT.
+#[test]
+fn a_second_signal_during_the_stop_of_a_planted_test_still_restores_the_plant() {
+    let fixture = Fixture::new("second-signal");
+    fixture.commit();
+    let tests = run_tests();
+    let work = fixture.work("second-signal");
+    let mut child = fixture.start(
+        &[RUN_FENCE],
+        &work,
+        plan(&[(&tests[1], &[("planted", "sleep-twice")])]),
+    );
+    fixture.wait_for(".sleeping");
+    child.signal(libc::SIGTERM);
+    let status = child.wait(Duration::from_secs(120));
+    assert!(ended_by(status, libc::SIGINT), "{status:?}");
+    assert!(
+        fixture.exists(".stopped"),
+        "the sleeping test received SIGTERM"
+    );
+    let work = fixture.resolved("second-signal");
+    assert!(!work.join("report.json").exists());
+    fixture.assert_restored(&work);
+}
