@@ -26,8 +26,10 @@
 //! (`suspects.jsonl`, `confirm.err` and a profile's manifest) and take every other input as a value;
 //! each child a judgment needs, it asks of its caller.
 //!
-//! [`Run`] holds a run's worktrees, the proof's state and the base archive, and starts each child by
-//! [`logged`] or by the Git call that reads the signal record.
+//! [`Run`] runs the checked plants: the run's worktrees, the proof reruns in the proof's worktree with
+//! the head's staged helper as their judge, the planted commits, the archives, the sweeps and the
+//! children a judgment asks for, each child started by [`logged`] or by the Git call that reads the
+//! signal record; [`publish`] writes the score's bytes and [`announce`] prints its lines.
 
 mod campaign;
 mod child;
@@ -40,6 +42,7 @@ mod options;
 mod output;
 mod prepare;
 mod proof;
+mod publish;
 mod record;
 mod rerun;
 mod run;
@@ -60,6 +63,7 @@ pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
+pub use publish::{announce, publish};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
 pub use run::{Remained, Run, remove};

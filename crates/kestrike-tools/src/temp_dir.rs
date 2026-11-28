@@ -42,7 +42,7 @@ impl std::error::Error for TempDirError {}
 
 /// `random_letters` fills `letters` with letters of [`NAME_LETTERS`] drawn uniformly from the kernel's
 /// random bytes.
-fn random_letters(letters: &mut [u8]) -> io::Result<()> {
+pub(crate) fn random_letters(letters: &mut [u8]) -> io::Result<()> {
     let mut filled = 0;
     while filled < letters.len() {
         let mut byte = 0u8;

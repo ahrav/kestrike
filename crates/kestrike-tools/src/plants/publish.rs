@@ -1,0 +1,139 @@
+//! The score's file: the run's settings, and the bytes written to a staging file beside
+//! `verification/plants/score.json` and renamed over it.
+//!
+//! The staging file is `.score.json.` and eight letters, created new with mode 0600 and then given mode
+//! 0666 less the umask; the rename replaces a link at the score's path, whose target stays. A write that
+//! fails removes the staging file. The write makes no sync.
+
+use std::ffi::OsStr;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+use super::entry::Finished;
+use super::prepare::Inputs;
+use super::run::Run;
+use super::score;
+use crate::json::{Object, Value};
+use crate::ownership::PathError;
+use crate::temp_dir::random_letters;
+use crate::text::Text;
+
+/// The most staging names a write draws while each one is taken.
+const ATTEMPTS: usize = 10_000;
+
+impl Run<'_> {
+    /// `settings` are the run's settings in the score: the workers, the floor, the seconds and rounds of
+    /// a sweep, the base archive's build digest, the `campaign` binary's digest and the plants `--plant`
+    /// selected, `null` for the whole store.
+    pub fn settings(&self) -> Object {
+        let inputs: &Inputs = self.inputs;
+        let options = inputs.options();
+        let mut settings = Object::new();
+        for (name, value) in [
+            ("workers", options.workers()),
+            ("runs", options.runs()),
+            ("seconds", options.seconds()),
+            ("rounds", options.rounds()),
+        ] {
+            settings.insert(name, Value::Integer(value.clone()));
+        }
+        let base = match &self.base {
+            Some(Ok((_, pins))) => Value::String(pins.build().clone()),
+            _ => Value::Null,
+        };
+        settings.insert("base_archive", base);
+        settings.insert(
+            "campaign_sha256",
+            Value::String(Text::from(inputs.campaign_sha256())),
+        );
+        let plants = if options.plants().is_empty() {
+            Value::Null
+        } else {
+            Value::Array(
+                options
+                    .plants()
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            )
+        };
+        settings.insert("plants", plants);
+        settings
+    }
+}
+
+/// `umask` reads the process's umask, setting it back at once.
+fn umask() -> u32 {
+    // SAFETY: `umask` takes and returns a mode and cannot fail; the second call restores the first's
+    // value.
+    unsafe {
+        let mask = libc::umask(0);
+        libc::umask(mask);
+        mask
+    }
+}
+
+/// `staging` creates a new staging file beside `target`.
+fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
+    let parent = target.parent().unwrap_or(Path::new("."));
+    let mut prefix = b".".to_vec();
+    prefix.extend_from_slice(target.file_name().unwrap_or_default().as_bytes());
+    prefix.push(b'.');
+    for _ in 0..ATTEMPTS {
+        let mut letters = [0u8; 8];
+        random_letters(&mut letters)?;
+        let mut name = prefix.clone();
+        name.extend_from_slice(&letters);
+        let path = parent.join(OsStr::from_bytes(&name));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no usable staging name found",
+    ))
+}
+
+/// `publish` replaces `target` with `written` through a staging file it creates beside it.
+///
+/// # Errors
+///
+/// The staging file cannot be created, given its mode, written or renamed; the text names the path.
+pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
+    let (staged, mut file) = staging(target).map_err(|error| PathError::new(target, error))?;
+    let done = file
+        .set_permissions(fs::Permissions::from_mode(0o666 & !umask()))
+        .and_then(|()| file.write_all(written.as_bytes()))
+        .and_then(|()| fs::rename(&staged, target));
+    drop(file);
+    done.map_err(|error| {
+        let _ = fs::remove_file(&staged);
+        PathError::new(target, error)
+    })
+}
+
+/// `announce` prints the score's lines on `out`, the sentence and `ID: RESULT (REASON)` a plant, and
+/// returns the run's exit: the run's last step, after the score's write, which reads no signal record.
+pub fn announce(head: &str, entries: &[Finished], out: &mut impl Write) -> u8 {
+    for line in score::lines(head, entries) {
+        let _ = writeln!(out, "{line}");
+    }
+    let _ = out.flush();
+    score::exit_code(entries)
+}
+
+#[cfg(test)]
+#[path = "publish_tests.rs"]
+mod tests;
