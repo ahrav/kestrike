@@ -243,15 +243,21 @@ impl Run {
     }
 
     /// `copy_lock` copies the invoking checkout's `Cargo.lock` into the worktree when it is a regular file
-    /// and the worktree holds no entry at that path. The lock is opened once and its check and copy read
-    /// that open, ahead of the target's creation. Exclusive creation fails on any existing entry, a dangling link included, so the copy
-    /// never writes through a link.
+    /// and the worktree holds no entry at that path, a dangling link included; a worktree with an entry
+    /// there leaves the source unread. The lock is opened once and its check and copy read that open,
+    /// ahead of the target's creation. Exclusive creation fails on an entry that appears after the first
+    /// look, so the copy never writes through a link.
     fn copy_lock(&self, tree: &Path) -> Result<(), Stop> {
+        let target = tree.join("Cargo.lock");
+        match fs::symlink_metadata(&target) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(failed(&target)(error)),
+        }
         let source = self.prepared.top.join("Cargo.lock");
         let Some(bytes) = read_regular(&source).map_err(|fault| Stop::failed(&fault))? else {
             return Ok(());
         };
-        let target = tree.join("Cargo.lock");
         let mut copy = match OpenOptions::new()
             .write(true)
             .create_new(true)
