@@ -15,8 +15,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::record::{Interrupted, Record, SLICE, left};
-use crate::plants::git::{code, newlines};
-use crate::text::strip_str;
+use crate::plants::git::code;
+use crate::text::{newlines, strip_str};
 
 /// The program a call starts, found on the given `PATH`.
 pub const AWS: &str = "aws";

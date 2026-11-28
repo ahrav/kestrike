@@ -66,7 +66,9 @@ pub enum Scalar {
     Name,
     /// A number of at most 2^53 in magnitude.
     Time,
+    /// A [`Time`](Self::Time) above zero: zero of either sign fails.
     Positive,
+    /// A [`Time`](Self::Time) of zero or above, with -0.0 as zero.
     Nonnegative,
     /// An integer from 0 to 2^53.
     Count,
@@ -120,7 +122,7 @@ impl Scalar {
     fn holds(self, value: &Value, names: &Names) -> bool {
         let count = |least: u64, most: u64| {
             matches!(value, Value::Integer(integer)
-                if !negative(integer) && magnitude(integer).is_some_and(|n| least <= n && n <= most))
+                if Integer::from(least) <= *integer && *integer <= Integer::from(most))
         };
         match self {
             Self::Name => matches!(value, Value::String(text)
@@ -196,35 +198,41 @@ pub(super) fn checked_list(value: &Value) -> &[Value] {
     }
 }
 
+/// The member `key` of an object that a passed schema check gave that member.
+pub(super) fn checked_member<'a>(object: &'a Object, key: &str) -> &'a Value {
+    object
+        .get(key)
+        .unwrap_or_else(|| panic!("the checked object holds {key}"))
+}
+
 /// The text that a passed schema check made `value`.
 pub(super) fn checked_text(value: &Value) -> &Text {
     string(value).unwrap_or_else(|| panic!("the checked value {value:?} is a string"))
 }
 
-fn negative(integer: &Integer) -> bool {
-    integer.to_string().starts_with('-')
-}
-
-/// The magnitude of `integer` when it fits a `u64`.
-fn magnitude(integer: &Integer) -> Option<u64> {
-    integer.to_string().trim_start_matches('-').parse().ok()
-}
-
 /// The sign of a number of [`finite`]: -1, 0 or 1, with -0.0 as 0.
 fn sign(value: &Value) -> i8 {
     match value {
-        Value::Integer(integer) if negative(integer) => -1,
-        Value::Integer(integer) if magnitude(integer) == Some(0) => 0,
+        Value::Integer(integer) => match integer.cmp(&Integer::from(0_u64)) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        },
         Value::Float(float) if *float < 0.0 => -1,
         Value::Float(float) if *float == 0.0 => 0,
         _ => 1,
     }
 }
 
+/// -2^53, the least integer the layout takes.
+static LEAST: LazyLock<Integer> = LazyLock::new(|| {
+    Integer::from_digits(true, &MOST.to_string()).expect("2^53 is a digit string")
+});
+
 /// `finite` holds for a JSON number of at most 2^53 in magnitude, so a NaN, an infinity and a boolean fail.
 pub fn finite(value: &Value) -> bool {
     match value {
-        Value::Integer(integer) => magnitude(integer).is_some_and(|n| n <= MOST),
+        Value::Integer(integer) => *LEAST <= *integer && *integer <= Integer::from(MOST),
         Value::Float(float) => float.abs() <= 9_007_199_254_740_992.0,
         _ => false,
     }
@@ -350,16 +358,13 @@ fn walk(
                 return refuse(path, said!("is no object"));
             };
             let kinds = names.of(each.keys);
-            let keys: BTreeSet<&Text> = object.iter().map(|(key, _)| key).collect();
-            let fits = if each.exact {
-                keys.len() == kinds.len() && keys.iter().all(|key| kinds.contains(*key))
-            } else {
-                keys.iter().all(|key| kinds.contains(*key))
-            };
+            // An object holds each key once, so with every key a name, equal counts make the sets equal.
+            let fits = (!each.exact || object.len() == kinds.len())
+                && object.iter().all(|(key, _)| kinds.contains(key));
             if !fits {
                 let reason = said!(
                     "names ",
-                    sorted(keys.into_iter().cloned()),
+                    sorted(object.iter().map(|(key, _)| key.clone())),
                     ", not ",
                     if each.exact { "exactly" } else { "only" },
                     " the ",
@@ -389,8 +394,13 @@ fn walk(
     Ok(())
 }
 
+/// Whether the object's keys are the schema's: as many, and each of the object's a key of the schema. An
+/// object holds each key once, so a schema that repeats a key matches no object.
 fn same_keys(object: &Object, fields: &[(&str, Schema)]) -> bool {
-    object.len() == fields.len() && fields.iter().all(|(key, _)| object.get(key).is_some())
+    object.len() == fields.len()
+        && object
+            .iter()
+            .all(|(key, _)| fields.iter().any(|(field, _)| *key == *field))
 }
 
 /// Python's `repr` of the sorted list of `items`.

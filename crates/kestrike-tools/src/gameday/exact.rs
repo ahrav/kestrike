@@ -14,8 +14,9 @@ pub fn exact(value: &Value) -> Option<Decimal> {
     }
 }
 
-/// `shown` writes a time, a duration or a count: a whole number as its digits, any other value as the
-/// shortest form of its nearest double. A value past the largest double writes `inf` or `-inf`.
+/// `shown` writes a time, a duration or a count: a whole number as its digits at any magnitude, any other
+/// value as the shortest form of its nearest double. A value that is no whole number and whose rounding
+/// overflows the largest double writes `inf` or `-inf`.
 pub fn shown(value: &Decimal) -> String {
     value
         .whole_digits()

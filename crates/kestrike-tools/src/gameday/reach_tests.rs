@@ -1,5 +1,5 @@
-//! Each row's expected result is the judge's own function's at the base under Python 3.9.25, as the
-//! expression beside it gives it.
+//! Each row's expected result is the judge's at the base under Python 3.9.25 for the same call: the
+//! function the test calls, on the held roles mark with the row's changes applied and the held package.
 
 use super::roles_reach;
 use crate::gameday::constants::FILE_LIMIT;
@@ -33,6 +33,8 @@ fn roles_reach_lists_each_unmet_condition_before_the_stop() {
     (r#"standby unhealthy"#, &[(r#"standbys/h3/host_report"#, Some(r#""impaired""#))], &[r#"standby host h3 of s2 reads running and impaired"#]),
     (r#"all"#, &[(r#"shards/s2/owner"#, Some(r#""h2""#)), (r#"shards/s3/owner"#, Some(r#""h3""#)), (r#"shards/s4/standby"#, Some(r#""h3""#)), (r#"shards/s1/standby"#, Some(r#""h4""#))], &[r#"the target owns 1 shards, fewer than 2"#, r#"the target stands by for 0 shards, fewer than 1"#, r#"standby host h4 of s1 has no instance state and host report read before the stop"#]),
     (r#"none owned"#, &[(r#"shards/s1/owner"#, Some(r#""h2""#)), (r#"shards/s2/owner"#, Some(r#""h2""#)), (r#"shards/s3/owner"#, Some(r#""h2""#))], &[r#"the target owns 0 shards, fewer than 2"#]),
+        (r#"owns exactly two"#, &[(r#"shards/s3/owner"#, Some(r#""h3""#))], &[]),
+        (r#"standby on the target's instance and stopped"#, &[(r#"standbys/h3/instance"#, Some(r#""i-h1""#)), (r#"standbys/h3/instance_state"#, Some(r#""stopped""#))], &[r#"standby host h3 of s2 reports the target's instance i-h1"#]),
     ];
     for &(label, patches, expected) in rows {
         let changed = patched(&roles, patches);
@@ -74,6 +76,37 @@ fn the_pre_stop_half_of_the_reach_reads_the_roles_and_the_package_alone() {
         [
             "the target stands by for 0 shards, fewer than 1",
             "standby host h3 of s2 reads running and unhealthy"
+        ]
+    );
+}
+
+/// The owned shards are read in the package's order: with the package's shards listed as s3, s1, s2, s4,
+/// s5 and the roles mark's keys left in their order, the text of s3 comes before that of s1.
+#[test]
+fn the_owned_shards_are_read_in_the_packages_order() {
+    let package = patched(
+        &held("package.json"),
+        &[("shards", Some(r#"["s3", "s1", "s2", "s4", "s5"]"#))],
+    );
+    let p = object(&package);
+    let bounds = FleetBounds::new(&tree(), FILE_LIMIT).expect("the top holds no NUL");
+    let names = check_package(p, &bounds).expect("the reordered package passes");
+    let roles = patched(
+        &held("injection/roles.json"),
+        &[("standbys/h2/instance", Some(r#""i-h1""#))],
+    );
+    let (schema, _) = layout("injection/roles.json").expect("a file of the layout");
+    conform(&roles, schema, &Text::from("injection/roles.json"), &names)
+        .expect("the roles conform");
+    let found: Vec<String> = roles_reach(object(&roles), p)
+        .iter()
+        .map(Text::to_string)
+        .collect();
+    assert_eq!(
+        found,
+        [
+            "standby host h2 of s3 reports the target's instance i-h1",
+            "standby host h2 of s1 reports the target's instance i-h1"
         ]
     );
 }

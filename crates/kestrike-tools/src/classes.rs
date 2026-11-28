@@ -1,9 +1,15 @@
 //! Regular-expression classes with the members Python's `re` gives `\s`, `\w` and `\d` in a `str` pattern:
 //! white space is Unicode `White_Space` with U+001C to U+001F, a word character is a letter, a number or
 //! `_`, and a digit is a code point of category `Nd`.
+//!
+//! Python's `\b` holds where a word character meets another character or the text's edge. The `regex`
+//! crate's `\b` reads its own set of word characters, which holds combining marks and lacks numbers such as
+//! `²`. A pattern written for [`captures_bounded`] therefore leaves out each `\b` at an edge of its match
+//! beside a word character, and the search checks those edges with [`is_word`].
 
 use std::sync::LazyLock;
 
+use regex::{Captures, Regex};
 use regex_syntax::hir::{Class as HirClass, HirKind};
 
 pub const SPACE: &str = r"[\s\x1c-\x1f]";
@@ -71,4 +77,61 @@ pub fn is_digit(c: char) -> bool {
     } else {
         DIGIT_CLASS.contains(c)
     }
+}
+
+/// Whether Python's `\b` holds at each edge of `text[start..end]` that is a word character: a match that
+/// starts with one has no word character before it, and a match that ends with one has none after it.
+pub fn word_edges(text: &str, start: usize, end: usize) -> bool {
+    let word = |c: Option<char>| c.is_some_and(is_word);
+    let (first, last) = (
+        text[start..end].chars().next(),
+        text[start..end].chars().next_back(),
+    );
+    !(word(first) && word(text[..start].chars().next_back()))
+        && !(word(last) && word(text[end..].chars().next()))
+}
+
+/// The first match of `regex` in `text` at or after `at` whose word edges pass [`word_edges`]. A candidate
+/// that fails resumes the search one code point after its start, as Python tries each start in turn. Only
+/// the `regex` crate's preferred match at each start is checked, so the result is Python's when, at each
+/// start, that match failing its edges means every match there fails them. Alternatives ending at
+/// different offsets break that condition when the preferred match fails an edge check and another passes
+/// both. For example, in `\b(?:cat|cater)\b` on `cater `, the rejected `cat` leaves `cater` untried.
+pub fn captures_bounded<'h>(regex: &Regex, text: &'h str, mut at: usize) -> Option<Captures<'h>> {
+    loop {
+        let found = regex.captures_at(text, at)?;
+        let whole = found.get_match();
+        if word_edges(text, whole.start(), whole.end()) {
+            return Some(found);
+        }
+        at = next_code_point(text, whole.start());
+    }
+}
+
+fn next_code_point(text: &str, at: usize) -> usize {
+    at + text[at..].chars().next().map_or(1, char::len_utf8)
+}
+
+/// Each match of `regex` in `text` in order: [`captures_bounded`] from the end of the previous match, or
+/// from one code point after an empty match. For a pattern under the condition of [`captures_bounded`]
+/// that matches no empty text, these are the matches Python's `finditer` yields for the pattern with its
+/// `\b` at the word edges.
+pub fn bounded_iter<'r, 'h>(
+    regex: &'r Regex,
+    text: &'h str,
+) -> impl Iterator<Item = Captures<'h>> + 'r
+where
+    'h: 'r,
+{
+    let mut at = 0;
+    std::iter::from_fn(move || {
+        let found = captures_bounded(regex, text, at)?;
+        let whole = found.get_match();
+        at = if whole.is_empty() {
+            next_code_point(text, whole.end())
+        } else {
+            whole.end()
+        };
+        Some(found)
+    })
 }

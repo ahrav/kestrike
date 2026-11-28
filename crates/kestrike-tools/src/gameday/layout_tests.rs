@@ -1,6 +1,6 @@
-//! Each expected result is the judge's own function's at the base under Python 3.9.25, as the expression
-//! beside it gives it: its `conform` over the held fixture's files with the names its `load_evidence`
-//! builds, and its `LAYOUT` flags.
+//! Each expected result is the judge's at the base under Python 3.9.25, as the expression beside it gives
+//! it: the held fixture's files checked against their schemas with the names a run's evidence is read
+//! against, and each file's optional flag.
 
 use std::collections::BTreeSet;
 
@@ -22,7 +22,7 @@ const RECORD: Schema = Schema::Object(&[
     VERSION_FIELDS[4],
 ]);
 
-/// The held package's names with `observed` and `sealed` as the judge's `load_evidence` sets them.
+/// The held package's names with `observed` and `sealed` as a run's evidence sets them.
 fn held_names() -> Names {
     let bounds = FleetBounds::new(&tree(), FILE_LIMIT).expect("the top holds no NUL");
     let mut names =
@@ -59,8 +59,15 @@ fn held_names() -> Names {
     names
 }
 
+/// The held file `rel`, decoded, or `None` when no entry stands at its name; any other failed read fails
+/// the test.
 fn file(rel: &str) -> Option<Value> {
-    let data = std::fs::read(tree().join("scripts/gameday-fixtures/held").join(rel)).ok()?;
+    let path = tree().join("scripts/gameday-fixtures/held").join(rel);
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("{}: {error}", path.display()),
+    };
     Some(parsed(&data, &Text::from(rel)).expect("the held file is strict JSON"))
 }
 

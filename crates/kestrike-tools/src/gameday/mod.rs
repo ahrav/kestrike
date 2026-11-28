@@ -1,4 +1,7 @@
-//! A game-day controller and `scripts/gameday-judge.py` share the GD-2 package rules.
+//! The rules that read a game-day package for GD-2: a file's bytes, strict JSON, the layout's schemas, the
+//! package, GD-2's catalog entry and the reach's conditions before the stop. The evidence layout is
+//! stated in the section "The evidence layout, the rules and the record" of `docs/agents/ci.md`. A caller checks the package, reads the roles mark against the names the
+//! package gives, and then reads the reach's conditions from the two.
 //!
 //! Each rule returns a value or a [`Refusal`] that holds the judge's sentence; where several refusals
 //! apply, the rule returns the one the judge raises first.

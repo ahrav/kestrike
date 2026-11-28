@@ -81,6 +81,11 @@ fn decode_reads_strict_json_and_refuses_the_first_defect_in_document_order() {
         (r#"decode('0e-1999999999999999997', 'f')"#, r#"0e-1999999999999999997"#, Ok(r#"0.0"#), None),
         (r#"decode('0.000e-1999999999999999994', 'f')"#, r#"0.000e-1999999999999999994"#, Ok(r#"0.0"#), None),
         (r#"decode('0.000e-1999999999999999995', 'f')"#, r#"0.000e-1999999999999999995"#, Err(r#"f is not strict JSON: InvalidOperation([<class 'decimal.InvalidOperation'>])"#), Some(r#"f is not strict JSON: the number 0.000e-1999999999999999995 holds more digits than a double carries"#)),
+        (r#"decode('0e10000000000000000000000000000000000000000', 'f')"#, r#"0e10000000000000000000000000000000000000000"#, Err(r#"f is not strict JSON: InvalidOperation([<class 'decimal.InvalidOperation'>])"#), Some(r#"f is not strict JSON: the number 0e10000000000000000000000000000000000000000 holds more digits than a double carries"#)),
+        (r#"decode('0e-10000000000000000000000000000000000000000', 'f')"#, r#"0e-10000000000000000000000000000000000000000"#, Err(r#"f is not strict JSON: InvalidOperation([<class 'decimal.InvalidOperation'>])"#), Some(r#"f is not strict JSON: the number 0e-10000000000000000000000000000000000000000 holds more digits than a double carries"#)),
+        (r#"decode('1e10000000000000000000000000000000000000000', 'f')"#, r#"1e10000000000000000000000000000000000000000"#, Err(r#"f is not strict JSON: ValueError("the number 1e10000000000000000000000000000000000000000 is beyond a double's range")"#), None),
+        (r#"decode('1e-10000000000000000000000000000000000000000', 'f')"#, r#"1e-10000000000000000000000000000000000000000"#, Err(r#"f is not strict JSON: InvalidOperation([<class 'decimal.InvalidOperation'>])"#), Some(r#"f is not strict JSON: the number 1e-10000000000000000000000000000000000000000 holds more digits than a double carries"#)),
+        (r#"decode('-1e-400', 'f')"#, r#"-1e-400"#, Err(r#"f is not strict JSON: ValueError('the number -1e-400 holds more digits than a double carries')"#), None),
     ];
     for &(expression, text, judged, tool) in rows {
         let found = shown(decode(text, &Text::from("f")));
@@ -105,6 +110,9 @@ fn parsed_reads_a_json_file_as_one_value_and_a_jsonl_file_as_its_lines() {
     (r#"parsed(b'', 'a.json')"#, b"", r#"a.json"#, Err(r#"a.json is not strict JSON: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')"#), Some(r#"a.json is not strict JSON: expected a value at byte 0"#)),
     (r#"parsed(b'\xff', 'a.json')"#, b"\xff", r#"a.json"#, Err(r#"a.json is not UTF-8: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"#), Some(r#"a.json is not UTF-8: invalid utf-8 sequence of 1 bytes from index 0"#)),
     (r#"parsed(b'"\xed\xa0\x80"', 'a.json')"#, b"\x22\xed\xa0\x80\x22", r#"a.json"#, Err(r#"a.json is not UTF-8: 'utf-8' codec can't decode byte 0xed in position 1: invalid continuation byte"#), Some(r#"a.json is not UTF-8: invalid utf-8 sequence of 1 bytes from index 1"#)),
+    (r#"parsed(b'x\n1', 'a.jsonl')"#, b"x\x0a1", r#"a.jsonl"#, Err(r#"a.jsonl ends in a line with no newline: it may be truncated"#), None),
+    (r#"parsed(b'\xff\n1', 'a.jsonl')"#, b"\xff\x0a1", r#"a.jsonl"#, Err(r#"a.jsonl is not UTF-8: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"#), Some(r#"a.jsonl is not UTF-8: invalid utf-8 sequence of 1 bytes from index 0"#)),
+    (r#"parsed(b'\n', 'a.jsonl')"#, b"\x0a", r#"a.jsonl"#, Err(r#"a.jsonl line 1 is not strict JSON: JSONDecodeError('Expecting value: line 1 column 1 (char 0)')"#), Some(r#"a.jsonl line 1 is not strict JSON: expected a value at byte 0"#)),
     (r#"parsed(b'1\n\xc3\n', 'a.jsonl')"#, b"1\x0a\xc3\x0a", r#"a.jsonl"#, Err(r#"a.jsonl is not UTF-8: 'utf-8' codec can't decode byte 0xc3 in position 2: invalid continuation byte"#), Some(r#"a.jsonl is not UTF-8: invalid utf-8 sequence of 1 bytes from index 2"#)),
     ];
     for &(expression, data, rel, judged, tool) in rows {
@@ -118,11 +126,14 @@ fn parsed_reads_a_json_file_as_one_value_and_a_jsonl_file_as_its_lines() {
 
 /// A sweep over fixed-seed bit patterns: every finite double's shortest form reads back as that double,
 /// and the same form with a digit added past the seventeenth significant one is refused, since no shortest
-/// form holds that many.
+/// form holds that many. The SHA-256 of the forms, each followed by a newline, is that of Python 3.9.25's
+/// `repr` of the same 20,000 doubles (the same sequence, each read as `struct.unpack('<d', ...)`, with
+/// non-finite values and both zeros passed over).
 #[test]
 fn strict_json_takes_each_shortest_form_and_refuses_one_digit_more() {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let mut checked = 0;
+    let mut forms = String::new();
     while checked < 20_000 {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -132,6 +143,8 @@ fn strict_json_takes_each_shortest_form_and_refuses_one_digit_more() {
             continue;
         }
         let shortest = crate::python::repr_float(value);
+        forms.push_str(&shortest);
+        forms.push('\n');
         let read = decode(&shortest, &Text::from("f")).expect("a shortest form is strict JSON");
         assert_eq!(read, crate::json::Value::Float(value), "{shortest}");
         let (mantissa, power) = shortest
@@ -151,4 +164,36 @@ fn strict_json_takes_each_shortest_form_and_refuses_one_digit_more() {
         assert_eq!(refused, Err(words));
         checked += 1;
     }
+    assert_eq!(
+        crate::python::hexdigest(forms.as_bytes()),
+        "83c7f7939c6873af92a9f38234fcbbcf67646e53d87b075a890170ed022be6ff",
+        "hashlib.sha256(''.join(repr(v) + '\\n' for v in values).encode()).hexdigest()"
+    );
+}
+
+/// Tokens whose run of digits and exponent cancel: the judge reads the first two as 1.0, and the third,
+/// whose value is 10^589824, as past a double's range.
+#[test]
+fn a_long_mantissa_and_an_exponent_that_cancel_read_as_the_value_they_spell() {
+    let small = format!("0.{}1e655360", "0".repeat(655_359));
+    let large = format!("1{}e-655360", "0".repeat(655_360));
+    let past = format!("0.{}1e655360", "0".repeat(65_535));
+    let f = Text::from("f");
+    assert_eq!(
+        decode(&small, &f),
+        Ok(crate::json::Value::Float(1.0)),
+        "decode('0.' + '0' * 655359 + '1e655360', 'f')"
+    );
+    assert_eq!(
+        decode(&large, &f),
+        Ok(crate::json::Value::Float(1.0)),
+        "decode('1' + '0' * 655360 + 'e-655360', 'f')"
+    );
+    assert_eq!(
+        decode(&past, &f).map_err(|refusal| refusal.to_string()),
+        Err(format!(
+            "f is not strict JSON: the number {past} is beyond a double's range"
+        )),
+        "decode('0.' + '0' * 65535 + '1e655360', 'f')"
+    );
 }
