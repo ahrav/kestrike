@@ -66,7 +66,8 @@ fn with(extra: &[&str]) -> Vec<OsString> {
 }
 
 /// `read` treats `=--` as the literal value `--`. `--watchdog` uses `f64` syntax, so `1_0` and a digit
-/// outside ASCII are invalid floats.
+/// outside ASCII are invalid floats. A word of `-` and decimal digits outside ASCII reads as an option, so
+/// it is a value only where `=` joins it to its option. `-h=` is refused.
 #[test]
 fn read_takes_the_eleven_options_by_unique_prefix() {
     let carry = |paths: &[&str]| {
@@ -140,6 +141,17 @@ fn read_takes_the_eleven_options_by_unique_prefix() {
          Ok(Options { package: Text::from("--"), ..options() })),
         ("--carry=--", with(&["--carry=--"]), Ok(Options { carry: carry(&["--"]), ..options() })),
         ("an unknown option", with(&["--carry", "a", "--bogus"]), Err("unrecognized arguments: --bogus")),
+        ("-h=", with(&["--carry", "a", "-h="]), Err("argument -h/--help: ignored explicit argument ''")),
+        ("--carry before a negative number in other digits", with(&["--carry", "-\u{661}"]),
+         Err("argument --carry: expected at least one argument")),
+        ("--carry a before a negative number in other digits", with(&["--carry", "a", "-\u{661}"]),
+         Err("unrecognized arguments: -\u{661}")),
+        ("--head before a negative number in other digits", with(&["--carry", "a", "--head", "-\u{661}"]),
+         Err("argument --head: expected one argument")),
+        ("--watchdog before a negative number in other digits", with(&["--carry", "a", "--watchdog", "-\u{661}"]),
+         Err("argument --watchdog: expected one argument")),
+        ("--carry= with a negative number in other digits", with(&["--carry=-\u{661}"]),
+         Ok(Options { carry: carry(&["-\u{661}"]), ..options() })),
     ];
     for (name, words, expected) in rows {
         let expected = expected.map_or_else(refused, Parsed::Run);
@@ -189,9 +201,10 @@ fn check_given_refuses_an_empty_or_double_dash_value() {
     }
 }
 
+/// A text that holds a NUL is refused as an empty one.
 #[test]
 fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
-    let rows: [(&str, Text, Text, Option<&str>); 9] = [
+    let rows: [(&str, Text, Text, Option<&str>); 11] = [
         (
             "a text",
             Text::from("lost a completion"),
@@ -207,6 +220,18 @@ fn check_expect_refuses_a_blank_text_and_part_of_the_test_id() {
         (
             "white space",
             Text::from(" \t\u{3000}\u{1c}"),
+            Text::from(TEST),
+            Some("--expect is empty"),
+        ),
+        (
+            "a NUL",
+            Text::from("\0"),
+            Text::from(TEST),
+            Some("--expect is empty"),
+        ),
+        (
+            "a NUL inside a text",
+            Text::from("lost\0a completion"),
             Text::from(TEST),
             Some("--expect is empty"),
         ),
@@ -290,13 +315,14 @@ fn check_watchdog_takes_a_positive_wait_up_to_the_platform_bound() {
 #[test]
 fn check_receipt_directory_refuses_a_line_break_and_a_byte_outside_utf8() {
     let tail = "cannot appear on the runner's one-line UTF-8 artifact announcement";
-    let rows: [(&[u8], Option<&str>); 14] = [
+    let rows: [(&[u8], Option<&str>); 15] = [
         (b"/r/target/red-green", None),
         (b"/r/a\nb", Some("'/r/a\\nb'")),
         (b"/r/a\rb", Some("'/r/a\\rb'")),
         (b"/r/a\x0bb", Some("'/r/a\\x0bb'")),
         (b"/r/a\x0cb", Some("'/r/a\\x0cb'")),
         (b"/r/a\x1cb", Some("'/r/a\\x1cb'")),
+        (b"/r/a\x1db", Some("'/r/a\\x1db'")),
         (b"/r/a\x1eb", Some("'/r/a\\x1eb'")),
         (b"/r/a\x1fb", None),
         ("/r/a\u{85}b".as_bytes(), Some("'/r/a\\x85b'")),
@@ -363,6 +389,48 @@ fn repeat_joins_each_value_to_its_flag_and_quotes_each_word() {
         let surrogate = bytes(b"n\xff");
         let expected = Text::from(expected).replace(&Text::from("n\u{fffd}"), &surrogate);
         assert_eq!(command, expected, "{name}");
+    }
+}
+
+#[test]
+fn repeat_names_the_parent_of_the_receipt_where_the_run_named_artifacts() {
+    let named = Options {
+        artifacts: Some(Text::from("r")),
+        ..run()
+    };
+    let empty = Options {
+        artifacts: Some(Text::new()),
+        ..run()
+    };
+    let rows: [(&str, &Options, &str, Option<&str>); 5] = [
+        ("a nested receipt", &named, "/r/local-1-1", Some("/r")),
+        (
+            "a receipt of one relative component",
+            &named,
+            "local-1-1",
+            Some("."),
+        ),
+        ("the root for the receipt", &named, "/", Some("/")),
+        ("an empty artifacts", &empty, "/r/local-1-1", None),
+        ("no artifacts", &run(), "/r/local-1-1", None),
+    ];
+    for (name, options, receipt, parent) in rows {
+        let command = repeat(
+            options,
+            &Text::from(BASE),
+            &Text::from(HEAD),
+            Path::new(receipt),
+        );
+        let words = shell::split(&command).expect("the command splits");
+        let artifacts: Vec<Text> = words
+            .into_iter()
+            .filter(|word| word.starts_with(&Text::from("--artifacts")))
+            .collect();
+        let expected: Vec<Text> = parent
+            .iter()
+            .map(|parent| Text::from(format!("--artifacts={parent}")))
+            .collect();
+        assert_eq!(artifacts, expected, "{name}");
     }
 }
 

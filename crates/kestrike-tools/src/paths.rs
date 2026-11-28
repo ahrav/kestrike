@@ -6,6 +6,8 @@
 //! as written. When a link's target leads back to a link still being resolved, `resolve` keeps that link
 //! and everything after it unresolved, and the final path is normalized lexically. `resolve` refuses a
 //! final path whose own lookup fails with a loop error, and links that nest more than [`DEPTH`] deep.
+//! `realpath` follows links by the same walk over the path's components as written and returns the path
+//! without that final lookup.
 //!
 //! `joined`, `parent`, `name` and `pure` read a path's text alone, as a pure POSIX path: a root of
 //! `//` stays, empty and `.` components drop, and `..` stays.
@@ -16,7 +18,8 @@ use std::io;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-/// The deepest chain of links whose targets `resolve` follows, one link inside the target of the next.
+/// The deepest chain of links whose targets `resolve` and `realpath` follow, one link inside the target of
+/// the next.
 pub const DEPTH: usize = 993;
 
 /// # Errors
@@ -25,18 +28,6 @@ pub const DEPTH: usize = 993;
 /// that `lstat` reports cannot be read, when links nest more than [`DEPTH`] deep, and when the lookup of
 /// the final path meets a link loop.
 pub fn resolve(path: &Path) -> io::Result<PathBuf> {
-    let resolved = realpath(path)?;
-    match std::fs::metadata(&resolved) {
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(format!(
-            "symlink loop from {}",
-            resolved.display()
-        ))),
-        _ => Ok(resolved),
-    }
-}
-
-/// `realpath` returns the resolved path even when a metadata lookup on that path would report `ELOOP`.
-pub fn realpath(path: &Path) -> io::Result<PathBuf> {
     let raw = path.as_os_str().as_bytes();
     let mut parsed: Vec<u8> = if raw.starts_with(b"/") {
         b"/".to_vec()
@@ -52,7 +43,31 @@ pub fn realpath(path: &Path) -> io::Result<PathBuf> {
         }
         parsed.extend_from_slice(name);
     }
-    let (joined, _) = walk(Vec::new(), &parsed, &mut HashMap::new(), 0)?;
+    let resolved = walked(&parsed)?;
+    match std::fs::metadata(&resolved) {
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(format!(
+            "symlink loop from {}",
+            resolved.display()
+        ))),
+        _ => Ok(resolved),
+    }
+}
+
+/// `realpath` resolves `path` as Python's `os.path.realpath` does and returns the absolute, lexically
+/// normalized result. It reads the components of `path` as written: after a link whose target leads back
+/// to a link still being resolved, an unread rest that opens with `/`, as a repeated separator leaves it,
+/// replaces the path resolved so far. The result may name a path whose own lookup reports `ELOOP`.
+///
+/// # Errors
+///
+/// `realpath` returns an error when reading the working directory fails for a result that is relative,
+/// when a link that `lstat` reports cannot be read, and when links nest more than [`DEPTH`] deep.
+pub fn realpath(path: &Path) -> io::Result<PathBuf> {
+    walked(path.as_os_str().as_bytes())
+}
+
+fn walked(path: &[u8]) -> io::Result<PathBuf> {
+    let (joined, _) = walk(Vec::new(), path, &mut HashMap::new(), 0)?;
     let absolute = if joined.starts_with(b"/") {
         joined
     } else {

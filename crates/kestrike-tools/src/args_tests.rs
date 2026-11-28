@@ -504,3 +504,47 @@ fn a_many_option_checks_each_value() {
         );
     }
 }
+
+/// `p.add_argument('--plant', nargs='+', action='append', type=given)` reads a command line without the
+/// option, where `plant` is `None`, and asks for at least one value where the option stands.
+#[test]
+fn a_many_option_that_is_not_required_may_be_left_out() {
+    const OPTIONAL: [Opt; 2] = [
+        HELP,
+        Opt {
+            names: &["--plant"],
+            kind: Kind::Many {
+                required: false,
+                check: given,
+            },
+        },
+    ];
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &OPTIONAL,
+    );
+    let read = |args: &[&str]| {
+        let args: Vec<OsString> = args.iter().map(OsString::from).collect();
+        reader.parse(&args)
+    };
+    let Parsed::Run(values) = read(&[]) else {
+        panic!("a command line without --plant reads");
+    };
+    assert!(values.all("--plant").is_empty());
+    assert_eq!(values.get("--plant"), None);
+    let Parsed::Run(values) = read(&["--plant", "a", "b"]) else {
+        panic!("--plant a b reads");
+    };
+    assert_eq!(values.all("--plant"), ["a", "b"].map(OsString::from));
+    assert_eq!(
+        read(&["--plant"]),
+        refused("argument --plant: expected at least one argument")
+    );
+    assert_eq!(
+        read(&["--plant", "a", ""]),
+        refused("argument --plant: a value")
+    );
+}

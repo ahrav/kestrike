@@ -1,7 +1,8 @@
-//! The entries a commit names, read from the records of `git ls-tree -z`, and the comparison of a
-//! worktree with them.
+//! The entries a commit names, read from the records of `git ls-tree -z --full-tree`, and the comparison
+//! of a worktree with them.
 //!
-//! A record is `MODE TYPE ID`, a tab, the path and a NUL. The comparison treats symbolic links as leaf
+//! A record is `MODE TYPE ID`, a tab, the path and a NUL. The caller runs Git, checks its exit status and
+//! passes its standard output as written. Each path is relative to the repository root. The comparison treats symbolic links as leaf
 //! entries. It counts every nondirectory entry, including FIFOs and links to directories, and each
 //! directory that holds no entry or cannot be listed. The worktree's own `.git` at the top and each path
 //! the commit names with mode 160000 stand outside the comparison. Paths compare in code point order of
@@ -21,7 +22,10 @@ use std::path::Path;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
+use crate::hook;
 use crate::ownership::PathError;
+use crate::paths;
+use crate::python;
 use crate::text::{Text, text};
 
 pub const FILE: &str = "100644";
@@ -48,11 +52,17 @@ fn decoded(bytes: &[u8]) -> Text {
     Text::from_os(OsStr::from_bytes(bytes))
 }
 
-fn fields(record: &[u8]) -> Option<(Vec<Text>, &[u8])> {
+/// The mode, type and ID of a record with the bytes after its first tab, or `None` for a record that
+/// holds no tab or another count of fields before it.
+fn fields(record: &[u8]) -> Option<([Text; 3], &[u8])> {
     let tab = record.iter().position(|&byte| byte == b'\t')?;
-    Some((decoded(&record[..tab]).split(), &record[tab + 1..]))
+    let meta = decoded(&record[..tab]).split().try_into().ok()?;
+    Some((meta, &record[tab + 1..]))
 }
 
+/// The entries in the output of `git ls-tree -r -z --full-tree COMMIT`. The recursive listing names each
+/// file, link and submodule and no directory.
+///
 /// # Errors
 ///
 /// `named_entries` returns [`Malformed`] for the first nonempty record that fails the tab or field-count
@@ -63,33 +73,36 @@ pub fn named_entries(stdout: &[u8]) -> Result<Entries, Malformed> {
         .split(|&byte| byte == 0)
         .filter(|record| !record.is_empty())
     {
-        let Some((meta, path)) = fields(record) else {
+        let Some(([mode, _, id], path)) = fields(record) else {
             return Err(Malformed(record.to_vec()));
         };
-        let [mode, _, id] = <[Text; 3]>::try_from(meta).map_err(|_| Malformed(record.to_vec()))?;
         entries.insert(decoded(path), Entry { mode, id });
     }
     Ok(entries)
 }
 
-/// The blob ID of `path` from the output of `git ls-tree -z HEAD -- PATH`.
+/// The blob ID of `path` from the output of `git --literal-pathspecs ls-tree -z --full-tree HEAD -- PATH`,
+/// with `head` as the revision and `path` as one literal name relative to the repository root. The ID is
+/// the record's third field as written.
 ///
 /// # Errors
 ///
 /// `carried_blob` requires three metadata fields, mode 100644 or 100755, and a decoded name equal to
 /// `path` followed by NUL. On mismatch, the error identifies `head` and `path`.
 pub fn carried_blob(head: &str, path: &Text, stdout: &[u8]) -> Result<Text, Text> {
-    let (meta, name) = fields(stdout).unwrap_or_else(|| (decoded(stdout).split(), &[][..]));
-    let regular = matches!(meta.first(), Some(mode) if *mode == FILE || *mode == EXECUTABLE);
-    if meta.len() != 3 || !regular || decoded(name) != text!(path, "\0") {
-        return Err(text!(
+    match fields(stdout) {
+        Some(([mode, _, id], name))
+            if (mode == FILE || mode == EXECUTABLE) && decoded(name) == text!(path, "\0") =>
+        {
+            Ok(id)
+        }
+        _ => Err(text!(
             "the head ",
-            super::short(head),
+            hook::short(&Text::from(head)),
             " holds no regular file ",
             path.repr()
-        ));
+        )),
     }
-    Ok(meta[2].clone())
 }
 
 /// `overlaid` matches a carried path and its slash-delimited ancestors and descendants.
@@ -126,18 +139,7 @@ pub fn blob_id<D: Digest>(data: &[u8]) -> String {
     let mut digest = D::new();
     digest.update(format!("blob {}\0", data.len()).as_bytes());
     digest.update(data);
-    digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn joined(directory: &[u8], name: &[u8]) -> Vec<u8> {
-    if directory.is_empty() {
-        return name.to_vec();
-    }
-    [directory, b"/", name].concat()
+    python::hex(&digest.finalize())
 }
 
 /// A top directory that cannot be listed is the path `.`.
@@ -156,7 +158,7 @@ fn present(tree: &Path) -> BTreeSet<Text> {
             present.insert(decoded(&relative));
         }
         for entry in entries {
-            let path = joined(&relative, entry.file_name().as_bytes());
+            let path = paths::join(&relative, entry.file_name().as_bytes());
             match entry.file_type() {
                 Ok(kind) if kind.is_dir() => pending.push(path),
                 _ => {
@@ -179,21 +181,21 @@ fn named_bytes(full: &Path, entry: &Entry) -> io::Result<Option<Vec<u8>>> {
             Err(error) => Err(error),
         };
     }
-    let executable = |mode: u32| mode & 0o100 != 0;
     let named = entry.mode == EXECUTABLE;
+    let differs = |status: &fs::Metadata| {
+        !status.file_type().is_file() || (status.permissions().mode() & 0o100 != 0) != named
+    };
     let flags = libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY;
     let mut file = match OpenOptions::new().read(true).custom_flags(flags).open(full) {
         Ok(file) => file,
         Err(error) => {
             return match fs::symlink_metadata(full) {
-                Ok(status) if !status.file_type().is_file() => Ok(None),
-                Ok(status) if executable(status.permissions().mode()) != named => Ok(None),
+                Ok(status) if differs(&status) => Ok(None),
                 _ => Err(error),
             };
         }
     };
-    let status = file.metadata()?;
-    if !status.file_type().is_file() || executable(status.permissions().mode()) != named {
+    if differs(&file.metadata()?) {
         return Ok(None);
     }
     let mut data = Vec::new();
@@ -202,12 +204,12 @@ fn named_bytes(full: &Path, entry: &Entry) -> io::Result<Option<Vec<u8>>> {
 }
 
 /// The first path at which the worktree at `tree` differs from `named`, or `None`. The caller trusts
-/// `tree` and the entries in it.
+/// `tree` and the entries in it. The comparison holds the set of paths and one whole regular file at a
+/// time in memory.
 ///
 /// # Errors
 ///
-/// `PathError` carries the full worktree path for propagated I/O errors. A failed `to_os()` conversion
-/// carries `tree` instead.
+/// `PathError` carries the full worktree path for propagated I/O errors.
 pub fn tree_difference(tree: &Path, named: &Entries) -> Result<Option<Text>, PathError> {
     let outside = |path: &Text| named.get(path).is_some_and(|entry| entry.mode == SUBMODULE);
     let present: BTreeSet<Text> = present(tree)
@@ -223,10 +225,9 @@ pub fn tree_difference(tree: &Path, named: &Entries) -> Result<Option<Text>, Pat
         if !COMPARED.iter().any(|mode| entry.mode == *mode) {
             return Ok(Some(path));
         }
-        let Some(relative) = path.to_os() else {
-            let error = io::Error::new(io::ErrorKind::InvalidInput, "a path with no bytes");
-            return Err(PathError::new(tree, error));
-        };
+        let relative = path
+            .to_os()
+            .expect("a path the walk listed decodes from the bytes of its name");
         let full = tree.join(relative);
         let Some(data) = named_bytes(&full, entry).map_err(|error| PathError::new(&full, error))?
         else {

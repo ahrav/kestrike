@@ -12,6 +12,7 @@ use super::{
     Entries, Entry, Malformed, base_entries, blob_id, carried_blob, named_entries, overlaid,
 };
 use crate::paths::tests::Scratch;
+use crate::python;
 use crate::text::Text;
 
 fn bytes(text: &[u8]) -> Text {
@@ -95,6 +96,48 @@ fn submodule(mut named: Entries) -> Entries {
 type Setup = fn(&Path);
 type Named = fn(Entries) -> Entries;
 
+/// The entry a row locks against its own user, restored to mode 0700 once the row has run.
+#[derive(Clone, Copy)]
+enum Locked {
+    Nothing,
+    File(&'static str),
+    Directory(&'static str),
+}
+
+impl Locked {
+    /// Whether the locked entry opens for this user, which leaves the row's denial unexercised.
+    fn opens(self, root: &Path) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::File(path) => fs::File::open(root.join(path)).is_ok(),
+            Self::Directory(path) => fs::read_dir(root.join(path)).is_ok(),
+        }
+    }
+
+    fn unlock(self, root: &Path) {
+        if let Self::File(path) | Self::Directory(path) = self {
+            fs::set_permissions(root.join(path), fs::Permissions::from_mode(0o700))
+                .expect("unlocked");
+        }
+    }
+}
+
+fn raw_link(root: &Path) {
+    fs::remove_file(root.join("link")).expect("the entry is removed");
+    symlink(OsStr::from_bytes(b"n\xff"), root.join("link")).expect("the link is made");
+}
+
+/// The Git blob IDs of the two bytes `n` and FF and of `n` with U+FFFD, from `git hash-object`.
+const RAW_TARGET: &str = "dc5c1502f13909c120482ddcdd943d31d9ea86f6";
+const LOSSY_TARGET: &str = "552531eaaaeb19f3e6e689470a0ff1eeb93b4348";
+
+fn relinked(id: &'static str) -> impl Fn(Entries) -> Entries {
+    move |mut named| {
+        named.insert(Text::from("link"), entry("120000", id));
+        named
+    }
+}
+
 #[rustfmt::skip]
 const TREE_ROWS: &[(&str, Setup, Named, Option<&[u8]>)] = &[
     ("the same tree", |_| {}, same, None),
@@ -167,10 +210,41 @@ const TREE_ROWS: &[(&str, Setup, Named, Option<&[u8]>)] = &[
     ("a file below a named submodule", |r| write(r, "sub/x", b"x\n", 0o644), submodule, Some(b"sub/x")),
     ("the worktree's .git", |r| write(r, ".git", b"gitdir: elsewhere\n", 0o644), same, None),
     ("a .git below the top", |r| write(r, "src/.git", b"gitdir: elsewhere\n", 0o644), same, Some(b"src/.git")),
+    ("an owner execute bit cleared beside the others", |r| {
+        fs::set_permissions(r.join("bin/run"), fs::Permissions::from_mode(0o655)).expect("set");
+    }, same, Some(b"bin/run")),
+    ("execute bits for the group and the others alone", |r| {
+        fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o654)).expect("set");
+    }, same, None),
+    ("a link target with a byte outside UTF-8", raw_link, |n| relinked(RAW_TARGET)(n), None),
+    ("a link target named by its replacement character", raw_link, |n| relinked(LOSSY_TARGET)(n), Some(b"link")),
+    ("a .gitattributes the commit lacks", |r| write(r, ".gitattributes", b"* text\n", 0o644), same,
+     Some(b".gitattributes")),
+    ("a file in a .git directory at the top", |r| write(r, ".git/x", b"x\n", 0o644), same, Some(b".git/x")),
+    ("a named file whose name holds a byte outside UTF-8",
+     |r| write(r, OsStr::from_bytes(b"n\xff"), b"n\n", 0o644), |mut n| {
+        n.insert(bytes(b"n\xff"), entry("100644", &blob_id::<Sha1>(b"n\n")));
+        n
+    }, None),
+    ("a named submodule that cannot be listed", |r| {
+        write(r, "sub/x", b"x\n", 0o644);
+        fs::set_permissions(r.join("sub"), fs::Permissions::from_mode(0o000)).expect("locked");
+    }, submodule, None),
     ("SHA-256 IDs", |_| {}, |_| named(true), None),
     ("a SHA-256 ID that differs", |r| write(r, "a.txt", b"b\n", 0o644), |_| named(true), Some(b"a.txt")),
 ];
 
+fn locked(name: &str) -> Locked {
+    match name {
+        "a directory that cannot be listed" => Locked::Directory("d"),
+        "a named submodule that cannot be listed" => Locked::Directory("sub"),
+        "an execute bit on a file that cannot be read" => Locked::File("a.txt"),
+        _ => Locked::Nothing,
+    }
+}
+
+/// A named submodule's directory stands outside the comparison even where it cannot be listed, so the
+/// entries below it go uncompared.
 #[test]
 fn tree_difference_names_the_first_differing_path_of_each_kind() {
     for (name, setup, adjust, expected) in TREE_ROWS {
@@ -182,19 +256,28 @@ fn tree_difference_names_the_first_differing_path_of_each_kind() {
             .expect("the tree is made");
         layout(&root);
         setup(&root);
-        let unread = name.contains("cannot be read") && fs::File::open(root.join("a.txt")).is_ok();
-        if unread || (root.join("d").exists() && fs::read_dir(root.join("d")).is_ok()) {
+        let locked = locked(name);
+        if locked.opens(&root) {
             eprintln!("{name}: the locked entry opens for this user, so the row is not run");
+            locked.unlock(&root);
             continue;
         }
         let found = tree_difference(&root, &adjust(named(false)));
-        if root.join("d").exists() {
-            fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o700))
-                .expect("unlocked");
-        }
+        locked.unlock(&root);
         let found = found.unwrap_or_else(|error| panic!("{name}: {error}"));
         assert_eq!(found, expected.map(bytes), "{name}");
     }
+}
+
+#[test]
+fn tree_difference_names_a_top_that_cannot_be_listed_as_a_dot() {
+    let scratch = Scratch::new("red-green-tree");
+    let absent = tree_difference(&scratch.0.join("absent"), &Entries::new());
+    assert_eq!(absent.expect("the top is judged"), Some(Text::from(".")));
+    let empty = scratch.0.join("empty");
+    fs::create_dir(&empty).expect("made");
+    let found = tree_difference(&empty, &Entries::new());
+    assert_eq!(found.expect("the top is listed"), None);
 }
 
 /// A file the walk lists that cannot be opened for reading is an error with its path.
@@ -217,11 +300,7 @@ fn a_named_file_that_cannot_be_read_is_an_error_with_its_path() {
     assert_eq!(error.error().kind(), std::io::ErrorKind::PermissionDenied);
 }
 
-fn hex(digest: &[u8]) -> String {
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// The four SHA-1 test vectors of FIPS 180-2.
+/// The three SHA-1 examples of FIPS 180-2, Appendix A, and the digest of the empty message.
 #[test]
 fn sha1_gives_the_standard_vectors() {
     let million = vec![b'a'; 1_000_000];
@@ -235,7 +314,12 @@ fn sha1_gives_the_standard_vectors() {
         (&million, "34aa973cd4c4daa4f61eeb2bdbad27316534016f"),
     ];
     for (data, digest) in rows {
-        assert_eq!(hex(&Sha1::digest(data)), digest, "{} bytes", data.len());
+        assert_eq!(
+            python::hex(&Sha1::digest(data)),
+            digest,
+            "{} bytes",
+            data.len()
+        );
     }
 }
 
@@ -358,6 +442,26 @@ fn named_entries_maps_each_path_to_its_mode_and_id() {
     for (name, stdout, expected) in rows {
         assert_eq!(named_entries(&stdout), Ok(expected), "{name}");
     }
+}
+
+/// A record of mode 160000 reads as a submodule whatever its type and ID, so the file at its path stands
+/// outside the comparison; the same record with the file's mode compares the file.
+#[test]
+fn a_record_with_a_submodule_mode_takes_its_path_out_of_the_comparison() {
+    let scratch = Scratch::new("red-green-tree");
+    let root = scratch.0.join("tree");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("the tree is made");
+    write(&root, "a.txt", b"changed\n", 0o644);
+    let listed = |mode: &str| {
+        let record = format!("{mode} blob {}\ta.txt\0", blob_id::<Sha1>(b"a\n"));
+        named_entries(record.as_bytes()).expect("the record has three fields")
+    };
+    let found = |mode: &str| tree_difference(&root, &listed(mode)).expect("the tree reads");
+    assert_eq!(found("160000"), None);
+    assert_eq!(found("100644"), Some(Text::from("a.txt")));
 }
 
 /// A record without a tab, with fewer than three fields before it or with more is malformed.

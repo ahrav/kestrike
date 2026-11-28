@@ -21,10 +21,15 @@ fn complete(leg: &Leg) -> bool {
 }
 
 /// A red base requires a match of `options.expect` in attempt output outside the framing and backtrace
-/// lines of `options.test`. `base_reason` sets `leg.expect_streams` after a reported failure with both
-/// streams read.
+/// lines of `options.test`. The judgment holds for `options` that passed [`check_expect`]: a blank
+/// expected text, or one that is part of the test ID, matches output that shows no failure of its own.
+/// `base_reason` sets `leg.expect_streams` to the matching streams after a reported failure with both
+/// streams read, and to `None` for every other outcome.
+///
+/// [`check_expect`]: super::options::check_expect
 #[must_use = "a dropped judgment leaves the refusal unrecorded"]
 pub fn base_reason(leg: &mut Leg, options: &Options) -> Option<Text> {
+    leg.expect_streams = None;
     let (code, verdict) = (leg.exit, &leg.verdict);
     let reported = runner::reported(code, verdict);
     let reason = match code {
@@ -41,8 +46,7 @@ pub fn base_reason(leg: &mut Leg, options: &Options) -> Option<Text> {
                     verdict
                 ));
             };
-            let matched =
-                expected::expect_streams(&readings.outputs, &options.expect, &options.test);
+            let matched = expected::expect_streams(&readings.outputs, options);
             let found = !matched.is_empty();
             leg.expect_streams = Some(matched);
             if found {
@@ -59,7 +63,7 @@ pub fn base_reason(leg: &mut Leg, options: &Options) -> Option<Text> {
             "the base is red for the wrong reason, a build failure: ",
             verdict
         ),
-        REJECTED if super::holds(verdict.as_bytes(), runner::ABSENT.as_bytes()) => {
+        REJECTED if verdict.contains(&Text::from(runner::ABSENT)) => {
             text!("the test is absent on the base: ", verdict)
         }
         CRASH => text!("the test crashed on the base: ", verdict),

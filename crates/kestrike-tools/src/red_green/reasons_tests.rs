@@ -50,6 +50,8 @@ fn both() -> Evidence {
     read(&[("stdout", EXPECT), ("stderr", "")])
 }
 
+/// Each row judges a leg that enters with `expect_streams` set, as a leg judged before holds it; the
+/// judgment leaves the streams of its own search or `None`.
 #[test]
 fn base_reason_names_each_outcome_of_the_base_leg() {
     let red = "reproduced: on attempt 1";
@@ -66,7 +68,17 @@ fn base_reason_names_each_outcome_of_the_base_leg() {
         ("a failure without the text", 1, red, read(&[("stdout", "x"), ("stderr", "")]),
          Some(format!("the test failed on the base without the expected text: {red}; the search skips framing and \
                        backtrace lines")), Some(vec![])),
+        ("the text in a framing line alone", 1, red,
+         read(&[("stdout", &format!("test {TEST} ... {EXPECT}\n")), ("stderr", "")]),
+         Some(format!("the test failed on the base without the expected text: {red}; the search skips framing and \
+                       backtrace lines")), Some(vec![])),
         ("a failure without evidence", 1, red, Evidence::Absent, Some(failed.clone()), None),
+        ("a failure with a stream of another name", 1, red, read(&[("stdout", EXPECT), ("other", "")]),
+         Some(failed.clone()), None),
+        ("a failure with one stream twice", 1, red, read(&[("stdout", EXPECT), ("stdout", "")]),
+         Some(failed.clone()), None),
+        ("a red base with standard error first", 1, red, read(&[("stderr", ""), ("stdout", EXPECT)]), None,
+         Some(vec!["stdout"])),
         ("a failure after a failed read", 1, red, Evidence::Unreadable(Text::from("x")), Some(failed.clone()), None),
         ("a failure with one stream", 1, red, read(&[("stdout", EXPECT)]), Some(failed), None),
         ("an unreported failure", 1, "Traceback", both(), Some(incomplete(1, "'Traceback'")), None),
@@ -95,7 +107,10 @@ fn base_reason_names_each_outcome_of_the_base_leg() {
          Some(incomplete(7, "\"x\\u2028'y\"")), None),
     ];
     for (name, code, verdict, evidence, reason, streams) in rows {
-        let mut judged = leg(code, verdict, evidence);
+        let mut judged = Leg {
+            expect_streams: Some(vec!["stderr"]),
+            ..leg(code, verdict, evidence)
+        };
         let found = base_reason(&mut judged, &options(TEST, EXPECT));
         assert_eq!(found, reason.map(Text::from), "{name}");
         assert_eq!(judged.expect_streams, streams, "{name}");
@@ -110,7 +125,10 @@ fn head_reason_names_each_outcome_of_the_head_leg() {
     let rows: Vec<(&str, i32, &str, Evidence, Option<String>)> = vec![
         ("a green head", 0, green, both(), None),
         ("a pass without evidence", 0, green, Evidence::Absent, Some(passed.clone())),
-        ("a pass with one stream", 0, green, read(&[("stderr", "")]), Some(passed)),
+        ("a pass with one stream", 0, green, read(&[("stderr", "")]), Some(passed.clone())),
+        ("a pass with a stream of another name", 0, green, read(&[("stdout", ""), ("other", "")]),
+         Some(passed.clone())),
+        ("a pass with one stream twice", 0, green, read(&[("stdout", ""), ("stdout", "")]), Some(passed)),
         ("a failure", 1, "reproduced: on attempt 1", both(),
          Some("the test fails on the head: reproduced: on attempt 1".to_owned())),
         ("an unreported failure", 1, "", both(), Some("the head leg did not pass: exit 1, verdict ''".to_owned())),
