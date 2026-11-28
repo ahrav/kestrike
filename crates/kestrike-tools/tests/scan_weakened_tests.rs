@@ -3525,6 +3525,62 @@ fn a_bidirectional_control_in_a_path_is_written_escaped() {
     }
 }
 
+/// The scan writes U+202E as `\u202e` in the hint, the acknowledged reason and the step summary, which
+/// preserves display order. The scan matches U+202E literally in `Weakens-Test:` keys.
+#[test]
+fn a_bidirectional_control_in_a_hint_or_a_reason_is_written_escaped() {
+    let repo = Repo::new("bidi-hint");
+    let path = "src/a\u{202e}b.rs";
+    let base = repo.change(&[(path, "const SEEDS: u64 = 12;\n")]);
+    let head = repo.change(&[(path, "const SEEDS: u64 = 11;\n")]);
+    let key = "budget-lowered:src/a\\u202eb.rs";
+    let line = format!("{key} SEEDS at line 1: 12 -> 11");
+    let run = repo.scan(&["--base", &base, "--head", &head]);
+    assert_eq!(
+        (run.code, run.bytes.as_slice()),
+        (Some(1), format!("blocks {line}\n").as_bytes()),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
+        run.stderr,
+        format!(
+            "scan-weakened-tests: {key} blocks; acknowledge it with a commit-message line in {}..{}: \
+             Weakens-Test: {key}: <reason>\n",
+            &base[..12],
+            &head[..12]
+        )
+    );
+    let message =
+        format!("Acknowledge it\n\nWeakens-Test: budget-lowered:{path}: x\u{202e}::error::y\n");
+    let acknowledged = repo.commit(&[], &message, &[]);
+    let summary = repo.temp.join("summary.md");
+    let run = repo.scan_env(
+        &["--base", &base, "--head", &acknowledged],
+        &[(
+            "GITHUB_STEP_SUMMARY",
+            summary.to_str().expect("the path is UTF-8"),
+        )],
+    );
+    let expected = format!("acknowledged {line} (Weakens-Test: x\\u202e::error::y)\n");
+    assert_eq!(
+        (run.code, run.bytes.as_slice()),
+        (Some(0), expected.as_bytes()),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(run.stderr, "");
+    let text = fs::read_to_string(&summary).expect("the summary reads");
+    assert_eq!(
+        text,
+        format!(
+            "Weakened-test scan of {}..{}:\n\n```text\n{expected}```\n",
+            &base[..12],
+            &acknowledged[..12]
+        )
+    );
+}
+
 impl Repo {
     fn add_bytes(&self, names: &[&[u8]]) -> String {
         use std::ffi::OsStr;
@@ -3686,4 +3742,83 @@ fn a_link_in_a_later_batch_of_ancestor_probes_exits_two() {
             &head[..12]
         ),
     );
+}
+
+impl Repo {
+    /// `doubled` commits, on `parent`, the top-level tree of `parent` with the entry `name` replaced by the
+    /// `git mktree` lines `entries`.
+    fn doubled(&self, parent: &str, name: &str, entries: &str, twice: &str) -> String {
+        let kept: String = self
+            .git(&["ls-tree", parent])
+            .lines()
+            .filter(|line| line.split_once('\t').map(|(_, path)| path) != Some(name))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let tree = self.git_stdin(&["mktree"], &format!("{kept}{entries}"));
+        let head = self.git(&["commit-tree", &tree, "-p", parent, "-m", "one path twice"]);
+        let listed = self.git(&["ls-tree", &head, "--", twice]);
+        assert_eq!(listed.lines().count(), 2, "{listed}");
+        head
+    }
+}
+
+/// A listing that names one path twice with two modes is refused. The scan asks for the test directory by
+/// name, and for `src` as the directory above a deleted file when `src` is a link and a submodule. The third
+/// row checks the scan's exit status and output for `src` listed as both a tree and a link: exit 0 with
+/// both streams empty.
+#[test]
+fn a_path_listed_twice_with_two_modes_exits_two_where_a_listing_names_it() {
+    let repo = Repo::new("two-entries");
+    let link = repo.git_stdin(&["hash-object", "-w", "--stdin"], "elsewhere");
+    let cases = repo.change(&[(&format!("{CASES}/c.rs"), "fn c() {}\n")]);
+    let held = repo.git(&["rev-parse", &format!("{cases}:{CASES}")]);
+    let tools = repo.git_stdin(
+        &["mktree"],
+        &format!("120000 blob {link}\ttests\n040000 tree {held}\ttests\n"),
+    );
+    let crates = repo.git_stdin(
+        &["mktree"],
+        &format!("040000 tree {tools}\tkestrike-tools\n"),
+    );
+    let head = repo.doubled(
+        &cases,
+        "crates",
+        &format!("040000 tree {crates}\tcrates\n"),
+        CASES,
+    );
+    repo.refused(
+        &cases,
+        &head,
+        &format!(
+            "git ls-tree at {}: the path '{CASES}' has two entries",
+            &head[..12]
+        ),
+    );
+    let head = repo.doubled(
+        &repo.base,
+        "src",
+        &format!(
+            "120000 blob {link}\tsrc\n160000 commit {}\tsrc\n",
+            repo.base
+        ),
+        "src",
+    );
+    repo.refused(
+        &repo.base,
+        &head,
+        &format!(
+            "git ls-tree at {}: the path 'src' has two entries",
+            &head[..12]
+        ),
+    );
+    let src = repo.git(&["rev-parse", &format!("{}:src", repo.base)]);
+    let head = repo.doubled(
+        &repo.base,
+        "src",
+        &format!("120000 blob {link}\tsrc\n040000 tree {src}\tsrc\n"),
+        "src",
+    );
+    let run = repo.scan_head(&head);
+    assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
+    assert_eq!(run.stderr, "");
 }
