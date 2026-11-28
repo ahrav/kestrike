@@ -29,6 +29,7 @@ mod plants;
 mod proofs;
 mod repository;
 mod scores;
+mod seeded;
 mod signals;
 mod standins;
 mod store;
