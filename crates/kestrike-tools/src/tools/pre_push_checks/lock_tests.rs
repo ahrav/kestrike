@@ -46,6 +46,24 @@ fn running() -> Result<(), u8> {
     Ok(())
 }
 
+fn unlock(file: &File) {
+    // SAFETY: `flock` takes an open descriptor and integer flags and touches no memory of the caller.
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+}
+
+fn freed(file: &File) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if attempt(file).ok() == Some(true) {
+            return true;
+        }
+        if start.elapsed() >= Duration::from_secs(10) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn a_lock_that_stays_held_is_refused_once_the_limit_has_passed_since_the_first_attempt() {
     let scratch = Scratch::new("lock-limit");
@@ -86,7 +104,12 @@ fn a_lock_released_during_the_wait_is_taken_and_held_until_its_descriptor_closes
     let waiter = open(&path).expect("the lock file opens again");
     let mut clock = Stepped::new(|index| {
         if index == 3 {
-            drop(held.borrow_mut().take());
+            unlock(
+                &held
+                    .borrow_mut()
+                    .take()
+                    .expect("the holder is released once"),
+            );
         }
     });
     let limit = Duration::from_secs(600);
@@ -100,8 +123,8 @@ fn a_lock_released_during_the_wait_is_taken_and_held_until_its_descriptor_closes
         "the waiter holds the lock"
     );
     drop(waiter);
-    assert_eq!(attempt(&third).ok(), Some(true), "the close released it");
-    drop(third);
+    assert!(freed(&third), "the close released it");
+    unlock(&third);
     let free = open(&path).expect("the lock file opens");
     let mut clock = Stepped::new(|_| {});
     let noted = Cell::new(false);

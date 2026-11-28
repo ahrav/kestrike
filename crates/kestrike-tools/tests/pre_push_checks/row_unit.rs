@@ -70,6 +70,12 @@ fn locked(file: &File) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
+fn released(file: File) -> File {
+    // SAFETY: `flock` takes an open descriptor and integer flags and touches no memory of the caller.
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+    file
+}
+
 fn opened(fx: &Fixture) -> File {
     DirBuilder::new()
         .recursive(true)
@@ -205,7 +211,7 @@ fn a_push_that_waits_for_the_lock_ends_on_a_signal_or_runs_the_row_once_the_lock
         written(&errors)
     );
     assert_eq!(fx.ran(), Vec::<String>::new());
-    drop(lock);
+    drop(released(lock));
     let run = finished(tool);
     assert_eq!(run.code, Some(0), "{}", written(&errors));
     assert_eq!(fx.ran(), [HOST_STOP_RUN]);
@@ -263,7 +269,7 @@ fn a_killed_push_frees_the_lock_and_leaves_its_worktree_registered_under_the_che
         locked(&probe),
         "the lock is free while that cargo still runs"
     );
-    drop(probe);
+    drop(released(probe));
     let left = entries(&own(&fx));
     assert_eq!(left.len(), 2, "{left:?}");
     assert!(left[0].starts_with("kestrike-pre-push-"), "{left:?}");
