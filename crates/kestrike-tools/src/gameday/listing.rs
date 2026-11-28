@@ -1,5 +1,5 @@
 //! [`open_dir`] refuses a symbolic link at the last component of its path, and [`entries`] refuses
-//! links, special files, and directories whose relative paths fall outside [`LAYOUT_DIRS`].
+//! links, special files, and directories whose relative paths fall outside `LAYOUT_DIRS`.
 //!
 //! For an entry name, `/proc/self/fd/<descriptor>` anchors the lookup at the open directory.
 
@@ -58,7 +58,7 @@ pub fn open_dir(
 /// empty prefix, when the listing fails; then, for the first refused entry in order,
 /// `<rel> cannot be read: <reason>` when its type cannot be read, `<rel> is a link or a special file`,
 /// or `<rel> is no directory of the layout` when a directory's relative path falls outside
-/// [`LAYOUT_DIRS`].
+/// `LAYOUT_DIRS`.
 pub fn entries(dir: BorrowedFd<'_>, prefix: &Text) -> Result<BTreeMap<Text, bool>, Refusal> {
     let listing = |error: &std::io::Error| {
         let whom = if prefix.is_empty() {

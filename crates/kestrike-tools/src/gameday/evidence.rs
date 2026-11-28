@@ -201,7 +201,9 @@ pub fn load_evidence(
 /// An empty `root` yields `no evidence directory is named`. The first refusal ends processing:
 /// [`open_dir`] and [`entries`], `package.json is missing`, [`read_file`] for `package.json`, then
 /// [`package_of`], [`admit`], [`read_file`] for the remaining files in relative-path order, and
-/// [`load_evidence`].
+/// [`load_evidence`]. A failed close of a file read is the [`ReadError::Closed`] that [`read_file`]
+/// returns, passed on for the caller to word; a failed close of a directory's descriptor goes
+/// unreported.
 pub fn read_evidence(root: &Path, limit: u64, bounds: &FleetBounds) -> Result<Evidence, ReadError> {
     if root.as_os_str().is_empty() {
         return Err(Refusal::new(said!("no evidence directory is named")).into());
