@@ -1,4 +1,5 @@
-//! The module flags path entries by ownership and write-permission bits.
+//! The module flags path entries by ownership and write-permission bits, and opens a regular file once
+//! for its check and its read.
 //!
 //! Ownership checks use the process's real user id, called this user below. A path's lineage is the path
 //! and then each lexical parent, as Python's `pathlib` gives them: repeated slashes and `.` components drop,
@@ -237,6 +238,69 @@ pub fn is_file(path: &Path) -> Result<bool, PathError> {
     Ok(status(path)?.is_some_and(|found| found.is_file()))
 }
 
+/// What [`open_regular`] found at a path.
+#[derive(Debug)]
+pub enum Opened {
+    /// A path absent by [`ignored`], or one that holds a NUL byte.
+    Absent,
+    /// An entry whose target is no regular file: a directory, a FIFO, a socket or a device.
+    Other,
+    /// The regular file the path names, open for reading.
+    File(fs::File),
+}
+
+/// `open_regular` follows symbolic links. [`status`] decides first: a path it reports absent is
+/// [`Opened::Absent`], and an entry it reports as no regular file is [`Opened::Other`] and is not opened.
+/// A path it reports as a regular file is opened, and the descriptor check and the caller's read use
+/// that same open file. The path can change between [`status`] and the open, to a device or a FIFO
+/// included, so `open_regular` returns [`Opened::File`] only when `fstat` identifies the open file as
+/// regular.
+///
+/// # Errors
+///
+/// [`open_regular`] propagates errors from [`status`], the open, or the descriptor's `fstat`, so a file
+/// removed between [`status`] and the open is an error that names the path.
+pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
+    open_regular_with(path, opened)
+}
+
+/// `open_regular_with` is [`open_regular`] with `open` opening a path that [`status`] reports as a
+/// regular file.
+fn open_regular_with(
+    path: &Path,
+    open: impl FnOnce(&Path) -> Result<Opened, PathError>,
+) -> Result<Opened, PathError> {
+    match status(path)? {
+        None => Ok(Opened::Absent),
+        Some(found) if !found.is_file() => Ok(Opened::Other),
+        Some(_) => open(path),
+    }
+}
+
+/// `opened` uses `fstat` to classify the open descriptor. `O_NONBLOCK` makes the open of a FIFO return
+/// at once, and `O_NOCTTY` preserves the process's controlling-terminal state when `path` resolves to a
+/// terminal.
+///
+/// # Errors
+///
+/// The open or the `fstat` fails; the error names `path`.
+fn opened(path: &Path) -> Result<Opened, PathError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .map_err(|error| PathError::new(path, error))?;
+    let status = file
+        .metadata()
+        .map_err(|error| PathError::new(path, error))?;
+    Ok(if status.is_file() {
+        Opened::File(file)
+    } else {
+        Opened::Other
+    })
+}
+
 /// `is_dir` holds when [`status`] names a directory.
 ///
 /// # Errors
@@ -370,3 +434,7 @@ impl fmt::Display for PathError {
 /// The `Display` text holds the path and the I/O error's text, so the error reports no `source`;
 /// [`PathError::error`] gives the I/O error itself.
 impl std::error::Error for PathError {}
+
+#[cfg(test)]
+#[path = "ownership_tests.rs"]
+mod tests;

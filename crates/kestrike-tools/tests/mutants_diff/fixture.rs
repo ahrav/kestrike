@@ -9,15 +9,14 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -51,7 +50,6 @@ const HOST_PROGRAMS: [&str; 4] = ["sh", "setsid", "sha256sum", "git"];
 
 pub type Env = Vec<(OsString, OsString)>;
 
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
 static HOST: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 /// `on_path` returns the first executable file named `program` in a `PATH` entry.
@@ -120,6 +118,11 @@ pub struct Plan {
     pub hold: bool,
     pub stray: bool,
     pub drop_git: bool,
+    /// The tool's run leaves two directories of mode 0500 in the worktree, each holding a file, among
+    /// other entries.
+    pub locked: bool,
+    /// The tool's run leaves a link at the run directory's `report.json` to the state's `victim`.
+    pub report_link: bool,
     pub no_outcomes: bool,
     pub raw_listing: Option<Vec<u8>>,
     pub raw_outcomes: Option<String>,
@@ -213,6 +216,8 @@ impl Plan {
             (self.hold, "hold"),
             (self.stray, "stray"),
             (self.drop_git, "drop_git"),
+            (self.locked, "locked"),
+            (self.report_link, "report_link"),
             (self.no_outcomes, "no_outcomes"),
         ] {
             if flag {
@@ -487,15 +492,67 @@ fn parse_calls(bytes: &[u8]) -> Vec<Call> {
     calls
 }
 
-/// `start_tool` starts the binary as `kestrike-tools <top> mutants-diff ARGS` in `cwd` with `env`.
-fn start_tool(
-    args: &[OsString],
-    cwd: &Path,
-    env: &Env,
+/// `executable` writes the stand-in at `path` through a child, the one process that holds the file open
+/// for writing. `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and a
+/// child that another test thread forks inherits every descriptor of this process until its own
+/// `execve`, so no descriptor of the stand-in is ever open in this process.
+pub fn executable(path: &Path, text: &str) {
+    let mut writer = Command::new("sh")
+        .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("the stand-in's writer starts");
+    std::io::Write::write_all(
+        &mut writer.stdin.take().expect("the writer's input is a pipe"),
+        text.as_bytes(),
+    )
+    .expect("the stand-in's text reaches the writer");
+    let status = writer.wait().expect("the stand-in's writer is reaped");
+    assert!(status.success(), "the stand-in is written: {status}");
+}
+
+/// `limit_file_size` makes the process `command` starts run with SIGXFSZ at its default action, not
+/// blocked, and a soft file size limit of `bytes`.
+pub fn limit_file_size(command: &mut Command, bytes: u64) {
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, `sigemptyset`,
+    // `sigaddset`, `sigprocmask`, `getrlimit` and `setrlimit`, which are async-signal-safe; it writes only
+    // locals that it initializes first.
+    unsafe {
+        command.pre_exec(move || {
+            libc::signal(libc::SIGXFSZ, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGXFSZ);
+            libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = bytes.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// How [`start_tool`] starts the binary beyond its command line.
+#[derive(Clone, Copy)]
+struct Launch {
     ignore_hangup: bool,
     blocked: bool,
-    state: &Path,
-) -> Runner {
+    file_limit: Option<u64>,
+}
+
+/// `start_tool` starts the binary as `kestrike-tools <top> mutants-diff ARGS` in `cwd` with `env`.
+fn start_tool(args: &[OsString], cwd: &Path, env: &Env, launch: Launch, state: &Path) -> Runner {
+    let Launch {
+        ignore_hangup,
+        blocked,
+        file_limit,
+    } = launch;
     let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut command = Command::new(BINARY);
     command
@@ -531,6 +588,9 @@ fn start_tool(
             Ok(())
         });
     }
+    if let Some(bytes) = file_limit {
+        limit_file_size(&mut command, bytes);
+    }
     let mut child = command.spawn().expect("the tool starts");
     let (stdout, stderr) = (reader(child.stdout.take()), reader(child.stderr.take()));
     Runner {
@@ -554,6 +614,7 @@ pub struct Start<'a> {
     raw: bool,
     ignore_hangup: bool,
     blocked: bool,
+    file_limit: Option<u64>,
 }
 
 impl Start<'_> {
@@ -605,6 +666,12 @@ impl Start<'_> {
         self
     }
 
+    /// `file_limit` starts the tool with a soft file size limit of `bytes` and SIGXFSZ at its default.
+    pub fn file_limit(mut self, bytes: u64) -> Self {
+        self.file_limit = Some(bytes);
+        self
+    }
+
     fn argv(&self) -> Vec<OsString> {
         if self.raw {
             return self.args.clone();
@@ -637,14 +704,12 @@ impl Start<'_> {
         let fixture = self.fixture;
         let cwd = self.cwd.clone().unwrap_or_else(|| fixture.repo.clone());
         let env = self.env.clone().unwrap_or_else(|| fixture.env.clone());
-        start_tool(
-            &self.argv(),
-            &cwd,
-            &env,
-            self.ignore_hangup,
-            self.blocked,
-            &fixture.state,
-        )
+        let launch = Launch {
+            ignore_hangup: self.ignore_hangup,
+            blocked: self.blocked,
+            file_limit: self.file_limit,
+        };
+        start_tool(&self.argv(), &cwd, &env, launch, &fixture.state)
     }
 
     /// `run` starts the tool and waits up to [`RUN_LIMIT`] for it.
@@ -699,7 +764,24 @@ pub struct Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        unlock(&self.state);
         let _ = fs::remove_dir_all(&self.state);
+    }
+}
+
+/// `unlock` gives `dir` and each directory below it mode 0700 before it lists them, so a case that ends
+/// early, a panic included, leaves a tree its owner can remove. It trusts the fixture's own tree: it
+/// follows a link at `dir` itself, and it looks each directory below up again by its path after reading
+/// its type, so it descends into no entry that was a link when listed.
+fn unlock(dir: &Path) {
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            unlock(&entry.path());
+        }
     }
 }
 
@@ -730,20 +812,13 @@ impl Fixture {
     /// whose head adds `two`, an untracked `Cargo.lock`, and the `cargo` stand-in.
     pub fn new(name: &str) -> Self {
         let real_git = prepare_host();
-        let count = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let state = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("mutants-diff")
-            .join(format!("{name}-{}-{count}", std::process::id()));
-        let _ = fs::remove_dir_all(&state);
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&state)
+        let parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mutants-diff");
+        fs::create_dir_all(&parent).expect("the scratch parent is made");
+        let prefix = format!("{name}-");
+        let state = kestrike_tools::temp_dir::make_temp_dir(&prefix, &parent)
             .expect("the state directory is made");
         let cargo = state.join("cargo");
-        fs::write(&cargo, CARGO).expect("the cargo stand-in is written");
-        fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
-            .expect("the stand-in is executable");
+        executable(&cargo, CARGO);
         let repo = state.join("repo");
         fs::create_dir(&repo).expect("the repository directory is made");
         let mut env: Env = std::env::vars_os()
@@ -854,6 +929,7 @@ impl Fixture {
             raw: false,
             ignore_hangup: false,
             blocked: false,
+            file_limit: None,
         }
     }
 
@@ -866,10 +942,7 @@ impl Fixture {
                 .real_git
                 .to_str()
                 .expect("the real git's path is UTF-8");
-            fs::write(bin.join("git"), GIT.replace("__REAL__", real))
-                .expect("the wrapper is written");
-            fs::set_permissions(bin.join("git"), fs::Permissions::from_mode(0o755))
-                .expect("it is executable");
+            executable(&bin.join("git"), &GIT.replace("__REAL__", real));
         }
         let path = self
             .env

@@ -37,7 +37,10 @@ The run judges the head commit, in this order:
    words of `--tests=ARGS` in their place. It sets
    `CARGO_PROFILE_DEV_OPT_LEVEL=1`, `CARGO_PROFILE_DEV_DEBUG=line-tables-only`,
    `RUSTUP_TOOLCHAIN` to the `STABLE` pin of
-   `.github/workflows/agent-checks.yml`, `CARGO_TARGET_DIR` and
+   `.github/workflows/agent-checks.yml` (the one line that holds, after
+   spaces or tabs alone, `STABLE: "` and one or more characters up to the
+   next `"` of that line, which may be followed by any text; `\n`, `\r\n`
+   and `\r` end a line), `CARGO_TARGET_DIR` and
    `CARGO_BUILD_BUILD_DIR` to `<artifacts>/build`, and `PATH`'s entries,
    `CARGO_HOME` and `RUSTUP_HOME` to their values resolved against the
    invoking directory. It refuses an inherited
@@ -76,15 +79,21 @@ not-run. The counts are recomputed from those outcomes, and listed equals
 caught plus missed plus timeout plus unviable plus not-run. A run with listed
 mutants is complete only when the tool exited 0, 2 or 3, the baseline passed
 and the set of judged mutants equals the listed set. A listing or outcome
-file that repeats a mutant, an outcome file with a phase time that is not a
-finite nonnegative number, a worktree configuration whose
+file that repeats a mutant, an outcome file whose `outcomes` is no array or
+that names a mutant by a value other than a string, an outcome file with a
+phase time that is not a finite nonnegative number, a worktree configuration whose
 `additional_cargo_args` the runner cannot read, and a worktree that remains
-after the removal make the run incomplete.
+after the removal make the run incomplete. When `git worktree remove` fails,
+the runner removes the worktree's directory itself, going past each entry it
+cannot remove and down to 512 levels below the worktree; a directory deeper
+than that stays with everything under it, and so does the worktree.
 
-`report.json` holds `base` and `head` (full commit ids), `diff_sha256` (the
-file the tool read), `tool_version`, `config_sha256` (the worktree's
-`.cargo/mutants.toml`, or null when it has none), `tests` (the arguments the
-runner passes after the tool's first `--`; the worktree configuration's own
+`report.json` holds `base` and `head` (full commit ids), `diff_sha256` (of
+the bytes the runner wrote to `diff.patch`), `tool_version`, `config_sha256`
+(the worktree's `.cargo/mutants.toml`, or null when it has none), `tests` (the
+words the runner passes after the tool's first `--`, as the shell split gave
+them: a byte of `--tests=ARGS` that is no UTF-8 is recorded as the escape
+`\udcXX` and passed to Cargo as that byte; the worktree configuration's own
 test settings, which `config_sha256` identifies, also apply), `machine` (the
 architecture part of the `host:` triple that `cargo -vV` prints),
 `debug_assertions` (the value of the last `profile.dev.debug-assertions=`
@@ -122,8 +131,19 @@ its terminal. The runner records the first handled signal and acts on it
 between steps and while it waits for a child; a signal that arrives while a
 process is being started is acted on once that process has started, and a
 later signal changes nothing. The runner then stops the supervised process
-group (the worktree add, the listing or the tool) with SIGTERM, then SIGKILL, removes the worktree, writes an incomplete
-report and exits 1. Each supervised process receives SIGTERM when the runner
+group (the worktree add, the listing or the tool), removes the worktree,
+writes an incomplete report and exits 1. A stop sends SIGTERM to the group,
+waits up to 10 s for the leader's exit, sends SIGKILL and waits up to 10 s
+again while the leader runs, sends a closing SIGKILL to the group, and then
+waits up to 10 s to reap the leader; each wait reads the leader's state at
+pauses of at most 20 ms. A leader that still runs after the reap's 10 s stays
+unreaped, and the run writes an incomplete report and exits 1, with the
+interruption as its reason when a signal started the stop and otherwise
+`the child outlived its stop`. A group whose leader exited by itself gets the
+first SIGTERM and the closing SIGKILL.
+The runner reads the leader's state from `/proc/<pid>/stat` and reaps the
+leader only after the group's last signal, so each signal reaches the group
+the leader still names. Each supervised process receives SIGTERM when the runner
 dies, so a runner stopped by SIGKILL also stops the tool; its worktree then
 stays in the run directory and registered until `git worktree remove --force
 --force` runs on that `worktree-*` path. Every other exit removes the
@@ -141,7 +161,8 @@ outcome file, a judged set that differs from the listed set, a worktree that
 remains, an unexpected runner error such as a run directory that refuses an
 output file, or an interruption. When the artifacts directory refuses the
 report, the runner prints that error in its place and exits 1. Exit 2 is
-rejected input and writes no report: malformed arguments; a set `GIT_DIR`,
+rejected input and writes no report: malformed arguments; a start with
+SIGCHLD ignored, under which no child's exit can be read; a set `GIT_DIR`,
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR` or
 `GIT_OBJECT_DIRECTORY`; an inherited variable that step 4 refuses; a
 directory outside a Git checkout; an unknown revision or no merge base with
@@ -154,4 +175,12 @@ regular file the invoking user owns or is held by another run; or more listed
 mutants than `--max-mutants`. Only the last of these reaches the worktree, and
 none starts a build. The limit refusal takes precedence over a worktree that
 remains: it exits 2, writes no report and names that worktree on standard
-error.
+error. Exit 120 replaces any other exit code when a write of a run's lines or
+of a refusal to standard output or standard error returns an error, a full
+device or a write past the file size limit for one; it does not say whether a
+report was written. Such a write to a stream that is closed or open read-only
+fails with `EBADF`, which the runner does not detect: the line is lost and
+the exit code stays. `--help` exits 0 and writes no report; when its write to
+standard output fails, one open read-only included, the runner tries to print
+`mutants-diff: standard output: ERROR` on standard error and exits 120. A
+closed standard output is not detected there either.

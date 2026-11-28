@@ -205,6 +205,31 @@ fn variable(name: &str) -> Result<String, String> {
     std::env::var(name).map_err(|error| format!("{name}: {error}"))
 }
 
+/// `write` writes `text` to a new file beside `path`, under the first free name of `.NAME.PID-N`, and
+/// renames it over `path`, so an entry at `path` that is no regular file, a link included, is replaced or
+/// refused and never written through.
 fn write(path: &Path, text: &str) -> Result<(), String> {
-    fs::write(path, text).map_err(|error| format!("{}: {error}", path.display()))
+    let failed = |at: &Path, error: std::io::Error| format!("{}: {error}", at.display());
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let parent = path.parent().unwrap_or(Path::new("."));
+    for at in 0usize.. {
+        let staged = parent.join(format!(".{name}.{}-{at}", std::process::id()));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(failed(&staged, error)),
+        };
+        let written = std::io::Write::write_all(&mut file, text.as_bytes())
+            .map_err(|error| failed(&staged, error))
+            .and_then(|()| fs::rename(&staged, path).map_err(|error| failed(path, error)));
+        if written.is_err() {
+            let _ = fs::remove_file(&staged);
+        }
+        return written;
+    }
+    unreachable!("an unbounded range yields a name")
 }

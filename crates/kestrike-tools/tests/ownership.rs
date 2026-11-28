@@ -382,3 +382,67 @@ fn a_path_with_a_nul_byte_is_no_file_directory_or_link() {
     assert!(!is_file(path).expect("no error"));
     assert!(!is_dir(path).expect("no error"));
 }
+
+/// `open_regular` returns the file of a regular file or of a link to one, read through that open; `Other`
+/// for a directory, a FIFO, a directory of mode 0000 and, where procfs gives the socket a short name to
+/// bind, a socket; and `Absent` for a missing path or a dangling link.
+#[test]
+fn open_regular_checks_the_opened_entry_and_reads_through_it() {
+    use kestrike_tools::ownership::{Opened, open_regular};
+    use std::io::Read;
+    let layout = Layout::new("open-regular");
+    let root = &layout.at("opened");
+    fs::create_dir(root).expect("the directory is made");
+    fs::write(root.join("file"), "bytes").expect("the file is written");
+    symlink(root.join("file"), root.join("link")).expect("the link is made");
+    symlink(root.join("gone"), root.join("dangling")).expect("the link is made");
+    fs::create_dir(root.join("dir")).expect("the directory is made");
+    let fifo = std::ffi::CString::new(root.join("fifo").into_os_string().into_encoded_bytes())
+        .expect("no NUL");
+    // SAFETY: `mkfifo` reads the NUL-terminated path, which outlives the call.
+    assert_eq!(
+        unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) },
+        0,
+        "the FIFO is made"
+    );
+    for name in ["file", "link"] {
+        let Ok(Opened::File(mut file)) = open_regular(&root.join(name)) else {
+            panic!("{name} opens as a regular file");
+        };
+        let mut read = String::new();
+        file.read_to_string(&mut read).expect("the file reads");
+        assert_eq!(read, "bytes", "{name}");
+    }
+    let mut others = vec!["dir", "fifo", "closed"];
+    #[cfg(target_os = "linux")]
+    let _socket = {
+        let directory = fs::File::open(root).expect("the directory opens");
+        let short = format!(
+            "/proc/self/fd/{}/socket",
+            std::os::fd::AsRawFd::as_raw_fd(&directory)
+        );
+        others.push("socket");
+        std::os::unix::net::UnixListener::bind(short).expect("the socket binds")
+    };
+    fs::create_dir(root.join("closed")).expect("the directory is made");
+    fs::set_permissions(root.join("closed"), fs::Permissions::from_mode(0o000))
+        .expect("the mode is set");
+    let found: Vec<_> = others
+        .into_iter()
+        .map(|name| (name, open_regular(&root.join(name))))
+        .collect();
+    fs::set_permissions(root.join("closed"), fs::Permissions::from_mode(0o700))
+        .expect("the mode is restored");
+    for (name, opened) in found {
+        assert!(
+            matches!(opened, Ok(Opened::Other)),
+            "{name} is no regular file"
+        );
+    }
+    for name in ["missing", "dangling"] {
+        assert!(
+            matches!(open_regular(&root.join(name)), Ok(Opened::Absent)),
+            "{name} is absent"
+        );
+    }
+}
