@@ -10,6 +10,7 @@ pub mod environ;
 pub mod fixtures;
 #[cfg(target_os = "linux")]
 pub mod gameday;
+pub mod genmc;
 pub mod git;
 pub mod json;
 pub mod orderings;
