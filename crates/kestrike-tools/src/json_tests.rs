@@ -275,10 +275,11 @@ fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
             .map_err(|error| error.to_string());
         assert_eq!(found, expected.map_err(str::to_owned), "{text}");
     }
-    let Err(UniqueError::Repeated(name)) = parse_unique(r#"{"k": 1, "k": 1}"#) else {
+    let Err(UniqueError::Repeated(name, keys)) = parse_unique(r#"{"k": 1, "j": 2, "k": 1}"#) else {
         panic!("the repeat is refused");
     };
     assert_eq!(name, Text::from("k"));
+    assert_eq!(keys, ["k", "j", "k"].map(Text::from));
     assert_eq!(
         parse(r#"{"a": 1, "a": 2}"#).map(|value| text(&value)),
         Ok(r#"{"a":2}"#.to_owned()),

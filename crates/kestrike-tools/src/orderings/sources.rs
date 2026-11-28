@@ -41,7 +41,7 @@ use regex::Regex;
 
 use super::sites::{MACRO, call_end, line_of, opener};
 use crate::classes::{SPACE, WORD, bounded_iter, captures_bounded, compiled, is_word};
-use crate::genmc::{INCLUDED, is_file, no_nul, package_sources, read_text, under_target, walk};
+use crate::genmc::{INCLUDED, is_file, no_nul, read_text, under_target, walk};
 use crate::json::{Text, Value};
 use crate::paths::{normalize, resolve};
 use crate::production_text::blanked;
@@ -57,6 +57,10 @@ const SCOPE_FILE: &str = "scope file";
 /// A reader of repository paths: the text at a path relative to the checkout's top, or the error of
 /// reading it, [`io::ErrorKind::NotFound`] for a file that does not exist.
 pub type Reader<'r> = &'r dyn Fn(&str) -> io::Result<String>;
+
+/// A walk of the kernel package: the sources at a package's path, as
+/// [`package_sources`](crate::genmc::package_sources) lists them, or the error that stops the walk.
+pub type Walk<'w> = &'w dyn Fn(&Path) -> io::Result<Vec<PathBuf>>;
 
 /// One refusal of the catalog's check, a `scope file` refusal with its sentence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -145,7 +149,7 @@ fn name_suffix(path: &str) -> &str {
     }
 }
 
-fn stem(path: &str) -> &str {
+pub(super) fn stem(path: &str) -> &str {
     let name = name(path);
     &name[..name.len() - name_suffix(path).len()]
 }
@@ -955,8 +959,8 @@ impl Classifier<'_> {
     }
 }
 
-/// The files outside the kernel package at `package` that it includes by `#[path]`, as [`package_sources`]
-/// lists them, classified by the declarations that load each one, relative to the checkout `root`.
+/// The files outside the kernel package at `package` that it includes by `#[path]`, as `walk` lists
+/// them, classified by the declarations that load each one, relative to the checkout `root`.
 ///
 /// The package is walked on disk under `root`. The path holders are the crate sources under `tree`
 /// whose text holds a path attribute; each holder and each module file is read through `read`. A source
@@ -968,7 +972,7 @@ impl Classifier<'_> {
 ///
 /// # Errors
 ///
-/// `scope_files` returns an error of [`package_sources`], of the walk of the crate's sources, of [`resolve`] for a
+/// `scope_files` returns an error of `walk`, of the walk of the crate's sources, of [`resolve`] for a
 /// source, the package or `root`, an error of kind [`io::ErrorKind::InvalidData`] for a path that is no
 /// UTF-8, and an error for an included file at the top of the checkout whose standing depends on a
 /// sibling named after the top's own empty name.
@@ -977,6 +981,7 @@ pub fn scope_files(
     root: &Path,
     read: Reader<'_>,
     tree: &Path,
+    walk: Walk<'_>,
 ) -> io::Result<Scope> {
     let mut classifier = Classifier {
         read,
@@ -995,7 +1000,7 @@ pub fn scope_files(
             classifier.holders.push(holder);
         }
     }
-    for path in package_sources(package)? {
+    for path in walk(package)? {
         let resolved = resolve(&path)?;
         if resolved.starts_with(resolve(package)?) {
             continue;

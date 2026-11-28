@@ -299,24 +299,25 @@ pub fn parse(text: &str) -> Result<Value, Error> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
-            StrictError::Repeated(_) | StrictError::Number(_) => {
+            StrictError::Repeated(..) | StrictError::Number(_) => {
                 unreachable!("a read that keeps repeated keys and every number refuses neither")
             }
         })
 }
 
-/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`.
+/// A refusal of [`parse_unique`]: an error of [`parse`], or an object that repeats the member `name`,
+/// with that object's keys in the order the text spells them, each repeat included.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UniqueError {
     Syntax(Error),
-    Repeated(Text),
+    Repeated(Text, Vec<Text>),
 }
 
 impl fmt::Display for UniqueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(name) => write!(f, "repeated member {name}"),
+            Self::Repeated(name, _) => write!(f, "repeated member {name}"),
         }
     }
 }
@@ -340,7 +341,7 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => UniqueError::Syntax(error),
-            StrictError::Repeated(name) => UniqueError::Repeated(name),
+            StrictError::Repeated(name, keys) => UniqueError::Repeated(name, keys),
             StrictError::Number(_) => unreachable!("a read that keeps every number refuses none"),
         })
 }
@@ -357,12 +358,12 @@ pub(crate) enum Unnumber {
     Digits(String),
 }
 
-/// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, or a
-/// number strict JSON refuses.
+/// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, with
+/// that object's keys as [`UniqueError::Repeated`] holds them, or a number strict JSON refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StrictError {
     Syntax(Error),
-    Repeated(Text),
+    Repeated(Text, Vec<Text>),
     Number(Unnumber),
 }
 
@@ -373,7 +374,7 @@ impl fmt::Display for StrictError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(_) => f.write_str("an object repeats a key"),
+            Self::Repeated(..) => f.write_str("an object repeats a key"),
             Self::Number(Unnumber::Constant(token)) => {
                 write!(f, "the constant {token} is no number")
             }
@@ -533,6 +534,7 @@ impl<'a> Reader<'a> {
             return Ok(Value::Object(object));
         }
         let mut repeated = None;
+        let mut keys = Vec::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -551,11 +553,14 @@ impl<'a> Reader<'a> {
             {
                 repeated = Some(key.clone());
             }
+            if self.mode != Mode::Keep {
+                keys.push(key.clone());
+            }
             object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
-                    return Err(StrictError::Repeated(name));
+                    return Err(StrictError::Repeated(name, keys));
                 }
                 return Ok(Value::Object(object));
             }
