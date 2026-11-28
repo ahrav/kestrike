@@ -178,6 +178,17 @@ fn stand_in(dir: &Path, script: &str) -> crate::environ::Environ {
     vec![(OsString::from("PATH"), dir.as_os_str().to_os_string())]
 }
 
+/// `with_tools` puts `/usr/bin` and `/bin` behind the stand-in's directory on the `PATH` of `env`, where
+/// the stand-in's script finds `touch` and `sleep`.
+fn with_tools(mut env: crate::environ::Environ) -> crate::environ::Environ {
+    let mut path = crate::environ::get(&env, "PATH")
+        .expect("the stand-in's `PATH`")
+        .clone();
+    path.push(":/usr/bin:/bin");
+    crate::environ::set(&mut env, "PATH", path);
+    env
+}
+
 /// An answer whose bytes are no UTF-8 is no answer, even inside a JSON string of the right shape; the
 /// reason is the last line of the error output.
 #[test]
@@ -201,14 +212,16 @@ fn an_answer_that_is_no_utf_8_is_no_answer() {
 }
 
 /// A signal recorded before the question starts no `python3`, and the caller reads the record after.
+/// The stand-in leaves a marker each time it starts, which the same question shows first with no signal
+/// recorded.
 #[test]
 fn a_signal_recorded_before_the_question_starts_no_python3() {
     let scratch = Scratch::new("question-signal");
     let marker = scratch.0.join("ran");
-    let env = stand_in(
+    let env = with_tools(stand_in(
         &scratch.0,
         &format!("#!/bin/sh\ntouch '{}'\necho true\n", marker.display()),
-    );
+    ));
     let helper = scratch.0.join("reproduce-test.py");
     let staged = Staged {
         env: &env,
@@ -217,6 +230,12 @@ fn a_signal_recorded_before_the_question_starts_no_python3() {
         source: b"",
     };
     let interrupt = Interrupt::new();
+    assert_eq!(
+        counts(&staged, 0, &Text::from("line"), &interrupt),
+        Ok(true)
+    );
+    assert!(marker.exists(), "a question that starts leaves the marker");
+    std::fs::remove_file(&marker).expect("the marker is removed");
     interrupt.record(libc::SIGTERM);
     assert_eq!(
         counts(&staged, 0, &Text::from("line"), &interrupt),
@@ -226,14 +245,15 @@ fn a_signal_recorded_before_the_question_starts_no_python3() {
 }
 
 /// The wait ends when the question exits while a descendant it left holds standard error open and
-/// writes to it; an accepted answer is returned without reading that stream.
+/// writes to it; an accepted answer is returned without reading that stream. The stand-in answers only
+/// where it finds `sleep`, so an answer shows that the descendant sleeps with the streams open.
 #[test]
 fn a_descendant_holding_the_question_s_streams_does_not_hold_the_answer() {
     let scratch = Scratch::new("question-descendant");
-    let env = stand_in(
+    let env = with_tools(stand_in(
         &scratch.0,
-        "#!/bin/sh\n(sleep 30; echo late >&2) &\necho true\n",
-    );
+        "#!/bin/sh\nsleep 0 || exit 1\n(sleep 30; echo late >&2) &\necho true\n",
+    ));
     let helper = scratch.0.join("reproduce-test.py");
     let staged = Staged {
         env: &env,
