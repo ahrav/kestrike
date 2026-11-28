@@ -180,6 +180,10 @@ fn the_ignore_pattern_matches_an_ignore_attribute_and_no_longer_word() {
         found("#[cfg_attr(x, xignore, ignore)]"),
         ["#[cfg_attr(x, xignore, ignore)]"]
     );
+    assert_eq!(
+        found("#[cfg_attr(ignore)]\n#[cfg_attr(ignore, x)]\n#[cfg_attr(ignorex)]"),
+        ["#[cfg_attr(ignore)]", "#[cfg_attr(ignore, x)]"]
+    );
 }
 
 #[test]

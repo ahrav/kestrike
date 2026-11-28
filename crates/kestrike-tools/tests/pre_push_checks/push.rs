@@ -536,9 +536,15 @@ pub fn process_id(path: &Path) -> libc::pid_t {
 fn subreaper() {
     static SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     SET.get_or_init(|| {
-        // SAFETY: `prctl` with `PR_SET_CHILD_SUBREAPER` reads its integer arguments alone.
-        let status = unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
-        assert_eq!(status, 0, "{}", io::Error::last_os_error());
+        #[cfg(target_os = "linux")]
+        {
+            let (on, unused): (libc::c_ulong, libc::c_ulong) = (1, 0);
+            // SAFETY: `prctl` with `PR_SET_CHILD_SUBREAPER` reads its four variadic operands as
+            // `unsigned long` values, which these are, and touches no memory of the caller.
+            let status =
+                unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, on, unused, unused, unused) };
+            assert_eq!(status, 0, "{}", io::Error::last_os_error());
+        }
     });
 }
 

@@ -42,6 +42,7 @@ fn a_deletion_runs_no_check() {
     let deletion = format!("(delete) {ZERO} refs/heads/gone {}\n", "1".repeat(40));
     let run = finished(unnamed(&fx, &deletion));
     assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
     assert!(fx.ran().is_empty());
 }
 

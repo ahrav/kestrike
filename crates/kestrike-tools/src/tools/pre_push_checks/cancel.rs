@@ -137,8 +137,8 @@ pub(super) enum Unwaited {
     /// On a recorded signal, the SIGKILL or the reap failed, so the check's group may still run and its
     /// leader may stand unreaped; the fields are the exit code and the error.
     Unstopped(u8, io::Error),
-    /// Polling the check failed. With `WNOHANG`, `waitpid` fails with `ECHILD` alone: the check is no
-    /// longer this process's child and its process id may name another process, so `wait` signals
+    /// The `waitid` probe of the check or the final reap failed. The probe fails where the check is no
+    /// longer this process's child, and then its process id may name another process, so `wait` signals
     /// neither the leader nor its group.
     Failed(io::Error),
 }

@@ -55,8 +55,9 @@ enum Ended {
     Unstopped(u8, String),
     /// A failed write to standard error; the field is the exit code.
     Stream(u8),
-    /// `git worktree add` failed: `pre-push: <error>` is printed once the worktree is removed, and the exit
-    /// is 2.
+    /// `git worktree add` failed: once the worktree is removed, an add that exited nonzero prints
+    /// `pre-push: <error>` and exits 2, and an add that could not start or be waited on prints
+    /// `pre-push-checks: <error>` and exits 1.
     Git(GitError),
     /// A check could not be started or waited on: `pre-push-checks: <message>` is printed once the worktree
     /// is removed, and the exit is 1.

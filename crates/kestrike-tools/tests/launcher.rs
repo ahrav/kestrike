@@ -1260,14 +1260,8 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     assert_eq!(tree.take_log(), Vec::<String>::new());
 }
 
-/// A successful call prints nothing of its own: the binary's standard output, standard error and exit
-/// code come back, the binary reads the caller's standard input, runs in the caller's directory with the
-/// top level's canonical path and the caller's arguments, and sees the caller's environment unchanged
-/// apart from the variables bash sets. The rustup calls see neither the caller's `RUSTUP_TOOLCHAIN` nor
-/// its `RUSTUP_AUTO_INSTALL`, and the build sees the cleared variables removed. A launcher started
-/// through a link to its file, a chain of links with a relative target, a link to the top level, or a
-/// relative path with `CDPATH` set passes the same canonical path. A shell function named `rustup` in the
-/// caller's environment is passed over for the `rustup` on `PATH`.
+/// The launcher's preparation reads no byte of the caller's standard input, so the binary receives every
+/// byte the caller wrote, such as Git's ref lines.
 #[test]
 fn the_preparation_reads_no_byte_of_the_binary_s_standard_input() {
     let tree = Tree::new(workflow_text("\n").as_bytes());
@@ -1288,6 +1282,14 @@ fn the_preparation_reads_no_byte_of_the_binary_s_standard_input() {
     assert_eq!(stdin, input);
 }
 
+/// A successful call prints nothing of its own: the binary's standard output, standard error and exit
+/// code come back, the binary reads the caller's standard input, runs in the caller's directory with the
+/// top level's canonical path and the caller's arguments, and sees the caller's environment unchanged
+/// apart from the variables bash sets. The rustup calls see neither the caller's `RUSTUP_TOOLCHAIN` nor
+/// its `RUSTUP_AUTO_INSTALL`, and the build sees the cleared variables removed. A launcher started
+/// through a link to its file, a chain of links with a relative target, a link to the top level, or a
+/// relative path with `CDPATH` set passes the same canonical path. A shell function named `rustup` in the
+/// caller's environment is passed over for the `rustup` on `PATH`.
 #[test]
 fn a_successful_call_passes_the_caller_through() {
     let tree = Tree::new(workflow_text("\n").as_bytes());

@@ -1575,6 +1575,12 @@ the tool prints `pre-push: could not remove worktree <tree>: <reason>`, and
 `git worktree unlock` and `git worktree prune` clear the entry. A line to
 standard error waits while the stream cannot take it, and a recorded signal
 ends that wait with `128 + n`.
+A removal that Git refuses prints the same line, and the checks' results
+decide the exit. A check, or `git worktree add` and what it starts, that
+reads the terminal or changes its modes stops by SIGTTIN or SIGTTOU in its
+background group, and the tool waits for it. SIGKILL cannot be caught: a
+SIGKILL to Git's process group ends the tool, while the running check or add
+runs on in its own group and its worktree stays registered.
 
 No handler covers a signal that never reaches the tool. Git starts the hook
 in Git's own process group and signals no group. At a terminal, the
