@@ -436,3 +436,42 @@ fn str_and_truth_follow_python() {
         assert_eq!(truthy(&value), *truth, "bool(json.loads({json:?}))");
     }
 }
+
+#[test]
+fn format_g_writes_six_significant_digits_as_python_formats_g() {
+    #[rustfmt::skip]
+    let rows: &[(&str, f64, &str)] = &[
+        ("format(0.0, 'g')", f64::from_bits(0x0000000000000000), "0"),
+        ("format(-0.0, 'g')", f64::from_bits(0x8000000000000000), "-0"),
+        ("format(900.0, 'g')", f64::from_bits(0x408c200000000000), "900"),
+        ("format(1295.0, 'g')", f64::from_bits(0x40943c0000000000), "1295"),
+        ("format(3255.0, 'g')", f64::from_bits(0x40a96e0000000000), "3255"),
+        ("format(13000.0, 'g')", f64::from_bits(0x40c9640000000000), "13000"),
+        ("format(1295.5, 'g')", f64::from_bits(0x40943e0000000000), "1295.5"),
+        ("format(820.25, 'g')", f64::from_bits(0x4089a20000000000), "820.25"),
+        ("format(123.456789, 'g')", f64::from_bits(0x405edd3c07ee0b0b), "123.457"),
+        ("format(3.0000005, 'g')", f64::from_bits(0x40080000431bde83), "3"),
+        ("format(0.1, 'g')", f64::from_bits(0x3fb999999999999a), "0.1"),
+        ("format(-2.5, 'g')", f64::from_bits(0xc004000000000000), "-2.5"),
+        ("format(999999.0, 'g')", f64::from_bits(0x412e847e00000000), "999999"),
+        ("format(999999.5, 'g')", f64::from_bits(0x412e847f00000000), "1e+06"),
+        ("format(1000000.0, 'g')", f64::from_bits(0x412e848000000000), "1e+06"),
+        ("format(123456.5, 'g')", f64::from_bits(0x40fe240800000000), "123456"),
+        ("format(123457.5, 'g')", f64::from_bits(0x40fe241800000000), "123458"),
+        ("format(1234565.0, 'g')", f64::from_bits(0x4132d68500000000), "1.23456e+06"),
+        ("format(1e+16, 'g')", f64::from_bits(0x4341c37937e08000), "1e+16"),
+        ("format(1e+300, 'g')", f64::from_bits(0x7e37e43c8800759c), "1e+300"),
+        ("format(1.7976931348623157e+308, 'g')", f64::from_bits(0x7fefffffffffffff), "1.79769e+308"),
+        ("format(0.0001, 'g')", f64::from_bits(0x3f1a36e2eb1c432d), "0.0001"),
+        ("format(9.9999995e-05, 'g')", f64::from_bits(0x3f1a36e2d51ec34b), "0.0001"),
+        ("format(1e-05, 'g')", f64::from_bits(0x3ee4f8b588e368f1), "1e-05"),
+        ("format(1.5000000000000002e-05, 'g')", f64::from_bits(0x3eef75104d551d6a), "1.5e-05"),
+        ("format(5e-324, 'g')", f64::from_bits(0x0000000000000001), "4.94066e-324"),
+        ("format(inf, 'g')", f64::INFINITY, "inf"),
+        ("format(-inf, 'g')", f64::NEG_INFINITY, "-inf"),
+        ("format(nan, 'g')", f64::NAN, "nan"),
+    ];
+    for &(call, value, expected) in rows {
+        assert_eq!(python::format_g(value), expected, "{call}");
+    }
+}

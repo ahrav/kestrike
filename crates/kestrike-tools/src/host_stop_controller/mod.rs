@@ -62,6 +62,7 @@ mod restore;
 mod run;
 mod seal;
 
+pub(crate) use context::pure;
 pub use context::{Command, Context};
 pub use controller::{Controller, Preflight};
 pub use fault::{Aborted, Fault, Halt};
