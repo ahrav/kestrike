@@ -1249,8 +1249,11 @@ fn pre_push_reads_past_a_time_limit_of_its_environment_and_passes_on_no_partial_
     }
     Repo::forget(&[repo.path.join("tool.args"), repo.path.join("tool.input")]);
 
-    let limited = checked.replace(" -t 1000000000 ", " ");
-    assert_ne!(limited, checked, "the hook's text holds ` -t 1000000000 `");
+    let limited = checked.replace("limit=(-t 1000000000)", "limit=()");
+    assert_ne!(
+        limited, checked,
+        "the hook's text holds `limit=(-t 1000000000)`"
+    );
     let mut command = repo.hook_with(&limited, TOOL);
     command.env("TMOUT", "1");
     let (done, _) = collect(&mut command, Feed::Held(b"a b c d\n"), RUN_LIMIT)
@@ -1328,7 +1331,8 @@ fn pre_push_fails_when_the_writer_of_the_ref_lines_fails_and_its_reader_exits_0(
 
 /// With the shell option `xtrace` in the hook's environment, a ref name of the input stands in neither
 /// output stream of the hook, and both readers get the lines. The hook's text without its `set +x` is
-/// the arm where the trace holds the name.
+/// the arm where the trace holds the name. The trace also shows the read's own words: with no `TMOUT`
+/// in the environment the read has no time limit, and with one it has the hook's.
 #[test]
 fn pre_push_keeps_the_ref_lines_out_of_a_trace_of_the_hook() {
     let repo = Repo::new("pre-push-trace");
@@ -1338,12 +1342,24 @@ fn pre_push_keeps_the_ref_lines_out_of_a_trace_of_the_hook() {
     assert_ne!(traced, checked, "the hook's text holds `set +x`");
     let name = "refs/heads/a-name-of-this-case";
     let input = format!("{name} {} {name} {}\n", "a".repeat(40), "b".repeat(40));
-    for (hook, shown) in [(traced.as_str(), true), (checked.as_str(), false)] {
+    for (hook, shown, limit) in [
+        (traced.as_str(), true, None),
+        (checked.as_str(), false, None),
+        (checked.as_str(), false, Some("7")),
+    ] {
         let mut command = repo.hook_with(hook, TOOL);
-        command.env("SHELLOPTS", "xtrace");
+        command.env("SHELLOPTS", "xtrace").env_remove("TMOUT");
+        let read = match limit {
+            Some(limit) => {
+                command.env("TMOUT", limit);
+                "+ read -r -d '' -t 1000000000 refs\n"
+            }
+            None => "+ read -r -d '' refs\n",
+        };
         let done = fed(&mut command, &input);
         assert_eq!(done.code, Some(37), "{done}");
         assert!(done.stderr.contains("+ send"), "the hook is traced: {done}");
+        assert!(done.stderr.contains(read), "TMOUT {limit:?}: {done}");
         assert_eq!(done.stderr.contains(name), shown, "{done}");
         assert!(!done.stdout.contains(name), "{done}");
         assert_eq!(bytes(repo.path.join("tool.input")), input.as_bytes());

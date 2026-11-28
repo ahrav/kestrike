@@ -4,14 +4,20 @@ set -euo pipefail
 # The hook holds Git's ref lines in the shell variable `refs`, its only copy of them. `unset` before the
 # read and `export -n` after it keep `refs` a variable of this shell alone, whatever the hook inherits, so
 # each program it starts gets the environment without the lines. `read` takes bytes up to the first NUL
-# byte or the end of standard input. In the C locale it takes each byte as it stands. Its own time limit
-# of a billion seconds replaces a `TMOUT` of the environment, a readonly one included. Exit status 0 means
-# it met a NUL byte, which Git writes in none of its ref lines. Exit status 1 with `refs` set means it
+# byte or the end of standard input. In the C locale it takes each byte as it stands. Where the shell
+# holds a `TMOUT`, which ends a read after that many seconds, the read takes a time limit of its own of a
+# billion seconds, which replaces it, a readonly one included. A read with a limit costs bash further
+# system calls for each byte, so a shell with no `TMOUT` reads with none. Exit status 0 means the read
+# met a NUL byte, which Git writes in none of its ref lines. Exit status 1 with `refs` set means it
 # reached the end of the input with every byte in `refs`, a final line feed or its absence included. A
 # read error leaves `refs` unset.
 unset refs
+limit=()
+if [ -n "${TMOUT-}" ]; then
+  limit=(-t 1000000000)
+fi
 status=0
-LC_ALL=C IFS= read -r -d '' -t 1000000000 refs || status=$?
+LC_ALL=C IFS= read -r -d '' "${limit[@]}" refs || status=$?
 if [ "$status" -eq 0 ]; then
   echo "pre-push: standard input holds a NUL byte" >&2
   exit 2
