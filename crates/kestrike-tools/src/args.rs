@@ -204,6 +204,21 @@ impl<'t> Reader<'t> {
     /// `Parsed::Help` immediately upon accepting help. Missing required options take precedence over
     /// leftover arguments.
     pub fn parse(&self, args: &[OsString]) -> Parsed {
+        match self.parse_known(args) {
+            Parsed::Run((values, extras)) if extras.is_empty() => Parsed::Run(values),
+            Parsed::Run((_, extras)) => self.refuse(unrecognized(&extras)),
+            Parsed::Help(text) => Parsed::Help(text),
+            Parsed::Refused { code, text } => Parsed::Refused { code, text },
+        }
+    }
+
+    /// `parse_known` parses `args` as [`Reader::parse`] does and returns the arguments it does not
+    /// recognize, in command-line order, beside the values, where `parse` refuses them.
+    pub fn parse_known(&self, args: &[OsString]) -> Parsed<(Values, Vec<OsString>)> {
+        let refused = |parsed: Parsed| match parsed {
+            Parsed::Refused { code, text } => Parsed::Refused { code, text },
+            _ => unreachable!("a refusal"),
+        };
         let args: Vec<&[u8]> = args.iter().map(|arg| arg.as_bytes()).collect();
         let mut kinds = Vec::with_capacity(args.len());
         let mut ended = false;
@@ -216,7 +231,7 @@ impl<'t> Reader<'t> {
             } else {
                 match self.classify(arg) {
                     Ok(kind) => kind,
-                    Err(message) => return self.refuse(message),
+                    Err(message) => return refused(self.refuse(message)),
                 }
             });
         }
@@ -237,11 +252,11 @@ impl<'t> Reader<'t> {
                     };
                     return match ignored(found.string, explicit) {
                         None => Parsed::Help(self.help.to_owned()),
-                        Some(rest) => self.refuse(format!(
+                        Some(rest) => refused(self.refuse(format!(
                             "argument {}: ignored explicit argument {}",
                             option.name(),
                             Text::from_os(OsStr::from_bytes(rest)).repr()
-                        )),
+                        ))),
                     };
                 }
                 Kind::Value { check, .. } | Kind::Repeated { check } => check,
@@ -253,14 +268,15 @@ impl<'t> Reader<'t> {
                     args[at]
                 }
                 (None, _) => {
-                    return self
-                        .refuse(format!("argument {}: expected one argument", option.name()));
+                    return refused(
+                        self.refuse(format!("argument {}: expected one argument", option.name())),
+                    );
                 }
             };
             at += 1;
             let value = OsStr::from_bytes(value);
             if let Err(message) = check(&Text::from_os(value)) {
-                return self.refuse(format!("argument {}: {message}", option.name()));
+                return refused(self.refuse(format!("argument {}: {message}", option.name())));
             }
             let kept = &mut values[found.option];
             if !matches!(option.kind, Kind::Repeated { .. }) {
@@ -278,17 +294,17 @@ impl<'t> Reader<'t> {
             .map(|(option, _)| option.name())
             .collect();
         if !missing.is_empty() {
-            return self.refuse(format!(
+            return refused(self.refuse(format!(
                 "the following arguments are required: {}",
                 missing.join(", ")
-            ));
+            )));
         }
-        if !extras.is_empty() {
-            let shown: Vec<String> = extras.iter().map(|arg| shown(arg)).collect();
-            return self.refuse(format!("unrecognized arguments: {}", shown.join(" ")));
-        }
+        let extras = extras
+            .into_iter()
+            .map(|arg| OsStr::from_bytes(arg).to_owned())
+            .collect();
         let names = self.options.iter().map(|option| option.names);
-        Parsed::Run(Values(names.zip(values).collect()))
+        Parsed::Run((Values(names.zip(values).collect()), extras))
     }
 
     fn strings(&self) -> impl Iterator<Item = (usize, &'static [u8])> + '_ {
@@ -374,6 +390,119 @@ impl<'t> Reader<'t> {
             }
         }
         matches
+    }
+}
+
+/// The refusal of the arguments a reader does not recognize.
+fn unrecognized(extras: &[OsString]) -> String {
+    let shown: Vec<String> = extras.iter().map(|arg| shown(arg.as_bytes())).collect();
+    format!("unrecognized arguments: {}", shown.join(" "))
+}
+
+/// One command word of a [`Commands`] reader and the reader of the arguments that follow it.
+pub struct Word<'a> {
+    pub word: &'a str,
+    pub reader: Reader<'a>,
+}
+
+/// [`Commands::parse`] reads a command word and the options after it, as `argparse` reads a parser with
+/// required subparsers named `command`.
+pub struct Commands<'a> {
+    top: Reader<'a>,
+    words: &'a [Word<'a>],
+}
+
+/// The help row of a [`Commands`] reader's own table.
+const TOP: [Opt; 1] = [Opt {
+    names: &["-h", "--help"],
+    kind: Kind::Help,
+}];
+
+impl<'a> Commands<'a> {
+    /// `tool`, `usage` and `help` are those of the reader's own refusals and help, as [`Reader::new`]
+    /// takes them; its one option is `-h`/`--help`, which a unique prefix selects. `words` holds each
+    /// command word with the reader of its options.
+    pub fn new(tool: &'a str, usage: &'a str, help: &'a str, words: &'a [Word<'a>]) -> Self {
+        Self {
+            top: Reader::new(tool, usage, help, Prefixes::Select, &TOP),
+            words,
+        }
+    }
+
+    /// `parse` reads `args` in order up to the command word: help before it returns the reader's help,
+    /// another argument that reads as an option is unrecognized, and the first other argument, `--`
+    /// included, is the command word. The word's reader parses the arguments after it, and its help and
+    /// refusals are its own. The arguments that neither reader recognizes, those before the word first,
+    /// are refused as unrecognized with the reader's own usage. `parse` returns the index of the word in
+    /// `words` and the word's values.
+    pub fn parse(&self, args: &[OsString]) -> Parsed<(usize, Values)> {
+        let mut extras = Vec::new();
+        let mut at = 0;
+        while at < args.len() {
+            let arg = args[at].as_bytes();
+            if arg == b"--" {
+                break;
+            }
+            match self.top.classify(arg) {
+                Ok(Arg::Value) => break,
+                Ok(Arg::Unknown) | Err(_) => extras.push(args[at].clone()),
+                Ok(Arg::Option(found)) => match found
+                    .explicit
+                    .and_then(|explicit| ignored(found.string, explicit))
+                {
+                    None => return Parsed::Help(self.top.help.to_owned()),
+                    Some(rest) => {
+                        return self
+                            .top
+                            .refuse(format!(
+                                "argument -h/--help: ignored explicit argument {}",
+                                Text::from_os(OsStr::from_bytes(rest)).repr()
+                            ))
+                            .map(|_| unreachable!("a refusal"));
+                    }
+                },
+            }
+            at += 1;
+        }
+        let Some(given) = args.get(at) else {
+            return self
+                .top
+                .refuse("the following arguments are required: command".to_owned())
+                .map(|_| unreachable!("a refusal"));
+        };
+        let Some(index) = self
+            .words
+            .iter()
+            .position(|word| given.as_bytes() == word.word.as_bytes())
+        else {
+            let choices: Vec<String> = self
+                .words
+                .iter()
+                .map(|word| Text::from(word.word).repr())
+                .collect();
+            return self
+                .top
+                .refuse(format!(
+                    "argument command: invalid choice: {} (choose from {})",
+                    Text::from_os(given).repr(),
+                    choices.join(", ")
+                ))
+                .map(|_| unreachable!("a refusal"));
+        };
+        match self.words[index].reader.parse_known(&args[at + 1..]) {
+            Parsed::Run((values, more)) => {
+                extras.extend(more);
+                if extras.is_empty() {
+                    Parsed::Run((index, values))
+                } else {
+                    self.top
+                        .refuse(unrecognized(&extras))
+                        .map(|_| unreachable!("a refusal"))
+                }
+            }
+            Parsed::Help(text) => Parsed::Help(text),
+            Parsed::Refused { code, text } => Parsed::Refused { code, text },
+        }
     }
 }
 

@@ -357,3 +357,154 @@ fn a_repeated_option_keeps_every_occurrence_in_order() {
         refused("argument --plant: expected one argument")
     );
 }
+
+/// The rows' texts after `error: ` were recorded from Python 3.9's `argparse` with a required subparser
+/// action `command` holding `check` and `run --work WORK [--row ROW]...`; the usage lines and program
+/// names are this reader's own.
+#[test]
+fn a_command_word_selects_its_reader_as_argparse_reads_subparsers() {
+    use crate::args::{Commands, Word};
+    const CHECK: [Opt; 1] = [Opt {
+        names: &["-h", "--help"],
+        kind: Kind::Help,
+    }];
+    const RUN: [Opt; 3] = [
+        Opt {
+            names: &["-h", "--help"],
+            kind: Kind::Help,
+        },
+        Opt {
+            names: &["--work"],
+            kind: Kind::Value {
+                required: true,
+                check: any,
+            },
+        },
+        Opt {
+            names: &["--row"],
+            kind: Kind::Repeated { check: any },
+        },
+    ];
+    let words = [
+        Word {
+            word: "check",
+            reader: Reader::new(
+                "t check",
+                "usage: t check",
+                "check help",
+                Prefixes::Select,
+                &CHECK,
+            ),
+        },
+        Word {
+            word: "run",
+            reader: Reader::new("t run", "usage: t run", "run help", Prefixes::Select, &RUN),
+        },
+    ];
+    let commands = Commands::new("t", "usage: t", "top help", &words);
+    let parse = |line: &str| {
+        let args: Vec<OsString> = line.split_whitespace().map(OsString::from).collect();
+        commands.parse(&args)
+    };
+    let refused = |prefix: &str, message: &str| Parsed::<()>::Refused {
+        code: 2,
+        text: format!("usage: {prefix}\n{prefix}: error: {message}\n"),
+    };
+    let rows = [
+        (
+            "",
+            refused("t", "the following arguments are required: command"),
+        ),
+        (
+            "bogus",
+            refused(
+                "t",
+                "argument command: invalid choice: 'bogus' (choose from 'check', 'run')",
+            ),
+        ),
+        (
+            "bogus -h",
+            refused(
+                "t",
+                "argument command: invalid choice: 'bogus' (choose from 'check', 'run')",
+            ),
+        ),
+        (
+            "-- check",
+            refused(
+                "t",
+                "argument command: invalid choice: '--' (choose from 'check', 'run')",
+            ),
+        ),
+        (
+            "-1 check",
+            refused(
+                "t",
+                "argument command: invalid choice: '-1' (choose from 'check', 'run')",
+            ),
+        ),
+        (
+            "--work x check",
+            refused(
+                "t",
+                "argument command: invalid choice: 'x' (choose from 'check', 'run')",
+            ),
+        ),
+        ("check extra", refused("t", "unrecognized arguments: extra")),
+        (
+            "--work=x check",
+            refused("t", "unrecognized arguments: --work=x"),
+        ),
+        ("-x check", refused("t", "unrecognized arguments: -x")),
+        ("check -- x", refused("t", "unrecognized arguments: -- x")),
+        (
+            "run --work d x y",
+            refused("t", "unrecognized arguments: x y"),
+        ),
+        (
+            "run --work d -x",
+            refused("t", "unrecognized arguments: -x"),
+        ),
+        (
+            "run",
+            refused("t run", "the following arguments are required: --work"),
+        ),
+        (
+            "run -x",
+            refused("t run", "the following arguments are required: --work"),
+        ),
+        (
+            "-x run",
+            refused("t run", "the following arguments are required: --work"),
+        ),
+        (
+            "run --work",
+            refused("t run", "argument --work: expected one argument"),
+        ),
+        (
+            "run --work d --row",
+            refused("t run", "argument --row: expected one argument"),
+        ),
+        ("--he", Parsed::Help("top help".to_owned())),
+        ("-x -h check", Parsed::Help("top help".to_owned())),
+        ("check -h x", Parsed::Help("check help".to_owned())),
+        ("run -h", Parsed::Help("run help".to_owned())),
+    ];
+    for (line, expected) in rows {
+        let parsed = parse(line).map(|_| ());
+        assert_eq!(parsed, expected, "{line:?}");
+    }
+    let Parsed::Run((index, values)) = parse("run --wo d --ro a --row b") else {
+        panic!("a run parses");
+    };
+    assert_eq!(index, 1);
+    assert_eq!(values.get("--work"), Some(OsStr::new("d")));
+    assert_eq!(
+        values.all("--row"),
+        [OsString::from("a"), OsString::from("b")]
+    );
+    let Parsed::Run((index, _)) = parse("check") else {
+        panic!("a check parses");
+    };
+    assert_eq!(index, 0);
+}
