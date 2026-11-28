@@ -2,7 +2,8 @@
 //! the plant store under `verification/plants/`, the checkout's `Cargo.lock`, the `campaign` binary and
 //! the work directory.
 //!
-//! [`prepare`] takes the arguments, the environment and the invoking directory as values and returns the
+//! [`prepare`] takes the arguments, the environment and the invoking directory as values, reads this
+//! process's SIGCHLD disposition before its first Git call, and returns the
 //! checked inputs, the help, the argument reader's refusal, the first refusal of the run's input in a
 //! fixed order, or a failure outside a plant: the checks are judged in turn and the first that fails is
 //! returned. It makes the work directory last,
@@ -28,8 +29,8 @@
 //!
 //! [`Run`] runs the checked plants: the run's worktrees, the proof reruns in the proof's worktree with
 //! the head's staged helper as their judge, the planted commits, the archives, the sweeps and the
-//! children a judgment asks for. [`publish`] writes the score's bytes, and [`conclude`] writes them and
-//! prints the score's lines.
+//! children a judgment asks for. [`publish`] writes the score's bytes, [`publish_with`] another tool's
+//! file the same way, and [`conclude`] writes the score and prints its lines.
 
 mod campaign;
 mod child;
@@ -67,7 +68,7 @@ pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
 pub(crate) use publish::UNANNOUNCED;
-pub use publish::{THREAD_STATUS, conclude, publish, umask};
+pub use publish::{Creation, THREAD_STATUS, conclude, publish, publish_with, umask};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub(crate) use removal::remove;
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};

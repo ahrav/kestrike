@@ -7,13 +7,17 @@ fn a_pin_line_ends_at_a_line_feed_and_holds_no_whitespace() {
     assert_eq!(pins(text), ["2.0"], "PIN.findall(text) gives ['2.0']");
 }
 
+/// A pin is one line: spaces or tabs alone before the key, a value that ends at the first quote of its
+/// line, and any text after that quote.
 #[test]
-fn a_stable_pin_follows_whitespace_from_a_line_start_and_its_value_may_span_lines() {
-    let text = "  \n  STABLE: \"a\nb\"\nx STABLE: \"c\"\n\tSTABLE: \"\"\nSTABLE: \"d\" STABLE: \"e\"\n\u{2028}STABLE: \"f\"";
+fn a_stable_pin_is_read_on_one_line_after_spaces_or_tabs() {
+    let text = "  \n  STABLE: \"a\nb\"\nx STABLE: \"c\"\n\tSTABLE: \"\"\nSTABLE: \"d\" STABLE: \"e\"\n\u{2028}STABLE: \"f\"\n\
+                \t STABLE: \"g\"\n\u{b}STABLE: \"h\"\nSTABLE: \"i\"  # the pin\n";
     assert_eq!(
         stables(text),
-        ["a\nb", "d", "f"],
-        "STABLE.findall(text) gives ['a\\nb', 'd', 'f']"
+        ["d", "g", "i"],
+        "a value across lines, a key after other text or after whitespace other than spaces and tabs, \
+         and an empty value are no pins"
     );
 }
 

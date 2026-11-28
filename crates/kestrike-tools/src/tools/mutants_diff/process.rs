@@ -5,17 +5,21 @@
 //! that arrives while a child is being started is acted on once that child has started. A supervised child
 //! leads a new session and group, starts with the three signals unblocked and each handled one at its
 //! default action, and receives SIGTERM when the thread that started it ends; the run starts every child
-//! from its main thread.
+//! from its main thread. The run ignores SIGXFSZ, so a write past the soft file size limit returns
+//! `EFBIG`, and every child it starts takes SIGXFSZ at its default action.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::process::{GRACE, Interrupted, child_defaults, exited_within, handled_set};
+use crate::process::{
+    GroupStop, GroupStopped, Interrupted, Leader, POLL, child_defaults, file_size_signal_default,
+    handled_set, leader_left_within, stop_group,
+};
 pub use crate::process::{INTERRUPT, Interrupt, SIGNALS, install_handlers};
 pub(super) use crate::process::{capture, exit_code};
 
@@ -49,48 +53,27 @@ pub fn ignore_signals() -> io::Result<()> {
     Ok(())
 }
 
-/// `signal_group` sends `signal` to the process group `group` and returns false when no member is left.
-///
-/// # Errors
-///
-/// `killpg` fails with an error other than `ESRCH`.
-fn signal_group(group: libc::pid_t, signal: i32) -> Result<bool, Fault> {
-    // SAFETY: `killpg` takes two integers and touches no memory of the caller.
-    if unsafe { libc::killpg(group, signal) } == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        return Ok(false);
-    }
-    Err(Fault::os(&error, None))
-}
+/// The stop of a supervised child's group: two graces of 10 s, a reap of up to 10 s and pauses of up to
+/// [`POLL`] between two reads of the leader's state.
+const STOP: GroupStop<'static> = GroupStop::new(
+    Duration::from_secs(10),
+    None,
+    Some(Duration::from_secs(10)),
+    POLL,
+)
+.with_second_grace();
 
-/// `stop_group` stops the group the child leads. When the group is gone at SIGTERM it returns. Otherwise
-/// it waits up to [`GRACE`] for the leader, sends SIGKILL to the group if the leader still runs and waits
-/// up to [`GRACE`] again, and ends with SIGKILL to the group in every case. A member the leader left
-/// behind after it exited gets SIGTERM and SIGKILL with no wait between them.
-///
-/// # Errors
-///
-/// A signal cannot be sent for a reason other than an empty group, or the wait fails.
-fn stop_group(child: &mut Child) -> Result<(), Fault> {
-    let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
-    for signal in [libc::SIGTERM, libc::SIGKILL] {
-        if !signal_group(group, signal)? {
-            return Ok(());
-        }
-        let exited = exited_within(child, GRACE, None).map_err(|error| Fault::os(&error, None))?;
-        if exited.is_some() {
-            break;
-        }
-    }
-    signal_group(group, libc::SIGKILL).map(drop)
+/// `file_size_default` makes the child that `command` starts take SIGXFSZ at its default action before it
+/// runs its program.
+pub(super) fn file_size_default(command: &mut Command) -> &mut Command {
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, which is
+    // async-signal-safe.
+    unsafe { command.pre_exec(file_size_signal_default) }
 }
 
 /// `lead_new_session` makes the child started by `command` lead a new session, return each of [`SIGNALS`]
-/// that has a handler to its default action, unblock the three and receive SIGTERM when the starting thread
-/// ends. A failed `setsid`, signal-mask change or `prctl` fails the start; a child whose parent already
+/// that has a handler and SIGXFSZ to their default actions, unblock the three and receive SIGTERM when the
+/// starting thread ends. A failed `setsid`, signal-mask change or `prctl` fails the start; a child whose parent already
 /// changed exits 1 before it runs the program.
 fn lead_new_session(command: &mut Command) {
     // SAFETY: `getpid` takes no argument and cannot fail.
@@ -106,6 +89,7 @@ fn lead_new_session(command: &mut Command) {
                 return Err(io::Error::last_os_error());
             }
             child_defaults(&handled)?;
+            file_size_signal_default()?;
             let (death, unused): (libc::c_ulong, libc::c_ulong) =
                 (libc::SIGTERM as libc::c_ulong, 0);
             if libc::prctl(libc::PR_SET_PDEATHSIG, death, unused, unused, unused) != 0 {
@@ -120,15 +104,24 @@ fn lead_new_session(command: &mut Command) {
 }
 
 /// `supervise` runs `argv` with standard input from `/dev/null`, standard output and standard error written
-/// to the two files and the environment `env`, in a new session, and returns its exit code as
+/// to the two files, each created new, and the environment `env`, in a new session, and returns its exit code as
 /// [`exit_code`] gives it. A signal recorded in `interrupt` before the child started or while it runs
 /// stops the child's group and returns the interruption. Once the leader has exited, the members of its
-/// group it left behind are stopped. The run passes [`INTERRUPT`].
+/// group it left behind are stopped. The run reads the leader's state while it waits and reaps the leader
+/// only after the group's last signal, and the exit code is that reap's. The reap waits up to 10 s after
+/// the closing SIGKILL; a leader that still runs then stays unreaped. The run passes [`INTERRUPT`].
+///
+/// The stop signals the group by its leader's id, which names that group alone only while the caller is
+/// the child's only waiter from its start until `supervise` returns: no other code of the process waits
+/// for this child or for any child, and SIGCHLD is neither ignored nor set with `SA_NOCLDWAIT`. A wait
+/// elsewhere is seen only after it has reaped the leader, and the stop then sends no further signal.
 ///
 /// # Errors
 ///
 /// An empty `argv`, a recorded signal, or an output file, the start, the wait or a stop of the group that
-/// fails. An empty `argv` fails before either output file is opened.
+/// fails; a leader that a wait outside the run reaped fails as a wait with `ECHILD`, and a leader that
+/// outlives the reap's bound fails as a wait that timed out, unless a recorded signal or a failed wait
+/// came first. An empty `argv` fails before either output file is opened.
 pub fn supervise(
     interrupt: &Interrupt,
     argv: &[&OsStr],
@@ -138,7 +131,11 @@ pub fn supervise(
     env: &[(OsString, OsString)],
 ) -> Result<i32, Stop> {
     let create = |path: &Path| {
-        File::create(path).map_err(|error| Stop::failed(&Fault::os(&error, Some(path.as_os_str()))))
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| Stop::failed(&Fault::os(&error, Some(path.as_os_str()))))
     };
     let Some((&program, args)) = argv.split_first() else {
         let error = io::Error::new(io::ErrorKind::InvalidInput, "an empty command");
@@ -160,16 +157,37 @@ pub fn supervise(
     let mut child = command
         .spawn()
         .map_err(|error| Stop::failed(&Fault::os(&error, Some(program))))?;
+    let recorded = || interrupt.recorded().is_some();
     let ended = interrupt.check().map_err(Stop::from).and_then(|()| {
-        match exited_within(&mut child, Duration::MAX, Some(interrupt)) {
-            Ok(Some(status)) => Ok(exit_code(status)),
-            Ok(None) => interrupt
+        match leader_left_within(child.id(), Duration::MAX, POLL, &recorded) {
+            Ok(Leader::Exited | Leader::Reaped) => Ok(()),
+            Ok(Leader::Running) => interrupt
                 .check()
                 .map_err(Stop::from)
                 .map(|()| unreachable!("a wait ends early only on a signal")),
             Err(error) => Err(Stop::failed(&Fault::os(&error, None))),
         }
     });
-    stop_group(&mut child).map_err(|fault| Stop::failed(&fault))?;
-    ended
+    concluded(ended, stop_group(&mut child, &STOP))
+}
+
+/// `concluded` is the result of a supervised run whose wait ended as `ended` and whose stop ended as
+/// `stopped`: a failed stop first, then the wait's error, then the stop's outcome.
+pub(super) fn concluded(
+    ended: Result<(), Stop>,
+    stopped: io::Result<GroupStopped>,
+) -> Result<i32, Stop> {
+    let stopped = stopped.map_err(|error| Stop::failed(&Fault::os(&error, None)))?;
+    ended?;
+    match stopped {
+        GroupStopped::Reaped(status) => Ok(exit_code(status)),
+        GroupStopped::ReapedElsewhere => {
+            let error = io::Error::from_raw_os_error(libc::ECHILD);
+            Err(Stop::failed(&Fault::os(&error, None)))
+        }
+        GroupStopped::Running => {
+            let error = io::Error::new(io::ErrorKind::TimedOut, "the child outlived its stop");
+            Err(Stop::failed(&Fault::os(&error, None)))
+        }
+    }
 }
