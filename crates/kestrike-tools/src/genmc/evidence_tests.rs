@@ -328,3 +328,125 @@ fn a_graph_path_that_loops_is_a_runtime_error() {
     );
     assert!(matches!(result, Err(Error::Runtime(_))), "{result:?}");
 }
+
+/// The admitted `target` table admits no other shaping entry beside it, and the same value under
+/// another table is that table's entry.
+#[test]
+fn the_admitted_target_table_admits_nothing_beside_it() {
+    let target = r#"{"cfg(target_arch = \"aarch64\")": {"rustflags": ["-C", "target-feature=+lse"], "rustdocflags": ["-C", "target-feature=+lse"]}}"#;
+    for (beside, reason) in [
+        (r#""profile": {}"#, "the cargo configuration sets profile"),
+        (
+            r#""build": {"rustflags": []}"#,
+            "the cargo configuration sets build.rustflags",
+        ),
+        (
+            r#""env": {"RUSTFLAGS": "x"}"#,
+            "the cargo configuration sets env.RUSTFLAGS",
+        ),
+    ] {
+        let text = format!(r#"{{"target": {target}, {beside}}}"#);
+        assert_eq!(refused(&text), reason, "{beside}");
+    }
+    assert_eq!(
+        refused(&format!(r#"{{"unstable": {target}}}"#)),
+        "the cargo configuration sets unstable"
+    );
+}
+
+/// The manifest is built on the resolved root, so a root named through a link admits the case's own
+/// command; a package with a `//` root keeps it, so its manifest is no `/` path the command resolves.
+#[test]
+fn the_manifest_stands_under_the_resolved_root_with_the_packages_own_root() {
+    let scratch = Scratch::new("check-command-root");
+    let evidence = &scratch.0;
+    let link = evidence.join("checkout");
+    std::os::unix::fs::symlink(root(), &link).expect("the link is made");
+    let record = parse(
+        r#"{"binary": {"path": "/genmc/build/bin/genmc"}, "rustc": {"name": "nightly-2026-07-27", "toolchain": "/toolchain"}}"#,
+    )
+    .expect("JSON");
+    let good = command(evidence);
+    let check = |root: &Path, declared: &Value, argv: &[String]| {
+        check_command(
+            root,
+            "join-production",
+            declared,
+            &record,
+            argv,
+            &good.env,
+            evidence,
+        )
+    };
+    assert!(check(&link, &declaration(), &good.argv).is_ok());
+    let rooted = |package: &str| {
+        let Value::Object(mut declared) = declaration() else {
+            panic!("the declaration is an object");
+        };
+        declared.insert("package", Value::String(package.into()));
+        Value::Object(declared)
+    };
+    let mut one = good.argv.clone();
+    one[4] = "/kernels/run-join-production/Cargo.toml".to_owned();
+    assert!(check(&root(), &rooted("/kernels/pkg"), &one).is_ok());
+    let mut two = good.argv.clone();
+    two[4] = "//kernels/run-join-production/Cargo.toml".to_owned();
+    match check(&root(), &rooted("//kernels/pkg"), &two) {
+        Err(Error::Refusal(refusal)) => assert!(
+            refusal
+                .reason()
+                .ends_with(" //kernels/run-join-production/Cargo.toml"),
+            "{}",
+            refusal.reason()
+        ),
+        other => panic!("a refusal, not {other:?}"),
+    }
+}
+
+/// A recorded path with a NUL byte is a value error, and a toolchain with a lone surrogate pins a
+/// RUSTC that holds the surrogate, which a recorded `\ud800` spelled in ASCII is not.
+#[test]
+fn a_command_compares_the_values_it_was_given() {
+    let scratch = Scratch::new("check-command-values");
+    let evidence = &scratch.0;
+    let record = |toolchain: &str| {
+        parse(&format!(
+            r#"{{"binary": {{"path": "/genmc/build/bin/genmc"}}, "rustc": {{"name": "nightly-2026-07-27", "toolchain": "{toolchain}"}}}}"#
+        ))
+        .expect("JSON")
+    };
+    let check = |record: &Value, command: &Command| {
+        check_command(
+            &root(),
+            "join-production",
+            &declaration(),
+            record,
+            &command.argv,
+            &command.env,
+            evidence,
+        )
+    };
+    for at in [3, 4] {
+        let mut nul = command(evidence);
+        nul.argv[at] = nul.argv[at].replacen("/genmc", "/bad\0/../genmc", 1);
+        assert!(nul.argv[at].contains('\0'), "{at}");
+        match check(&record("/toolchain"), &nul) {
+            Err(Error::Value(reason)) => assert_eq!(reason, "embedded null byte"),
+            other => panic!("a value error, not {other:?}"),
+        }
+    }
+    let mut ascii = command(evidence);
+    ascii
+        .env
+        .insert("RUSTC", Value::String("\\ud800/bin/rustc".into()));
+    match check(&record("\\ud800"), &ascii) {
+        Err(Error::Refusal(refusal)) => assert_eq!(
+            refusal.reason(),
+            "join-production ran with {'CASE': 'join-production', 'RUSTUP_TOOLCHAIN': \
+'nightly-2026-07-27', 'RUSTC': '\\\\ud800/bin/rustc', 'RUSTC_WRAPPER': '', 'RUSTC_WORKSPACE_WRAPPER': ''}, \
+not {'CASE': 'join-production', 'RUSTUP_TOOLCHAIN': 'nightly-2026-07-27', 'RUSTC': '\\ud800/bin/rustc', \
+'RUSTC_WRAPPER': '', 'RUSTC_WORKSPACE_WRAPPER': ''}"
+        ),
+        other => panic!("a refusal, not {other:?}"),
+    }
+}

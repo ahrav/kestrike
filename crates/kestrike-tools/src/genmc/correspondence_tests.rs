@@ -1,5 +1,5 @@
 use super::check_correspondence;
-use crate::genmc::case::tests::{declaration, root};
+use crate::genmc::case::tests::{case_of, declaration, root};
 use crate::genmc::refusal::Error;
 use crate::genmc::transcription::{check_transcription, transcription_drift};
 use crate::json::{Text, Value, parse};
@@ -8,19 +8,6 @@ fn edited(change: impl FnOnce(&mut Value)) -> Value {
     let mut declared = declaration();
     change(&mut declared);
     declared
-}
-
-fn case_of<'v>(declared: &'v mut Value, name: &str) -> &'v mut crate::json::Object {
-    let Value::Object(declared) = declared else {
-        panic!("the declaration is an object");
-    };
-    let Some(Value::Object(cases)) = declared.get_mut("cases") else {
-        panic!("the declaration holds cases");
-    };
-    let Some(Value::Object(case)) = cases.get_mut(name) else {
-        panic!("the case is declared");
-    };
-    case
 }
 
 fn refusal(declared: &Value) -> String {
@@ -58,6 +45,17 @@ fn a_case_agrees_with_the_outcome_of_every_litmus_test_it_names() {
         refusal(&other_kind),
         "join-production is declared positive and its litmus tests ['L0-no-fences'] are \
          ['Sometimes']"
+    );
+    let mixed = edited(|declared| {
+        case_of(declared, "join-relaxeddepart").insert(
+            "litmus",
+            parse(r#"["L0-no-fences", "L1-both-fences"]"#).expect("JSON"),
+        );
+    });
+    assert_eq!(
+        refusal(&mixed),
+        "join-relaxeddepart is declared violation and its litmus tests ['L0-no-fences', \
+         'L1-both-fences'] are ['Sometimes', 'Never']"
     );
     let unlisted = edited(|declared| {
         case_of(declared, "join-production").remove("litmus");
@@ -191,9 +189,28 @@ fn one_drifted_binding_of_each_kind_is_correspondence_drift() {
             "claim-load: the production operation no longer comes after 'claim-raise'".into(),
             "claim-load: the production operation no longer comes after 'Ok(Registration {'".into(),
         ]),
-        ("the file", edited(|d| site(binding(d, "claim-load"), "production").insert("scope", json(r#"[""]"#))), vec![
-            "claim-load: the production scope the file in crates/kestrike/src/storage/register.rs appears 443 times".into(),
+        ("before", edited(|d| { site(binding(d, "claim-raise"), "production").insert("before", json(r#"["claim-load"]"#)); }), vec![
+            "claim-raise: the production operation no longer comes before 'claim-load'".into(),
+        ]),
+        ("load call", edited(|d| site(binding(d, "claim-load"), "production").insert("call", json(r#""bound.store""#))), vec![
+            "claim-load: the production bound.store is no load".into(),
             "claim-raise: the production anchor entry claim-load was not located".into(),
+        ]),
+        ("store call", edited(|d| site(binding(d, "sequence-odd-store"), "production").insert("call", json(r#""word.load""#))), vec![
+            "sequence-odd-store: the production word.load is no store".into(),
+            "sequence-odd-fence: the production anchor entry sequence-odd-store was not located".into(),
+        ]),
+        ("cas call", edited(|d| site(binding(d, "anchored-park"), "production").insert("call", json(r#""slot_word.swap""#))), vec![
+            "anchored-park: the production slot_word.swap is no cas".into(),
+            "anchored-park-load: the production anchor entry anchored-park was not located".into(),
+        ]),
+        ("fence call", edited(|d| site(binding(d, "sequence-odd-fence"), "production").insert("call", json(r#""W::store""#))), vec![
+            "sequence-odd-fence: the production W::store is no fence".into(),
+            "sequence-odd-store: the production anchor entry sequence-odd-fence was not located".into(),
+        ]),
+        ("failure ordering", edited(|d| binding(d, "anchored-park").insert("orderings", json(r#"["AcqRel", "Acquire"]"#))), vec![
+            "anchored-park: the production orderings are ['AcqRel', 'Relaxed'], bound ['AcqRel', 'Acquire']".into(),
+            "anchored-park: the kernel orderings are ['AcqRel', 'Relaxed'], bound ['AcqRel', 'Acquire']".into(),
         ]),
         ("bound text", edited(|d| binding(d, "claim-load").insert("orderings", json(r#""Acquire""#))), vec![
             "claim-load: the production orderings are ['SeqCst'], bound Acquire".into(),
@@ -218,6 +235,25 @@ fn one_drifted_binding_of_each_kind_is_correspondence_drift() {
             other => panic!("{kind}: a refusal, not {other:?}"),
         }
     }
+}
+
+/// An empty scope header is the whole file, which the drift line names `the file`.
+#[test]
+fn an_empty_scope_is_the_file() {
+    let declared = edited(|d| {
+        site(binding(d, "claim-load"), "production").insert("scope", json(r#"[""]"#));
+    });
+    let drift = transcription_drift(&declared, &root()).expect("the sources read");
+    let scope = "claim-load: the production scope the file in crates/kestrike/src/storage/register.rs appears ";
+    assert_eq!(drift.len(), 2, "{drift:?}");
+    assert!(
+        drift[0].starts_with(scope) && drift[0].ends_with(" times"),
+        "{drift:?}"
+    );
+    assert_eq!(
+        drift[1],
+        "claim-raise: the production anchor entry claim-load was not located"
+    );
 }
 
 #[test]
@@ -253,6 +289,8 @@ fn cases_are_judged_in_code_point_order_and_litmus_tests_need_an_object() {
         r#"{"tests": []}"#,
     )
     .expect("the list writes");
+    let unnamed = json(r#"{"cases": {"c": {"expect": "positive", "litmus": []}}}"#);
+    assert!(check_correspondence(&scratch.0, &unnamed).is_ok());
     let numbered = json(r#"{"cases": {"c": {"expect": "positive", "litmus": [1]}}}"#);
     assert!(matches!(
         check_correspondence(&scratch.0, &numbered),

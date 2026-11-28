@@ -316,6 +316,8 @@ fn decimal_reads_digits_of_any_script_up_to_the_limit() {
     assert_eq!(digits("0042"), Ok("42".to_owned()));
     assert_eq!(digits("\u{664}\u{662}"), Ok("42".to_owned()));
     assert_eq!(digits("\u{1d7d7}"), Ok("9".to_owned()));
+    assert_eq!(digits("\u{1d7d8}\u{1d7e3}"), Ok("1".to_owned()));
+    assert_eq!(digits("\u{1d7e2}"), Ok("0".to_owned()));
     assert!(digits("").is_err());
     assert!(digits("4a").is_err());
     assert!(digits(&"1".repeat(4301)).is_err());

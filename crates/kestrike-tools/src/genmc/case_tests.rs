@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::{Judged, check_graph, check_line, judge_case};
 use crate::genmc::refusal::{Code, Error, Refusal, read_json};
-use crate::json::{Integer, Value, parse};
+use crate::json::{Integer, Text, Value, parse};
 use crate::paths::tests::Scratch;
 
 pub(crate) const DEPARTURE: &str = "a follower saw the departure without its terminal";
@@ -44,13 +44,22 @@ pub(crate) fn declaration() -> Value {
 }
 
 pub(crate) fn case(declared: &Value, name: &str) -> Value {
+    let mut declared = declared.clone();
+    Value::Object(case_of(&mut declared, name).clone())
+}
+
+/// The declaration of case `name` in `declared`, to change in place.
+pub(crate) fn case_of<'v>(declared: &'v mut Value, name: &str) -> &'v mut crate::json::Object {
     let Value::Object(declared) = declared else {
         panic!("the declaration is an object");
     };
-    let Some(Value::Object(cases)) = declared.get("cases") else {
+    let Some(Value::Object(cases)) = declared.get_mut("cases") else {
         panic!("the declaration holds cases");
     };
-    cases.get(name).expect("the case is declared").clone()
+    let Some(Value::Object(case)) = cases.get_mut(name) else {
+        panic!("the case is declared");
+    };
+    case
 }
 
 pub(crate) fn line_of(message: &str) -> usize {
@@ -219,7 +228,26 @@ the run reported ('0', '4') at join_kernel.rs:{line}"), "tool failure")),
 
 #[test]
 fn a_check_line_is_the_line_of_the_check_invocation_around_its_message() {
-    assert_eq!((line_of(DEPARTURE), line_of(FREED)), (126, 132));
+    let kernel =
+        fs::read_to_string(root().join("verification/genmc/packages/kernels/src/join_kernel.rs"))
+            .expect("the kernel reads");
+    let source: Vec<&str> = kernel.lines().collect();
+    for message in [DEPARTURE, FREED] {
+        let at = line_of(message);
+        let carried = format!("c\"{message}\"");
+        let end = (at - 1..source.len())
+            .find(|&index| source[index].contains(&carried))
+            .expect("the message follows its check");
+        assert!(source[at - 1].contains("check!("), "{message}");
+        assert!(
+            source
+                .get(at..end)
+                .unwrap_or_default()
+                .iter()
+                .all(|line| !line.contains("check!(")),
+            "{message}"
+        );
+    }
     let file = parse(r#"{"file": "src/join_kernel.rs"}"#).expect("JSON");
     let absent = Value::String("no kernel check carries this".into());
     match check_line(&root(), &file, &absent) {
@@ -336,4 +364,183 @@ fn a_graph_that_is_a_fifo_is_no_graph_and_is_read_without_waiting() {
         Err(Error::Refusal(refusal)) => assert_eq!(refusal.reason(), "c left no error graph"),
         other => panic!("a refusal, not {other:?}"),
     }
+}
+
+/// A scratch checkout whose kernel `src/k.rs` holds the lines `check_line` reads: a message in a
+/// comment beside its check, a form feed, a comment that opens a check inside an invocation and a
+/// literal outside every invocation.
+fn kernel_root() -> Scratch {
+    let scratch = Scratch::new("check-line-rules");
+    let package = scratch.0.join("verification/genmc/packages/kernels/src");
+    fs::create_dir_all(&package).expect("the package is made");
+    fs::write(
+        scratch.0.join("verification/genmc/expected.json"),
+        r#"{"package": "verification/genmc/packages/kernels"}"#,
+    )
+    .expect("the declaration writes");
+    fs::write(
+        package.join("k.rs"),
+        "fn f() {\n    check!(a, c\"first\");\n    // c\"first\"\n    \x0c\n    check!(b, c\"second\");\n    \
+         check!(\n        // check!(\n        x,\n        c\"third\"\n    );\n    check!(d, c\"fourth\");\n    \
+         let m = c\"detached\";\n}\n",
+    )
+    .expect("the kernel writes");
+    scratch
+}
+
+/// `check_line` numbers lines as `str.splitlines` does, so the form feed above `second` counts as a
+/// line end, and it reads raw lines: a comment that repeats a message counts, a commented `check!(`
+/// is the nearest opener, and a literal below an unrelated check takes that check's line.
+#[test]
+fn a_check_line_reads_raw_lines_numbered_as_splitlines_numbers_them() {
+    let scratch = kernel_root();
+    let line = |file: &str, message: Value| {
+        let file = parse(&format!(r#"{{"file": "{file}"}}"#)).expect("JSON");
+        check_line(&scratch.0, &file, &message)
+    };
+    let text = |message: &str| Value::String(message.into());
+    for (message, wanted) in [("second", 6), ("third", 8), ("detached", 12)] {
+        assert_eq!(
+            line("src/k.rs", text(message)).ok(),
+            Some(wanted),
+            "{message}"
+        );
+    }
+    for file in ["src/k.rs/", "src/k.rs/."] {
+        assert_eq!(line(file, text("second")).ok(), Some(6), "{file}");
+    }
+    let surrogate = Value::String(Text::from_code_points([0xd800]).expect("a code point"));
+    for (message, reason) in [
+        (
+            text("first"),
+            "the check 'first' appears 2 times in src/k.rs",
+        ),
+        (surrogate, "the check '\\ud800' appears 0 times in src/k.rs"),
+    ] {
+        match line("src/k.rs", message) {
+            Err(Error::Refusal(refusal)) => assert_eq!(refusal.reason(), reason),
+            other => panic!("a refusal, not {other:?}"),
+        }
+    }
+}
+
+/// The case rules as the case's own lines give them: `expect` other than `positive` is a violation, an
+/// unsuccessful line beside a positive run passes, a graph is compared by its event ids alone, events
+/// the graph leaves out stand after the violation line, and every abort phrase refuses in any case.
+#[test]
+fn a_case_is_judged_by_the_lines_its_rules_read() {
+    let declared = declaration();
+    let positive = case(&declared, "join-production");
+    let violation_case = case(&declared, "join-relaxeddepart");
+    let line = line_of(DEPARTURE);
+    let (text, graph) = (violation(line), violation_graph(line));
+    let with_event = text.replace(
+        "*** Verification unsuccesful.",
+        "\t(1, 2): W x\n*** Verification unsuccesful.",
+    );
+    let ended = text.replace(
+        "*** Verification unsuccesful.",
+        "\t(1, 3): THREAD_END\n\t(2, 1): BLOCK[join]\n*** Verification unsuccesful.",
+    );
+    let relabeled = graph.replace("}\n", "\t\"(1, 2)\" [label=<R y>]\n}\n");
+    let accepted = [
+        (
+            "join-production",
+            positive.clone(),
+            format!("{POSITIVE}*** Verification unsuccesful.\n"),
+            0,
+            POSITIVE_GRAPH.to_owned(),
+        ),
+        (
+            "join-relaxeddepart",
+            violation_case.clone(),
+            text.clone(),
+            42,
+            graph.replace("}\n", ""),
+        ),
+        (
+            "join-relaxeddepart",
+            violation_case.clone(),
+            with_event.clone(),
+            42,
+            relabeled,
+        ),
+        (
+            "join-relaxeddepart",
+            violation_case.clone(),
+            ended,
+            42,
+            graph.clone(),
+        ),
+    ];
+    for (name, declared, text, code, graph) in accepted {
+        assert!(
+            judged(name, &declared, &text, code, &graph, &[]).is_ok(),
+            "{text}"
+        );
+    }
+    let other_file = violation(line).replace("join_kernel.rs", "other_kernel.rs");
+    let other_graph = graph.replace("join_kernel.rs", "other_kernel.rs");
+    let surrogate = with(&positive, "intrinsics", r#"["\ud800"]"#);
+    #[rustfmt::skip]
+    let refused: Vec<(Refused, Refused)> = vec![
+        (refusal(judged("join-production", &with(&positive, "expect", r#""Positive""#), POSITIVE, 0, POSITIVE_GRAPH, &[])),
+         (1, "join-production exited 0, declared a violation".into(), "completed")),
+        (refusal(judged("join-production", &with(&positive, "expect", "null"), POSITIVE, 0, POSITIVE_GRAPH, &[])),
+         (1, "join-production exited 0, declared a violation".into(), "completed")),
+        (refusal(judged("join-relaxeddepart", &violation_case, &with_event, 42, &graph, &[])),
+         (2, "join-relaxeddepart's graph holds other events than the run reported".into(), "tool failure")),
+        (refusal(judged("join-relaxeddepart", &violation_case, &other_file, 42, &other_graph, &[])),
+         (1, format!("join-relaxeddepart failed at other_kernel.rs:{line}, declared join_kernel.rs:{line}"), "completed")),
+        (refusal(judged("join-production", &surrogate, POSITIVE, 0, POSITIVE_GRAPH, &[])),
+         (2, "join-production's bitcode calls [], declared ['\\ud800']".into(), "tool failure")),
+    ];
+    for (found, wanted) in refused {
+        assert_eq!(found, wanted);
+    }
+    for phrase in [
+        "does not support intrinsic x",
+        "Constant unimplemented",
+        "LLVM ERROR: y",
+        "Aborted",
+        "Segmentation fault",
+        "terminate called after",
+        "internal error",
+        "unsupported thing",
+        "SEGMENTATION FAULT",
+        "Internal Error",
+    ] {
+        let aborted = format!("{phrase}\n{POSITIVE}");
+        assert_eq!(
+            refusal(judged(
+                "join-production",
+                &positive,
+                &aborted,
+                0,
+                POSITIVE_GRAPH,
+                &[]
+            )),
+            (
+                2,
+                format!("join-production aborted: '{phrase}'"),
+                "tool failure"
+            )
+        );
+    }
+    let assertion = format!("Assertion `z' failed\n{POSITIVE}");
+    assert_eq!(
+        refusal(judged(
+            "join-production",
+            &positive,
+            &assertion,
+            0,
+            POSITIVE_GRAPH,
+            &[]
+        )),
+        (
+            2,
+            "join-production aborted: \"Assertion `z' failed\"".to_owned(),
+            "tool failure"
+        )
+    );
 }
