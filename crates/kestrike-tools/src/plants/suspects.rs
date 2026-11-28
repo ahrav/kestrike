@@ -7,14 +7,13 @@
 //! leave no verdict. Each line is read as strict UTF-8 with [`json::parse_unique`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use super::values::{natural_integer, text};
 use super::verdict::NoVerdict;
 use crate::json::{self, Integer, Object, Value};
-use crate::ownership::{is_file, is_link, status};
+use crate::ownership::{Opened, is_link, open_regular};
 use crate::text::{Text, text};
 
 /// The classes of a suspect that can catch a plant;
@@ -102,8 +101,9 @@ pub(crate) struct Listing {
     pub(crate) shown: BTreeMap<(Text, Text), usize>,
 }
 
-/// `listing` reads `path`, the root's `suspects.jsonl`, for the suspects of `profiles`; `work`, the work
-/// directory, names the path in the refusal of a file that cannot be read.
+/// `listing` reads `path`, the root's `suspects.jsonl`, for the suspects of `profiles`, through one open
+/// whose file it checks as a regular file; `work`, the work directory, names the path in the refusal of a
+/// file that cannot be read.
 ///
 /// # Errors
 ///
@@ -112,18 +112,19 @@ pub(crate) struct Listing {
 pub(crate) fn listing(path: &Path, profiles: &[Text], work: &Path) -> Result<Listing, NoVerdict> {
     let unreadable = |error: &std::io::Error| NoVerdict::unreadable(path, error, work);
     let mut listing = Listing::default();
-    let present = status(path)
-        .map_err(|error| unreadable(error.error()))?
-        .is_some();
-    if !present && !is_link(path).map_err(|error| unreadable(error.error()))? {
-        return Ok(listing);
-    }
-    if !is_file(path).map_err(|error| unreadable(error.error()))? {
-        return Err(NoVerdict::plain(
-            "the root's suspects.jsonl is no regular file",
-        ));
-    }
-    let mut lines = BufReader::new(File::open(path).map_err(|error| unreadable(&error))?);
+    let opened = open_regular(path).map_err(|error| unreadable(error.error()))?;
+    let file = match opened {
+        Opened::File(file) => file,
+        Opened::Absent if !is_link(path).map_err(|error| unreadable(error.error()))? => {
+            return Ok(listing);
+        }
+        Opened::Absent | Opened::Other => {
+            return Err(NoVerdict::plain(
+                "the root's suspects.jsonl is no regular file",
+            ));
+        }
+    };
+    let mut lines = BufReader::new(file);
     let mut seen = BTreeSet::new();
     let mut line = Vec::new();
     for number in 1usize.. {
