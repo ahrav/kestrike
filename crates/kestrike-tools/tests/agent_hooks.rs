@@ -3,7 +3,7 @@
 //! arguments to `tool.args` and its standard input to `tool.input` in the repository, or beside the
 //! stand-in the case names. A stand-in of the global hook stands in the directory `shared hooks` of the
 //! repository. Each stand-in finds the programs it starts on the `PATH` of the test run, or takes a
-//! program's whole path from a variable the case sets.
+//! program's whole path from a variable the case sets. The scratch cases' stand-ins start the built tool.
 
 use std::fmt;
 use std::fs::{self, DirBuilder, File};
@@ -1370,4 +1370,59 @@ fn a_hook_that_reads_nothing_ends_its_case_at_the_time_limit() {
         Ok((done, _)) => panic!("the hook ended: {done}"),
     }
     assert!(took < Duration::from_secs(30), "the case took {took:?}");
+}
+
+/// The launcher's stand-in of the scratch case: it writes the listing of the directory `TMPDIR` names to
+/// `tool.scratch` in the repository as it starts, then starts the program `TOOLS_BINARY` names with
+/// `TOOLS_TOP` and its own arguments, on its own standard input.
+const SCRATCH_TOOL: &str = r#"#!/bin/sh
+top=$(dirname -- "$0")/..
+ls -A "$TMPDIR" > "$top/tool.scratch" || exit 99
+exec "$TOOLS_BINARY" "$TOOLS_TOP" "$@"
+"#;
+
+/// With `TMPDIR` a directory that every user can write and that has no sticky bit, the built tool's
+/// refusal of that directory ends the push through the hook: exit 2 with the tool's sentence, and the
+/// global hook does not start. The same directory with the sticky bit passes and the global hook starts.
+/// In both arms the directory is empty when the tool starts and keeps its modification time over the
+/// push, so the hook made no entry in it.
+#[test]
+fn pre_push_ends_with_the_tool_s_refusal_of_a_scratch_directory_others_can_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new("pre-push-scratch");
+    let hooks = repo.guard(&deaf_guard());
+    let scratch = repo.scratch();
+    let checked = hook_text();
+    let refusal = format!(
+        "pre-push: the scratch directory {} is writable by its group or by other users and has no sticky \
+         bit; set TMPDIR to a directory that you own and only you can write\n",
+        scratch.display()
+    );
+    for (mode, code, stderr, guarded) in
+        [(0o777, 2, refusal.as_str(), false), (0o1777, 0, "", true)]
+    {
+        fs::set_permissions(&scratch, fs::Permissions::from_mode(mode)).expect("the mode is set");
+        age(&scratch);
+        Repo::forget(&[hooks.join("guard.ran")]);
+        let mut command = repo.hook_with(&checked, SCRATCH_TOOL);
+        command
+            .env("TOOLS_BINARY", BINARY)
+            .env("TOOLS_TOP", &repo.path)
+            .env("TMPDIR", &scratch);
+        let done = fed(&mut command, DELETION);
+        assert_eq!(done.code, Some(code), "{mode:o}: {done}");
+        assert_eq!(done.stderr, stderr, "{mode:o}: {done}");
+        assert_eq!(
+            hooks.join("guard.ran").exists(),
+            guarded,
+            "{mode:o}: {done}"
+        );
+        assert_eq!(
+            repo.listed("tool.scratch", &[]),
+            Vec::<String>::new(),
+            "{mode:o}: an entry stands under TMPDIR when the tool starts"
+        );
+        assert!(aged(&scratch), "{mode:o}: an entry was made under TMPDIR");
+        assert_eq!(names(&scratch), Vec::<String>::new(), "{mode:o}");
+    }
 }
