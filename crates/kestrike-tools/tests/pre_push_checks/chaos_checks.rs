@@ -148,10 +148,10 @@ fn a_game_day_input_push_runs_the_isolated_self_test_and_its_failure_blocks() {
 }
 
 /// The module of the host stop controller's cases, whose presence at a tip says the tip holds them.
-const HOST_STOP_CASES: &str = "crates/kestrike-tools/tests/host_stop_controller/mod.rs";
+pub const HOST_STOP_CASES: &str = "crates/kestrike-tools/tests/host_stop_controller/mod.rs";
 
 /// The line the stand-in `cargo` logs for the host stop controller's row.
-const HOST_STOP_RUN: &str = "cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::";
+pub const HOST_STOP_RUN: &str = "cargo test --package kestrike-tools --test tools -- host_stop:: host_stop_checks:: host_stop_controller:: host_stop_support::";
 
 /// The words the stand-in `cargo` gets for the host stop controller's row, one argument each.
 const HOST_STOP_ARGS: [&str; 10] = [
@@ -216,10 +216,7 @@ fn an_unrelated_push_asks_git_nothing_about_the_host_stop_self_test() {
 fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
     let fx = Fixture::new();
     let fixture = "scripts/host-stop-fixtures/operator.json";
-    let target = super::push::top()
-        .join("target/tools")
-        .to_string_lossy()
-        .into_owned();
+    let target = fx.top.join("target/tools").to_string_lossy().into_owned();
     let head = fx.commit(&[(fixture, "{}\n")]);
     assert_eq!(fx.push(&[(&head, &fx.base)]).code, Some(0));
     assert!(!fx.ran().iter().any(|line| line.starts_with("cargo")));
@@ -237,11 +234,12 @@ fn the_hook_runs_the_host_stop_self_test_only_at_a_tip_that_holds_it() {
     let mut words = vec![HOST_STOP_ARGS.len().to_string()];
     words.extend(HOST_STOP_ARGS.iter().map(|word| (*word).to_owned()));
     assert_eq!(fx.cargo_args(), words);
-    let tmp = fs::canonicalize(&fx.tmp).expect("the tool's TMPDIR resolves");
+    let own = fs::canonicalize(fx.top.join("target/tools/pre-push.d"))
+        .expect("the tool's directory under the checkout resolves");
     let dirs = fx.cargo_dirs();
     assert_eq!(dirs.len(), 1, "{dirs:?}");
     let dir = Path::new(&dirs[0]);
-    assert_eq!(dir.parent(), Some(tmp.as_path()), "{dirs:?}");
+    assert_eq!(dir.parent(), Some(own.as_path()), "{dirs:?}");
     assert!(
         dir.file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with("kestrike-pre-push-")),
@@ -334,9 +332,8 @@ fn a_new_branch_without_origin_main_runs_the_contract_checks_its_tip_holds() {
     assert_eq!(fx.ran(), expected);
 }
 
-/// A sticky worktree parent that every user can write, as the default `/tmp` is, passes the scratch
-/// check and fails the host stop controller's row before `cargo` starts, naming the parent; the
-/// control, the fixture's own `TMPDIR` of mode 0700, runs it.
+/// The host stop controller's row runs with a sticky, world-writable `TMPDIR` because the row's worktree is under the checkout.
+/// A checkout below such a directory fails the row before `cargo` starts, and the failure names the directory.
 #[test]
 fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
     let mut fx = Fixture::new();
@@ -350,23 +347,24 @@ fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
     fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777))
         .expect("the shared directory's mode is set");
     fx.set("TMPDIR", shared.clone());
+    assert_eq!(fx.push(&[(&head, &held)]).code, Some(0));
+    assert_eq!(fx.ran(), [HOST_STOP_RUN]);
+    fx.clear();
+    fx.top = shared.join("top");
+    fs::create_dir(&fx.top).expect("the checkout's top is made");
     let run = fx.push(&[(&head, &held)]);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
     assert!(
         run.stderr.contains(&format!(
-            "failed: {HOST_STOP_RUN}: another user owns or can write {}",
+            "failed: {HOST_STOP_RUN}: another user owns or can write {}, and so can configure Cargo \
+             or rustup in the tip's worktree, which stands under the checkout\n",
             shared.display()
         )),
         "{}",
         run.stderr
     );
-    assert!(
-        run.stderr
-            .contains("set TMPDIR to a directory only you control"),
-        "{}",
-        run.stderr
-    );
     assert_eq!(fx.ran(), Vec::<String>::new());
+    assert_eq!(fx.worktrees(), 1);
 }
 
 /// A tool that refuses before it reads its standard input closes that pipe. Ref lines longer than the
@@ -414,11 +412,7 @@ fn the_checkout_top_is_made_absolute_and_an_empty_one_is_refused() {
     for _ in 0..ups {
         relative.push("..");
     }
-    relative.push(
-        super::push::top()
-            .strip_prefix("/")
-            .expect("the top is absolute"),
-    );
+    relative.push(fx.top.strip_prefix("/").expect("the top is absolute"));
     let input = format!("refs/heads/x {head} refs/heads/x {held}\n");
     let mut command = fx.command(super::push::BINARY);
     command

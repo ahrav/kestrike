@@ -14,6 +14,8 @@ pub(crate) mod push;
 mod reads;
 mod ref_lines;
 mod repository;
+mod row_place;
+mod row_unit;
 mod scanned;
 mod selected;
 mod selection;

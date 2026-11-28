@@ -1444,14 +1444,25 @@ directory its path is reached through, from the root down and through links,
 gives its group or every user write access without the sticky bit: such a
 user could swap a worktree or a directory on the way between the
 steps that name them. It also refuses a directory there whose path passes
-through a link that such a user owns in a directory its group or every user
-can write, a sticky one included, since that user can replace the link. It
-reads the statuses again before each worktree it adds. A directory above the
-scratch directory that another user owns is trusted, and with it a link in a
-directory that only its owner can write. The default `/tmp` is sticky and
+through a link or a directory that such a user owns in a directory its group
+or every user can write, a sticky one included, since that user can replace
+the entry: `/tmp/build/tmp` is refused where another user made `/tmp/build`.
+The sentence names the scratch directory and the entry. It
+reads the statuses again before each worktree it adds. A link or a directory
+that another user owns is trusted where the directory that holds it gives its
+group and other users no write access. The default `/tmp` is sticky and
 root's, and passes. Where root's directories read as another id, as in a user
-namespace that maps the pushing user alone, such a `/tmp` is refused and a
-`TMPDIR` the user owns passes. CI
+namespace that maps the pushing user alone, such a `/tmp` passes on the way
+to a `TMPDIR` the user owns and is refused as the scratch directory itself.
+A build the launcher starts, and the programs that build starts, make their
+own entries under `TMPDIR` ahead of the tool's check, each created by the
+process that uses it: on the pinned toolchain the linker driver creates three
+files for each link, exclusively and with mode 0600, and unlinks them, and
+rustc's own link directory stands beside the output under `target/tools`.
+A tip whose checks include the host stop controller's cases gets its worktree
+under `target/tools/pre-push.d` of the checkout in place of the scratch
+directory, and every check of that tip runs there; the bullet on those cases
+below states that directory's rules. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's self-test run in the hook
@@ -1524,20 +1535,71 @@ require:
   `scripts/tool.sh` builds into, so the dependencies' build outlasts the tip's
   worktree, with `CARGO_CACHE_RUSTC_INFO=0`, and with the checkout's
   `Cargo.lock` copied into a worktree that holds none. Its `cargo` is the
-  push's first `cargo` on `PATH`, not the launcher's pinned toolchain, and it
+  push's first `cargo` on `PATH`: the row builds with the pusher's toolchain,
+  where the launcher and the `workspace` job build with the workflow's pinned
+  one. It
   builds without `--target`, so its outputs stand in `target/tools/debug`
   beside the launcher's `target/tools/<host>/debug`. The package and its
   `tools` test executable compile again at each tip, whose worktree has a new
-  path and new file times. While the row's `cargo` runs it holds the
+  path and new file times. While the row's `cargo` builds it holds the
   directory's build lock, so a `scripts/tool.sh` call in the same checkout
-  waits for it, and two pushes of one checkout that run the row at once share
-  its build directory, so one can run the other's test executable: run such
-  pushes one at a time. The row runs the integration cases of `--test tools`
-  and leaves the modules' unit cases to the `workspace` job. Before `cargo`
+  waits for it. Every push of one checkout builds this row into the same
+  `target/tools/debug`, and the row's cases start what the build left there,
+  so the row holds a lock of the checkout's own, the file
+  `target/tools/pre-push.d/lock`, from before `cargo` starts until `cargo`
+  has ended: one tip's build and its cases run as one unit. The tool takes
+  the lock with a nonblocking `flock` on a descriptor that closes on exec,
+  and the close releases it, also where the tool dies. A second push prints
+  `pre-push: TIP: waiting for the lock PATH, which another push of this checkout holds`,
+  tries again at most 50 ms apart, reads the signal record between attempts,
+  and fails the row with `another push held the lock PATH for 600 seconds`
+  once 600 seconds have passed on the monotonic clock since its first attempt.
+  A lock file that stands from an earlier push is used as it is, and the tool
+  reads and writes none of its bytes. A link or an entry that is no regular
+  file at the lock's name fails the row with `the lock PATH is a link` or
+  `the lock PATH is no regular file`. The row runs the integration cases of
+  `--test tools`
+  and leaves the modules' unit cases to the `workspace` job. The worktree of a
+  tip with this row stands under `target/tools/pre-push.d` of the checkout,
+  which Git ignores with `/target`, and every check of that tip runs there:
+  under the scratch directory the row would fail with the default `/tmp`,
+  since Cargo and rustup search each directory above their working directory
+  for configuration. Cargo makes no entry named `pre-push.d` in a target
+  directory: its entries there are `CACHEDIR.TAG`, `tmp`, a profile's
+  directory, whose name holds letters, digits, `-` and `_` alone, a target's
+  directory, and names that start with a dot. The tool makes the directory
+  with mode 0700 where it is absent, after `target/tools` where that is
+  absent, and uses a directory there that the pushing user owns and that its
+  group and other users cannot write. Any other entry there ends the push
+  with exit 2 and
+  `pre-push: the worktree directory PATH STATE; remove it, and the next push makes it`,
+  where STATE is `is a link`, `is no directory`, `is owned by another user`
+  or `is writable by its group or by other users`. The tool trusts the
+  checkout's top and the directories above it for that place, as the launcher
+  that built it does. Before `cargo`
   starts, the row fails where another user owns or can write a directory
-  above the worktree, or a Cargo or rustup configuration entry there, since
-  Cargo and rustup search those directories for configuration; the default
-  `/tmp` is such a directory, so set `TMPDIR` to a directory only you control.
+  above the worktree, the checkout's own lineage included, or a Cargo or
+  rustup configuration entry there, and the failure names the paths. Under
+  the checkout the row's build reads what a `cargo test` in the working copy
+  reads: the working copy's `.cargo/config.toml` beside the tip's (a key both
+  files hold takes the tip's value; a key the tip lacks and every array take
+  the working copy's too), a toolchain file of the working copy where the tip
+  tracks none, and a rustup directory override of the checkout, as the
+  launcher's own build of the tool does. Before `cargo` starts the row prints
+  `pre-push: TIP: the working copy's FILE differs from the tip's, and the row's build reads it beside the tip's`
+  for each of `.cargo/config.toml`, `.cargo/config`, `rust-toolchain` and
+  `rust-toolchain.toml` whose bytes differ between the checkout's top and the
+  tip's worktree, and then runs as it would. A file absent on both sides is
+  equal, and a file that cannot be read, is no regular file or is longer than
+  1 MiB counts as differing. That line does not show a rustup directory
+  override. `git worktree add` and `git worktree remove` behave under the
+  checkout as under the scratch directory, a recorded signal included. A tool
+  that SIGKILL ends leaves the lock free and its worktree under
+  `target/tools/pre-push.d`, registered, while its `cargo` can run on; no
+  system cleaner removes that worktree. `git worktree list` shows it, and
+  `git worktree remove --force --force PATH` removes it; with no push running,
+  deleting `target/tools/pre-push.d` or the whole `target` and then running
+  `git worktree prune` clears every such worktree.
   On a host other than Linux the row prints that the cases run on Linux alone
   and runs nothing. A change at or under
   `crates/kestrike-tools/src/host_stop/`,
@@ -1639,14 +1701,21 @@ passes; 1 is a failed check or a failed step of the tool's own (reading the
 scratch directory's status, where the working directory of a relative
 `TMPDIR` cannot be read or the `stat` fails for another reason than an absent
 path, reading
-standard input, making or removing the worktree's directory, starting or
-waiting for a check or for `git worktree add`, starting Git, or reading or
+standard input, making or removing the worktree's directory, making or
+reading the tool's directory under `target/tools`, opening or locking the
+row's lock file, starting or
+waiting for a check or for `git worktree add`, starting Git where the start
+fails with a system error, or reading or
 writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
 the worktree; 2 is every other refusal before the checks, printed as
 `pre-push: ` and its text: a scratch directory that another user can reach
-by ownership, a write bit or a link, as stated above, a malformed ref
-line, a Git read that exits
+by ownership, a write bit, or a link or a directory on the way, as stated
+above, an entry in the place of `target/tools/pre-push.d` that the tool
+refuses, a malformed ref
+line, a Git read whose start fails with an error that has no system error
+code, as the standard library gives for an argument it refuses, a Git read
+that exits
 nonzero where the read is not a presence test (Git's own text), Git output
 that is not UTF-8, a tree entry or a raw diff record of a form Git's manual
 does not give (the tool's
@@ -1667,7 +1736,7 @@ default disposition before it starts any child. It reads the record after
 reading the scratch directory's status, after
 reading standard input, after each Git read of a ref line's plan and of the
 guard, after each scan, after each line it prints, and while it waits for
-`git worktree add` or a check; once it reads a record it starts no further
+`git worktree add`, a check or the host stop row's lock; once it reads a record it starts no further
 Git read, scan or check. Each check,
 `git worktree add` and `git worktree remove` leads a process group of its own.
 On a record the tool sends SIGKILL to the group of the running check or add

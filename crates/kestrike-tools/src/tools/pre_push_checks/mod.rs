@@ -14,7 +14,7 @@
 //! failure is printed as `pre-push: failed: <failure>` at the end.
 //!
 //! Exit 0 passes; 1 is a failed check or a failed step of the tool's own, a scratch directory whose
-//! status cannot be read, Git that cannot start and a
+//! status cannot be read, a Git start error with a raw OS error code and a
 //! failed read or write of the batch read's Git child among them, named by a `pre-push-checks: ` line, or
 //! for Git that cannot start for the worktree's removal by the line `pre-push: could not remove worktree
 //! <tree>: git: <error>`; a guarded chaos record that is missing or not JSON is a failure listed at the
@@ -38,6 +38,7 @@
 //! worktree removal and a running check whose SIGKILL or reap failed.
 
 mod cancel;
+mod lock;
 mod worktree;
 
 use std::ffi::{OsStr, OsString};
@@ -122,9 +123,10 @@ fn fail(line: &str, code: Exit) -> Exit {
     }
 }
 
-/// `refused` ends the push on `failure` and returns its exit code: a recorded signal's code with nothing
-/// printed, `pre-push-checks: <failure>` and 1 for Git that cannot start and for a failed read or write of
-/// the batch read's child, and `pre-push: <failure>` and 2 for every other failure.
+/// `refused` ends the push on `failure`.
+/// For a recorded signal, `refused` returns the signal's exit code and prints nothing.
+/// For a Git start error with a raw OS error code or a batch-child I/O error, `refused` passes `pre-push-checks: <failure>` and status 1 to `fail`.
+/// For every other failure, `refused` passes `pre-push: <failure>` and status 2 to `fail`.
 fn refused(failure: &Failure) -> Exit {
     match failure {
         Failure::Cancelled(code) => *code,
