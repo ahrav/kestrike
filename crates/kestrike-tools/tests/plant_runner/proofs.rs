@@ -671,6 +671,18 @@ fn an_apply_check_that_fails_itself_leaves_no_verdict_and_a_refused_patch_does_n
     fx.verdict("p-stale", "does not apply", "patch failed");
 }
 
+/// An apply check that exits 1 reads as a patch that does not apply, whatever made Git exit 1: the
+/// tool takes the first line of Git's error output as the reason and judges the plant no further.
+#[test]
+fn an_apply_check_that_exits_1_for_any_cause_reads_as_a_patch_that_does_not_apply() {
+    let mut fx = Fixture::new();
+    let (name, path) = fx.git_shim("--check", "echo 'error: the index is locked' >&2; exit 1");
+    let done = fx.run(&["p-miss"], &[(name, &path)]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict("p-miss", "does not apply", "error: the index is locked");
+    assert!(fx.proof_log().is_empty());
+}
+
 /// An ignored file in the store refuses the run.
 #[test]
 fn an_ignored_file_in_the_store_is_rejected() {

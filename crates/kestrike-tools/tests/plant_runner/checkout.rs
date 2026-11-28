@@ -98,6 +98,26 @@ fn a_score_that_is_a_link_is_replaced_and_its_target_stays() {
     assert_eq!(text_of(written.get("commit").expect("a commit")), fx.head);
 }
 
+/// A tracked file of the store staged under the score's name passes the checks, and the run writes its
+/// score over that path: the tool exits with the run's own code, and the file's bytes are gone from the
+/// working tree with no word of it.
+#[test]
+fn a_store_file_renamed_to_the_score_is_written_over_by_the_run() {
+    let mut fx = Fixture::new();
+    std::fs::write(fx.store.join("notes.txt"), "notes\n").expect("written");
+    fx.commit("a note in the store");
+    fx.git(&[
+        "mv",
+        "verification/plants/notes.txt",
+        "verification/plants/score.json",
+    ]);
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 0, "{}", done.stderr);
+    let (written, _) = fx.results();
+    assert_eq!(text_of(written.get("commit").expect("a commit")), fx.head);
+    assert!(!done.stderr.contains("notes"), "{}", done.stderr);
+}
+
 /// A run leaves an index whose plant entry is stale as it was.
 #[test]
 fn a_run_leaves_an_index_whose_plant_entry_is_stale_as_it_was() {
