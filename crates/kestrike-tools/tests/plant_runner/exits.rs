@@ -4,11 +4,6 @@
 
 use super::fixture::{CAUSE, Fixture, patch_of, shown, text_of, write_plant};
 
-fn sentence(fx: &Fixture) -> String {
-    let (written, _) = fx.results();
-    text_of(written.get("sentence").expect("a sentence"))
-}
-
 fn discard(path: &std::path::Path) {
     let _ = std::fs::remove_dir_all(path);
 }
@@ -76,7 +71,7 @@ fn each_of_the_four_cause_words_stands_in_the_score_of_its_miss() {
     let (written, plants) = fx.results();
     let commit = text_of(written.get("commit").expect("a commit"));
     assert_eq!(commit, fx.git(&["rev-parse", "HEAD"]).trim());
-    assert_eq!(sentence(&fx), format!("0 of 4 plants at commit {commit}"));
+    assert_eq!(fx.sentence(), format!("0 of 4 plants at commit {commit}"));
     for word in words {
         let plant = &plants[&format!("p-{word}")];
         assert_eq!(text_of(plant.get("result").expect("a result")), "missed");
@@ -92,7 +87,7 @@ fn every_plant_with_a_verdict_and_every_miss_with_a_cause_exits_0() {
     let done = fx.run(&["p-catch", "p-miss"], &[]);
     assert_eq!(done.code, 0, "{}", done.stderr);
     assert_eq!(
-        sentence(&fx),
+        fx.sentence(),
         format!("1 of 2 plants at commit {}", fx.head)
     );
 }
@@ -105,7 +100,7 @@ fn a_patch_that_does_not_apply_exits_3_and_stays_out_of_the_count() {
     assert_eq!(done.code, 3, "{}", done.stderr);
     let (_, plants) = fx.results();
     assert_eq!(
-        sentence(&fx),
+        fx.sentence(),
         format!("1 of 2 plants at commit {}", fx.head)
     );
     assert_eq!(
@@ -116,7 +111,7 @@ fn a_patch_that_does_not_apply_exits_3_and_stays_out_of_the_count() {
     let done = fx.run(&["p-stale"], &[]);
     assert_eq!(done.code, 3, "{}", done.stderr);
     assert_eq!(
-        sentence(&fx),
+        fx.sentence(),
         format!("0 of 0 plants at commit {}", fx.head)
     );
 }
@@ -820,6 +815,98 @@ fn a_run_writes_its_progress_lines_to_standard_error() {
             fx.work.display()
         )
     );
+}
+
+/// A plant its apply check settles prints its result in the first phase and again in the second; a
+/// plant its proof settles prints `proof RESULT`, and one its proof leaves live prints its exits.
+#[test]
+fn each_line_form_of_the_two_phases_comes_in_store_order() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-miss", "p-notlive", "p-stale"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    assert_eq!(
+        done.stderr,
+        format!(
+            "work: {}\np-stale: does not apply\np-miss: proof {{'head': 0, 'plant': 1}}\n\
+             p-notlive: proof not live\np-miss: missed\np-notlive: not live\np-stale: does not apply\n",
+            fx.work.display()
+        )
+    );
+}
+
+fn full() -> std::fs::File {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full opens")
+}
+
+/// A standard error that refuses the work line ends the run before any worktree: exit 4, no stand-in
+/// call, no plant directory and no score.
+#[test]
+fn a_work_line_that_cannot_be_written_ends_the_run_with_exit_4() {
+    let mut fx = Fixture::new();
+    let mut runner = fx.spawn_with(&["p-miss"], &[], false, |command| {
+        command.stderr(full());
+    });
+    let (code, _) = runner.finish();
+    assert_eq!(code, 4);
+    assert!(fx.calls(&[]).is_empty());
+    assert!(!fx.work.join("plants").exists());
+    assert!(!fx.score.exists());
+}
+
+/// A standard error that refuses the first progress line ends the run after its cleanup: exit 4, the
+/// plant's worktree removed and unlisted, and no score.
+#[test]
+fn a_progress_line_that_cannot_be_written_ends_the_run_after_its_cleanup() {
+    let mut fx = Fixture::new();
+    let gate = fx.scratch.join("gate");
+    let (name, path) = fx.git_shim(
+        "--check",
+        &format!("while [ ! -e '{}' ]; do sleep 0.02; done", gate.display()),
+    );
+    let env = fx.environment(&[(name, path.as_str())]);
+    let args = fx.args(&["p-stale"], &[], None);
+    let repo = fx.repo.clone();
+    let mut child = fx
+        .command(&args, &env, &repo)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the tool starts");
+    let mut err = std::io::BufReader::new(child.stderr.take().expect("a pipe"));
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut err, &mut line).expect("the work line reads");
+    assert!(line.starts_with("work: "), "{line}");
+    drop(err);
+    std::fs::write(&gate, "").expect("the gate opens");
+    let status = child.wait().expect("the tool ends");
+    assert_eq!(status.code(), Some(4));
+    assert!(!fx.work.join("plants/p-stale/tree").exists());
+    let listed = fx.git(&["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("p-stale"), "{listed}");
+    assert!(!fx.score.exists());
+}
+
+/// The help goes to standard output with exit 0 and nothing on standard error, for both flags; a
+/// standard output that refuses it exits 120.
+#[test]
+fn the_help_is_printed_on_standard_output_or_exits_120() {
+    let fx = Fixture::new();
+    let env = fx.environment(&[]);
+    for flag in ["--help", "-h"] {
+        let done = fx.run_with(&[flag.into()], &env, &fx.repo);
+        assert_eq!(done.code, 0, "{flag}: {}", done.stderr);
+        assert_eq!(done.stderr, "", "{flag}");
+        assert!(done.stdout.contains("Exit 120: standard"), "{flag}");
+    }
+    let status = fx
+        .command(&["--help".into()], &env, &fx.repo)
+        .stdout(full())
+        .status()
+        .expect("the tool starts");
+    assert_eq!(status.code(), Some(120));
 }
 
 /// The shim fails the head's date read, which runs before any worktree.

@@ -99,7 +99,8 @@ impl Inputs {
 pub enum Outcome {
     /// The checked inputs; the work directory exists.
     Run(Box<Inputs>),
-    /// The help text, which the caller writes to standard output before exiting 0.
+    /// The help text, which the caller writes to standard output before exiting 0, or 120 when the write
+    /// fails.
     Help(String),
     /// The argument reader's refusal, which the caller writes to standard error before exiting with
     /// `code`.

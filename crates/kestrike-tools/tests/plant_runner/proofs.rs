@@ -18,11 +18,6 @@ fn other_proof(fx: &mut Fixture) {
     fx.commit("another proof");
 }
 
-fn sentence(fx: &Fixture) -> String {
-    let (written, _) = fx.results();
-    text_of(written.get("sentence").expect("a sentence"))
-}
-
 /// A plant whose proof passes on the plant is not live, gets no archive, and stays out of `n`; each
 /// rerun runs in the proof's worktree with its target, the run's lockfile and a session of its own.
 #[test]
@@ -32,7 +27,7 @@ fn a_plant_whose_proof_passes_on_the_plant_is_not_live_and_leaves_n() {
     assert_eq!(done.code, 3, "{}", done.stderr);
     let (written, plants) = fx.results();
     assert_eq!(
-        sentence(&fx),
+        fx.sentence(),
         format!("0 of 1 plants at commit {}", fx.head)
     );
     assert_eq!(
@@ -227,7 +222,7 @@ fn a_plant_whose_proof_fails_on_the_head_and_passes_on_the_plant_is_not_live() {
     );
     assert_eq!(shown(record.get("proof_exits")), r#"{"head":1,"plant":0}"#);
     assert_eq!(
-        sentence(&fx),
+        fx.sentence(),
         format!("0 of 0 plants at commit {}", fx.head)
     );
     assert!(fx.calls(&["sim", "archive"]).is_empty());
@@ -367,6 +362,54 @@ fn a_head_whose_helper_links_to_a_named_pipe_leaves_no_verdict() {
     let (_, plants) = fx.results();
     let reason = super::fixture::text_of(plants["p-miss"].get("reason").expect("a reason"));
     assert!(reason.ends_with("is a named pipe"), "{reason}");
+    assert!(fx.proof_log().is_empty());
+}
+
+/// A head whose helper is a committed link to a character device gives every plant no verdict: the
+/// copy refuses the opened file, which is no regular file, before it reads any byte, under a file size
+/// limit of infinity too.
+#[test]
+fn a_head_whose_helper_links_to_a_character_device_leaves_no_verdict() {
+    let mut fx = Fixture::new();
+    let helper = fx.repo.join("scripts/reproduce-test.py");
+    std::fs::remove_file(&helper).expect("removed");
+    std::os::unix::fs::symlink("/dev/zero", &helper).expect("linked");
+    fx.commit("a helper that links to a character device");
+    let (code, err) = fx
+        .spawn(
+            &["p-miss"],
+            &["bash", "-c", "ulimit -S -f unlimited; exec \"$@\"", "bash"],
+            false,
+        )
+        .finish();
+    assert_eq!(code, 3, "{err}");
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "the head's scripts/reproduce-test.py cannot be copied:",
+    );
+    let (_, plants) = fx.results();
+    let reason = super::fixture::text_of(plants["p-miss"].get("reason").expect("a reason"));
+    assert!(reason.ends_with("is no regular file"), "{reason}");
+    assert!(fx.proof_log().is_empty());
+}
+
+/// An add of the proof's worktree that prints no UTF-8 text gives every plant that waits for its proof
+/// the setup's words with Git's failure, and no proof reruns.
+#[test]
+fn a_proof_worktree_add_that_prints_no_text_words_the_setup_s_failure() {
+    let mut fx = Fixture::new();
+    let (name, path) = fx.git_shim(
+        "add",
+        "case \"$*\" in */proof/tree*) printf '\\377' >&2; exit 0;; esac",
+    );
+    let done = fx.run(&["p-miss"], &[(name, path.as_str())]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    let (_, plants) = fx.results();
+    assert_eq!(
+        text_of(plants["p-miss"].get("reason").expect("a reason")),
+        "the proof's worktree cannot be prepared: `git worktree` wrote output that is no UTF-8"
+    );
     assert!(fx.proof_log().is_empty());
 }
 
@@ -540,6 +583,22 @@ fn a_head_rerun_that_rewrites_the_run_s_lockfile_ends_the_head_s_reruns() {
         );
     }
     assert_eq!(fx.proof_modes(), ["base"]);
+}
+
+/// A rerun that leaves the run's lockfile with one byte more, a regular file whose start is the run's
+/// bytes, leaves that plant no verdict for the changed lockfile.
+#[test]
+fn a_rerun_that_appends_to_the_run_s_lockfile_leaves_no_verdict() {
+    let mut fx = Fixture::new();
+    let done = fx.run(&["p-growlock"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-growlock",
+        "no verdict",
+        "the rerun of the proof a::test left the proof's worktree without the run's Cargo.lock; its \
+         output is in proof/plant-p-growlock.out",
+    );
+    assert!(fx.calls(&["sim", "archive"]).is_empty());
 }
 
 /// A rerun that removes the run's lockfile leaves its plant no verdict.
@@ -918,26 +977,17 @@ fn work_directory_ancestors_the_run_makes_are_private_under_any_umask() {
     let private = fx.scratch.join("private");
     super::repository::private_dir(&private);
     let under_umask = |fx: &mut Fixture, work: &std::path::Path| {
-        let args = fx.args(&["p-miss"], &[], Some(work));
-        let env = fx.environment(&[]);
-        let output = std::process::Command::new("sh")
-            .args(["-c", "umask 002; exec \"$@\"", "sh", super::fixture::BINARY])
-            .arg(&fx.repo)
-            .arg("plant-runner")
-            .args(&args)
-            .current_dir(&fx.repo)
-            .env_clear()
-            .envs(env)
-            .output()
-            .expect("the tool starts");
-        (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
+        fx.work = work.to_path_buf();
+        fx.spawn(
+            &["p-miss"],
+            &["sh", "-c", "umask 002; exec \"$@\"", "sh"],
+            false,
         )
+        .finish()
     };
     let work = private.join("a/b/work");
     let (code, err) = under_umask(&mut fx, &work);
-    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(code, 0, "{err}");
     for made in [private.join("a"), private.join("a/b"), work] {
         assert_eq!(
             super::fixture::mode_bits(&made) & 0o022,
@@ -947,7 +997,7 @@ fn work_directory_ancestors_the_run_makes_are_private_under_any_umask() {
         );
     }
     let (code, err) = under_umask(&mut fx, &private.join("a/b/work-2"));
-    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(code, 0, "{err}");
 }
 
 /// The proof's output is read as UTF-8 under an English single-byte locale, whose Git messages are
@@ -1169,12 +1219,61 @@ fn a_signal_during_the_helper_s_question_acts_after_the_question() {
     super::fixture::wait_for(&fx.scratch.join("question-ready"), &mut runner.child);
     runner.signal(libc::SIGTERM, false);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    assert!(!fx.scratch.join("question-answered").exists());
+    assert!(
+        matches!(runner.child.try_wait(), Ok(None)),
+        "the run waits for the held question"
+    );
+    assert!(fx.work.join("proof/tree").exists(), "no cleanup started");
     std::fs::write(fx.scratch.join("question-release"), "").expect("written");
     let (code, err) = runner.finish();
     assert_eq!(code, 128 + libc::SIGTERM, "{err}");
     assert!(fx.scratch.join("question-answered").exists());
     assert!(fx.proof_log().is_empty());
+    assert!(!fx.score.exists());
+}
+
+/// A planted rerun's question that fails leaves that plant no verdict with its exact reason, and the
+/// next plant is judged: its proof reruns on its plant and it reads `not live`.
+#[test]
+fn a_planted_rerun_s_question_that_fails_leaves_the_next_plant_judged() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::RAISES_PLANTED);
+    let done = fx.run(&["p-miss", "p-notlive"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    let (_, plants) = fx.results();
+    assert_eq!(
+        text_of(plants["p-miss"].get("reason").expect("a reason")),
+        "the head's verdict check failed on the rerun of the proof a::test: ValueError: no count"
+    );
+    fx.verdict("p-notlive", "not live", "");
+    assert_eq!(fx.proof_modes(), ["base", "pass", "notlive"]);
+}
+
+/// A signal during a planted rerun's question waits for the question, then ends the run with no reset
+/// of the proof's worktree, no later step and no score.
+#[test]
+fn a_signal_during_a_planted_rerun_s_question_acts_after_it() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::HOLDS_PLANTED);
+    let resets = fx.scratch.join("resets");
+    let (name, path) = fx.git_shim("--hard", &format!("echo reset >> '{}'", resets.display()));
+    fx.env.retain(|(known, _)| known != name);
+    fx.env.push((name.into(), path.into()));
+    let mut runner = fx.spawn(&["p-miss"], &[], false);
+    super::fixture::wait_for(&fx.scratch.join("question-ready"), &mut runner.child);
+    runner.signal(libc::SIGTERM, false);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        matches!(runner.child.try_wait(), Ok(None)),
+        "the run waits for the held question"
+    );
+    assert!(fx.work.join("proof/tree").exists(), "no cleanup started");
+    std::fs::write(fx.scratch.join("question-release"), "").expect("written");
+    let (code, err) = runner.finish();
+    assert_eq!(code, 128 + libc::SIGTERM, "{err}");
+    assert!(fx.scratch.join("question-answered").exists());
+    assert!(!resets.exists(), "no reset follows the question");
+    assert!(fx.calls(&["sim", "archive"]).is_empty());
     assert!(!fx.score.exists());
 }
 

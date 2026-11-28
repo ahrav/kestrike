@@ -1,5 +1,9 @@
 //! Steps 3 to 6 of a live plant: its planted commit and archive, its sweeps, `campaign confirm` and the
-//! seed checks on the unpatched head's archive, which the run builds once, at the first seed check.
+//! seed checks on the unpatched head's archive. The run prepares that archive at the first seed check
+//! and keeps it, or its failure, for every later one; a failure before Git answers for its worktree, or
+//! a failed open or read of its kept `Cargo.lock`, is kept for that seed check alone, and the next seed
+//! check prepares the archive again. That attempt adds the worktree at the same path, so after an add
+//! that made the worktree it ends at Git's refusal of the path, which is kept.
 //!
 //! The planted commit takes the head's date and a fixed identity, which the environment sets above every
 //! configuration scope. Every archive build writes the
@@ -7,10 +11,9 @@
 //! `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true` into a target and build directory of its own, and removes
 //! that directory after the build; the removal runs whole.
 
-use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
-use std::fs::{self, DirBuilder, OpenOptions};
-use std::io::Write;
+use std::fs::{self, DirBuilder};
+use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
@@ -21,13 +24,14 @@ use super::git::{self, Done};
 use super::judgment::{Ask, Sweep, judge};
 use super::output::{Pins, archive_pins, first_object};
 use super::record::Plant;
-use super::run::{Run, lock_bytes, open_lock, remove};
+use super::removal::remove;
+use super::run::{Run, Unadded, lock_bytes, open_lock, write_new};
 use super::seed::Manifest;
 use super::status::profile_runs;
 use super::suspects::Suspect;
 use super::verdict::NoVerdict;
 use crate::json::{Integer, Object};
-use crate::ownership::make_private;
+use crate::ownership::{PathError, ignored, make_private};
 use crate::text::{Text, text};
 
 /// The identity of every planted commit.
@@ -45,6 +49,29 @@ fn os(text: &impl std::fmt::Display) -> OsString {
 /// `rounds` is `--rounds` as a count of sweeps; a count past `u64` is reached by no run.
 fn rounds(value: &Integer) -> u64 {
     value.to_string().parse().unwrap_or(u64::MAX)
+}
+
+/// Why an archive was not built: the step's ending; a failure before Git answered for its worktree,
+/// given as its text; or the failed open or read of its kept `Cargo.lock`, with that file's path.
+enum Unbuilt {
+    Step(Step),
+    Unprepared(String),
+    Unread(PathBuf, io::Error),
+}
+
+impl<T: Into<Step>> From<T> for Unbuilt {
+    fn from(ending: T) -> Self {
+        Self::Step(ending.into())
+    }
+}
+
+impl From<Unadded> for Unbuilt {
+    fn from(unadded: Unadded) -> Self {
+        match unadded {
+            Unadded::Step(ending) => Self::Step(ending),
+            Unadded::Unprepared(why) => Self::Unprepared(why),
+        }
+    }
 }
 
 impl Run<'_> {
@@ -88,14 +115,15 @@ impl Run<'_> {
 
     /// `archive` builds the archive of `tree`, `what`, at `place/archive` and returns it with its pins.
     /// The run's `Cargo.lock` goes into the tree first, and the target directory goes after the build,
-    /// whatever its ending.
-    fn archive(
-        &self,
-        place: &Path,
-        tree: &Path,
-        what: &str,
-        unread: &Cell<bool>,
-    ) -> Result<(PathBuf, Pins), Step> {
+    /// whatever its ending. The archive's kept `Cargo.lock` must be a regular file of the run's bytes.
+    ///
+    /// # Errors
+    ///
+    /// `Unbuilt::Step` for the build's ending and for a kept `Cargo.lock` that is missing, no regular
+    /// file or of other bytes; `Unbuilt::Unread` for a kept `Cargo.lock` whose open fails while its
+    /// status shows a regular file or cannot be read for a cause other than absence, and for a read of
+    /// the opened file that fails.
+    fn archive(&self, place: &Path, tree: &Path, what: &str) -> Result<(PathBuf, Pins), Unbuilt> {
         let target = place.join("target");
         let env = self.cargo_env(
             &target,
@@ -118,55 +146,56 @@ impl Run<'_> {
         let pins = archive_pins(code, &out, what, &err)?;
         let kept = output.join("Cargo.lock");
         let unequal = || {
-            NoVerdict::plain(text!(
+            Unbuilt::from(NoVerdict::plain(text!(
                 "the archive of ",
                 what,
                 " keeps no regular Cargo.lock equal to the run's"
-            ))
+            )))
         };
         let file = match open_lock(&kept) {
             Ok(file) => file,
             Err(error) => {
                 return Err(match fs::symlink_metadata(&kept) {
-                    Ok(status) if status.is_file() => {
-                        unread.set(true);
-                        NoVerdict::unreadable(&kept, &error, self.work())
-                    }
-                    _ => unequal(),
-                }
-                .into());
+                    Ok(status) if status.is_file() => Unbuilt::Unread(kept, error),
+                    Ok(_) => unequal(),
+                    Err(status) if ignored(&status) => unequal(),
+                    Err(status) => Unbuilt::Unread(kept, status),
+                });
             }
         };
         match lock_bytes(file, self.inputs.lock()) {
-            Ok(Some(bytes)) if bytes == self.inputs.lock() => {}
-            Ok(_) => return Err(unequal().into()),
-            Err(error) => {
-                unread.set(true);
-                return Err(NoVerdict::unreadable(&kept, &error, self.work()).into());
-            }
+            Ok(Some(bytes)) if bytes == self.inputs.lock() => Ok((output, pins)),
+            Ok(_) => Err(unequal()),
+            Err(error) => Err(Unbuilt::Unread(kept, error)),
         }
-        Ok((output, pins))
     }
 
-    /// `base_archive` caches the unpatched head's archive and pins on success. It caches a `NoVerdict`
-    /// from `Step::Git`, or from `Step::NoVerdict` when `unread` is false; an `unread` failure returns
-    /// uncached, so the next call builds again.
+    /// `base_archive` is the unpatched head's archive and pins, prepared at the first call. A built
+    /// archive is kept for every later call, and so is a failure of a checked Git step or of the build;
+    /// a failure before Git answered for the worktree, and a kept `Cargo.lock` that cannot be opened or
+    /// read, are returned with nothing kept, so the next call prepares the archive again, adding the
+    /// worktree at the same path.
+    ///
+    /// # Errors
+    ///
+    /// The run ended.
     fn base_archive(&mut self) -> Result<Result<(PathBuf, Pins), NoVerdict>, Halt> {
         if self.base.is_none() {
             let place = self.work().join("base");
-            let unread = Cell::new(false);
             let built = self
-                .tree(&place, |why| {
-                    unread.set(true);
-                    NoVerdict::plain(why)
-                })
-                .and_then(|tree| self.archive(&place, &tree, "the unpatched head", &unread));
+                .add_tree(&place)
+                .map_err(Unbuilt::from)
+                .and_then(|tree| self.archive(&place, &tree, "the unpatched head"));
             self.base = Some(match built {
                 Ok(base) => Ok(base),
-                Err(Step::Halt(halt)) => return Err(halt),
-                Err(Step::NoVerdict(ending)) if unread.get() => return Ok(Err(ending)),
-                Err(Step::NoVerdict(ending)) => Err(ending),
-                Err(Step::Git(failed)) => {
+                Err(Unbuilt::Step(Step::Halt(halt))) => return Err(halt),
+                Err(Unbuilt::Unprepared(why)) => return Ok(Err(NoVerdict::plain(why))),
+                Err(Unbuilt::Unread(path, error)) => {
+                    let shown = PathError::new(&path, error).to_string();
+                    return Ok(Err(NoVerdict::plain(shown)));
+                }
+                Err(Unbuilt::Step(Step::NoVerdict(ending))) => Err(ending),
+                Err(Unbuilt::Step(Step::Git(failed))) => {
                     let log = self.keep_git_error(&place, &failed);
                     Err(NoVerdict::plain(text!(
                         "the unpatched head's worktree: ",
@@ -270,7 +299,15 @@ impl Run<'_> {
         };
         entry.set_commit(&parsed("HEAD")?);
         entry.set_tree(&parsed("HEAD^{tree}")?);
-        let (archive, pins) = self.archive(&place, tree, "the planted tree", &Cell::new(false))?;
+        let (archive, pins) =
+            self.archive(&place, tree, "the planted tree")
+                .map_err(|unbuilt| match unbuilt {
+                    Unbuilt::Step(ending) => ending,
+                    Unbuilt::Unprepared(why) => NoVerdict::failed(why).into(),
+                    Unbuilt::Unread(path, error) => {
+                        NoVerdict::unreadable(&path, &error, self.work()).into()
+                    }
+                })?;
         if !entry.archived(&pins) {
             return Ok(());
         }
@@ -365,15 +402,7 @@ impl Ask for Asking<'_, '_> {
             .create(&check)
             .map_err(|error| shown(error, &check))?;
         let written = check.join("manifest");
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&written)
-            .and_then(|mut file| {
-                let pinned = manifest.pinned(&pins);
-                crate::fixtures::fits(pinned.as_bytes().len())?;
-                file.write_all(pinned.as_bytes())
-            })
+        write_new(&written, manifest.pinned(&pins).as_bytes())
             .map_err(|error| shown(error, &written))?;
         let args = [
             os(&"sim"),

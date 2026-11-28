@@ -143,6 +143,25 @@ pub fn chmod(path: &Path, mode: u32) {
         .unwrap_or_else(|error| panic!("chmod {}: {error}", path.display()));
 }
 
+/// `git_in` runs the host's Git with `args` in `dir`, with exactly the environment `env`, and returns
+/// its standard output; a Git that fails or prints no UTF-8 fails the case.
+pub fn git_in(dir: &Path, env: &[(OsString, OsString)], args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_clear()
+        .envs(env.iter().cloned())
+        .output()
+        .expect("git starts");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("Git's output is UTF-8")
+}
+
 /// `executable` writes `text` at `path` with mode 0755 through a child process, the one process that holds
 /// the file open for writing. `execve` refuses a file some process holds open for writing (`ETXTBSY`), and a
 /// child another test thread forks holds every descriptor of the test process until its own `execve`.
@@ -315,20 +334,7 @@ impl Repository {
 
     /// `hooked_git` runs the host's Git as [`Repository::git`] does with the repository's hooks on.
     pub fn hooked_git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.top)
-            .args(args)
-            .env_clear()
-            .envs(self.env.iter().cloned())
-            .output()
-            .expect("git starts");
-        assert!(
-            output.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("Git's output is UTF-8")
+        git_in(&self.top, &self.env, args)
     }
 
     /// `commit` commits every change of the checkout.

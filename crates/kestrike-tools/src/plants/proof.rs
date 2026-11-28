@@ -7,21 +7,22 @@
 //! changes. The verdict check is the staged helper's own: once the helpers are copied, and after each
 //! rerun that exits 0 or 1, the run asks the copy. A setup that fails, an apply or a reset of the proof's
 //! worktree that fails, and a rerun that leaves the tree without the run's lockfile are kept, so every
-//! later plant reports that cause.
+//! later plant reports that cause. The lockfile is checked after a rerun whose output is UTF-8 text; a
+//! rerun that prints no UTF-8 text gets that no verdict first, and the next proof still reruns.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{DirBuilder, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use super::child::{Logged, PYTHON, counts, logged, verdict_texts};
+use super::child::{Logged, PYTHON, Staged, counts, logged, verdict_texts};
 use super::ending::{Halt, Step, Stopped};
 use super::entry::Entry;
 use super::git::{CallError, Done};
 use super::record::Plant;
 use super::rerun::{HelperVerdict, Rerun, judge_rerun};
-use super::run::Run;
+use super::run::{Run, write_new};
 use super::verdict::{Kind, NoVerdict};
 use crate::text::{Text, text};
 
@@ -42,28 +43,42 @@ fn os(text: &Text) -> OsString {
         .expect("a checked record's text names no lone surrogate")
 }
 
-/// `copy` opens `from` once, following links and waiting for no writer, refuses a named pipe judged
-/// on the opened file, and reads through that descriptor at most one byte past the soft file size
-/// limit, so a source the copy could not write is refused before it is read whole.
+/// The most bytes a copied helper may hold; the head's two helpers hold under 64 KiB each.
+const HELPER_BOUND: u64 = 16 << 20;
+
+/// `copy` opens `from` once, following links and waiting for no writer, refuses an opened file that is
+/// no regular file (a named pipe, a device, a socket or a directory), judged on the opened file, and
+/// reads through that descriptor at most one byte past [`HELPER_BOUND`] and past the soft file size
+/// limit, so a source longer than either is refused before it is read whole.
 fn copy(from: &Path, to: &Path) -> io::Result<Vec<u8>> {
     let source = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(from)?;
-    if source.metadata()?.file_type().is_fifo() {
+    let kind = source.metadata()?.file_type();
+    if kind.is_fifo() {
         return Err(io::Error::other(format!(
             "`{}` is a named pipe",
             from.display()
         )));
     }
+    if !kind.is_file() {
+        return Err(io::Error::other(format!(
+            "`{}` is no regular file",
+            from.display()
+        )));
+    }
     let mut bytes = Vec::new();
-    source.take(size_bound()?).read_to_end(&mut bytes)?;
-    crate::fixtures::fits(bytes.len())?;
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)?
-        .write_all(&bytes)?;
+    source
+        .take(size_bound()?.min(HELPER_BOUND + 1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > HELPER_BOUND {
+        return Err(io::Error::other(format!(
+            "`{}` holds more than {HELPER_BOUND} bytes",
+            from.display()
+        )));
+    }
+    write_new(to, &bytes)?;
     Ok(bytes)
 }
 
@@ -103,14 +118,7 @@ impl Run<'_> {
         let place = self.place(plant.id());
         let tree = self.tree(&place, NoVerdict::failed)?;
         let patch = place.join("plant.patch");
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&patch)
-            .and_then(|mut staged| {
-                crate::fixtures::fits(plant.patch().len())?;
-                staged.write_all(plant.patch())
-            })
+        write_new(&patch, plant.patch())
             .map_err(|error| NoVerdict::unreadable(&patch, &error, self.work()))?;
         let args = [
             OsStr::new("apply"),
@@ -134,8 +142,8 @@ impl Run<'_> {
     }
 
     /// `setup` makes the proof's worktree with the run's `Cargo.lock`, copies the head's helpers out of
-    /// it and asks the staged helper for its verdict texts. A signal recorded during the question ends
-    /// the run after it.
+    /// it and asks the staged helper for its verdict texts. A signal recorded before the question starts
+    /// no question, and one recorded during it ends the run after it.
     fn setup(&mut self) -> Result<PathBuf, Step> {
         let place = self.proof_place();
         let tree = self.tree(&place, |why| {
@@ -164,7 +172,13 @@ impl Run<'_> {
         }
         let source = sources.swap_remove(0);
         self.interrupt.check()?;
-        let answer = verdict_texts(self.inputs.env(), &self.helper(), &source);
+        let staged = Staged {
+            env: self.inputs.env(),
+            dir: &place,
+            helper: &self.helper(),
+            source: &source,
+        };
+        let answer = verdict_texts(&staged, self.interrupt);
         self.helper_source = source;
         self.interrupt.check()?;
         match answer {
@@ -235,8 +249,14 @@ impl Run<'_> {
 
     /// `proof` reruns `proof` in the proof's worktree `tree` as it stands, logged as `label`, and returns
     /// its exit, 0 or 1, once the tree holds the run's `Cargo.lock` and the staged helper counts the
-    /// rerun's last line beside that exit. A signal recorded during the helper's question ends the run
-    /// after it.
+    /// rerun's last line beside that exit. The run reads the signal record after the rerun, just before
+    /// the helper's question starts and after it ends.
+    ///
+    /// # Errors
+    ///
+    /// `Stopped::NoVerdict` for the rerun's own endings and a question that gives no answer;
+    /// `Stopped::Halt` for a signal recorded before or during the rerun or the question, which ends the
+    /// run once the child has ended, and for a SIGTERM or a wait after it that fails.
     fn proof(&self, tree: &Path, proof: &Text, label: &str) -> Result<u8, Stopped> {
         let place = self.proof_place();
         let (log, kept) = (place.join(label), place.join("artifacts").join(label));
@@ -272,15 +292,16 @@ impl Run<'_> {
             .results
             .as_ref()
             .expect("a rerun follows the helper's setup");
+        let helper = self.helper();
+        let staged = Staged {
+            env: self.inputs.env(),
+            dir: &place,
+            helper: &helper,
+            source: &self.helper_source,
+        };
         let judged = judge_rerun(&rerun, |code, line| {
             let expected = results[usize::from(code == 1)].clone();
-            match counts(
-                self.inputs.env(),
-                &self.helper(),
-                &self.helper_source,
-                code,
-                line,
-            ) {
+            match counts(&staged, code, line, self.interrupt) {
                 Ok(true) => Ok(HelperVerdict::Counted),
                 Ok(false) => Ok(HelperVerdict::Uncounted { expected }),
                 Err(why) => Err(text!(
@@ -301,8 +322,8 @@ impl Run<'_> {
         self.git(tree, &args).and_then(Done::checked)
     }
 
-    /// `live` returns the proof's exits on the head and on the plant. The plant's patch, the head's
-    /// bytes, is applied to the proof's worktree, its proof rerun, and the tree reset. An apply or a reset
+    /// `live` returns the proof's exits on the head and on the plant. The staged `plant.patch`, as the
+    /// file stands at the apply, is applied to the proof's worktree, its proof rerun, and the tree reset. An apply or a reset
     /// that fails, or a rerun that leaves the tree without the run's lockfile, is kept for every later
     /// plant; the reset's failure outranks the rerun's ending.
     pub(super) fn live(&mut self, plant: &Plant) -> Result<(u8, u8), Step> {

@@ -372,9 +372,10 @@ The work directory, by default under `$TMPDIR`, must lie outside the
 checkout, on a mount `campaign` accepts (xfs, or ext4 with a journal), under
 ancestors only you or root can write. Where `$TMPDIR` is unset or shared, as
 `/tmp` is, the bare command is rejected: pass `--work DIR` or set `TMPDIR` to
-such a directory. The runner starts `python3`, the first on `PATH`, for each
-proof rerun and for the question to the head's staged
-`scripts/reproduce-test.py`; it runs on Linux alone. The runner sweeps each plant's archive
+such a directory. The runner runs on Linux alone and reads its umask from
+`/proc/thread-self/status`. It starts `python3`, the first on `PATH`, for
+each proof rerun and for each check of a rerun's verdict by the head's copy
+of `scripts/reproduce-test.py`. The runner sweeps each plant's archive
 in a scratch worktree and writes `verification/plants/score.json`, which reads
 "k of n plants at commit C". A run with `--plant` writes a score over the
 selected plants and names them in its `settings`. A swept miss is one
@@ -405,7 +406,9 @@ rerun counts when it exits 0 or 1, prints last the verdict of that exit,
 tree as it was. Any other ending on either the head or the plant leaves the
 plant with no verdict. So does an apply or a reset that fails in the proof's
 worktree, or a rerun that changes the `Cargo.lock`, for that plant and each
-later one. When both reruns count, the plant is live only when its proof
+later one; the lockfile is checked after a rerun whose output is UTF-8 text,
+so one that prints no UTF-8 text leaves its own plant with no verdict and
+the next proof still reruns. When both reruns count, the plant is live only when its proof
 exits 0 on the head and 1 on the plant; the runner then builds its archive.
 Any other pair of exits makes the plant `not live`: `n` does not count it,
 the score names it under `not_live`, and the run exits 3. The runner removes
