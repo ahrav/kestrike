@@ -67,6 +67,29 @@ fn each_python_form_reads_and_writes_back_compactly() {
     assert!(matches!(parse("NaN"), Ok(Value::Float(value)) if value.is_nan()));
 }
 
+/// For these tokens, the decimal exponent of the value equals 655,360 less the number of fraction digits,
+/// leading zeros included.
+#[test]
+fn a_long_exponent_reads_as_the_value_it_spells() {
+    for (expression, token, value) in [
+        (
+            "json.loads('0.' + '0' * 65535 + '1e655360')",
+            format!("0.{}1e655360", "0".repeat(65_535)),
+            f64::INFINITY,
+        ),
+        (
+            "json.loads('0.' + '0' * 655359 + '1e655360')",
+            format!("0.{}1e655360", "0".repeat(655_359)),
+            1.0,
+        ),
+    ] {
+        let Ok(Value::Float(read)) = parse(&token) else {
+            panic!("{expression} reads as a float")
+        };
+        assert_eq!(read.to_bits(), value.to_bits(), "{expression}");
+    }
+}
+
 #[test]
 fn integers_keep_their_digits_up_to_the_conversion_limit() {
     let digits = "9".repeat(MAX_INTEGER_DIGITS);

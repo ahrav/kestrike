@@ -93,7 +93,7 @@ pub fn int(value: &Value) -> Result<Integer, String> {
 
 /// `int_space` holds for the code points `int()` strips: ASCII space, tab, line feed, vertical tab, form
 /// feed and carriage return, and each non-ASCII code point [`is_space`] takes.
-fn int_space(code: u32) -> bool {
+pub(crate) fn int_space(code: u32) -> bool {
     matches!(code, 0x9..=0xd | 0x20) || (code >= 0x80 && is_space(code))
 }
 

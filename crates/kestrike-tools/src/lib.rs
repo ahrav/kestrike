@@ -12,6 +12,7 @@ pub mod fixtures;
 pub mod gameday;
 pub mod genmc;
 pub mod git;
+pub mod hardware_lane;
 pub mod hook;
 #[cfg(target_os = "linux")]
 pub mod host_stop;
