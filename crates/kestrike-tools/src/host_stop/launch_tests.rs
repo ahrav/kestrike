@@ -1,15 +1,16 @@
 use std::fs;
-use std::io;
+use std::io::{self, PipeWriter};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    Call, CallFailed, Ended, Reader, TAIL, Waited, finish, read_all, run, tail, wait, whole_seconds,
+    Call, CallFailed, EXIT_PAUSE, Ended, Finished, READERS, Reader, TAIL, Waited, block, finish,
+    joined, read_all, run, tail, wait, whole_seconds,
 };
 use crate::host_stop::{Delivered, Interrupted, Record, SLICE, Signal};
 
@@ -52,27 +53,44 @@ struct Watched {
     out: Reader,
     err: Reader,
     abandoned: Arc<AtomicBool>,
+    finished: Arc<Finished>,
 }
 
-fn watched(program: &str, args: &[&str]) -> Watched {
-    let mut child = Command::new(program)
+fn spawned(program: &str, args: &[&str], stdin: Stdio) -> Child {
+    Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("the child starts");
+        .expect("the child starts")
+}
+
+/// The child with a reader of its standard output and a reader of `stderr`.
+fn read_by(mut child: Child, stderr: impl io::Read + Send + 'static) -> Watched {
     let abandoned = Arc::new(AtomicBool::new(false));
-    let out = read_all(child.stdout.take().expect("piped"), Arc::clone(&abandoned))
-        .expect("a reader starts");
-    let err = read_all(child.stderr.take().expect("piped"), Arc::clone(&abandoned))
-        .expect("a reader starts");
+    let finished = Arc::new(Finished::default());
+    let out = read_all(
+        child.stdout.take().expect("piped"),
+        Arc::clone(&abandoned),
+        Arc::clone(&finished),
+    )
+    .expect("a reader starts");
+    let err =
+        read_all(stderr, Arc::clone(&abandoned), Arc::clone(&finished)).expect("a reader starts");
     Watched {
         child,
         out,
         err,
         abandoned,
+        finished,
     }
+}
+
+fn watched(program: &str, args: &[&str]) -> Watched {
+    let mut child = spawned(program, args, Stdio::null());
+    let stderr = child.stderr.take().expect("piped");
+    read_by(child, stderr)
 }
 
 fn hanging() -> Watched {
@@ -82,16 +100,55 @@ fn hanging() -> Watched {
     )
 }
 
-fn ended(watched: &Watched) {
-    let stat = format!("/proc/{}/stat", watched.child.id());
+/// A shell that runs `script` with its standard input open: the script's `read` returns once the
+/// input is dropped.
+fn gated(script: &str) -> (Watched, ChildStdin) {
+    let mut child = spawned("/bin/sh", &["-c", script], Stdio::piped());
+    let gate = child.stdin.take().expect("piped");
+    let stderr = child.stderr.take().expect("piped");
+    (read_by(child, stderr), gate)
+}
+
+/// A child that has exited and whose standard output has closed, with the second reader on a pipe
+/// that stays open until the writer returned here is dropped.
+fn held_open() -> (Watched, PipeWriter) {
+    let (reader, writer) = io::pipe().expect("a pipe opens");
+    let mut child = spawned("/bin/true", &[], Stdio::null());
+    drop(child.stderr.take());
+    let watched = read_by(child, reader);
+    exited(&watched.child);
+    closed(&[&watched.out]);
+    (watched, writer)
+}
+
+fn within_limit(start: Instant, what: &str) {
+    assert!(start.elapsed() < Duration::from_secs(30), "{what}");
+    thread::sleep(Duration::from_millis(1));
+}
+
+/// Returns once the process whose state `stat` holds has exited and waits to be reaped.
+fn zombie(stat: &Path) {
     let start = Instant::now();
-    while !(watched.out.is_finished()
-        && watched.err.is_finished()
-        && fs::read_to_string(&stat).is_ok_and(|text| text.contains(") Z ")))
-    {
-        assert!(start.elapsed() < Duration::from_secs(30), "the child ends");
-        thread::sleep(Duration::from_millis(5));
+    while !fs::read_to_string(stat).is_ok_and(|text| text.contains(") Z ")) {
+        within_limit(start, "the child exits");
     }
+}
+
+fn exited(child: &Child) {
+    zombie(&PathBuf::from(format!("/proc/{}/stat", child.id())));
+}
+
+/// Returns once each reader's thread has ended.
+fn closed(readers: &[&Reader]) {
+    let start = Instant::now();
+    while !readers.iter().all(|reader| reader.is_finished()) {
+        within_limit(start, "the readers finish");
+    }
+}
+
+fn ended(watched: &Watched) {
+    exited(&watched.child);
+    closed(&[&watched.out, &watched.err]);
 }
 
 fn gone(child: &Child) -> bool {
@@ -112,17 +169,18 @@ fn a_signal_after_the_child_ends_and_its_outputs_close_raises_in_the_wait() {
     delivered.deliver(Signal::Terminate);
     let Watched {
         child,
-        out,
-        err,
         abandoned,
+        finished,
+        ..
     } = &mut watched;
     let waited = wait(
         &mut record,
         child,
         abandoned,
-        [out, err],
+        finished,
         Instant::now(),
         SLICE * 600,
+        Instant::now,
     );
     assert!(matches!(
         waited,
@@ -140,20 +198,407 @@ fn an_answer_seen_at_or_after_the_cut_is_a_cut() {
     let started = Instant::now() - Duration::from_secs(2);
     let Watched {
         child,
-        out,
-        err,
         abandoned,
+        finished,
+        ..
     } = &mut watched;
     let waited = wait(
         &mut record,
         child,
         abandoned,
-        [out, err],
+        finished,
         started,
         Duration::from_secs(1),
+        Instant::now,
     );
     assert!(matches!(waited, Err(Waited::Cut(Ok(())))));
     assert!(gone(child));
+    assert!(abandoned.load(Ordering::SeqCst));
+}
+
+#[test]
+fn a_signal_that_may_raise_wins_over_the_cut() {
+    let mut watched = watched("/bin/true", &[]);
+    ended(&watched);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    record.arm();
+    delivered.deliver(Signal::Hangup);
+    let started = Instant::now() - Duration::from_secs(2);
+    let Watched {
+        child,
+        abandoned,
+        finished,
+        ..
+    } = &mut watched;
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        Duration::from_secs(1),
+        Instant::now,
+    );
+    assert!(matches!(
+        waited,
+        Err(Waited::Raised(Interrupted(Signal::Hangup)))
+    ));
+    assert!(gone(child));
+}
+
+/// Turns the wait makes with its end an hour off before the last interval of a case starts. Six is
+/// the fewest after which a wait that sleeps a pause doubling from 1 ms at each turn sleeps one whole
+/// [`SLICE`]: that wait sleeps through the last interval to the end, and the cases on
+/// [`completed_in_the_last_interval`] reject it.
+const EARLY: usize = 6;
+const _: () = assert!(1 << EARLY >= SLICE.as_millis());
+
+/// The end of every wait with a scripted clock stands this long after its start.
+const HOUR: Duration = Duration::from_secs(3600);
+
+/// Waits on a shell that runs to the `read` that `gate` holds, and returns what the wait gave. The
+/// clock reads one [`SLICE`] before the end at the turn after the early ones. During that reading the
+/// gate opens and the reply completes: the child exits and both readers finish. From the completed
+/// reply on, the clock runs with real time.
+///
+/// A case on this wait rests on real time in one stretch: from the completed reply to the wait's next
+/// reading of the clock, which must come within one `SLICE`. The stretch holds the end of one turn,
+/// one block and one look. The child's exit and the readers' finish stand outside it, since the clock
+/// starts at the completed reply. A host fails such a case only by keeping the waiting thread off its
+/// processor for the rest of a `SLICE` inside that stretch.
+fn completed_in_the_last_interval(
+    mut watched: Watched,
+    gate: ChildStdin,
+) -> Result<Option<i32>, Waited> {
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let Watched {
+        child,
+        out,
+        err,
+        abandoned,
+        finished,
+    } = &mut watched;
+    let started = Instant::now();
+    let end = started + HOUR;
+    let stat = PathBuf::from(format!("/proc/{}/stat", child.id()));
+    let mut gate = Some(gate);
+    let mut turns = 0;
+    let mut completed = None;
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        HOUR,
+        || {
+            turns += 1;
+            if turns <= EARLY {
+                return started;
+            }
+            let completed = completed.get_or_insert_with(|| {
+                drop(gate.take());
+                zombie(&stat);
+                closed(&[&*out, &*err]);
+                Instant::now()
+            });
+            end - SLICE + completed.elapsed()
+        },
+    );
+    assert!(gone(child), "the wait reaps the child");
+    assert_eq!(finished.count(), READERS);
+    assert_eq!(abandoned.load(Ordering::SeqCst), waited.is_err());
+    waited.map(|status| status.code())
+}
+
+/// A reply that completes inside the last interval before the end is an answer: the child holds its
+/// pipes to its exit, and the readers' finish ends the wait's block before the end.
+#[test]
+fn a_reply_complete_inside_the_last_interval_is_an_answer() {
+    let (watched, gate) = gated("read line; exit 7");
+    match completed_in_the_last_interval(watched, gate) {
+        Ok(code) => assert_eq!(code, Some(7)),
+        Err(_) => panic!("a reply {SLICE:?} before the end is cut"),
+    }
+}
+
+/// A child that closed both pipes at its start and exits inside the last interval is an answer: its
+/// exit is the reply's last event, and the wait sees it after a block of one [`EXIT_PAUSE`], where a
+/// block of one [`SLICE`] in that state runs to the end.
+#[test]
+fn an_exit_after_both_outputs_closed_is_seen_after_a_short_block() {
+    let (watched, gate) = gated("exec >&- 2>&-; read line; exit 7");
+    closed(&[&watched.out, &watched.err]);
+    match completed_in_the_last_interval(watched, gate) {
+        Ok(code) => assert_eq!(code, Some(7)),
+        Err(_) => panic!("an exit {SLICE:?} before the end is cut"),
+    }
+}
+
+/// The block a turn requests: 1 ms once both readers have finished, one [`SLICE`] of 50 ms while a
+/// reader is unfinished, and the time left to the limit where that is shorter.
+#[test]
+fn a_turn_blocks_an_exit_pause_or_a_slice_and_never_past_the_limit() {
+    assert_eq!(EXIT_PAUSE, Duration::from_millis(1));
+    assert_eq!(SLICE, Duration::from_millis(50));
+    assert_eq!(READERS, 2);
+    assert_eq!(block(READERS, HOUR), EXIT_PAUSE);
+    for unfinished in 0..READERS {
+        assert_eq!(block(unfinished, HOUR), SLICE, "{unfinished}");
+        assert_eq!(block(unfinished, SLICE / 2), SLICE / 2, "{unfinished}");
+    }
+    let short = Duration::from_nanos(1);
+    assert_eq!(block(READERS, EXIT_PAUSE / 2), EXIT_PAUSE / 2);
+    assert_eq!(block(READERS, short), short);
+    assert_eq!(block(0, short), short);
+}
+
+/// A reply seen by the look of a turn whose clock reads 1 ns before the end is the answer, at that
+/// one reading.
+#[test]
+fn a_reply_seen_just_before_the_end_is_an_answer() {
+    let mut watched = watched("/bin/true", &[]);
+    ended(&watched);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let Watched {
+        child,
+        abandoned,
+        finished,
+        ..
+    } = &mut watched;
+    let started = Instant::now();
+    let end = started + HOUR;
+    let mut readings = 0;
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        HOUR,
+        || {
+            readings += 1;
+            if readings == 1 {
+                end - Duration::from_nanos(1)
+            } else {
+                end
+            }
+        },
+    );
+    match waited {
+        Ok(status) => assert_eq!(status.code(), Some(0)),
+        Err(_) => panic!("a reply seen 1 ns before the end is no answer"),
+    }
+    assert_eq!(readings, 1);
+    assert!(!abandoned.load(Ordering::SeqCst));
+    assert!(gone(child));
+}
+
+/// A reply whose last reader finishes at the end is a cut, though the clock read before the end at
+/// the turn's reading: the reader finishes during that reading, after which the clock reads the end.
+#[test]
+fn a_reply_whose_last_reader_finishes_at_the_end_is_a_cut() {
+    let (mut watched, held) = held_open();
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let Watched {
+        child,
+        err,
+        abandoned,
+        finished,
+        ..
+    } = &mut watched;
+    let started = Instant::now();
+    let end = started + HOUR;
+    let mut held = Some(held);
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        HOUR,
+        || match held.take() {
+            Some(writer) => {
+                drop(writer);
+                closed(&[&*err]);
+                end - Duration::from_nanos(1)
+            }
+            None => end,
+        },
+    );
+    assert!(matches!(waited, Err(Waited::Cut(Ok(())))));
+    assert_eq!(finished.count(), READERS, "both readers had finished");
+    assert!(gone(child));
+    assert!(abandoned.load(Ordering::SeqCst));
+}
+
+/// A reply whose last event, the child's exit, comes at the end is a cut, though the clock read before
+/// the end at the turn's reading: both readers finished earlier, the child exits during that reading,
+/// and the clock then reads the end. The turn's look came before its reading and saw the child
+/// running, and the turn that first sees the exit reads the end.
+#[test]
+fn a_reply_whose_exit_comes_at_the_end_is_a_cut() {
+    let (mut watched, gate) = gated("exec >&- 2>&-; read line; exit 7");
+    closed(&[&watched.out, &watched.err]);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let Watched {
+        child,
+        abandoned,
+        finished,
+        ..
+    } = &mut watched;
+    let started = Instant::now();
+    let end = started + HOUR;
+    let stat = PathBuf::from(format!("/proc/{}/stat", child.id()));
+    let mut gate = Some(gate);
+    let mut readings = 0;
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        HOUR,
+        || {
+            readings += 1;
+            match gate.take() {
+                Some(gate) => {
+                    drop(gate);
+                    zombie(&stat);
+                    end - Duration::from_nanos(1)
+                }
+                None => end,
+            }
+        },
+    );
+    assert!(matches!(waited, Err(Waited::Cut(Ok(())))));
+    assert_eq!(readings, 2);
+    assert!(gone(child));
+    assert!(abandoned.load(Ordering::SeqCst));
+    let status = child.try_wait().expect("cached").expect("reaped");
+    assert_eq!((status.code(), status.signal()), (Some(7), None));
+}
+
+/// One part of a reply is no answer. A child that has exited while one output stays open, and a
+/// child that runs on after both outputs closed, are each cut at the end, after two turns that
+/// found the part and waited on.
+#[test]
+fn an_exit_alone_and_two_closed_outputs_alone_are_no_answer() {
+    let (exit_alone, held) = held_open();
+    let outputs_alone = watched("/bin/sh", &["-c", "exec >&- 2>&-; exec /bin/sleep 30"]);
+    closed(&[&outputs_alone.out, &outputs_alone.err]);
+    for (mut watched, killed) in [(exit_alone, false), (outputs_alone, true)] {
+        let delivered = Delivered::new();
+        let mut record = Record::new(&delivered);
+        let Watched {
+            child,
+            abandoned,
+            finished,
+            ..
+        } = &mut watched;
+        let started = Instant::now();
+        let mut turns = 0;
+        let waited = wait(
+            &mut record,
+            child,
+            abandoned,
+            finished,
+            started,
+            HOUR,
+            || {
+                turns += 1;
+                if turns <= 2 { started } else { started + HOUR }
+            },
+        );
+        assert!(
+            matches!(waited, Err(Waited::Cut(Ok(())))),
+            "killed {killed}"
+        );
+        assert_eq!(turns, 3, "killed {killed}: each turn reads the clock once");
+        assert!(gone(child), "killed {killed}");
+        assert!(abandoned.load(Ordering::SeqCst));
+        let status = child.try_wait().expect("cached").expect("reaped");
+        let signal = killed.then_some(libc::SIGKILL);
+        assert_eq!(status.signal(), signal, "killed {killed}");
+    }
+    drop(held);
+}
+
+/// A finish counted after the wait's look ends its block at once, and a block with no finish lasts its
+/// timeout.
+#[test]
+fn a_finish_after_the_look_ends_the_block_at_once() {
+    let timeout = Duration::from_secs(60);
+    let finished = Finished::default();
+    let seen = finished.count();
+    finished.add();
+    let start = Instant::now();
+    finished.wait(seen, timeout);
+    assert!(start.elapsed() < timeout / 2, "{:?}", start.elapsed());
+    let start = Instant::now();
+    finished.wait(finished.count(), SLICE);
+    assert!(
+        start.elapsed() >= SLICE,
+        "no finish: the block lasts its timeout"
+    );
+}
+
+/// A finish counted while the wait is blocked wakes it. The waiter holds the lock from before the
+/// other thread starts until its block releases it, so that thread counts its finish only once the
+/// waiter has compared the count and blocked; the waiter then returns on the wake alone, long before
+/// its timeout of 60 seconds.
+#[test]
+fn a_finish_during_the_block_wakes_it() {
+    let timeout = Duration::from_secs(60);
+    let finished = Finished::default();
+    let start = Instant::now();
+    thread::scope(|scope| {
+        let held = finished.lock();
+        let seen = *held;
+        scope.spawn(|| finished.add());
+        finished.wait_locked(held, seen, timeout);
+    });
+    assert!(start.elapsed() < timeout / 2, "{:?}", start.elapsed());
+    assert_eq!(finished.count(), 1);
+}
+
+/// A stream whose first read fails with the error given, or panics with none.
+struct Broken(Option<io::ErrorKind>);
+
+impl io::Read for Broken {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        match self.0 {
+            Some(kind) => Err(kind.into()),
+            None => panic!("the stream breaks"),
+        }
+    }
+}
+
+/// A reader whose read fails or panics counts as finished once, and its call keeps the failure: the
+/// read's error, or the sentence for a reader that panicked.
+#[test]
+fn a_reader_that_fails_or_panics_counts_as_finished() {
+    for (broken, message) in [
+        (Some(io::ErrorKind::BrokenPipe), "broken pipe"),
+        (None, "a reader of the child's output panicked"),
+    ] {
+        let finished = Arc::new(Finished::default());
+        let reader = read_all(
+            Broken(broken),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&finished),
+        )
+        .expect("a reader starts");
+        closed(&[&reader]);
+        assert_eq!(finished.count(), 1, "{broken:?}");
+        let error = joined(reader).expect_err("the reader failed");
+        assert_eq!(error.to_string(), message, "{broken:?}");
+    }
 }
 
 #[test]
@@ -169,18 +614,19 @@ fn the_cut_and_a_raise_each_end_a_child_that_ignores_term_with_sigkill() {
         }
         let Watched {
             child,
-            out,
-            err,
             abandoned,
+            finished,
+            ..
         } = &mut watched;
         let cut = Duration::from_millis(if raise { 30_000 } else { 200 });
         let waited = wait(
             &mut record,
             child,
             abandoned,
-            [out, err],
+            finished,
             Instant::now(),
             cut,
+            Instant::now,
         );
         match (raise, &waited) {
             (true, Err(Waited::Raised(Interrupted(Signal::Terminate))))
@@ -206,17 +652,18 @@ fn a_failed_wait_abandons_the_readers_and_fails() {
     let mut record = Record::new(&delivered);
     let Watched {
         child,
-        out,
-        err,
         abandoned,
+        finished,
+        ..
     } = &mut watched;
     let waited = wait(
         &mut record,
         child,
         abandoned,
-        [out, err],
+        finished,
         Instant::now(),
         SLICE * 600,
+        Instant::now,
     );
     match waited {
         Err(Waited::Failed(error)) => assert_eq!(error.raw_os_error(), Some(libc::ECHILD)),
@@ -262,9 +709,9 @@ fn the_pause_between_turns_stays_within_a_slice() {
     record.arm();
     let Watched {
         child,
-        out,
-        err,
         abandoned,
+        finished,
+        ..
     } = &mut watched;
     let (waited, late) = thread::scope(|scope| {
         let sender = scope.spawn(|| {
@@ -277,9 +724,10 @@ fn the_pause_between_turns_stays_within_a_slice() {
             &mut record,
             child,
             abandoned,
-            [out, err],
+            finished,
             Instant::now(),
             SLICE * 600,
+            Instant::now,
         );
         let returned = Instant::now();
         (waited, returned - sender.join().expect("the sender ends"))

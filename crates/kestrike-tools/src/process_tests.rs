@@ -157,9 +157,14 @@ fn stat_line(name: &str, fields: &[String]) -> Vec<u8> {
 /// The fields are read after the last `)`, so a command name that holds `) Z (` reads as the state that
 /// follows it; `Z` is an exited leader only with one thread left, and a stat line of a process that leads
 /// no group of its own is refused.
+///
+/// `spawn` can return before `/proc/<pid>/comm` shows the script's name `NAME`, whose `) Z ` resembles
+/// the command-name terminator followed by the zombie state in `/proc/<pid>/stat`. The test waits for
+/// `comm` to show `NAME` so the `Leader::Running` assertion exercises the embedded `Z`.
 #[test]
 fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     use super::{Leader, parsed};
+    const NAME: &str = "x) Z (y";
     let own = std::process::id();
     let line = |name: &str, state: &str, group: u32, threads: u32| {
         stat_line(name, &stat_fields(state, own, group, threads))
@@ -167,6 +172,11 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     assert_eq!(
         parsed(&line("a) Z (b", "S", 12, 1), 12, own),
         Ok(Leader::Running)
+    );
+    assert_eq!(
+        parsed(&line("a) Z (b", "Z", 12, 1), 12, own),
+        Ok(Leader::Exited),
+        "the state after the name decides, whatever the name holds"
     );
     assert_eq!(parsed(&line("sh", "Z", 12, 1), 12, own), Ok(Leader::Exited));
     assert_eq!(
@@ -208,7 +218,7 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
         );
     }
     let scratch = crate::paths::tests::Scratch::new("probe-name");
-    let program = scratch.0.join("x) Z (y");
+    let program = scratch.0.join(NAME);
     crate::fixtures::tests::script(&program, "#!/bin/sh\nread line\n");
     let mut child = {
         use std::os::unix::process::CommandExt;
@@ -218,12 +228,22 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
             .spawn()
             .expect("the script runs")
     };
-    let comm = std::fs::read_to_string(format!("/proc/{}/comm", child.id()));
-    let state = super::leader(child.id());
+    let comm = format!("/proc/{}/comm", child.id());
+    let mut last = String::new();
+    let state = super::polled(WAIT, PAUSE, &|| false, || {
+        last = std::fs::read_to_string(&comm)?;
+        if last.strip_suffix('\n') != Some(NAME) {
+            return Ok(None);
+        }
+        super::leader(child.id()).map(Some)
+    });
     child.kill().expect("the child is killed");
     child.wait().expect("the child is reaped");
-    let (comm, state) = (comm.expect("comm reads"), state.expect("the state reads"));
-    assert_eq!(comm, "x) Z (y\n");
+    let state = state
+        .expect("the name and the state read")
+        .unwrap_or_else(|| {
+            panic!("the name is {last:?} {WAIT:?} after the start, where {NAME:?} is expected")
+        });
     assert_eq!(state, Leader::Running);
 }
 

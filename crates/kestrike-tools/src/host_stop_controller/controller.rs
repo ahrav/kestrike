@@ -69,7 +69,8 @@ pub(crate) enum Kind {
     Stop,
 }
 
-/// One run under one operator file and GD-2's admitted entry. `written` lists each mark that
+/// One command, `run`, `restore` or `seal`, under one operator file and GD-2's admitted entry.
+/// `written` lists each mark that
 /// stands, a mark that stands with its durability unknown included; the caller owns it, so it
 /// outlives a panic that ends the run.
 pub struct Controller<'c, 'a, S: Seam, F: Files> {
@@ -490,17 +491,18 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
     }
 
     /// Writes the mark `name` once, its value checked first against the judge's layout (`roles`
-    /// excepted, which its builder checked) and its bytes against the mark size limit, with a signal
-    /// held to the write's end. A mark that stands with its durability unknown counts as written.
+    /// excepted, which its builder checked) and its bytes against [`Context`]'s mark bound, the
+    /// lesser of `mark_limit` and `file_limit`, with a signal held to the write's end. A mark that
+    /// stands with its durability unknown counts as written.
     ///
     /// # Errors
     ///
     /// [`Halt::Interrupted`] for a signal the read before the hold or the release raises;
     /// [`Halt::Fault`] for a value or bytes a check refuses, no injection directory set, or a write
-    /// that fails, and an order fault for a `name` other than the run's four marks, `roles`,
-    /// `stop`, `stopped` and `abort`.
+    /// that fails, and an order fault for a `name` other than the five marks a command writes from a
+    /// value, `roles`, `stop`, `stopped`, `abort` and `restoration`.
     pub fn mark(&mut self, name: &'static str, value: &Value) -> Result<(), Halt> {
-        if !matches!(name, "roles" | "stop" | "stopped" | "abort") {
+        if !matches!(name, "roles" | "stop" | "stopped" | "abort" | "restoration") {
             return Err(Halt::order(&format!("{name} is no mark of a run")));
         }
         let what = Text::from(format!("injection/{name}.json"));
@@ -510,8 +512,16 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             conform(value, schema, &what, &Names::new())
                 .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
         }
-        let data = encoded(value, &what, self.cx.mark_limit)
+        let data = encoded(value, &what, self.cx.mark_bound())
             .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
+        self.publish_mark(name, &data)
+    }
+
+    /// Writes `data` as the mark `name` once, with a signal held to the write's end. It checks
+    /// neither the name against the judge's layout nor the bytes against a schema or a size: each
+    /// caller checks them first, [`Controller::mark`] for a mark it encodes and `seal` through the
+    /// judge's loader over the very bytes it passes.
+    pub(super) fn publish_mark(&mut self, name: &'static str, data: &[u8]) -> Result<(), Halt> {
         let Some(injection) = self.injection.clone() else {
             return Err(Halt::order(&format!(
                 "the mark {name} has no injection directory to stand in"
@@ -522,7 +532,7 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         let files = self.cx.files;
         let written = &mut *self.written;
         let outcome = self.cx.record.holding(|| {
-            match publish(files, &injection, OsStr::new(&file), &data) {
+            match publish(files, &injection, OsStr::new(&file), data) {
                 Ok(()) => {
                     written.push(name);
                     Ok(())

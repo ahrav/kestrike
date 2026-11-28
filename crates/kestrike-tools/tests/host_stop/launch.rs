@@ -59,6 +59,8 @@ case "$HOST_STOP_MODE" in
   group) read -r stat < /proc/$$/stat; set -- $stat; printf '%s' "$5" ;;
   orphan) /bin/sleep 4 & echo $! > "$HOST_STOP_PID.orphan"; echo '{}' ;;
   status) exec /bin/cat /proc/self/status ;;
+  shut) exec >&- 2>&-; /bin/sleep 0.3; exit 3 ;;
+  shut-hang) exec >&- 2>&-; exec /bin/sleep 5 ;;
 esac
 "#;
 
@@ -310,6 +312,41 @@ fn a_child_that_answers_after_its_cut_gives_no_answer() {
     let pids = standin.started();
     assert_eq!(pids.len(), 1, "one call starts one child");
     assert!(pids.iter().all(|&pid| gone(pid)));
+}
+
+/// Two closed output pipes are no answer while the child runs. A child that closes both and exits
+/// later fails with the code of that exit, and one that closes both and runs on is cut at its limit,
+/// killed and reaped.
+#[test]
+fn a_child_that_closes_both_outputs_answers_at_its_exit_or_is_cut() {
+    let standin = Standin::new("launch-shut");
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let env = standin.env("shut");
+    let message = failed(launch(
+        &mut record,
+        &call(&IDENTITY, true, Duration::from_secs(20), &env),
+    ));
+    assert_eq!(message, "sts get-caller-identity exited 3: ");
+    let env = standin.env("shut-hang");
+    let cut = Duration::from_millis(300);
+    let start = Instant::now();
+    let message = failed(launch(&mut record, &call(&IDENTITY, true, cut, &env)));
+    let elapsed = start.elapsed();
+    assert_eq!(
+        message,
+        "sts get-caller-identity gave no answer: timed out after 300ms"
+    );
+    assert!(
+        elapsed >= cut && elapsed < Duration::from_secs(2),
+        "{elapsed:?}"
+    );
+    let pids = standin.started();
+    assert_eq!(pids.len(), 2, "one call starts one child");
+    assert!(
+        pids.iter().all(|&pid| gone(pid)),
+        "{pids:?} are reaped, the second after SIGKILL"
+    );
 }
 
 /// A signal delivered to an armed record ends the wait at the next slice: the child gets SIGKILL and is
