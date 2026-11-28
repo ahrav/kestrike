@@ -732,21 +732,29 @@ pub fn lib_rs() -> String {
     format!("{SOURCE}/lib.rs")
 }
 
+/// `exclusive_dir` makes the first of `STEM-0`, `STEM-1` and so on under `parent` that no entry takes, by
+/// an exclusive `mkdir` of mode 0700, and returns it; a taken name is left as it is.
+pub fn exclusive_dir(parent: &Path, stem: &str) -> PathBuf {
+    for at in 0usize.. {
+        let path = parent.join(format!("{stem}-{at}"));
+        match DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("{}: {error}", path.display()),
+        }
+    }
+    unreachable!("an unbounded range yields a name")
+}
+
 impl Fixture {
     /// `new` builds the fixture of the case `name`: a repository whose base adds `lib.rs` with `one` and
     /// whose head adds `two`, an untracked `Cargo.lock`, and the `cargo` stand-in.
     pub fn new(name: &str) -> Self {
         let real_git = prepare_host();
         let count = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let state = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join("mutants-diff")
-            .join(format!("{name}-{}-{count}", std::process::id()));
-        let _ = fs::remove_dir_all(&state);
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(&state)
-            .expect("the state directory is made");
+        let parent = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mutants-diff");
+        fs::create_dir_all(&parent).expect("the scratch parent is made");
+        let state = exclusive_dir(&parent, &format!("{name}-{}-{count}", std::process::id()));
         let cargo = state.join("cargo");
         fs::write(&cargo, CARGO).expect("the cargo stand-in is written");
         fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))

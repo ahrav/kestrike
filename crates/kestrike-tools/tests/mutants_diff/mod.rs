@@ -1083,6 +1083,27 @@ fn the_report_replaces_an_entry_at_its_path_and_writes_through_no_link() {
     assert!(complete(&fx.report(Some(&out))));
 }
 
+/// The fixture's scratch is a new directory of mode 0700 under a name no entry takes; a taken name and
+/// what it holds stay as they are.
+#[test]
+fn the_fixture_scratch_leaves_a_taken_name_as_it_is() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("mutants-diff");
+    fs::create_dir_all(&parent).expect("the scratch parent is made");
+    let stem = format!("taken-{}", std::process::id());
+    let taken = parent.join(format!("{stem}-0"));
+    let _ = fs::create_dir(&taken);
+    fs::write(taken.join("kept"), "kept").expect("the planted file is written");
+    let made = fixture::exclusive_dir(&parent, &stem);
+    let kept = fs::read_to_string(taken.join("kept"));
+    let mode = fs::metadata(&made).map(|status| status.permissions().mode() & 0o777);
+    let _ = fs::remove_dir_all(&taken);
+    let _ = fs::remove_dir(&made);
+    assert_ne!(made, taken);
+    assert_eq!(kept.expect("the planted file stays"), "kept");
+    assert_eq!(mode.expect("the directory stands"), 0o700);
+}
+
 #[test]
 fn the_default_head_and_artifacts_come_from_the_invoking_checkout() {
     let fx = Fixture::new("defaults");
