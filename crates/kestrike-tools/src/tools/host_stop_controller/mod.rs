@@ -25,8 +25,9 @@ use crate::host_stop::{DELIVERED, Disk};
 use crate::host_stop_controller::Context;
 
 /// `top` is the checkout's top level. Exit 0 is help; 120 is help that standard output fails to take,
-/// named in one line on standard error; 2 is arguments `read` refuses, handlers that fail to install
-/// or a `SIGXFSZ` that fails to be ignored; any other code is the command's.
+/// named in one line on standard error, and a refusal of the arguments whose line standard error
+/// fails to take; 2 is arguments `read` refuses, handlers that fail to install or a `SIGXFSZ` that
+/// fails to be ignored; any other code is the command's.
 #[cfg(target_os = "linux")]
 pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
     use std::ffi::OsString;
@@ -61,8 +62,8 @@ pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
             return 120;
         }
         Parsed::Refused { code, text } => {
-            let _ = err.write_all(text.as_bytes()).and_then(|()| err.flush());
-            return code;
+            let written = err.write_all(text.as_bytes()).and_then(|()| err.flush());
+            return if written.is_ok() { code } else { 120 };
         }
     };
     let mut seam = crate::host_stop::System;

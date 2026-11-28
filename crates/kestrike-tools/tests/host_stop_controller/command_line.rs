@@ -391,6 +391,44 @@ fn help_that_standard_output_refuses_exits_120_and_names_the_stream() {
     );
 }
 
+/// A refusal of the arguments whose line standard error refuses exits 120; the same start with a
+/// pipe as standard error exits 2 with the refusal's line.
+#[test]
+fn a_refusal_of_the_arguments_that_standard_error_refuses_exits_120() {
+    super::started::apart(
+        module_path!(),
+        "a_refusal_of_the_arguments_that_standard_error_refuses_exits_120",
+        || {
+            let scratch = Scratch::new("refusal-refused");
+            let start = |stderr: Stdio| {
+                Command::new(BINARY)
+                    .arg(tree())
+                    .args(["host-stop-controller", "bogus"])
+                    .current_dir(&scratch.0)
+                    .env_clear()
+                    .env("PATH", &scratch.0)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(stderr)
+                    .output()
+                    .expect("the binary runs")
+            };
+            let full = std::fs::File::options()
+                .write(true)
+                .open("/dev/full")
+                .expect("/dev/full opens for writing");
+            let refused = start(Stdio::from(full));
+            assert_eq!(refused.status.code(), Some(120), "{refused:?}");
+            assert_eq!(refused.stdout, b"");
+            let taken = start(Stdio::piped());
+            assert_eq!(taken.status.code(), Some(2), "{taken:?}");
+            let line = String::from_utf8(taken.stderr).expect("UTF-8");
+            assert!(line.contains("invalid choice: 'bogus'"), "{line}");
+            assert_eq!(taken.stdout, b"");
+        },
+    );
+}
+
 /// An argument that is no UTF-8 shows in the invalid choice and among the leftover arguments as
 /// `repr` writes a lone surrogate, `'\\udcff'`.
 #[test]
