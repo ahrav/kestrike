@@ -1057,6 +1057,46 @@ fn a_failed_write_of_the_help_exits_120_with_one_line() {
             "mutants-diff: standard output: No space left on device (os error 28)\n".into()
         )
     );
+    let read_only = fs::File::open("/dev/null").expect("/dev/null opens");
+    let out = std::process::Command::new(fixture::BINARY)
+        .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+        .args(["mutants-diff", "--help"])
+        .stdin(std::process::Stdio::null())
+        .stdout(read_only)
+        .output()
+        .expect("the tool runs");
+    assert_eq!(
+        (out.status.code(), String::from_utf8_lossy(&out.stderr)),
+        (
+            Some(120),
+            "mutants-diff: standard output: Bad file descriptor (os error 9)\n".into()
+        )
+    );
+}
+
+/// The diff is created as a new file: a link a child of the run left at `diff.patch` before the write
+/// fails the run with an incomplete report that names the path and holds no digest, the file the link
+/// names stays as it was, and no listing runs.
+#[test]
+fn a_link_at_the_diff_s_path_fails_the_run_and_its_target_stays() {
+    let fx = Fixture::new("diff-link");
+    let victim = fx.state.join("victim");
+    fs::write(&victim, "victim before").expect("the victim is written");
+    fx.plan(&Plan::caught(&one_mutant("2:1: m")));
+    let out = fx.start().env(fx.git_wrapper("plant-diff")).run();
+    let planted = fs::read_to_string(fx.state.join("planted")).expect("the stand-in planted a link");
+    assert_eq!(planted.lines().count(), 1, "{planted}");
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(found.contains("diff.patch"), "{found}");
+    assert_eq!(get(&report, "diff_sha256"), &Value::Null);
+    assert_eq!(
+        fs::read_to_string(&victim).expect("UTF-8"),
+        "victim before"
+    );
+    assert!(fx.calls().is_empty(), "no listing runs");
 }
 
 /// The report is published through a new file renamed over its path: an entry at `report.json`, a link

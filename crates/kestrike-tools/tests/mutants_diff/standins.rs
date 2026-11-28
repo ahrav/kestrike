@@ -145,7 +145,8 @@ exit "$code"
 "#;
 
 /// `GIT` runs the real Git named in place of `__REAL__`, or in the mode `FAKE_GIT_MODE` names: `fail-add`
-/// exits 3 on a worktree add, `fail-remove` refuses a worktree removal with `fatal: refused`, `hang-add`
+/// exits 3 on a worktree add, `plant-diff` links each run directory's `diff.patch` to the fixture's
+/// `victim` and records each link in `planted` before a diff runs, `fail-remove` refuses a worktree removal with `fatal: refused`, `hang-add`
 /// adds a locked worktree, publishes `ready` and sleeps, and `bad-rev` and `bad-base` make a successful
 /// `rev-parse --verify` or `merge-base` print the byte 0xff and a line feed.
 pub const GIT: &str = r#"#!/bin/sh
@@ -161,6 +162,12 @@ has() {
   return 1
 }
 if has worktree "$@" && has add "$@" && [ "$mode" = fail-add ]; then exit 3; fi
+if has diff "$@" && [ "$mode" = plant-diff ]; then
+  for run in "$state"/artifacts/*/; do
+    ln -s "$state/victim" "${run}diff.patch" || exit 97
+    printf '%s\n' "${run}diff.patch" >> "$state/planted"
+  done
+fi
 if { has rev-parse "$@" && has --verify "$@" && [ "$mode" = bad-rev ]; } ||
   { has merge-base "$@" && [ "$mode" = bad-base ]; }; then
   printf '\377\n'
