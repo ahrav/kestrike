@@ -770,7 +770,9 @@ impl Drop for Fixture {
 }
 
 /// `unlock` gives `dir` and each directory below it mode 0700 before it lists them, so a case that ends
-/// early, a panic included, leaves a tree its owner can remove. It follows no link.
+/// early, a panic included, leaves a tree its owner can remove. It trusts the fixture's own tree: it
+/// follows a link at `dir` itself, and it looks each directory below up again by its path after reading
+/// its type, so it descends into no entry that was a link when listed.
 fn unlock(dir: &Path) {
     let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
     let Ok(entries) = fs::read_dir(dir) else {

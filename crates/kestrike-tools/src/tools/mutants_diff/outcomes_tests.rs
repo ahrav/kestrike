@@ -160,3 +160,48 @@ fn phase_times_round_to_three_places_and_integers_keep_their_digits() {
         );
     }
 }
+
+/// A record whose summary earns no verdict, `null`, a boolean, a number or a string such as `Failure`,
+/// leaves the file readable with the caught mutant alone judged; its name and its phase times are still
+/// read, so a number as its name, its name repeated before or after the caught one, or a refused phase
+/// time makes the file unreadable.
+#[test]
+fn an_unjudged_record_is_read_whole_and_judged_by_no_summary() {
+    let refused = r#"[{"phase":"Test","duration":-1}]"#;
+    for summary in ["null", "true", "1", "1.5", r#""Failure""#] {
+        let unjudged = mutant(r#""b""#, summary, r#"[{"phase":"Build","duration":0.5}]"#);
+        let text = file(&[BASELINE.to_owned(), caught(r#""a""#), unjudged]);
+        let read = read_outcomes(text.as_bytes()).expect("the file reads");
+        let names: Vec<String> = read
+            .judged
+            .iter()
+            .map(|(name, _, _)| name.to_string())
+            .collect();
+        assert_eq!(names, ["a"], "a summary of {summary}");
+        for (records, defect) in [
+            (
+                vec![caught(r#""a""#), mutant("1", summary, "[]")],
+                "a number as its name",
+            ),
+            (
+                vec![mutant(r#""a""#, summary, "[]"), caught(r#""a""#)],
+                "its name before the caught one",
+            ),
+            (
+                vec![caught(r#""a""#), mutant(r#""a""#, summary, "[]")],
+                "its name after the caught one",
+            ),
+            (
+                vec![caught(r#""a""#), mutant(r#""b""#, summary, refused)],
+                "a refused phase time",
+            ),
+        ] {
+            let mut all = vec![BASELINE.to_owned()];
+            all.extend(records);
+            assert!(
+                read_outcomes(file(&all).as_bytes()).is_none(),
+                "a summary of {summary} with {defect}: None"
+            );
+        }
+    }
+}

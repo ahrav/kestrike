@@ -318,9 +318,36 @@ fn decimal_reads_digits_of_any_script_up_to_the_limit() {
     assert_eq!(digits("\u{1d7d7}"), Ok("9".to_owned()));
     assert_eq!(digits("\u{1d7d8}\u{1d7e3}"), Ok("1".to_owned()));
     assert_eq!(digits("\u{1d7e2}"), Ok("0".to_owned()));
-    assert!(digits("").is_err());
-    assert!(digits("4a").is_err());
-    assert!(digits(&"1".repeat(4301)).is_err());
+    for refused in ["", "4a", "1_0", "_"] {
+        assert_eq!(
+            digits(refused),
+            Err(format!(
+                "no decimal digits: {}",
+                crate::text::Text::from(refused).repr()
+            )),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        python::int_digits("1_0").map(|integer| integer.to_string()),
+        Ok("10".to_owned()),
+        "the scan's reading drops the underscore"
+    );
+    assert_eq!(
+        digits(&format!("a{}", "1".repeat(4301))),
+        Err(format!(
+            "no decimal digits: {}",
+            crate::text::Text::from(format!("a{}", "1".repeat(4301)).as_str()).repr()
+        )),
+        "a non-digit is refused before the count"
+    );
+    assert_eq!(
+        digits(&format!("0{}", "1".repeat(4300))),
+        Err(
+            "a string of 4301 digits passes the limit of 4300 for integer conversion".to_owned()
+        ),
+        "a leading zero counts"
+    );
     assert_eq!(digits(&"1".repeat(4300)).map(|text| text.len()), Ok(4300));
 }
 

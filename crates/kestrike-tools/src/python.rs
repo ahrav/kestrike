@@ -1,7 +1,7 @@
 //! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` for floats,
 //! [`hexdigest`] for the SHA-256 hex of bytes, [`say`], which writes one line with its control
-//! characters and surrogates escaped, and the digit rules of a string: [`isdigit`], [`digit_value`] and
-//! [`int_digits`].
+//! characters and surrogates escaped, and the digit rules of a string: [`isdigit`], [`digit_value`],
+//! [`ascii_digits`], [`int_digits`] and [`decimal`], which reads a run through [`int_digits`].
 //!
 //! A JSON value stands for the Python value `json.loads` gives for it: an object is a `dict`, an array a
 //! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
@@ -367,20 +367,16 @@ pub fn ascii_digits(text: &str) -> String {
 /// `decimal` accepts 1 through [`MAX_INTEGER_DIGITS`] digits, including leading zeros, and returns an
 /// error for any other text.
 pub fn decimal(digits: &str) -> Result<Integer, String> {
-    let ascii: Option<String> = digits
-        .chars()
-        .map(|c| digit_value(c).and_then(|value| char::from_digit(value, 10)))
-        .collect();
-    let ascii = ascii
-        .filter(|ascii| !ascii.is_empty())
-        .ok_or_else(|| format!("no decimal digits: {}", Text::from(digits).repr()))?;
-    if ascii.len() > MAX_INTEGER_DIGITS {
-        return Err(format!(
-            "a string of {} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion",
-            ascii.len()
-        ));
+    let refused = || format!("no decimal digits: {}", Text::from(digits).repr());
+    if digits.contains('_') {
+        return Err(refused());
     }
-    Ok(Integer::from_digits(false, &ascii).expect("ASCII digits within the limit"))
+    int_digits(digits).map_err(|error| match error {
+        DigitsError::Empty | DigitsError::NotDecimal(_) => refused(),
+        DigitsError::TooMany(count) => format!(
+            "a string of {count} digits passes the limit of {MAX_INTEGER_DIGITS} for integer conversion"
+        ),
+    })
 }
 
 /// A run of digits that [`int_digits`] refuses.

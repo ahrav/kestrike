@@ -281,9 +281,10 @@ fn half() -> Value {
     Value::Float(0.5)
 }
 
-/// A record whose summary is no string earns no verdict and leaves the file readable, so an unlisted
+/// A mutant record whose summary is `null` earns no verdict and leaves the file readable, so an unlisted
 /// mutant with a null summary beside a listed one the tool caught gives a complete run with that one
-/// caught.
+/// caught. A boolean or a number as a summary reads the same way; an array or an object makes the file
+/// unreadable.
 #[test]
 fn an_unlisted_mutant_with_a_null_summary_leaves_the_run_complete() {
     let fx = Fixture::new("null-summary");
