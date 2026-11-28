@@ -24,8 +24,9 @@ use crate::host_stop::{DELIVERED, Disk};
 #[cfg(target_os = "linux")]
 use crate::host_stop_controller::Context;
 
-/// `top` is the checkout's top level. Exit 0 is help; 2 is arguments `read` refuses, handlers that
-/// fail to install or a `SIGXFSZ` that fails to be ignored; any other code is the command's.
+/// `top` is the checkout's top level. Exit 0 is help; 120 is help that standard output fails to take,
+/// named in one line on standard error; 2 is arguments `read` refuses, handlers that fail to install
+/// or a `SIGXFSZ` that fails to be ignored; any other code is the command's.
 #[cfg(target_os = "linux")]
 pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
     use std::ffi::OsString;
@@ -52,8 +53,12 @@ pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
     let command = match read(args) {
         Parsed::Run(command) => command,
         Parsed::Help(help) => {
-            let _ = out.write_all(help.as_bytes()).and_then(|()| out.flush());
-            return 0;
+            let Err(error) = out.write_all(help.as_bytes()).and_then(|()| out.flush()) else {
+                return 0;
+            };
+            let line = format!("{NAME}: standard output: {error}\n");
+            let _ = err.write_all(line.as_bytes());
+            return 120;
         }
         Parsed::Refused { code, text } => {
             let _ = err.write_all(text.as_bytes()).and_then(|()| err.flush());

@@ -1,9 +1,9 @@
 //! The command line: a command, `run`, `restore` or `seal`, named by its whole word, then its
 //! options, each read by [`Reader`] with a unique prefix selecting its row. Ahead of the command
 //! each argument reads by a [`Reader`] of the help row alone: an option of that row asks for the help
-//! or is refused as that reader refuses it, an unknown option is left over, and the first argument
-//! that reads as a value, or `--` with an argument after it, is the command's word. The leftover
-//! arguments of both levels are refused together, once the command's own options are read.
+//! or is refused as that reader refuses it, an unknown option is left over, and the command's word is
+//! the first argument that reads as a value, or the argument after `--`, whatever it reads as. The
+//! leftover arguments of both levels are refused together, once the command's own options are read.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -111,7 +111,7 @@ pub fn read(args: &[OsString]) -> Parsed<Command> {
         match top.reads(arg) {
             Ok(Reads::End) => {
                 if at + 1 < args.len() {
-                    word = Some(at);
+                    word = Some(at + 1);
                 }
                 break;
             }

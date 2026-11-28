@@ -163,14 +163,15 @@ impl Plan {
     ///
     /// Each Git read runs in the order and under the conditions stated here, so a failed read ends the push
     /// with that read's text: the comparison base, the links registry, and then either the presence at the
-    /// tip of the contract (twice), the replay after a held contract, the judges' test, the game-day and the
-    /// host stop self-tests, or the changed paths, the Verus inventory, the changed Rust files, the judges'
-    /// test where a source it reads changed, the replay, and each self-test where none of its own scripts
-    /// changed and another of its inputs did. Then the commits under the record directories that the tip
-    /// reaches and the destination is not known to hold. A presence read, and a read of the inventory or the
-    /// registry, whose Git command runs and exits nonzero reads as an absent file. The probe also runs once
-    /// the skipped-scan note returns, before the next read. A line that returns an error leaves the plan as
-    /// it stood before the line.
+    /// tip of the contract (twice), the replay after a held contract, the judges' test, the game-day
+    /// self-test and the host stop controller's cases, or the changed paths, the Verus inventory, the
+    /// changed Rust files, the judges' test where a source it reads changed, the replay, the game-day
+    /// self-test where none of its own scripts changed and another of its inputs did, and the host stop
+    /// cases where no path at or under their own directories changed and a file they read did. Then the
+    /// commits under the record directories that the tip reaches and the destination is not known to
+    /// hold. A presence read, and a read of the inventory or the registry, whose Git command runs and exits
+    /// nonzero reads as an absent file. The probe also runs once the skipped-scan note returns, before the
+    /// next read. A line that returns an error leaves the plan as it stood before the line.
     ///
     /// # Errors
     ///
