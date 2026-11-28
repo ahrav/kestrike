@@ -11,20 +11,18 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use kestrike_tools::json::{self, Object, Value};
 
-use super::repository::{chmod, executable, write};
+use super::repository::{executable, write};
 use super::standins::wrapper;
 
 pub const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// The fixture's helper: the lines the `python3` stand-in reads, its `RESULTS` and its `reported`.
 pub const HELPER: &str = "#!/usr/bin/env python3
@@ -281,28 +279,6 @@ pub struct Done {
     pub stderr: String,
 }
 
-/// `claimed` makes a new directory `run-PID-N` under `base`, mode 0700, taking the next `N` while a
-/// name is taken.
-fn claimed(base: &Path) -> PathBuf {
-    loop {
-        let scratch = base.join(format!(
-            "run-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        match DirBuilder::new().mode(0o700).create(&scratch) {
-            Ok(()) => {
-                chmod(&scratch, 0o700);
-                return scratch
-                    .canonicalize()
-                    .expect("the scratch directory resolves");
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => panic!("{}: {error}", scratch.display()),
-        }
-    }
-}
-
 /// One repository, plant store and pair of stand-ins a case; the scratch directory goes on drop.
 pub struct Fixture {
     pub scratch: PathBuf,
@@ -324,7 +300,9 @@ impl Fixture {
     pub fn new() -> Self {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(base).expect("the scratch base is made");
-        let scratch = claimed(base);
+        let scratch = super::repository::claimed(base, "run")
+            .canonicalize()
+            .expect("the scratch directory resolves");
         let (repo, standins) = (scratch.join("repo"), scratch.join("standins"));
         for directory in [&repo, &standins] {
             fs::create_dir(directory).expect("a fixture directory is made");

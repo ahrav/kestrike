@@ -171,12 +171,12 @@ pub fn write(path: &Path, contents: impl AsRef<[u8]>) {
     fs::write(path, contents).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
-/// `claimed` makes a new directory `plants-PID-N` under `base`, mode 0700 whatever the umask, taking the
-/// next `N` while a name is taken, so the fixture never adopts or later removes a path it did not make.
-fn claimed(base: &Path) -> PathBuf {
+/// `claimed` makes a new directory `PREFIX-PID-N` under `base`, mode 0700 whatever the umask, taking
+/// the next `N` on each collision so the fixture uses and later removes only the directory it creates.
+pub fn claimed(base: &Path, prefix: &str) -> PathBuf {
     loop {
         let scratch = base.join(format!(
-            "plants-{}-{}",
+            "{prefix}-{}-{}",
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
@@ -222,7 +222,7 @@ impl Repository {
             "the checks refuse a work directory under {shared:?}, which another user can write; \
              make those directories private or move CARGO_TARGET_TMPDIR under a private directory"
         );
-        let scratch = claimed(&base);
+        let scratch = claimed(&base, "plants");
         let (top, tmp, bin, home) = (
             scratch.join("checkout"),
             scratch.join("tmp"),

@@ -372,7 +372,9 @@ The work directory, by default under `$TMPDIR`, must lie outside the
 checkout, on a mount `campaign` accepts (xfs, or ext4 with a journal), under
 ancestors only you or root can write. Where `$TMPDIR` is unset or shared, as
 `/tmp` is, the bare command is rejected: pass `--work DIR` or set `TMPDIR` to
-such a directory. The runner sweeps each plant's archive
+such a directory. The runner starts `python3`, the first on `PATH`, for each
+proof rerun and for the question to the head's staged
+`scripts/reproduce-test.py`; it runs on Linux alone. The runner sweeps each plant's archive
 in a scratch worktree and writes `verification/plants/score.json`, which reads
 "k of n plants at commit C". A run with `--plant` writes a score over the
 selected plants and names them in its `settings`. A swept miss is one

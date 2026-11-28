@@ -310,8 +310,8 @@ impl<'a> Run<'a> {
         }
     }
 
-    /// `remove_worktree` runs `git worktree remove --force --force TREE`, whose exit the caller reads from
-    /// the listing after it.
+    /// `remove_worktree` runs `git worktree remove --force --force TREE`; the caller checks the
+    /// subsequent worktree listing to determine whether removal succeeded.
     fn remove_worktree(&self, tree: &Path) -> Result<(), Halt> {
         let args = [
             OsStr::new("worktree"),

@@ -117,6 +117,7 @@ fn the_planted_tree_holds_the_patch_s_bytes_under_a_configured_whitespace_fix() 
     let done = fx.run_in(&["p-space"], &[], &[], Some(&again));
     assert_eq!(done.code, 0, "{}", done.stderr);
     assert_ne!(first.0, "null");
+    assert_eq!(fx.git(&["show", &format!("{}:mode", first.1)]), "pass \n");
     assert_eq!(
         first,
         (
@@ -173,7 +174,7 @@ fn a_failed_git_step_names_its_command_and_keeps_its_message_in_the_work_directo
     assert!(kept.contains("a signer refused"), "{kept}");
 }
 
-/// A patch check that fails for another cause than the patch is no plant that does not apply.
+/// The shim's check exits with status 128 to simulate a damaged index.
 #[test]
 fn a_patch_check_that_fails_for_another_cause_than_the_patch_is_no_plant_that_does_not_apply() {
     let mut fx = Fixture::new();

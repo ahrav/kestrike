@@ -5,7 +5,6 @@
 //! 0666 less the umask; the rename replaces a link at the score's path, whose target stays. A write that
 //! fails removes the staging file. The write makes no sync.
 
-use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -18,11 +17,8 @@ use super::run::Run;
 use super::score;
 use crate::json::{Object, Value};
 use crate::ownership::PathError;
-use crate::temp_dir::random_letters;
+use crate::temp_dir::{TempDirError, fresh, random_letters};
 use crate::text::Text;
-
-/// The most staging names a write draws while each one is taken.
-const ATTEMPTS: usize = 10_000;
 
 impl Run<'_> {
     /// `settings` are the run's settings in the score: the workers, the floor, the seconds and rounds of
@@ -84,33 +80,26 @@ fn staging(target: &Path) -> io::Result<(PathBuf, File)> {
 /// `letters`; a name that is taken is left as it is and another is drawn.
 fn staging_with(
     target: &Path,
-    mut letters: impl FnMut(&mut [u8]) -> io::Result<()>,
+    letters: impl FnMut(&mut [u8]) -> io::Result<()>,
 ) -> io::Result<(PathBuf, File)> {
     let parent = target.parent().unwrap_or(Path::new("."));
     let mut prefix = b".".to_vec();
     prefix.extend_from_slice(target.file_name().unwrap_or_default().as_bytes());
     prefix.push(b'.');
-    for _ in 0..ATTEMPTS {
-        let mut drawn = [0u8; 8];
-        letters(&mut drawn)?;
-        let mut name = prefix.clone();
-        name.extend_from_slice(&drawn);
-        let path = parent.join(OsStr::from_bytes(&name));
-        match OpenOptions::new()
+    let create = |path: &Path| {
+        OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+            .open(path)
+    };
+    fresh(&prefix, parent, letters, create).map_err(|error| match error {
+        TempDirError::Random(error) => error,
+        TempDirError::Create(error) => error.into_error(),
+        TempDirError::Exhausted => {
+            io::Error::new(io::ErrorKind::AlreadyExists, "no usable staging name found")
         }
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "no usable staging name found",
-    ))
+    })
 }
 
 /// `publish` replaces `target` with `written` through a staging file it creates beside it.

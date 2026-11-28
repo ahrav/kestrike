@@ -2,7 +2,7 @@
 //! seed checks on the unpatched head's archive, which the run builds once, at the first seed check.
 //!
 //! The planted commit takes the head's date and a fixed identity, which the environment sets above every
-//! configuration scope, so it depends on the head and the patch alone. Every archive build writes the
+//! configuration scope. Every archive build writes the
 //! run's `Cargo.lock` into its tree, builds with `CARGO_PROFILE_DEV_OPT_LEVEL=3` and
 //! `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true` into a target and build directory of its own, and removes
 //! that directory after the build; the removal runs whole.

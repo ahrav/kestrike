@@ -65,7 +65,7 @@ fn started(inputs: &Inputs) -> Result<Run<'_>, Halt> {
 }
 
 /// `cleanup` removes the run's worktrees and the proof's target directory, naming on `err` each one that
-/// remains, and returns whether one does. It reads no signal record.
+/// remains, and returns whether a worktree remains.
 fn cleanup(inputs: &Inputs, run: &Run<'_>, err: &mut impl Write) -> Result<bool, Halt> {
     let remained = run.remove_trees()?;
     let mut written = Ok(());

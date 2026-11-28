@@ -875,6 +875,12 @@ fn seed(args: &[String], out: &mut File) -> i32 {
     if failing { 4 } else { 0 }
 }
 
+/// Helper lines that steer the question stand-in: count every rerun, fail each rerun's question, or
+/// hold the answer.
+pub const COUNTS_EVERY: &str = "# reported counts every rerun\n";
+pub const RAISES: &str = "# reported raises on a rerun\n";
+pub const HOLDS: &str = "# the question holds\n";
+
 /// `results` reads the verdict texts of the staged helper's `RESULTS` line: `CODE: "TEXT"` items.
 fn results(helper: &str) -> Vec<(i32, String)> {
     let line = helper
@@ -918,8 +924,21 @@ fn question(args: &[String], out: &mut File) -> i32 {
             .expect("the log lies in the scratch directory");
         seen_replacement(place, "question");
     }
-    if let Some(log) = var("STANDIN_QUESTION_LOG") {
-        append(Path::new(&log), &format!("{}\n", args.len()));
+    let place = PathBuf::from(var("STANDIN_LOG").expect("the call log is named"))
+        .parent()
+        .expect("the log lies in the scratch directory")
+        .to_path_buf();
+    append(&place.join("helpers"), &format!("question {}\n", args[0]));
+    if helper.contains(HOLDS) {
+        write(&place.join("question-ready"), "");
+        let release = place.join("question-release");
+        for _ in 0..600 {
+            if release.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        write(&place.join("question-answered"), "");
     }
     if !helper.contains("\ndef reported(") {
         eprintln!("Traceback (most recent call last):");
@@ -941,8 +960,13 @@ fn question(args: &[String], out: &mut File) -> i32 {
             std::io::stdin()
                 .read_to_string(&mut line)
                 .expect("the line is read");
-            let counted =
-                matches!(code, 0 | 1 | 6) && line.starts_with(verdict_text(&results, code));
+            if helper.contains(RAISES) {
+                eprintln!("Traceback (most recent call last):");
+                eprintln!("ValueError: no count");
+                return 1;
+            }
+            let counted = helper.contains(COUNTS_EVERY)
+                || (matches!(code, 0 | 1 | 6) && line.starts_with(verdict_text(&results, code)));
             say(out, &json::text(&Value::Bool(counted)));
         }
     }
@@ -983,6 +1007,7 @@ fn helper(args: &[String], out: &mut File) -> i32 {
         .expect("the proof log lies in the scratch directory")
         .to_path_buf();
     seen_replacement(&place, "python3");
+    append(&place.join("helpers"), &format!("rerun {}\n", args[0]));
     let mode = read(Path::new("mode")).trim().to_owned();
     let target = std::env::var("CARGO_TARGET_DIR").ok();
     let build = std::env::var("CARGO_BUILD_BUILD_DIR").ok();

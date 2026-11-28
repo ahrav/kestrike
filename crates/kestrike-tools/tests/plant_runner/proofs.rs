@@ -312,6 +312,18 @@ fn a_plant_that_patches_the_proof_helper_is_judged_by_the_head_s_helper() {
     );
     assert_eq!(fx.proof_modes(), ["base", "base"]);
     assert!(fx.calls(&["sim", "archive"]).is_empty());
+    let staged = fx
+        .work
+        .join("proof/scripts/reproduce-test.py")
+        .display()
+        .to_string();
+    let helpers =
+        std::fs::read_to_string(fx.scratch.join("helpers")).expect("the helpers are logged");
+    let wanted: Vec<String> = ["question", "rerun", "question", "rerun", "question"]
+        .iter()
+        .map(|role| format!("{role} {staged}"))
+        .collect();
+    assert_eq!(helpers.lines().collect::<Vec<_>>(), wanted);
 }
 
 /// A head without the selector leaves every plant no verdict before any rerun.
@@ -1078,4 +1090,62 @@ fn a_relocking_rerun_with_undecodable_output_lets_the_next_head_rerun_start() {
              output is in proof/head-1.out",
         );
     }
+}
+
+fn steered(fx: &mut Fixture, line: &str) {
+    let helper = format!("{}{line}", super::fixture::HELPER);
+    std::fs::write(fx.repo.join("scripts/reproduce-test.py"), helper).expect("written");
+    fx.commit("a steered helper");
+}
+
+/// The staged helper's count determines whether the rerun contributes to `proof_exits`.
+#[test]
+fn the_staged_helper_s_answer_decides_a_rerun_that_its_prefix_would_refuse() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::COUNTS_EVERY);
+    let done = fx.run(&["p-swapfail"], &[]);
+    let (_, plants) = fx.results();
+    let entry = &plants["p-swapfail"];
+    assert_eq!(
+        shown(entry.get("proof_exits")),
+        r#"{"head":0,"plant":1}"#,
+        "{}",
+        done.stderr
+    );
+    assert_ne!(
+        text_of(entry.get("result").expect("a result")),
+        "no verdict"
+    );
+}
+
+/// The setup's question passes and the head rerun's question fails.
+#[test]
+fn a_rerun_s_question_that_fails_leaves_no_verdict_with_its_last_error_line() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::RAISES);
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "the head's verdict check failed on the rerun of the proof a::test: ValueError: no count",
+    );
+}
+
+/// The setup's question waits for its release; the signal reaches the run alone.
+#[test]
+fn a_signal_during_the_helper_s_question_acts_after_the_question() {
+    let mut fx = Fixture::new();
+    steered(&mut fx, super::standins::HOLDS);
+    let mut runner = fx.spawn(&["p-miss"], &[], false);
+    super::fixture::wait_for(&fx.scratch.join("question-ready"), &mut runner.child);
+    runner.signal(libc::SIGTERM, false);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(!fx.scratch.join("question-answered").exists());
+    std::fs::write(fx.scratch.join("question-release"), "").expect("written");
+    let (code, err) = runner.finish();
+    assert_eq!(code, 128 + libc::SIGTERM, "{err}");
+    assert!(fx.scratch.join("question-answered").exists());
+    assert!(fx.proof_log().is_empty());
+    assert!(!fx.score.exists());
 }
