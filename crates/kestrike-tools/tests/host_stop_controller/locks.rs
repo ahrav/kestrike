@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use kestrike_tools::host_stop::{Disk, lock};
+use kestrike_tools::host_stop::{Disk, Signal, lock};
 
 use super::plane::{CALLER, STATUS};
 use super::sealed::taken_now;
@@ -243,6 +243,9 @@ fn a_seal_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
         if arm != "same" {
             swap_at_the_lock(&case, &injection, &aside, arm == "another");
         }
+        if arm == "none" {
+            case.delivered.deliver(Signal::Terminate);
+        }
         let read = case.reads_under(&root);
         let seen = case.output().len();
         let code = case.seal_at(&root);
@@ -257,6 +260,8 @@ fn a_seal_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
         assert_eq!(output, swapped_refusal(&injection, arm), "{arm}");
         assert!(read.borrow().is_empty(), "{arm}: {:?}", read.borrow());
         assert!(!seal.exists() && !aside.join("collected.json").exists());
+        let stored = (arm == "none").then_some(Signal::Terminate);
+        assert_eq!(case.delivered.stored(), stored, "{arm}");
         drop(free_lock(&aside));
     }
 }
@@ -274,6 +279,9 @@ fn a_restore_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
         if arm != "same" {
             swap_at_the_lock(&case, &injection, &aside, arm == "another");
         }
+        if arm == "none" {
+            case.delivered.deliver(Signal::Terminate);
+        }
         let (calls, seen) = (case.log().len(), case.output().len());
         let evidence = case.evidence.clone();
         let code = case.restore_at(&evidence, None);
@@ -288,6 +296,8 @@ fn a_restore_refuses_a_name_that_no_longer_gives_the_directory_it_locked() {
         assert_eq!(output, swapped_refusal(&injection, arm), "{arm}");
         assert_eq!(case.log().len(), calls, "{arm}: the restore makes no call");
         assert!(!mark.exists() && !aside.join("restoration.json").exists());
+        let stored = (arm == "none").then_some(Signal::Terminate);
+        assert_eq!(case.delivered.stored(), stored, "{arm}");
         drop(free_lock(&aside));
     }
 }
