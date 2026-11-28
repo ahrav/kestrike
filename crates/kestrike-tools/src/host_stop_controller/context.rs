@@ -19,6 +19,11 @@ pub enum Command {
         package: PathBuf,
         evidence: OsString,
     },
+    Restore {
+        operator: PathBuf,
+        evidence: OsString,
+        reviewed: Option<PathBuf>,
+    },
 }
 
 /// The system a command runs on. `env` is the environment read at the tool's start, under which

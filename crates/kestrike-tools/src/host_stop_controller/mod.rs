@@ -25,6 +25,7 @@
 mod context;
 mod controller;
 mod fault;
+mod restore;
 mod run;
 
 pub use context::{Command, Context};

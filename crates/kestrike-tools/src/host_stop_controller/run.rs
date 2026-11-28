@@ -27,24 +27,28 @@ use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
 use crate::text::Text;
 
-const TOOL: &str = "host-stop-controller: ";
+pub(super) const TOOL: &str = "host-stop-controller: ";
 
 /// Runs `command` on `cx` and returns the exit code: 0 for a run that ends with the restoration
 /// pending, 1 for an abort, 2 for a refusal, a signal before any mark, or an unforeseen failure that
 /// reaches the entry, whose line names the marks that stand. A panic counts as an unforeseen failure.
 pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -> u8 {
-    let Command::Run {
-        operator,
-        package,
-        evidence,
-    } = command;
+    let (Command::Run { operator, .. } | Command::Restore { operator, .. }) = command;
     let mut written = Vec::new();
     let ended = catch_unwind(AssertUnwindSafe(|| {
         let limit = cx.file_limit;
         let catalog = read_json(cx.catalog, &Text::from("the game-day catalog"), limit)?;
         let gd2 = gd2_of(&catalog)?;
         let operator = read_operator(operator, &gd2, limit)?;
-        Controller::new(&mut *cx, &mut written, &operator, gd2).run(package, evidence)
+        let mut controller = Controller::new(&mut *cx, &mut written, &operator, gd2);
+        match command {
+            Command::Run {
+                package, evidence, ..
+            } => controller.run(package, evidence),
+            Command::Restore {
+                evidence, reviewed, ..
+            } => controller.restore(evidence, reviewed.as_deref()),
+        }
     }));
     cx.record.disarm();
     let halt = match ended {
@@ -125,7 +129,7 @@ macro_rules! refused {
     }};
 }
 
-fn shown_path(path: &Path) -> Text {
+pub(super) fn shown_path(path: &Path) -> Text {
     Text::from_os(path.as_os_str())
 }
 
@@ -647,7 +651,7 @@ fn halt_text(halt: Halt) -> Text {
     }
 }
 
-fn lock_sentence(directory: &Path, error: &LockError) -> Text {
+pub(super) fn lock_sentence(directory: &Path, error: &LockError) -> Text {
     let mut sentence = shown_path(directory);
     match error {
         LockError::Open(error) => {
@@ -661,7 +665,7 @@ fn lock_sentence(directory: &Path, error: &LockError) -> Text {
     sentence
 }
 
-fn probe_refusal(root: &Path, error: &ProbeError) -> Halt {
+pub(super) fn probe_refusal(root: &Path, error: &ProbeError) -> Halt {
     match error {
         ProbeError::Unnamed(error) => refused!(
             shown_path(root),
