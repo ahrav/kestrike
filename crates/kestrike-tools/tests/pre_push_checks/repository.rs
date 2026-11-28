@@ -51,6 +51,16 @@ impl Repository {
     /// `new` makes an empty repository on the branch `main`, in a directory it creates under a name no
     /// other entry holds; a name another entry holds is left alone and the next is tried.
     pub fn new(name: &str) -> Self {
+        Self::made(name, &[])
+    }
+
+    /// `of` is [`Repository::new`] with the object format `format`, `sha1` or `sha256`.
+    pub fn of(name: &str, format: &str) -> Self {
+        Self::made(name, &[&format!("--object-format={format}")])
+    }
+
+    /// `made` is [`Repository::new`] with `options` added to `git init`.
+    fn made(name: &str, options: &[&str]) -> Self {
         let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(root).expect("the scratch root is made");
         let temp = (0..1000)
@@ -82,7 +92,7 @@ impl Repository {
             env.push((OsString::from(key), value));
         }
         let repository = Self { temp, top, env };
-        repository.git(&["init", "-q", "-b", "main"]);
+        repository.git(&[&["init", "-q", "-b", "main"], options].concat());
         repository
     }
 

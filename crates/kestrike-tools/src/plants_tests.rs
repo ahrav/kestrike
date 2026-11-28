@@ -1,10 +1,70 @@
 //! The record's value tests: `natural` holds for a JSON integer of at least its bound, and a boolean or a
 //! float is none; `count` holds for a positive integer; `text` holds for a string with a code point outside
 //! the whitespace `str.isspace` takes. The status readers `unlisted_replay` and `held_suspects` on the
-//! statuses the judgment cannot reach.
+//! statuses the judgment cannot reach. `Opens`, the watch by which the tests of this library's children
+//! see a start.
+
+use std::fs::File;
+use std::io::Read;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::path::Path;
 
 use crate::json::{Value, parse};
 use crate::plants::values::{count, natural, text};
+
+/// `Opens` watches the file that a path names when the watch is added, and queues a record for each
+/// open of that file by any process. An `exec` of the file opens it, and the start of a child returns
+/// only after that `exec`, so the queue shows a start of the file, also the start of a child that a
+/// signal kills before it runs an instruction. A file that takes the watched file's name later is
+/// outside the watch.
+pub(super) struct Opens(File);
+
+impl Opens {
+    pub(super) fn of(path: &Path) -> Self {
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("a name");
+        // SAFETY: the call takes two flags and no pointer.
+        let queue = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(
+            queue >= 0,
+            "the watch's setup has no inotify instance: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `queue` is an open descriptor that this value alone owns.
+        let queue = unsafe { File::from_raw_fd(queue) };
+        // SAFETY: `queue` is open and `name` is a NUL-terminated path that outlives the call.
+        let watch =
+            unsafe { libc::inotify_add_watch(queue.as_raw_fd(), name.as_ptr(), libc::IN_OPEN) };
+        assert!(
+            watch >= 0,
+            "the watch's setup adds no watch of {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+        Self(queue)
+    }
+
+    /// `inert` writes at `path` a program that exits 0 with no output, watches it and leaves it
+    /// executable and unreadable. Its interpreter opens no script, so a record of this watch is an
+    /// `exec` of the program or an open by a process that needs no read permission.
+    pub(super) fn inert(path: &Path) -> Self {
+        crate::fixtures::tests::script(path, "#!/bin/true\n");
+        let opens = Self::of(path);
+        let execute = std::os::unix::fs::PermissionsExt::from_mode(0o100);
+        std::fs::set_permissions(path, execute).expect("the program is left executable alone");
+        opens
+    }
+
+    /// `any` takes the queued records and holds when the queue held one since the last call.
+    pub(super) fn any(&self) -> bool {
+        let mut records = [0_u8; 4096];
+        match (&self.0).read(&mut records) {
+            Ok(0) => panic!("a read of the queue takes a record or fails"),
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the queue is read: {error}"),
+        }
+    }
+}
 
 fn value(json: &str) -> Value {
     parse(json).expect("a JSON value")

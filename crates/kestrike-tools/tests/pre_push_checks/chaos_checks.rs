@@ -334,8 +334,9 @@ fn a_new_branch_without_origin_main_runs_the_contract_checks_its_tip_holds() {
     assert_eq!(fx.ran(), expected);
 }
 
-/// A worktree parent that another user can write fails the host stop controller's row before `cargo`
-/// starts, naming the parent; the control, the fixture's own `TMPDIR` of mode 0700, runs it.
+/// A sticky worktree parent that every user can write, as the default `/tmp` is, passes the scratch
+/// check and fails the host stop controller's row before `cargo` starts, naming the parent; the
+/// control, the fixture's own `TMPDIR` of mode 0700, runs it.
 #[test]
 fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
     let mut fx = Fixture::new();
@@ -346,7 +347,7 @@ fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
     fx.clear();
     let shared = fx.temp.join("shared");
     fs::create_dir(&shared).expect("the shared directory is made");
-    fs::set_permissions(&shared, fs::Permissions::from_mode(0o777))
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777))
         .expect("the shared directory's mode is set");
     fx.set("TMPDIR", shared.clone());
     let run = fx.push(&[(&head, &held)]);
@@ -366,6 +367,25 @@ fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
         run.stderr
     );
     assert_eq!(fx.ran(), Vec::<String>::new());
+}
+
+/// A tool that refuses before it reads its standard input closes that pipe. Ref lines longer than the
+/// pipe holds then end the fixture's write in `BrokenPipe`, and the run still reports the refusal's exit
+/// code and its line.
+#[test]
+fn a_refusal_ahead_of_standard_input_is_reported_whatever_the_ref_lines_hold() {
+    let fx = Fixture::new();
+    let input = "refs/heads/x\n".repeat(1 << 18);
+    let mut command = fx.command(super::push::BINARY);
+    command.arg("").args(["pre-push-checks", "origin", "url"]);
+    let run = super::push::finished(super::push::spawn_with_input(&mut command, &input));
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .starts_with("pre-push-checks: the checkout's top : "),
+        "{}",
+        run.stderr
+    );
 }
 
 /// A tip that tracks its own `Cargo.lock` keeps it for the host stop controller's row, where a tip without

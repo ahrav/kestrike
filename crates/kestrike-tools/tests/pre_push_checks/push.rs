@@ -522,7 +522,8 @@ impl Drop for Tool {
 }
 
 /// `spawn_with_input` starts `command` with both output streams piped, writes the bytes of `input` to its
-/// standard input and closes it.
+/// standard input and closes it. A tool that ends before it reads its input closes the pipe, so a write
+/// that ends in `BrokenPipe` is left to the case, which reads the tool's exit code and streams.
 pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Tool {
     let mut child = command
         .stdin(Stdio::piped())
@@ -532,9 +533,10 @@ pub fn spawn_with_input(command: &mut Command, input: impl AsRef<[u8]>) -> Tool 
         .expect("the tool starts");
     let mut stdin = child.stdin.take().expect("standard input is piped");
     let tool = Tool(Some(child));
-    stdin
-        .write_all(input.as_ref())
-        .expect("the ref lines are written");
+    match stdin.write_all(input.as_ref()) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+        written => written.expect("the ref lines are written"),
+    }
     tool
 }
 

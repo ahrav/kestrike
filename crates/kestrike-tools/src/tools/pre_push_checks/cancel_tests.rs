@@ -434,3 +434,102 @@ fn a_failed_batch_read_is_refused_with_exit_1() {
     )));
     assert_eq!(super::super::refused(&failure), 1);
 }
+
+/// Git that cannot start for a reason that is no system error, as the standard library reports an
+/// argument it refuses, is a refusal of the push and not a failed step of the tool's own.
+#[test]
+fn a_start_error_with_no_system_code_is_refused_with_exit_2() {
+    let _serial = serial();
+    let failure = crate::hook::Failure::Git(crate::git::GitError::Start(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "a start error of a unit row",
+    )));
+    assert_eq!(super::super::refused(&failure), 2);
+}
+
+/// A signal recorded by the time the scratch parent's status is read outranks what the read gave: a
+/// parent that passes, one that is refused and one whose status cannot be read each end as cancelled
+/// with the signal's code, and with no record each gives its own result.
+#[test]
+fn a_record_outranks_every_result_of_the_scratch_parent_s_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::super::worktree::{Exposure, Unusable, checked};
+    let _serial = serial();
+    let scratch = crate::paths::tests::Scratch::new("scratch-parent");
+    let (private, shared, closed) = (
+        scratch.0.join("private"),
+        scratch.0.join("shared"),
+        scratch.0.join("closed"),
+    );
+    for (directory, mode) in [(&private, 0o700), (&shared, 0o777), (&closed, 0o000)] {
+        std::fs::create_dir(directory).expect("the directory is made");
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode))
+            .expect("the mode is set");
+    }
+    let unread = closed.join("below");
+    // SAFETY: `geteuid` takes no argument and touches no memory.
+    let root = unsafe { libc::geteuid() } == 0;
+    let results = |recorded: bool| {
+        RECORD.store(if recorded { libc::SIGTERM } else { 0 }, Ordering::SeqCst);
+        let results = [&private, &shared, &unread].map(|path| checked(path.as_os_str()));
+        RECORD.store(0, Ordering::SeqCst);
+        results
+    };
+    let [passed, refused, faulted] = results(false);
+    assert_eq!(passed, Ok(private.clone()));
+    assert_eq!(
+        refused,
+        Err(Unusable::Exposed {
+            parent: shared.clone(),
+            at: shared.clone(),
+            exposure: Exposure::Writable
+        })
+    );
+    if !root {
+        assert!(matches!(faulted, Err(Unusable::Fault(_))), "{faulted:?}");
+    }
+    for result in results(true) {
+        assert_eq!(result, Err(Unusable::Cancelled(143)));
+    }
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700))
+        .expect("the mode is restored");
+}
+
+/// The scratch check judges the parent's owner and each link on the way for the user it is given. Read
+/// for the user who made them, a private directory and a link to it in a sticky directory that others
+/// can write both pass. Read for another user, the directory is refused as another user's, and the link
+/// is refused first, by its own path.
+#[test]
+fn the_scratch_check_judges_the_parent_and_each_link_for_the_user_it_is_given() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::super::worktree::{Exposure, Unusable, judged};
+    let _serial = serial();
+    let scratch = crate::paths::tests::Scratch::new("scratch-user");
+    let shared = scratch.0.join("shared");
+    let (private, link) = (shared.join("private"), shared.join("own"));
+    std::fs::create_dir_all(&private).expect("the directories are made");
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700))
+        .expect("the mode is set");
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777))
+        .expect("the mode is set");
+    std::os::unix::fs::symlink("private", &link).expect("the link is made");
+    let me = crate::ownership::real_uid();
+    for path in [&private, &link] {
+        assert_eq!(judged(path.as_os_str(), me), Ok(path.clone()));
+    }
+    if me == 0 {
+        return;
+    }
+    for (path, exposure) in [(&private, Exposure::Owned), (&link, Exposure::Linked)] {
+        assert_eq!(
+            judged(path.as_os_str(), me + 1),
+            Err(Unusable::Exposed {
+                parent: path.clone(),
+                at: path.clone(),
+                exposure
+            })
+        );
+    }
+}

@@ -35,7 +35,46 @@ fn rows() -> Vec<(&'static [&'static str], u8, Option<String>)> {
         (
             &["--", "run"],
             2,
+            error("the following arguments are required: --operator, --package, --evidence"),
+        ),
+        (
+            &[
+                "--",
+                "run",
+                "--operator",
+                "a",
+                "--package",
+                "b",
+                "--evidence",
+                "c",
+            ],
+            2,
+            missing.clone(),
+        ),
+        (
+            &["--", "-x", "run"],
+            2,
+            error(&format!("argument command: invalid choice: '-x' {CHOICE}")),
+        ),
+        (
+            &["--", "--"],
+            2,
             error(&format!("argument command: invalid choice: '--' {CHOICE}")),
+        ),
+        (
+            &[
+                "--bogus",
+                "--",
+                "run",
+                "--operator",
+                "a",
+                "--package",
+                "b",
+                "--evidence",
+                "c",
+            ],
+            2,
+            error("unrecognized arguments: --bogus"),
         ),
         (
             &["ru"],
@@ -305,6 +344,49 @@ fn each_argument_vector_reads_as_the_controllers_parser_read_it() {
                     }
                 }
             }
+        },
+    );
+}
+
+/// Help that standard output refuses exits 120 with one line on standard error that names the
+/// stream and the error; the same start with a pipe as standard output exits 0 with the help.
+#[test]
+fn help_that_standard_output_refuses_exits_120_and_names_the_stream() {
+    super::started::apart(
+        module_path!(),
+        "help_that_standard_output_refuses_exits_120_and_names_the_stream",
+        || {
+            let scratch = Scratch::new("help-refused");
+            let start = |stdout: Stdio| {
+                Command::new(BINARY)
+                    .arg(tree())
+                    .args(["host-stop-controller", "-h"])
+                    .current_dir(&scratch.0)
+                    .env_clear()
+                    .env("PATH", &scratch.0)
+                    .stdin(Stdio::null())
+                    .stdout(stdout)
+                    .stderr(Stdio::piped())
+                    .output()
+                    .expect("the binary runs")
+            };
+            let full = std::fs::File::options()
+                .write(true)
+                .open("/dev/full")
+                .expect("/dev/full opens for writing");
+            let refused = start(Stdio::from(full));
+            assert_eq!(refused.status.code(), Some(120), "{refused:?}");
+            assert_eq!(
+                String::from_utf8(refused.stderr).expect("UTF-8"),
+                "host-stop-controller: standard output: No space left on device (os error 28)\n"
+            );
+            let taken = start(Stdio::piped());
+            assert_eq!(taken.status.code(), Some(0), "{taken:?}");
+            assert_eq!(
+                String::from_utf8(taken.stdout).expect("UTF-8"),
+                kestrike_tools::tools::host_stop_controller::HELP
+            );
+            assert_eq!(taken.stderr, b"");
         },
     );
 }
