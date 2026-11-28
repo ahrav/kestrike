@@ -213,10 +213,33 @@ pub(crate) fn assembled(root: &str, names: &[&str]) -> String {
     }
 }
 
-/// The text of `path` with empty and `.` components dropped, `..` kept.
+/// The text of `path` in the form of [`pure_bytes`].
 pub(crate) fn pure(path: &str) -> String {
-    let (root, names) = parts(path);
-    assembled(root, &names)
+    String::from_utf8(pure_bytes(path.as_bytes()))
+        .expect("UTF-8 split at `/` and joined again stays UTF-8")
+}
+
+/// `pure_bytes` is `path` with empty and `.` components dropped and `..` kept, each remaining component
+/// byte for byte: exactly two leading slashes stay as `//`, one or three or more stand as `/`, and a
+/// relative path with no component left is `.`.
+pub(crate) fn pure_bytes(path: &[u8]) -> Vec<u8> {
+    let root: &[u8] = if path.starts_with(b"//") && !path.starts_with(b"///") {
+        b"//"
+    } else if path.starts_with(b"/") {
+        b"/"
+    } else {
+        b""
+    };
+    let names: Vec<&[u8]> = path
+        .split(|&byte| byte == b'/')
+        .filter(|name| !name.is_empty() && *name != b".")
+        .collect();
+    if names.is_empty() && root.is_empty() {
+        return b".".to_vec();
+    }
+    let mut pure = root.to_vec();
+    pure.extend_from_slice(&names.join(&b'/'));
+    pure
 }
 
 /// `name` joined to `base`; an absolute `name` replaces `base`.
