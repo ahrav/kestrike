@@ -25,6 +25,18 @@ pub const DEPTH: usize = 993;
 /// that `lstat` reports cannot be read, when links nest more than [`DEPTH`] deep, and when the lookup of
 /// the final path meets a link loop.
 pub fn resolve(path: &Path) -> io::Result<PathBuf> {
+    let resolved = realpath(path)?;
+    match std::fs::metadata(&resolved) {
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(format!(
+            "symlink loop from {}",
+            resolved.display()
+        ))),
+        _ => Ok(resolved),
+    }
+}
+
+/// `realpath` returns the resolved path even when a metadata lookup on that path would report `ELOOP`.
+pub fn realpath(path: &Path) -> io::Result<PathBuf> {
     let raw = path.as_os_str().as_bytes();
     let mut parsed: Vec<u8> = if raw.starts_with(b"/") {
         b"/".to_vec()
@@ -48,14 +60,7 @@ pub fn resolve(path: &Path) -> io::Result<PathBuf> {
         base = join(&base, &joined);
         base
     };
-    let resolved = PathBuf::from(OsStr::from_bytes(&normalize(&absolute)));
-    match std::fs::metadata(&resolved) {
-        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Err(io::Error::other(format!(
-            "symlink loop from {}",
-            resolved.display()
-        ))),
-        _ => Ok(resolved),
-    }
+    Ok(PathBuf::from(OsStr::from_bytes(&normalize(&absolute))))
 }
 
 /// `join` appends `name` to `path` with one `/` between them; an absolute `name` replaces `path`.

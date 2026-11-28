@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
-use crate::shell::{Error, split};
+use crate::shell::{Error, join, split};
 use crate::text::Text;
 
 type Row<'a> = (&'a str, &'a str, Result<&'a [&'a str], (Error, &'a str)>);
@@ -67,4 +67,71 @@ fn an_undecodable_byte_stays_in_its_word() {
         split(&Text::from_os(OsStr::from_bytes(b"a\xff \"b c\""))).expect("the text splits");
     let found: Vec<String> = found.iter().map(Text::repr).collect();
     assert_eq!(found, python, "{expression}");
+}
+
+/// Each expected text was recorded from Python 3.9's `shlex.join` of the same words.
+#[test]
+fn join_quotes_each_word_as_shlex_does() {
+    let rows: &[(&[&str], &str)] = &[
+        (
+            &[
+                "cargo",
+                "+1.99.0",
+                "test",
+                "-p",
+                "kestrike",
+                "--lib",
+                "--release",
+                "storage::fill_model::x",
+                "--",
+                "--exact",
+            ],
+            "cargo +1.99.0 test -p kestrike --lib --release storage::fill_model::x -- --exact",
+        ),
+        (&[""], "''"),
+        (
+            &["a b", "it's", "\u{e9}", "a=b,c:d/e.f@g%h+i-j_k"],
+            "'a b' 'it'\"'\"'s' '\u{e9}' a=b,c:d/e.f@g%h+i-j_k",
+        ),
+        (&["$x", "*", "~", "a\nb"], "'$x' '*' '~' 'a\nb'"),
+        (&[], ""),
+    ];
+    for (words, expected) in rows {
+        let words: Vec<Text> = words.iter().map(|word| Text::from(*word)).collect();
+        assert_eq!(join(&words), Text::from(*expected), "{words:?}");
+    }
+}
+
+#[test]
+fn join_quotes_each_word_that_holds_a_character_outside_the_safe_set() {
+    #[rustfmt::skip]
+    let rows: &[(&[&[u8]], &[u8])] = &[
+        (&[], b""),
+        (&[b""], b"''"),
+        (&[b"a"], b"a"),
+        (&[b"a b"], b"'a b'"),
+        (&[b"it's"], b"'it'\"'\"'s'"),
+        (&[b"-x", b"--y=z"], b"-x --y=z"),
+        (&[b"a@b%c+d=e:f,g./h-i_j"], b"a@b%c+d=e:f,g./h-i_j"),
+        (&[b"$HOME"], b"'$HOME'"),
+        (&["caf\u{e9}".as_bytes()], "'caf\u{e9}'".as_bytes()),
+        (&[b"n\xff"], b"'n\xff'"),
+        (&[b"a\nb"], b"'a\nb'"),
+        (&[b"'"], b"''\"'\"''"),
+        (&[b"~"], b"'~'"),
+        (&[b"*"], b"'*'"),
+        (&[b"a", b"", b"b"], b"a '' b"),
+    ];
+    let text = |bytes: &[u8]| Text::from_os(OsStr::from_bytes(bytes));
+    for (words, joined) in rows {
+        let words: Vec<Text> = words.iter().map(|word| text(word)).collect();
+        assert_eq!(join(&words), text(joined), "shlex.join({words:?})");
+        if !words.is_empty() {
+            assert_eq!(
+                split(&join(&words)),
+                Ok(words.clone()),
+                "the joined words split back"
+            );
+        }
+    }
 }
