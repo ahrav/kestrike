@@ -9,10 +9,10 @@
 //! removal reads the directory as no working tree and fails, and the tool names the worktree it could not
 //! remove.
 //!
-//! The parent is the run's scratch directory, and the hook's spool of the ref lines stands in it too. A
+//! The parent is the run's scratch directory. A
 //! user whom a directory's mode gives write access while it has no sticky bit can rename or remove any
-//! entry of it, and so can the directory's owner. Such a user could swap the spool, the worktree's
-//! directory or a directory on the way to them between the steps that name them. [`scratch`] therefore
+//! entry of it, and so can the directory's owner. Such a user could swap the worktree's
+//! directory or a directory on the way to it between the steps that name them. [`scratch`] therefore
 //! refuses, before the tool reads its standard input, a parent that a user other than the tool's real
 //! user and root owns, and a parent or a directory above it whose mode gives its group or every user
 //! write access without the sticky bit. The directories above are those in which the parent's path looks
@@ -606,9 +606,9 @@ pub(super) fn judged(chosen: &OsStr, user: u32) -> Result<PathBuf, Unusable> {
     read
 }
 
-/// `scratch` refuses the run where [`parent`] refuses the directory its worktrees go under, which is also
-/// the directory the hook spools the ref lines in. The tool calls it before it reads its standard input,
-/// so a refused directory ends the push before a byte of the spool is read.
+/// `scratch` refuses the run where [`parent`] refuses the directory its worktrees go under. The tool
+/// calls it before it reads its standard input, so a refused directory ends the push before a byte of
+/// the ref lines is read.
 ///
 /// # Errors
 ///

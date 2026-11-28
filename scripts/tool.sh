@@ -104,17 +104,28 @@ prepare() {
   unset RUSTUP_TOOLCHAIN
   export RUSTUP_AUTO_INSTALL=0
 
+  # Each answer of rustup is read line by line in the shell's memory: `rest` holds the answer and one
+  # line feed, and each turn takes the text before its first line feed as a line.
   shown=$("$rustup" show 2>/dev/null) || true
-  mapfile -t lines <<<"$shown"
-  for line in "${lines[@]}"; do
+  rest=$shown$'\n'
+  while [[ -n $rest ]]; do
+    line=${rest%%$'\n'*}
+    rest=${rest#*$'\n'}
     [[ $line != 'Default host: '* ]] || { host=${line#'Default host: '} && hosts=$((hosts + 1)); }
   done
   ((hosts == 1)) && [[ $host =~ ^[^[:space:]/]+$ ]] || fail "rustup names no single host"
   installed=$("$rustup" toolchain list 2>/dev/null) || fail "rustup lists no toolchains"
   found=
-  while read -r toolchain _; do
+  # A line's toolchain is its first field: the text after its leading spaces and tabs, up to the next
+  # space or tab.
+  rest=$installed$'\n'
+  while [[ -n $rest ]]; do
+    line=${rest%%$'\n'*}
+    rest=${rest#*$'\n'}
+    line=${line#"${line%%[!$' \t']*}"}
+    toolchain=${line%%[$' \t']*}
     [[ $toolchain == "$pin-$host" ]] && found=yes
-  done <<<"$installed"
+  done
   [[ -n $found ]] ||
     fail "the pinned toolchain $pin-$host is not installed; install it with: rustup toolchain install $pin"
   cargo=$("$rustup" which --toolchain "$pin" cargo 2>/dev/null) && [[ $cargo == /* ]] ||

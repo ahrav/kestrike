@@ -1418,19 +1418,31 @@ change. A skipped proof lane is not proof credit.
 
 ## Pre-push checks
 
-With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` runs
-`bash scripts/tool.sh pre-push-checks REMOTE` with Git's ref lines on standard
-input, then the user-wide hook. The tool `pre-push-checks` runs the checks
+With `git config --local core.hooksPath .githooks`, `.githooks/pre-push` reads
+Git's ref lines from its standard input once and holds them in the shell,
+its only copy of them. It runs `bash scripts/tool.sh pre-push-checks REMOTE` and then
+the user-wide hook, each with those bytes on its standard input through a
+pipe. An exit status of the tool other than 0 ends the hook with that status
+before the user-wide hook starts, and the user-wide hook's exit status is the
+hook's. A reader that exits before it has read the lines decides with its
+exit status as one that read them. A writer of the lines that fails
+otherwise, or that a signal ends, fails the push where its reader exits 0.
+A reader that leaves a process holding its standard input open and unread
+holds the hook as it would hold Git, once the lines are more than a pipe
+holds. Before it starts the tool, the hook refuses with
+exit 2 an input that holds a NUL byte, which Git writes in none of its ref
+lines, and with exit 1 an input whose read ends before the input does. The tool
+`pre-push-checks` runs the checks
 `AGENTS.md` requires before a push, each in a worktree of the pushed tip that
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
 commit pushed under a new name included. A failed check blocks the push. The
-hook spools the ref lines in the same directory. Before it reads its standard
+tool trusts no more of the directory `TMPDIR` names than its checks show. Before it reads its standard
 input, the tool refuses with exit 2 a directory there that a user other than
 the pushing user and root owns, and one whose mode, or the mode of a
 directory its path is reached through, from the root down and through links,
 gives its group or every user write access without the sticky bit: such a
-user could swap the spool, a worktree or a directory on the way between the
+user could swap a worktree or a directory on the way between the
 steps that name them. It also refuses a directory there whose path passes
 through a link that such a user owns in a directory its group or every user
 can write, a sticky one included, since that user can replace the link. It
@@ -1707,8 +1719,8 @@ waits for it. Dying of a signal, Git
 2.50.1 to 2.53 signals no hook process (run on 2.50.1), and Git 2.54.0 to
 2.56.1 signals the hook's own process id alone (read in Git's
 `run-command.c`). The hook's bash then dies, or waits on SIGINT, and the tool
-with its check runs to its end. While the launcher builds the tool at line 6
-of the hook, the same holds for Cargo (read, not run).
+with its check runs to its end. While the hook's launcher builds the tool,
+the same holds for Cargo (read, not run).
 
 CI runs the same scanner in the `Weakened-test scan` step of
 the `comment-policy` job, after `Obligation catalog admission`. On a pull
