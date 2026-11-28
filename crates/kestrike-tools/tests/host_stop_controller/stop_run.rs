@@ -158,6 +158,17 @@ fn a_clean_run_sends_the_five_calls_in_order_writes_three_marks_and_exits_0() {
         .collect();
     assert_eq!(standbys, ["h2", "h3"]);
     assert!(output.contains("restoration is pending"), "{output}");
+    assert_eq!(
+        case.stderr(),
+        "",
+        "a clean run prints on standard output alone"
+    );
+    let ended = format!(
+        "host-stop-controller: {TARGET} stopped and observed for 45 s; the restoration is pending \
+         and the alarms are no longer watched: start the instance, then run restore. {bound} \
+         before the run window's end\n"
+    );
+    assert!(case.stdout().ends_with(&ended), "{}", case.stdout());
     let last = log.last().expect("a call");
     assert_eq!(last.op, ALARMS);
     assert!(last.start >= time(stopped) + operator_seconds(&case, "observe_seconds"));

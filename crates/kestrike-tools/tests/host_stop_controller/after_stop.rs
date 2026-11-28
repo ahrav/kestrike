@@ -372,7 +372,12 @@ fn a_failed_abort_mark_leaves_no_stopped_mark() {
     assert_eq!(code, 1, "{output}");
     let names: Vec<String> = case.marks().keys().cloned().collect();
     assert_eq!(names, ["roles", "stop"]);
-    assert!(output.contains("abort.json is unwritten"), "{output}");
+    let stderr = case.stderr();
+    assert!(
+        stderr.starts_with("host-stop-controller: abort.json is unwritten: OSError: [Errno 28] "),
+        "{stderr}"
+    );
+    assert!(!case.stdout().contains("abort.json"), "{}", case.stdout());
     assert_eq!(case.after_fault(), [STATUS]);
 }
 
@@ -627,7 +632,7 @@ fn a_deadline_reached_between_two_calls_aborts_before_the_next() {
     operate(&mut case, "snapshot_max_age_seconds", LIMIT_SECONDS);
     {
         let mut plane = case.plane.borrow_mut();
-        plane.script(CALLER, vec![Action::Delay(50.0)]);
+        plane.script(CALLER, vec![Action::Delay(52.5)]);
         plane.script(STATUS, vec![Action::Delay(30.0)]);
         plane.stop_after = Some(3);
     }

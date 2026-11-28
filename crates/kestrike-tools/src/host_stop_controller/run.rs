@@ -46,6 +46,7 @@ pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -
         let operator = read_operator(operator, &gd2, limit)?;
         Controller::new(&mut *cx, &mut written, &operator, gd2).run(package, evidence)
     }));
+    cx.record.disarm();
     let halt = match ended {
         Ok(Ok(code)) => return code,
         Ok(Err(halt)) => halt,

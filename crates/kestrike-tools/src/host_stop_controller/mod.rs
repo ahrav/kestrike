@@ -14,9 +14,8 @@
 //!
 //! A signal raises at a read of the record: after arming, before each call starts, after each call
 //! returns and before its reply is used, in each slice of a pause and at the end of each mark's
-//! write. Before `injection/`
-//! is made it ends the run with exit 2; from there to the end of the roles' write it waits; later it
-//! takes the abort path. The abort path and the final `stopped.json` run unarmed, after a panic as
+//! write. Before `injection/` is made it ends the run with exit 2; from there to the end of the
+//! roles' write it waits; later it takes the abort path. The abort path and the final `stopped.json` run unarmed, after a panic as
 //! well.
 //!
 //! [`entry`] is the command's one path. The other public items are the steps the cases take alone,

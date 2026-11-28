@@ -2,9 +2,10 @@
 //! deadline's check, the alarms' quiet read, the check before the stop request, the pause between
 //! polls and a mark's write.
 //!
-//! The deadline and every window's end are monotonic readings. A call checks the deadline before it
-//! starts and once it returns, and reads the record once it returns, so a signal that stands then
-//! ends the step before its reply or failure is used. A mark's write holds the record from before
+//! The deadline and every window's end are monotonic readings. A call reads the record before it
+//! starts, ahead of every bound it checks, and once it returns, so a signal that stands then ends
+//! the step before the call or before its reply or failure is used. It checks the deadline before
+//! it starts and once it returns. A mark's write holds the record from before
 //! its first file step to its end.
 
 use std::collections::BTreeMap;
@@ -150,7 +151,8 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
 
     /// One call of `argv` with `--region`, cut at [`CALL_SECONDS`], at the deadline and at `until`.
     /// The deadline is checked before the call and after it returns or fails. The record is read
-    /// before the call starts, so a signal that stands then ends the step with no call made, and
+    /// first, before the deadline's check, so a signal that stands then ends the step with no call
+    /// made, and
     /// again when the call returns, so a signal raised then comes before its reply or failure. With
     /// `mutating`, the call counts as sent from its launch, and its monotonic times, its answer and
     /// its failure are kept; a second mutating call is a failure the controller names.
@@ -161,6 +163,10 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         until: Option<f64>,
         mutating: bool,
     ) -> Result<Object, Halt> {
+        if mutating && self.sent {
+            return Err(order("a second stop request was asked for"));
+        }
+        self.cx.record.read()?;
         self.within_deadline()?;
         let mut timeout = CALL_SECONDS as f64;
         for end in [self.deadline, until].into_iter().flatten() {
@@ -172,10 +178,6 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
                 "{what} has no time left before its window ends"
             )))));
         }
-        if mutating && self.sent {
-            return Err(order("a second stop request was asked for"));
-        }
-        self.cx.record.read()?;
         if mutating {
             self.sent = true;
             self.launched = Some(self.monotonic());

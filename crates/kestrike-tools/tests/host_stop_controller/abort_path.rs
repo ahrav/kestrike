@@ -16,6 +16,7 @@ use super::{Case, guardrails, member, set, text_of};
 
 const ALL: [&str; 4] = ["roles", "stop", "stopped", "abort"];
 const STOPPING: [&str; 3] = ["roles", "stop", "abort"];
+const POLL: f64 = 5.0;
 
 /// A hook that delivers `signals` into the case's record in order and then answers.
 fn delivering(case: &Case, signals: &'static [Signal], interrupt: bool) -> Action {
@@ -172,11 +173,9 @@ fn a_signal_during_the_abort_path_after_the_stop_is_shown_is_left_unraised() {
         false,
     );
     case.assert_aborted("guardrail", &ALL, Some(&guardrails()[4]), None);
-    let stdout = case.stdout();
-    assert!(
-        stdout.contains("host-stop-controller: the target reads {"),
-        "{stdout}"
-    );
+    let line = "host-stop-controller: the target reads {'state': 'stopped', 'instance': \
+                'not-applicable', 'system': 'not-applicable'}\n";
+    assert!(case.stdout().contains(line), "{}", case.stdout());
     assert!(!case.output().contains("Interrupted"), "{}", case.output());
     assert_eq!(case.after_fault(), [STATUS]);
 }
@@ -279,6 +278,21 @@ fn a_failed_final_stopped_mark_takes_the_abort_path() {
     let found = case.assert_aborted("exception", &ALL, None, Some("No space left on device"));
     assert_eq!(member(&found["stopped"], "request"), &found["stop"]);
     assert_eq!(text_of(&found["stopped"], "state"), "stopped");
+    let log = case.log();
+    let record = log
+        .iter()
+        .position(|l| l.op == super::plane::RECORD)
+        .expect("the record read");
+    let shown = log[..record]
+        .iter()
+        .rev()
+        .find(|l| l.op == STATUS)
+        .and_then(|l| l.time);
+    assert_eq!(
+        Some(time(&found["stopped"])),
+        shown,
+        "dated by the status read that showed it"
+    );
 }
 
 /// A stop mark's write that leaves the stop call exactly no time of its half of the effect timeout
@@ -337,4 +351,44 @@ fn a_stopped_read_dated_at_the_requests_own_time_shows_the_stop() {
     assert_eq!(code, 0, "{}", case.output());
     let marks = case.marks();
     assert_eq!(time(&marks["stopped"]), time(&marks["stop"]));
+}
+
+/// A SIGTERM delivered in a pause of the observation's last seconds, which the plane ends at the
+/// deadline, stands when the next call would start: the call's read of the record comes before its
+/// check of the deadline, so the run aborts with cause `signal`, as a signal raised at its delivery
+/// does. A late start leaves the observation's end past the deadline.
+#[test]
+fn a_signal_that_stands_as_the_deadline_passes_takes_the_abort_path_with_its_own_cause() {
+    let mut case = Case::new("signal-at-deadline");
+    for (key, seconds) in [
+        ("effect_timeout_seconds", 60),
+        ("observe_seconds", 200),
+        ("snapshot_max_age_seconds", LIMIT_SECONDS),
+    ] {
+        set(&mut case.operator, &[key], int(seconds));
+    }
+    let delivered = case.delivered;
+    let mut sent = false;
+    {
+        let mut plane = case.plane.borrow_mut();
+        plane.script(super::plane::CALLER, vec![Action::Delay(50.0)]);
+        plane.script(STATUS, vec![Action::Delay(30.0)]);
+        plane.stop_after = Some(3);
+        plane.slept = Some(Box::new(move |state| {
+            let Some(deadline) = state.deadline else {
+                return;
+            };
+            if state.t > deadline - POLL && !sent {
+                sent = true;
+                state.t = deadline;
+                delivered.deliver(Signal::Terminate);
+            }
+        }));
+    }
+    let found = case.assert_aborted("signal", &ALL, None, Some("signal SIGTERM"));
+    assert!(
+        !detail(&found).contains("the deadline of"),
+        "{}",
+        detail(&found)
+    );
 }

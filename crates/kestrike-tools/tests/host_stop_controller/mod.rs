@@ -482,13 +482,15 @@ impl Case {
             format!("GD-2's restoration steps: {}", steps()),
             "{stdout}"
         );
+        let marks = self.marks();
         for line in self.stderr().lines() {
             let named = ["abort", "stopped"].iter().any(|name| {
-                [" stands with its durability unknown: ", " is unwritten: "]
-                    .iter()
-                    .any(|standing| {
-                        line.starts_with(&format!("host-stop-controller: {name}.json{standing}"))
-                    })
+                let unwritten = format!("host-stop-controller: {name}.json is unwritten: ");
+                let stands = format!(
+                    "host-stop-controller: {name}.json stands with its durability unknown: "
+                );
+                (line.starts_with(&unwritten) && !marks.contains_key(*name))
+                    || (line.starts_with(&stands) && marks.contains_key(*name))
             });
             assert!(named, "{line}");
         }

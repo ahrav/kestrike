@@ -53,6 +53,8 @@ pub(crate) type Shape = Box<dyn FnOnce(Value) -> Value>;
 pub(crate) type FaultPlan = Box<dyn FnMut(&State, &str) -> Option<Action>>;
 /// Runs once a call has answered, before its reply returns.
 pub(crate) type After = Box<dyn FnMut(&mut State, &str)>;
+/// Runs once a sleep has moved the clock.
+pub(crate) type Slept = Box<dyn FnMut(&mut State)>;
 /// Runs at each wall reading.
 pub(crate) type Reading = Rc<dyn Fn(&State)>;
 
@@ -113,6 +115,7 @@ pub(crate) struct State {
     /// Makes the call that runs now read the record once it is answered and end with the signal
     /// the read raises, as a launch whose wait reads the record does.
     pub(crate) interrupt: bool,
+    pub(crate) slept: Option<Slept>,
 }
 
 pub(crate) type Shared = Rc<RefCell<State>>;
@@ -179,6 +182,7 @@ impl State {
             stop_code: "Client.UserInitiatedShutdown".to_owned(),
             stopping: None,
             interrupt: false,
+            slept: None,
         }
     }
 
@@ -298,6 +302,10 @@ impl Seam for Plane {
         state.sleeps += 1;
         assert!(state.sleeps < 10_000, "the controller sleeps without end");
         state.t += length.as_secs_f64();
+        if let Some(mut slept) = state.slept.take() {
+            slept(&mut state);
+            state.slept = Some(slept);
+        }
         Ok(())
     }
 }
