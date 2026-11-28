@@ -45,6 +45,8 @@ pub(crate) enum Stop {
     NoNumber,
     /// A whole number of seconds past the largest float.
     Overflow,
+    /// A lane that names an item past the end of a list of the hardware manifest.
+    OutOfRange,
 }
 
 /// The checks of a run in the controller's order, over the hardware manifest at `hardware`: the poll,
@@ -65,18 +67,22 @@ pub(crate) fn checks(inputs: &Inputs, hardware: &Path) -> Result<(), (Check, Sto
             (check, Stop::Rejected(error.sentence().clone()))
         }
     };
-    let failed = |check| {
-        move |error: Error| match error {
-            Error::Rejected(error) => (check, Stop::Rejected(error.sentence().clone())),
-            Error::Overflow => (check, Stop::Overflow),
-        }
-    };
+    let failed = |check| move |error: Error| (check, stop(error));
     let (manifest, names, aws) = (&inputs.profiles, &inputs.names, inputs.aws_seconds);
     let operator = check_operator(&inputs.operator).map_err(rejected(Check::Operator))?;
-    check_manifest(manifest).map_err(rejected(Check::Manifest))?;
-    check_episode(&inputs.episode, manifest).map_err(rejected(Check::Episode))?;
-    check_profiles(manifest, names, &operator, aws).map_err(failed(Check::Profiles))?;
-    check_attachments(manifest, names, &operator).map_err(rejected(Check::Attachments))?;
-    check_grace(manifest, names, &operator, aws, inputs.grace, hardware)
+    let manifest = check_manifest(manifest).map_err(rejected(Check::Manifest))?;
+    check_episode(&inputs.episode, &manifest).map_err(rejected(Check::Episode))?;
+    check_profiles(&manifest, names, &operator, aws).map_err(failed(Check::Profiles))?;
+    check_attachments(&manifest, names, &operator).map_err(rejected(Check::Attachments))?;
+    check_grace(&manifest, names, &operator, aws, inputs.grace, hardware)
         .map_err(failed(Check::Grace))
+}
+
+/// What stops a run for `error`.
+pub(crate) fn stop(error: Error) -> Stop {
+    match error {
+        Error::Rejected(error) => Stop::Rejected(error.sentence().clone()),
+        Error::Overflow => Stop::Overflow,
+        Error::OutOfRange => Stop::OutOfRange,
+    }
 }

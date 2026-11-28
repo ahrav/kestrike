@@ -8,8 +8,8 @@ use crate::text::{Text, text};
 ///
 /// # Errors
 ///
-/// The errors of [`finite_seconds`], then [`Error::Refused`] with the text's repr for zero, `-0.0`
-/// included.
+/// The errors of [`finite_seconds`], [`Error::NoNumber`] and [`Error::Refused`], then [`Error::Refused`]
+/// with the text's repr for zero, `-0.0` included. It reads no file, so it gives no [`Error::System`].
 pub fn positive_seconds(text: &Text) -> Result<f64, Error> {
     let seconds = finite_seconds(text)?;
     if seconds <= 0.0 {

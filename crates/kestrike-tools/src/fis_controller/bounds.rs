@@ -17,8 +17,8 @@ use super::constants::{
 use super::error::{Error, Rejected};
 use super::lane_role::close_seconds;
 use super::operator::Operator;
-use super::profiles::chosen;
-use super::seconds::{Seconds, plus, whole_sum};
+use super::profiles::{Manifest, member};
+use super::seconds::{Seconds, plus, whole_float, whole_sum};
 use crate::hardware_lane::OBSERVER_SECONDS;
 use crate::json::Value;
 use crate::python::{format_g, repr, str_of};
@@ -40,13 +40,15 @@ pub fn run_bound(profile: &Value, operator: &Operator, aws_seconds: f64) -> Resu
     let duration = number(duration, "duration_seconds")?;
     let effect = operator.effect_timeout_seconds();
     let windows = [effect; RUN_WINDOWS as usize];
+    // Two whole terms and the windows sum in one exact sum, whose partial sums stay within the reader's
+    // digits wherever the total does, before the one conversion to a float.
     let run = match (&ready, &duration) {
         (Seconds::Whole(ready), Seconds::Whole(duration)) => {
             let mut terms = vec![ready, duration];
             terms.extend(windows);
-            Seconds::Whole(whole_sum(&terms)?).float()?
+            whole_float(&whole_sum(&terms)?)?
         }
-        _ => plus(&ready, &duration)?.float()? + Seconds::Whole(whole_sum(&windows)?).float()?,
+        _ => plus(&ready, &duration)?.float()? + whole_float(&whole_sum(&windows)?)?,
     };
     Ok(run + f64::from(RUN_CALLS) * aws_seconds)
 }
@@ -62,7 +64,7 @@ pub fn run_bound(profile: &Value, operator: &Operator, aws_seconds: f64) -> Resu
 /// Those of [`run_bound`].
 pub fn phase_bound(profile: &Value, operator: &Operator, aws_seconds: f64) -> Result<f64, Error> {
     let run = run_bound(profile, operator, aws_seconds)?;
-    let effect = Seconds::Whole(operator.effect_timeout_seconds().clone()).float()?;
+    let effect = whole_float(operator.effect_timeout_seconds())?;
     Ok(run
         + f64::from(CLEANUP_CALLS) * aws_seconds
         + f64::from(CLEANUP_WINDOWS) * (effect + aws_seconds)
@@ -84,10 +86,10 @@ pub fn episode_bound(
     aws_seconds: f64,
     hardware_manifest: &Path,
 ) -> Result<f64, Error> {
-    let phases = Seconds::Real(aws_seconds + phase_bound(profile, operator, aws_seconds)?);
-    let case = number(member(profile, "case_seconds")?, "case_seconds")?;
-    let before_close = plus(&phases, &case)?.float()?;
-    Ok(before_close + close_seconds(profile, hardware_manifest)?)
+    Ok(aws_seconds
+        + phase_bound(profile, operator, aws_seconds)?
+        + number(member(profile, "case_seconds")?, "case_seconds")?.float()?
+        + close_seconds(profile, hardware_manifest)?)
 }
 
 /// `cleanup_bound` is the seconds the controller's cleanup after a signal can take on its longest path, a
@@ -105,7 +107,7 @@ pub fn cleanup_bound(
     aws_seconds: f64,
     hardware_manifest: &Path,
 ) -> Result<f64, Error> {
-    let effect = Seconds::Whole(operator.effect_timeout_seconds().clone()).float()?;
+    let effect = whole_float(operator.effect_timeout_seconds())?;
     let windows = f64::from(CLEANUP_PATH_WINDOWS) * (effect + aws_seconds)
         + f64::from(CLEANUP_CALLS) * aws_seconds;
     Ok(windows + close_seconds(profile, hardware_manifest)?)
@@ -119,13 +121,13 @@ pub fn cleanup_bound(
 /// The first profile whose phases pass its case; before its comparison, a name the file declares no
 /// profile under, the errors of [`phase_bound`], and a `case_seconds` that is absent or no number.
 pub fn check_profiles(
-    manifest: &Value,
+    manifest: &Manifest<'_>,
     names: &[Text],
     operator: &Operator,
     aws_seconds: f64,
 ) -> Result<(), Error> {
     for name in names {
-        let profile = chosen(manifest, name)?;
+        let profile = manifest.profile(name)?;
         let bound = phase_bound(profile, operator, aws_seconds)?;
         let case = member(profile, "case_seconds")?;
         if Seconds::Real(bound).exceeds(&number(case, "case_seconds")?) {
@@ -153,7 +155,7 @@ pub fn check_profiles(
 /// The first profile whose cleanup passes the grace; before its comparison, a name the file declares no
 /// profile under and the errors of [`cleanup_bound`].
 pub fn check_grace(
-    manifest: &Value,
+    manifest: &Manifest<'_>,
     names: &[Text],
     operator: &Operator,
     aws_seconds: f64,
@@ -161,7 +163,7 @@ pub fn check_grace(
     hardware_manifest: &Path,
 ) -> Result<(), Error> {
     for name in names {
-        let profile = chosen(manifest, name)?;
+        let profile = manifest.profile(name)?;
         let cleanup = cleanup_bound(profile, operator, aws_seconds, hardware_manifest)?
             + f64::from(CLOSE_OUT_SECONDS);
         if cleanup > grace {
@@ -178,19 +180,6 @@ pub fn check_grace(
         }
     }
     Ok(())
-}
-
-/// The member `key` of a profile.
-///
-/// # Errors
-///
-/// A profile that is no object or holds no `key`.
-pub(super) fn member<'a>(profile: &'a Value, key: &str) -> Result<&'a Value, Rejected> {
-    match profile {
-        Value::Object(fields) => fields.get(key),
-        _ => None,
-    }
-    .ok_or_else(|| Rejected::new(text!("a FIS profile holds no ", key)))
 }
 
 fn number(value: &Value, key: &str) -> Result<Seconds, Rejected> {

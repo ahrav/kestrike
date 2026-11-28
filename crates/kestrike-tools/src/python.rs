@@ -1,11 +1,11 @@
-//! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` and the format `g`
-//! for floats,
-//! [`hexdigest`] for the SHA-256 hex of bytes, [`say`], which writes one line with its control
-//! characters and surrogates escaped, and the digit rules of a string: [`isdigit`], [`digit_value`],
-//! [`ascii_digits`], [`int_digits`] and [`decimal`], which reads a run through [`int_digits`].
+//! Python-style `len`, `int`, `round`, `repr`, `str`, the type's name and truth for JSON values, `repr`
+//! and the format `g` for floats, [`hexdigest`] for the SHA-256 hex of bytes, [`say`], which writes one
+//! line with its control characters and surrogates escaped, and the digit rules of a string:
+//! [`isdigit`], [`digit_value`], [`ascii_digits`], [`int_digits`] and [`decimal`], which reads a run
+//! through [`int_digits`].
 //!
-//! A JSON value stands for the Python value `json.loads` gives for it: an object is a `dict`, an array a
-//! `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
+//! A JSON value stands for the Python value `json.loads` gives for it: an object is a `dict`, an array
+//! a `list`, `null` is `None`, and an integer, a float, a boolean and a string are Python's own.
 
 use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -227,6 +227,20 @@ fn push_value_repr(value: &Value, out: &mut String) {
             }
             out.push('}');
         }
+    }
+}
+
+/// `type_name` is the name Python gives the type of the value, `type(value).__name__`: `dict`, `list`,
+/// `str`, `int`, `float`, `bool` or `NoneType`.
+pub fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "dict",
+        Value::Array(_) => "list",
+        Value::String(_) => "str",
+        Value::Integer(_) => "int",
+        Value::Float(_) => "float",
+        Value::Bool(_) => "bool",
+        Value::Null => "NoneType",
     }
 }
 

@@ -27,12 +27,16 @@ impl fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// A failure of a bound or of a check that sums seconds, of the kind a caller tells apart.
+/// A failure of a bound or of a check that sums seconds, of the kind a caller tells apart: the controller
+/// prints a rejection as rejected input, and ends its run on each other kind as on an error it does not
+/// catch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Rejected(Rejected),
     /// A whole number of seconds that a sum converts to a float is past the largest float.
     Overflow,
+    /// A lane names an item past the end of an array or a string of the hardware manifest.
+    OutOfRange,
 }
 
 impl From<Rejected> for Error {
@@ -46,15 +50,11 @@ impl fmt::Display for Error {
         match self {
             Self::Rejected(rejected) => rejected.fmt(f),
             Self::Overflow => f.write_str("a whole number of seconds is too large for a float"),
+            Self::OutOfRange => {
+                f.write_str("the lane names an item past the end of the hardware manifest's list")
+            }
         }
     }
 }
 
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Rejected(rejected) => Some(rejected),
-            Self::Overflow => None,
-        }
-    }
-}
+impl std::error::Error for Error {}

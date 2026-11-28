@@ -51,7 +51,7 @@ fn hardware_with(change: impl FnOnce(&mut Vec<Value>)) -> Vec<u8> {
 fn close(profile: &Value, hardware: &Path) -> Result<f64, String> {
     close_seconds(profile, hardware).map_err(|error| match error {
         Error::Rejected(rejected) => rejected.sentence().to_string(),
-        Error::Overflow => panic!("the close of {hardware:?} overflows"),
+        other => panic!("the close of {hardware:?} fails with {other:?}"),
     })
 }
 
@@ -172,9 +172,8 @@ fn a_profile_without_a_lane_is_rejected_before_the_manifest_is_judged() {
     );
 }
 
-/// The close reads the manifest's file at each call: a file replaced between two calls gives each call
-/// the grace the file held at that call. This keeps the second read of the file beside the controller's
-/// checked read of it.
+/// The close reads the manifest's file at each call, beside the controller's checked read of it: a file
+/// replaced between two calls gives each call the grace the file held at that call.
 #[test]
 fn each_call_reads_the_manifest_anew() {
     let scratch = Scratch::new("close-anew");
@@ -191,4 +190,84 @@ fn each_call_reads_the_manifest_anew() {
     );
     fs::rename(&longer, &path).expect("the manifest is replaced");
     assert_eq!(close(&read, &path), Ok(110.0));
+}
+
+/// A lane's whole number or boolean names an item of a list of the manifest, a negative one counted from
+/// the end; one past the end is [`Error::OutOfRange`], and a float or a string names no item.
+#[test]
+fn a_lane_of_whole_numbers_names_items_of_the_manifests_lists() {
+    let scratch = Scratch::new("close-lists");
+    let lists = scratch.file(
+        "lists.json",
+        br#"{"profiles": [{"roles": [{"cases": [{"grace": 7}]}]}]}"#,
+    );
+    let rows = [
+        (r#"{"profile": 0, "role": 0}"#, Ok(47.0)),
+        (r#"{"profile": false, "role": -1}"#, Ok(47.0)),
+        (
+            r#"{"profile": 0.0, "role": 0}"#,
+            rejected(
+                "{'profile': 0.0, 'role': 0}",
+                "a value that is not an object has no member 0.0",
+            ),
+        ),
+        (
+            r#"{"profile": "fis-read", "role": 0}"#,
+            rejected(
+                "{'profile': 'fis-read', 'role': 0}",
+                "a value that is not an object has no member 'fis-read'",
+            ),
+        ),
+    ];
+    for (lane, expected) in rows {
+        assert_eq!(close(&with_lane(Some(lane)), &lists), expected, "{lane}");
+    }
+    let past = with_lane(Some(r#"{"profile": 5, "role": 0}"#));
+    assert_eq!(close_seconds(&past, &lists), Err(Error::OutOfRange));
+    let string = scratch.file("string.json", br#"{"profiles": "abc"}"#);
+    assert_eq!(
+        close(
+            &with_lane(Some(r#"{"profile": 1, "role": "owner"}"#)),
+            &string
+        ),
+        rejected(
+            "{'profile': 1, 'role': 'owner'}",
+            "a string has no member 1"
+        )
+    );
+    let past = with_lane(Some(r#"{"profile": 9, "role": "owner"}"#));
+    assert_eq!(close_seconds(&past, &string), Err(Error::OutOfRange));
+}
+
+/// The longest grace keeps the first case's until a later one is above it, so a first `nan` stands and
+/// a later `nan` is passed over.
+#[test]
+fn a_nan_grace_stands_first_and_is_passed_over_later() {
+    let scratch = Scratch::new("close-nan");
+    let read = profile("fis-read-latency");
+    let first = scratch.file(
+        "nan-first.json",
+        &hardware_with(|cases| {
+            let mut later = cases[0].clone();
+            if let Value::Object(fields) = &mut cases[0] {
+                fields.insert("grace", Value::Float(f64::NAN));
+            }
+            if let Value::Object(fields) = &mut later {
+                fields.insert("grace", value("60"));
+            }
+            cases.push(later);
+        }),
+    );
+    assert!(close(&read, &first).is_ok_and(f64::is_nan));
+    let last = scratch.file(
+        "nan-last.json",
+        &hardware_with(|cases| {
+            let mut later = cases[0].clone();
+            if let Value::Object(fields) = &mut later {
+                fields.insert("grace", Value::Float(f64::NAN));
+            }
+            cases.push(later);
+        }),
+    );
+    assert_eq!(close(&read, &last), Ok(100.0));
 }

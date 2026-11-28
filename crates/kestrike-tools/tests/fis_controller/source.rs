@@ -7,9 +7,9 @@ use std::path::PathBuf;
 
 use crate::fis_support::tree;
 
-/// The names through which Rust code starts a process, reads a clock, opens a socket, writes to a
-/// stream, or escapes the compiler's checks.
-const EFFECTS: [&str; 16] = [
+/// The names through which Rust code starts a process, reads a clock, opens a socket, writes a file or
+/// a stream, reads the environment, or escapes the compiler's checks.
+const EFFECTS: [&str; 21] = [
     "std::process",
     "Command",
     "std::time",
@@ -26,6 +26,11 @@ const EFFECTS: [&str; 16] = [
     "libc::",
     "unsafe",
     "std::thread",
+    "File::create",
+    "OpenOptions",
+    "fs::write",
+    "std::env",
+    "env::var",
 ];
 
 /// The names through which Rust code opens or reads a file.
@@ -74,6 +79,12 @@ fn the_module_names_no_process_clock_socket_or_output() {
         named(&planted, &EFFECTS),
         ["std::process", "Command"],
         "the scan finds a planted process start"
+    );
+    let planted = format!("{first}\nlet _ = std::fs::write(path, bytes);\n");
+    assert_eq!(
+        named(&planted, &EFFECTS),
+        ["fs::write"],
+        "the scan finds a planted file write"
     );
 }
 

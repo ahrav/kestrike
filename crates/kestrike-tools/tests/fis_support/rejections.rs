@@ -1,8 +1,10 @@
 //! The rejections of a run's inputs, each a change of [`super::Inputs::base`] and the sentence of the
-//! controller's first rejection. The rows hold each of the controller's twenty rejections of its operator
-//! contract, its FIS profiles file, its episode name and the bounds of the chosen profiles, and the
-//! refusal of a poll that is no duration above zero; two failing fields give the first. Each sentence is
-//! the one `scripts/fis-controller.py` gives for the same inputs.
+//! controller's first rejection for the changed inputs. The rows hold each of the controller's twenty
+//! rejections of its operator contract, its FIS profiles file, its episode name and the bounds of the
+//! chosen profiles, and the refusal of a poll that is no duration above zero. Where two fields fail, the
+//! row's sentence is the first in the order the checks read them: the profiles in document order, the
+//! members of a profile in the order of its check, and the chosen profiles and the volumes in their
+//! order.
 
 use super::{Change, Input::*};
 
@@ -26,11 +28,28 @@ const PAST_TAG: &str = concat!(
     "\""
 );
 
+/// An episode of 225 characters, at the tag's bound and past the receipt's.
+const SHORT_OF_TAG: &str = concat!(
+    "\"",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "\""
+);
+
 /// An episode of 177 characters, one past what the receipt's file name holds.
 const PAST_RECEIPT: &str = concat!(
     "\"",
     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeex",
+    "\""
+);
+
+/// An episode of 177 code points `é`, one past what the receipt's file name holds in code points.
+const ACCENTED: &str = concat!(
+    "\"",
+    "éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+    "ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
     "\""
 );
 
@@ -320,6 +339,93 @@ pub(crate) const REJECTIONS: &[Row] = &[
         case: "an episode one character past the receipt name",
         changes: &[(Episode, &[], Some(PAST_RECEIPT))],
         sentence: "episode 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeex' is 1 characters too long for the receipt file name derived from it",
+    },
+    Row {
+        case: "an episode one character short of the tag",
+        changes: &[(Episode, &[], Some(SHORT_OF_TAG))],
+        sentence: "episode 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' is 49 characters too long for the receipt file name derived from it",
+    },
+    Row {
+        case: "an episode of 177 code points past the receipt name",
+        changes: &[(Episode, &[], Some(ACCENTED))],
+        sentence: "episode 'ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé' is 1 characters too long for the receipt file name derived from it",
+    },
+    Row {
+        case: "two profiles of unknown modes, the first in document order last when sorted",
+        changes: &[
+            (
+                Profiles,
+                &["profiles", "fis-pause", "attachment"],
+                Some("\"shared\""),
+            ),
+            (
+                Profiles,
+                &["profiles", "fis-family-stop", "attachment"],
+                Some("\"shared\""),
+            ),
+        ],
+        sentence: "manifest profile 'fis-pause' declares attachment mode 'shared'; the controller implements ['single', 'multi-attach-one']",
+    },
+    Row {
+        case: "an unknown mode beside an unlisted action",
+        changes: &[
+            (
+                Profiles,
+                &["profiles", "fis-pause", "attachment"],
+                Some("\"shared\""),
+            ),
+            (
+                Profiles,
+                &["profiles", "fis-pause", "action"],
+                Some("\"aws:ebs:detach-volume\""),
+            ),
+        ],
+        sentence: "manifest profile 'fis-pause' declares attachment mode 'shared'; the controller implements ['single', 'multi-attach-one']",
+    },
+    Row {
+        case: "no read flag beside a write flag that is a string",
+        changes: &[
+            (Profiles, &["profiles", "fis-read-latency", "read"], None),
+            (
+                Profiles,
+                &["profiles", "fis-read-latency", "write"],
+                Some("\"x\""),
+            ),
+        ],
+        sentence: "manifest profile 'fis-read-latency' has read None, not a JSON boolean",
+    },
+    Row {
+        case: "a second chosen profile whose case is short",
+        changes: &[
+            (Names, &[], Some("[\"fis-pause\", \"fis-read-latency\"]")),
+            (
+                Profiles,
+                &["profiles", "fis-read-latency", "case_seconds"],
+                Some("888"),
+            ),
+        ],
+        sentence: "profile fis-read-latency needs up to 889 s before its case ends, past its 888 s case; lower effect_timeout_seconds",
+    },
+    Row {
+        case: "a second chosen profile whose lane role the hardware manifest lacks",
+        changes: &[
+            (Names, &[], Some("[\"fis-pause\", \"fis-read-latency\"]")),
+            (
+                Profiles,
+                &["profiles", "fis-read-latency", "lane", "role"],
+                Some("\"nobody\""),
+            ),
+        ],
+        sentence: "the hardware manifest names no lane role for {'profile': 'fis-read', 'role': 'nobody'}: 'nobody'",
+    },
+    Row {
+        case: "a multi-attach-one choice whose second volume declares no instance",
+        changes: &[
+            (Names, &[], Some("[\"fis-read-latency-multi-attach\"]")),
+            (Operator, &["volumes"], Some("[\"vol-1\", \"vol-2\"]")),
+            (Operator, &["attachments"], Some("{\"vol-1\": [\"i-1\"]}")),
+        ],
+        sentence: "attachments declares [] for vol-2; a multi-attach-one profile takes exactly one instance",
     },
     Row {
         case: "an effect timeout of 600 s",

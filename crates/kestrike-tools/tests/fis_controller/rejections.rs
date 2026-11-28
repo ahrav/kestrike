@@ -3,6 +3,7 @@
 //! change. Each check is a function of the decoded inputs that returns before any call, process or
 //! clock reading of the controller, so a rejected input precedes every call.
 
+use kestrike_tools::fis_controller::positive_seconds;
 use kestrike_tools::json::Text;
 
 use super::{Check, Stop, checks};
@@ -68,10 +69,13 @@ const SENTENCES: [(&str, Check); 21] = [
 
 #[test]
 fn the_table_holds_each_rejection_at_the_check_that_gives_it() {
+    let stopped: Vec<_> = REJECTIONS
+        .iter()
+        .map(|row| checks(&Inputs::changed(row.changes), &hardware_manifest()))
+        .collect();
     for (part, check) in SENTENCES {
-        let found = REJECTIONS.iter().any(|row| {
-            let stopped = checks(&Inputs::changed(row.changes), &hardware_manifest());
-            matches!(&stopped, Err((at, Stop::Rejected(sentence)))
+        let found = stopped.iter().any(|stopped| {
+            matches!(stopped, Err((at, Stop::Rejected(sentence)))
                 if *at == check && sentence.to_string().contains(part))
         });
         assert!(found, "no row gives {part:?} at {check:?}");
@@ -106,4 +110,13 @@ fn a_case_at_its_phase_bound_and_a_grace_at_its_cleanup_pass() {
             ))
         ))
     );
+}
+
+/// The poll's reader returns the seconds the text spells, the smallest float above zero included.
+#[test]
+fn a_poll_above_zero_reads_as_its_seconds() {
+    for (poll, seconds) in [("2.5", 2.5), ("5e-324", 5e-324), (" 7 ", 7.0)] {
+        let read = positive_seconds(&Text::from(poll));
+        assert_eq!(read.ok(), Some(seconds), "{poll:?}");
+    }
 }

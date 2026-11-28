@@ -3,8 +3,9 @@
 
 use super::constants::OPERATOR_KEYS;
 use super::error::Rejected;
+use super::profiles::texts_repr;
 use crate::json::{Integer, Object, Value};
-use crate::python::repr;
+use crate::python::{repr, type_name};
 use crate::text::{Text, text};
 
 /// An operator contract that [`check_operator`] admits: its strings, its lists of strings, its map from
@@ -53,7 +54,21 @@ impl Operator {
 
 /// `strings` holds for an array whose every item is a string, an empty one included.
 pub fn strings(value: &Value) -> bool {
-    matches!(value, Value::Array(items) if items.iter().all(|item| matches!(item, Value::String(_))))
+    string_items(value).is_some()
+}
+
+/// The strings of an array whose every item is a string, and none for any other value.
+fn string_items(value: &Value) -> Option<Vec<Text>> {
+    let Value::Array(items) = value else {
+        return None;
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            Value::String(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// `check_operator` admits a decoded operator contract whose keys are [`OPERATOR_KEYS`] and whose fields
@@ -82,24 +97,14 @@ pub fn check_operator(operator: &Value) -> Result<Operator, Rejected> {
     if !keyed {
         let mut keys: Vec<&Text> = contract.iter().map(|(key, _)| key).collect();
         keys.sort();
-        let keys = Value::Array(keys.into_iter().cloned().map(Value::String).collect());
-        return Err(Rejected::new(text!("operator contract keys ", repr(&keys))));
+        return Err(Rejected::new(text!(
+            "operator contract keys ",
+            texts_repr(keys)
+        )));
     }
-    let mut texts = Vec::new();
-    for name in ["account", "region", "role_arn"] {
-        match field(contract, name) {
-            Value::String(value) => texts.push(value.clone()),
-            other => {
-                return Err(Rejected::new(text!(
-                    name,
-                    " ",
-                    repr(other),
-                    " is not a string"
-                )));
-            }
-        }
-    }
-    let [account, region, role_arn]: [Text; 3] = texts.try_into().expect("three names were read");
+    let account = string_field(contract, "account")?;
+    let region = string_field(contract, "region")?;
+    let role_arn = string_field(contract, "role_arn")?;
     if !is_role_arn(&role_arn) {
         return Err(Rejected::new(text!(
             "role_arn ",
@@ -110,17 +115,18 @@ pub fn check_operator(operator: &Value) -> Result<Operator, Rejected> {
     let volumes = string_list(contract, "volumes")?;
     let stop_alarms = string_list(contract, "stop_alarms")?;
     let attachments = match field(contract, "attachments") {
-        Value::Object(map) if map.iter().all(|(_, instances)| strings(instances)) => map
+        Value::Object(map) => map
             .iter()
-            .map(|(volume, instances)| (volume.clone(), texts_of(instances)))
-            .collect(),
-        other => {
-            return Err(Rejected::new(text!(
-                "attachments ",
-                repr(other),
-                " is not a map from volume ID to a list of instance IDs"
-            )));
-        }
+            .map(|(volume, instances)| Some((volume.clone(), string_items(instances)?)))
+            .collect::<Option<Vec<_>>>(),
+        _ => None,
+    };
+    let Some(attachments) = attachments else {
+        return Err(Rejected::new(text!(
+            "attachments ",
+            repr(field(contract, "attachments")),
+            " is not a map from volume ID to a list of instance IDs"
+        )));
     };
     let effect_timeout_seconds = match field(contract, "effect_timeout_seconds") {
         Value::Integer(effect) if *effect > Integer::from(0u64) => effect.clone(),
@@ -150,59 +156,35 @@ fn field<'a>(contract: &'a Object, name: &str) -> &'a Value {
         .expect("the contract holds every key of OPERATOR_KEYS")
 }
 
-fn string_list(contract: &Object, name: &str) -> Result<Vec<Text>, Rejected> {
-    let value = field(contract, name);
-    if strings(value) {
-        Ok(texts_of(value))
-    } else {
-        Err(Rejected::new(text!(
+fn string_field(contract: &Object, name: &str) -> Result<Text, Rejected> {
+    match field(contract, name) {
+        Value::String(value) => Ok(value.clone()),
+        other => Err(Rejected::new(text!(
             name,
             " ",
-            repr(value),
-            " is not a list of strings"
-        )))
+            repr(other),
+            " is not a string"
+        ))),
     }
 }
 
-/// The strings of an array that [`strings`] admits.
-fn texts_of(value: &Value) -> Vec<Text> {
-    match value {
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| match item {
-                Value::String(text) => Some(text.clone()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
+fn string_list(contract: &Object, name: &str) -> Result<Vec<Text>, Rejected> {
+    let value = field(contract, name);
+    string_items(value)
+        .ok_or_else(|| Rejected::new(text!(name, " ", repr(value), " is not a list of strings")))
 }
 
+/// Whether `role_arn` is six fields split at `:` of which the first is `arn`, the second is not empty,
+/// the third is `iam`, the fourth is empty and the sixth starts with `role/`.
 fn is_role_arn(role_arn: &Text) -> bool {
     let codes: Vec<u32> = role_arn.code_points().collect();
-    let fields: Vec<Text> = codes
-        .split(|&code| code == u32::from(':'))
-        .map(|field| {
-            Text::from_code_points(field.iter().copied()).expect("a text's code points form a text")
-        })
-        .collect();
+    let fields: Vec<&[u32]> = codes.split(|&code| code == u32::from(':')).collect();
+    let spells = |field: &[u32], word: &str| field.iter().copied().eq(word.chars().map(u32::from));
     fields.len() == 6
-        && fields[0] == "arn"
-        && fields[2] == "iam"
+        && spells(fields[0], "arn")
+        && spells(fields[2], "iam")
         && fields[3].is_empty()
         && !fields[1].is_empty()
-        && fields[5].starts_with(&Text::from("role/"))
-}
-
-/// The name Python gives the type of the decoded value.
-fn type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Object(_) => "dict",
-        Value::Array(_) => "list",
-        Value::String(_) => "str",
-        Value::Integer(_) => "int",
-        Value::Float(_) => "float",
-        Value::Bool(_) => "bool",
-        Value::Null => "NoneType",
-    }
+        && fields[5].len() >= "role/".len()
+        && spells(&fields[5][.."role/".len()], "role/")
 }

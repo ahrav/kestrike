@@ -2,60 +2,68 @@
 //! kind the read cannot take, the check that reads it stops the run with the library's sentence; where
 //! Python's operation reads it, as `in` finds an action in an array or a string of eligible types and as
 //! arithmetic takes a boolean, an infinity or `nan`, the run goes on as that operation does. A whole
-//! number past the largest float stops the bound that converts it.
+//! number past the largest float stops the bound that converts it. The rows that pass beside the rows
+//! that stop differ from them in one value.
 
 use kestrike_tools::json::Text;
 
 use super::{Check, Stop, checks};
 use crate::fis_support::{Change, Input::*, Inputs, hardware_manifest};
 
+/// A whole number of 401 digits, past the largest float.
+const PAST_FLOAT: &str = concat!(
+    "1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000"
+);
+
 type Read = (&'static str, &'static [Change], Result<(), (Check, Stop)>);
+
+/// The run stops at `check` with `sentence`.
+fn stops(check: Check, sentence: &str) -> Result<(), (Check, Stop)> {
+    Err((check, Stop::Rejected(Text::from(sentence))))
+}
 
 fn reads() -> Vec<Read> {
     vec![
         (
             "a profiles file without profiles",
             &[(Profiles, &["profiles"], None)],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "the FIS profiles file holds no object under profiles",
-                )),
-            )),
+                "the FIS profiles file holds no object under profiles",
+            ),
         ),
         (
             "a profiles file whose profiles is a list",
             &[(Profiles, &["profiles"], Some("[]"))],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "the FIS profiles file holds no object under profiles",
-                )),
-            )),
+                "the FIS profiles file holds no object under profiles",
+            ),
         ),
         (
             "a profiles file that is a list",
             &[(Profiles, &[], Some("[]"))],
-            Err((
-                Check::Manifest,
-                Stop::Rejected(Text::from("the FIS profiles file is not an object")),
-            )),
+            stops(Check::Manifest, "the FIS profiles file is not an object"),
         ),
         (
             "a profile that is a number",
             &[(Profiles, &["profiles", "fis-pause"], Some("7"))],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from("manifest profile 'fis-pause' is not an object")),
-            )),
+                "manifest profile 'fis-pause' is not an object",
+            ),
         ),
         (
             "a profiles file without eligible_types",
             &[(Profiles, &["eligible_types"], None)],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from("the FIS profiles file holds no eligible_types")),
-            )),
+                "the FIS profiles file holds no eligible_types",
+            ),
         ),
         (
             "a profiles file whose eligible_types is a list",
@@ -78,12 +86,10 @@ fn reads() -> Vec<Read> {
         (
             "a profiles file whose eligible_types is a number",
             &[(Profiles, &["eligible_types"], Some("7"))],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "the manifest's eligible_types 7 lists no action",
-                )),
-            )),
+                "the manifest's eligible_types 7 lists no action",
+            ),
         ),
         (
             "an action of 1.0 that a list of eligible_types holds as 1",
@@ -95,12 +101,10 @@ fn reads() -> Vec<Read> {
                 ),
                 (Profiles, &["profiles", "fis-pause", "action"], Some("1.0")),
             ],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "manifest profile 'fis-family-stop' names action 'aws:ebs:pause-volume-io', which the manifest's eligible_types does not list",
-                )),
-            )),
+                "manifest profile 'fis-family-stop' names action 'aws:ebs:pause-volume-io', which the manifest's eligible_types does not list",
+            ),
         ),
         (
             "an action of true that a list of eligible_types holds as 1",
@@ -112,12 +116,10 @@ fn reads() -> Vec<Read> {
                 ),
                 (Profiles, &["profiles", "fis-pause", "action"], Some("true")),
             ],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "manifest profile 'fis-family-stop' names action 'aws:ebs:pause-volume-io', which the manifest's eligible_types does not list",
-                )),
-            )),
+                "manifest profile 'fis-family-stop' names action 'aws:ebs:pause-volume-io', which the manifest's eligible_types does not list",
+            ),
         ),
         (
             "an absent action that a list of eligible_types holds as null",
@@ -129,10 +131,10 @@ fn reads() -> Vec<Read> {
                 ),
                 (Profiles, &["profiles", "fis-pause", "action"], None),
             ],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from("manifest profile 'fis-pause' holds no action")),
-            )),
+                "manifest profile 'fis-pause' holds no action",
+            ),
         ),
         (
             "an action that is no string beside eligible_types that is a string",
@@ -144,12 +146,58 @@ fn reads() -> Vec<Read> {
                 ),
                 (Profiles, &["profiles", "fis-pause", "action"], Some("7")),
             ],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "manifest profile 'fis-pause' names action 7, which is no string to find in the manifest's eligible_types",
-                )),
-            )),
+                "manifest profile 'fis-pause' names action 7, which is no string to find in the manifest's eligible_types",
+            ),
+        ),
+        (
+            "an action of nan that a list of eligible_types holds",
+            &[
+                (
+                    Profiles,
+                    &["eligible_types"],
+                    Some("[NaN, \"aws:ebs:volume-io-latency\", \"aws:ebs:pause-volume-io\"]"),
+                ),
+                (Profiles, &["profiles", "fis-pause", "action"], Some("NaN")),
+            ],
+            Ok(()),
+        ),
+        (
+            "an action of [nan] that a list of eligible_types holds as [nan]",
+            &[
+                (
+                    Profiles,
+                    &["eligible_types"],
+                    Some("[[NaN], \"aws:ebs:volume-io-latency\", \"aws:ebs:pause-volume-io\"]"),
+                ),
+                (
+                    Profiles,
+                    &["profiles", "fis-pause", "action"],
+                    Some("[NaN]"),
+                ),
+            ],
+            Ok(()),
+        ),
+        (
+            "a single profile whose volume declares two instances",
+            &[(
+                Operator,
+                &["attachments"],
+                Some("{\"vol-0123456789abcdef0\": [\"i-1\", \"i-2\"]}"),
+            )],
+            Ok(()),
+        ),
+        (
+            "an episode at the receipt name's bound",
+            &[(
+                Episode,
+                &[],
+                Some(
+                    "\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
+                ),
+            )],
+            Ok(()),
         ),
         (
             "an action that is a list",
@@ -158,20 +206,15 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-pause", "action"],
                 Some("[\"aws:ebs:pause-volume-io\"]"),
             )],
-            Err((
+            stops(
                 Check::Manifest,
-                Stop::Rejected(Text::from(
-                    "manifest profile 'fis-pause' names action ['aws:ebs:pause-volume-io'], which the manifest's eligible_types does not list",
-                )),
-            )),
+                "manifest profile 'fis-pause' names action ['aws:ebs:pause-volume-io'], which the manifest's eligible_types does not list",
+            ),
         ),
         (
             "a profiles file with no profile",
             &[(Profiles, &["profiles"], Some("{}"))],
-            Err((
-                Check::Episode,
-                Stop::Rejected(Text::from("the FIS profiles file declares no profile")),
-            )),
+            stops(Check::Episode, "the FIS profiles file declares no profile"),
         ),
         (
             "a profile without ready_seconds",
@@ -180,10 +223,7 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "ready_seconds"],
                 None,
             )],
-            Err((
-                Check::Profiles,
-                Stop::Rejected(Text::from("a FIS profile holds no ready_seconds")),
-            )),
+            stops(Check::Profiles, "a FIS profile holds no ready_seconds"),
         ),
         (
             "a ready_seconds that is a string",
@@ -192,12 +232,10 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "ready_seconds"],
                 Some("\"300\""),
             )],
-            Err((
+            stops(
                 Check::Profiles,
-                Stop::Rejected(Text::from(
-                    "a FIS profile's ready_seconds '300' is not a number of seconds",
-                )),
-            )),
+                "a FIS profile's ready_seconds '300' is not a number of seconds",
+            ),
         ),
         (
             "a ready_seconds string beside an absent duration",
@@ -213,10 +251,7 @@ fn reads() -> Vec<Read> {
                     None,
                 ),
             ],
-            Err((
-                Check::Profiles,
-                Stop::Rejected(Text::from("a FIS profile holds no duration_seconds")),
-            )),
+            stops(Check::Profiles, "a FIS profile holds no duration_seconds"),
         ),
         (
             "a profile without duration_seconds",
@@ -225,10 +260,7 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "duration_seconds"],
                 None,
             )],
-            Err((
-                Check::Profiles,
-                Stop::Rejected(Text::from("a FIS profile holds no duration_seconds")),
-            )),
+            stops(Check::Profiles, "a FIS profile holds no duration_seconds"),
         ),
         (
             "a duration_seconds of null",
@@ -237,12 +269,10 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "duration_seconds"],
                 Some("null"),
             )],
-            Err((
+            stops(
                 Check::Profiles,
-                Stop::Rejected(Text::from(
-                    "a FIS profile's duration_seconds None is not a number of seconds",
-                )),
-            )),
+                "a FIS profile's duration_seconds None is not a number of seconds",
+            ),
         ),
         (
             "a profile without case_seconds",
@@ -251,10 +281,7 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "case_seconds"],
                 None,
             )],
-            Err((
-                Check::Profiles,
-                Stop::Rejected(Text::from("a FIS profile holds no case_seconds")),
-            )),
+            stops(Check::Profiles, "a FIS profile holds no case_seconds"),
         ),
         (
             "a case_seconds that is a string",
@@ -263,20 +290,15 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "case_seconds"],
                 Some("\"1800\""),
             )],
-            Err((
+            stops(
                 Check::Profiles,
-                Stop::Rejected(Text::from(
-                    "a FIS profile's case_seconds '1800' is not a number of seconds",
-                )),
-            )),
+                "a FIS profile's case_seconds '1800' is not a number of seconds",
+            ),
         ),
         (
             "a profile without lane",
             &[(Profiles, &["profiles", "fis-read-latency", "lane"], None)],
-            Err((
-                Check::Grace,
-                Stop::Rejected(Text::from("a FIS profile holds no lane")),
-            )),
+            stops(Check::Grace, "a FIS profile holds no lane"),
         ),
         (
             "a lane that is a string",
@@ -285,22 +307,14 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "lane"],
                 Some("\"fis-read\""),
             )],
-            Err((
+            stops(
                 Check::Grace,
-                Stop::Rejected(Text::from(
-                    "the hardware manifest names no lane role for fis-read: a value that is not an object has no member 'profile'",
-                )),
-            )),
+                "the hardware manifest names no lane role for fis-read: a value that is not an object has no member 'profile'",
+            ),
         ),
         (
             "an effect timeout past every float",
-            &[(
-                Operator,
-                &["effect_timeout_seconds"],
-                Some(
-                    "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-                ),
-            )],
+            &[(Operator, &["effect_timeout_seconds"], Some(PAST_FLOAT))],
             Err((Check::Profiles, Stop::Overflow)),
         ),
         (
@@ -308,9 +322,7 @@ fn reads() -> Vec<Read> {
             &[(
                 Profiles,
                 &["profiles", "fis-read-latency", "ready_seconds"],
-                Some(
-                    "10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
-                ),
+                Some(PAST_FLOAT),
             )],
             Err((Check::Profiles, Stop::Overflow)),
         ),
@@ -330,12 +342,10 @@ fn reads() -> Vec<Read> {
                 &["profiles", "fis-read-latency", "ready_seconds"],
                 Some("Infinity"),
             )],
-            Err((
+            stops(
                 Check::Profiles,
-                Stop::Rejected(Text::from(
-                    "profile fis-read-latency needs up to inf s before its case ends, past its 1800 s case; lower effect_timeout_seconds",
-                )),
-            )),
+                "profile fis-read-latency needs up to inf s before its case ends, past its 1800 s case; lower effect_timeout_seconds",
+            ),
         ),
         (
             "a ready_seconds of nan",
@@ -370,6 +380,7 @@ fn reads() -> Vec<Read> {
 
 #[test]
 fn each_read_without_a_check_of_its_own_stops_at_the_check_that_reads_it() {
+    assert_eq!(PAST_FLOAT.len(), 401);
     for (case, changes, expected) in reads() {
         let stopped = checks(&Inputs::changed(changes), &hardware_manifest());
         assert_eq!(stopped, expected, "{case}");

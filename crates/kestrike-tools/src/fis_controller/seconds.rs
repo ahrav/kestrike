@@ -36,7 +36,7 @@ impl Seconds {
     pub(super) fn float(&self) -> Result<f64, Error> {
         match self {
             Self::Real(real) => Ok(*real),
-            Self::Whole(whole) => float(whole),
+            Self::Whole(whole) => whole_float(whole),
         }
     }
 
@@ -98,7 +98,11 @@ pub(super) fn whole_sum(terms: &[&Integer]) -> Result<Integer, Error> {
 }
 
 /// The float nearest `whole`, half to even.
-fn float(whole: &Integer) -> Result<f64, Error> {
+///
+/// # Errors
+///
+/// [`Error::Overflow`] for a whole number that rounds past the largest float.
+pub(super) fn whole_float(whole: &Integer) -> Result<f64, Error> {
     let real: f64 = whole
         .to_string()
         .parse()

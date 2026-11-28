@@ -463,6 +463,7 @@ fn format_g_writes_six_significant_digits_as_python_formats_g() {
         ("format(1e+300, 'g')", f64::from_bits(0x7e37e43c8800759c), "1e+300"),
         ("format(1.7976931348623157e+308, 'g')", f64::from_bits(0x7fefffffffffffff), "1.79769e+308"),
         ("format(0.0001, 'g')", f64::from_bits(0x3f1a36e2eb1c432d), "0.0001"),
+        ("format(9.9999995e-05, 'g')", f64::from_bits(0x3f1a36e2d51ec34b), "0.0001"),
         ("format(1e-05, 'g')", f64::from_bits(0x3ee4f8b588e368f1), "1e-05"),
         ("format(1.5000000000000002e-05, 'g')", f64::from_bits(0x3eef75104d551d6a), "1.5e-05"),
         ("format(5e-324, 'g')", f64::from_bits(0x0000000000000001), "4.94066e-324"),
