@@ -21,7 +21,7 @@ use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
-use crate::plants::remove;
+use crate::plants::{publish, remove};
 use crate::process::{SIGCHLD_IGNORED, sigchld_ignored};
 use crate::python::{hexdigest, say};
 use crate::stream::emit;
@@ -202,8 +202,13 @@ impl Run {
         let patch = git(&prepared.git_env, prepared.top.as_os_str(), &args)
             .map_err(GitError::incomplete)?;
         let diff = self.dir().join("diff.patch");
-        fs::write(&diff, &patch).map_err(failed(&diff))?;
-        self.diff_sha256 = Some(hexdigest(&fs::read(&diff).map_err(failed(&diff))?));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&diff)
+            .map_err(failed(&diff))?;
+        file.write_all(&patch).map_err(failed(&diff))?;
+        self.diff_sha256 = Some(hexdigest(&patch));
         Ok(diff)
     }
 
@@ -528,7 +533,7 @@ impl Run {
 
 impl Run {
     /// `write_report` writes `report.json` into the run directory, which it creates when execute made
-    /// none, and returns its path.
+    /// none, through a new file beside it that it renames over the report, and returns its path.
     fn write_report(&mut self, judgment: &Judgment) -> Result<PathBuf, Text> {
         let dir = match self.dir.clone() {
             Some(dir) => dir,
@@ -538,8 +543,11 @@ impl Run {
         let mut written = json::indented(&Value::Object(self.report(judgment)))
             .expect("every phase time of a report is finite");
         written.push('\n');
-        fs::write(&path, written)
-            .map_err(|error| Fault::os(&error, Some(path.as_os_str())).text().clone())?;
+        publish(&path, &written).map_err(|error| {
+            Fault::os(error.error(), Some(error.path().as_os_str()))
+                .text()
+                .clone()
+        })?;
         Ok(path)
     }
 

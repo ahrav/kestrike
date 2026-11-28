@@ -1058,6 +1058,31 @@ fn a_failed_write_of_the_help_exits_120_with_one_line() {
     );
 }
 
+/// The report is published through a new file renamed over its path: an entry at `report.json`, a link
+/// a child of the run left there included, is replaced and the file it named stays as it was.
+#[test]
+fn the_report_replaces_an_entry_at_its_path_and_writes_through_no_link() {
+    let fx = Fixture::new("report-link");
+    let victim = fx.state.join("victim");
+    fs::write(&victim, "victim before").expect("the victim is written");
+    fx.plan(&Plan {
+        report_link: true,
+        ..Plan::caught(&one_mutant("2:1: m"))
+    });
+    let out = fx.start().run();
+    assert_eq!(out.code, 0, "{}", out.all());
+    assert_eq!(
+        fs::read_to_string(&victim).expect("the victim reads"),
+        "victim before"
+    );
+    let report = only(fx.reports());
+    assert!(
+        fs::symlink_metadata(&report).is_ok_and(|status| status.is_file()),
+        "the report is a regular file"
+    );
+    assert!(complete(&fx.report(Some(&out))));
+}
+
 #[test]
 fn the_default_head_and_artifacts_come_from_the_invoking_checkout() {
     let fx = Fixture::new("defaults");

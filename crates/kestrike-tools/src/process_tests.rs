@@ -83,22 +83,27 @@ fn group_leader(script: &str) -> std::process::Child {
 /// `ignoring_term` starts a group leader that ignores SIGTERM and returns once its status shows SIGTERM
 /// ignored.
 fn ignoring_term() -> std::process::Child {
-    let child = group_leader("trap '' TERM; while :; do sleep 1; done");
+    let mut child = group_leader("trap '' TERM; while :; do sleep 1; done");
     let status = format!("/proc/{}/status", child.id());
-    let start = Instant::now();
-    loop {
+    let ignores = || {
         let text = std::fs::read_to_string(&status).expect("the status reads");
         let ignored = text
             .lines()
             .find_map(|line| line.strip_prefix("SigIgn:"))
             .and_then(|mask| u64::from_str_radix(mask.trim(), 16).ok())
             .expect("a SigIgn line");
-        if ignored & (1 << (libc::SIGTERM - 1)) != 0 {
-            return child;
+        ignored & (1 << (libc::SIGTERM - 1)) != 0
+    };
+    let start = Instant::now();
+    while !ignores() {
+        if start.elapsed() >= WAIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the leader ignores SIGTERM within {WAIT:?}");
         }
-        assert!(start.elapsed() < WAIT, "the leader ignores SIGTERM in time");
         std::thread::sleep(Duration::from_millis(5));
     }
+    child
 }
 
 /// `recorded_stop` stops `child`'s group with `stop` and returns each signal sent with the leader's state

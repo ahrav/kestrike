@@ -124,6 +124,7 @@ if [ -e "$plan/stray" ]; then
   printf '%s' "$!" > "$state/grandchild.pid"
 fi
 out=$(value --output "$@")/mutants.out
+if [ -e "$plan/report_link" ]; then ln -s "$state/victim" "$(value --output "$@")/../report.json"; fi
 mkdir -p "$out"
 if [ -e "$plan/raw_outcomes" ]; then
   cp "$plan/raw_outcomes" "$out/outcomes.json"

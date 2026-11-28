@@ -123,6 +123,8 @@ pub struct Plan {
     /// The tool's run leaves two directories of mode 0500 in the worktree, each holding a file, among
     /// other entries.
     pub locked: bool,
+    /// The tool's run leaves a link at the run directory's `report.json` to the state's `victim`.
+    pub report_link: bool,
     pub no_outcomes: bool,
     pub raw_listing: Option<Vec<u8>>,
     pub raw_outcomes: Option<String>,
@@ -217,6 +219,7 @@ impl Plan {
             (self.stray, "stray"),
             (self.drop_git, "drop_git"),
             (self.locked, "locked"),
+            (self.report_link, "report_link"),
             (self.no_outcomes, "no_outcomes"),
         ] {
             if flag {

@@ -8,7 +8,7 @@
 //! from its main thread.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -108,7 +108,7 @@ fn lead_new_session(command: &mut Command) {
 }
 
 /// `supervise` runs `argv` with standard input from `/dev/null`, standard output and standard error written
-/// to the two files and the environment `env`, in a new session, and returns its exit code as
+/// to the two files, each created new, and the environment `env`, in a new session, and returns its exit code as
 /// [`exit_code`] gives it. A signal recorded in `interrupt` before the child started or while it runs
 /// stops the child's group and returns the interruption. Once the leader has exited, the members of its
 /// group it left behind are stopped. The run reads the leader's state while it waits and reaps the leader
@@ -128,7 +128,11 @@ pub fn supervise(
     env: &[(OsString, OsString)],
 ) -> Result<i32, Stop> {
     let create = |path: &Path| {
-        File::create(path).map_err(|error| Stop::failed(&Fault::os(&error, Some(path.as_os_str()))))
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|error| Stop::failed(&Fault::os(&error, Some(path.as_os_str()))))
     };
     let Some((&program, args)) = argv.split_first() else {
         let error = io::Error::new(io::ErrorKind::InvalidInput, "an empty command");
