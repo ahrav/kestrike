@@ -2,11 +2,8 @@
 //! deadline before `injection/`, the roles mark's size, a signal that stands at the start, and an
 //! evidence directory that cannot hold a mark.
 
-use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
-use std::path::Path;
 
 use kestrike_tools::host_stop::{Interrupted, Signal};
 use kestrike_tools::host_stop_controller::Halt;
@@ -14,6 +11,7 @@ use kestrike_tools::json::Value;
 
 use super::plane::{Action, CALLER, STATUS, string};
 use super::steps::{Step, errno};
+use super::stop_run::mkfifo;
 use super::{COPY, Case, listing, set};
 use crate::host_stop_support::{START, value};
 
@@ -226,13 +224,6 @@ fn a_stale_malformed_or_inconsistent_snapshot_is_refused_after_the_caller() {
         }
     });
     case.assert_refused(&[CALLER], "cut 98 lies before the baseline window");
-}
-
-fn mkfifo(path: &Path) {
-    let name = CString::new(path.as_os_str().as_bytes()).expect("no NUL");
-    // SAFETY: `name` is a NUL-terminated path that outlives the call.
-    let status = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
-    assert_eq!(status, 0, "{}", std::io::Error::last_os_error());
 }
 
 /// A snapshot file that is a named pipe is refused as no regular file without waiting for a

@@ -182,7 +182,7 @@ fn a_clean_run_sends_the_five_calls_in_order_writes_three_marks_and_exits_0() {
     assert!(!last.marks.iter().any(|m| m == "stopped"), "{last:?}");
 }
 
-fn mkfifo(path: &std::path::Path) {
+pub(crate) fn mkfifo(path: &std::path::Path) {
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("no NUL in the path");
     // SAFETY: `name` is a NUL-terminated path that outlives the call.
