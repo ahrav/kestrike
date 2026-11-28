@@ -95,6 +95,8 @@ fn ancestors(path: &str) -> impl Iterator<Item = &str> {
 /// with `<path> at <short id> lies under <ancestor>, which is a link` (or `a submodule`), since a checkout
 /// reads the path through that entry; an ancestor that is a regular file or absent leaves the path absent.
 /// Each listing covers the batch's requested entries and the trees Git traverses to reach them.
+/// The first listing names only the leaf paths in the batch: Git lists every entry of a directory named
+/// alongside one of its descendants, and `-t` prints the directory's own record when Git traverses it.
 fn modes(
     environ: &Environ,
     commit: &str,

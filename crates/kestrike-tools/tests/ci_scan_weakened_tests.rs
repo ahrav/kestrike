@@ -2,9 +2,10 @@
 //! check CI-visible output and exit status.
 
 use std::fs::{self, DirBuilder};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::io::Write;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const WRAPPER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -51,6 +52,25 @@ impl Tree {
                 let _ = fs::remove_file(path);
             }
         }
+    }
+
+    /// `execve` refuses a file that any process holds open for writing with `ETXTBSY`, and another test
+    /// thread's child inherits the open writer at `fork` even when `FD_CLOEXEC` is set.
+    fn draw(&self, text: &str) {
+        let mut writer = Command::new("sh")
+            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(self.root.join("draws/od"))
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("the stand-in's writer starts");
+        writer
+            .stdin
+            .take()
+            .expect("the writer's standard input is a pipe")
+            .write_all(text.as_bytes())
+            .expect("the stand-in's text reaches the writer");
+        let status = writer.wait().expect("the stand-in's writer is reaped");
+        assert!(status.success(), "the stand-in draw is written: {status}");
     }
 
     fn environment(&self) -> Option<Vec<u8>> {
@@ -176,24 +196,35 @@ fn the_wrapper_stops_workflow_commands_around_the_scan_and_keeps_its_status() {
     assert_eq!(distinct.len(), tokens.len(), "{tokens:?}");
 }
 
-/// The wrapper requires a draw of exactly 32 ASCII hexadecimal digits. If the draw fails or yields a
-/// malformed token, the wrapper exits with a nonzero status before printing the stop line or running the
-/// launcher.
+const MALFORMED: &str =
+    "ci-scan-weakened-tests.sh: the random source gave no token of 32 hex digits\n";
+
 #[test]
 fn a_failed_or_malformed_draw_stops_the_wrapper_before_the_scan() {
     let tree = Tree::new("draw");
     tree.launcher(Some(&format!("{RECORDS}exit 0\n")));
     let path = format!("./draws:{}", std::env::var("PATH").expect("PATH is set"));
-    for draw in [
-        "exit 1\n",
-        "printf 'abc\\n'\n",
-        "printf '%032d\\n' 0 | tr 0 g\n",
-    ] {
-        let od = tree.root.join("draws/od");
-        fs::write(&od, draw).expect("the stand-in draw is written");
-        fs::set_permissions(&od, fs::Permissions::from_mode(0o755)).expect("the draw runs");
-        let output = tree.run(&[("PATH", &path)]);
-        assert_ne!(output.status.code(), Some(0), "{draw}");
+    let marker = tree.root.join("draw");
+    let marker_path = marker.to_str().expect("the scratch path is UTF-8");
+    for (row, (draw, code, complaint)) in [
+        ("exit 1\n", 1, ""),
+        ("printf '%032d\\n' 0\nexit 3\n", 3, ""),
+        ("printf 'abc\\n'\n", 1, MALFORMED),
+        ("printf '%032d\\n' 0 | tr 0 g\n", 1, MALFORMED),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        tree.draw(&format!("printf '{row}' > \"$STAND_IN_DRAW\"\n{draw}"));
+        let _ = fs::remove_file(&marker);
+        let output = tree.run(&[("PATH", &path), ("STAND_IN_DRAW", marker_path)]);
+        assert_eq!(
+            fs::read_to_string(&marker).ok(),
+            Some(row.to_string()),
+            "{draw}: the row's draw did not run"
+        );
+        assert_eq!(output.status.code(), Some(code), "{draw}");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), complaint, "{draw}");
         assert!(output.stdout.is_empty(), "{draw}");
         assert_eq!(tree.environment(), None, "{draw}: the launcher ran");
     }

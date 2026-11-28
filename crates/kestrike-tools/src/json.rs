@@ -1,6 +1,6 @@
-//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`] and
-//! [`indented_in_order`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits, which adds, steps
-//! down by one and sums without passing that bound.
+//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`],
+//! [`indented_in_order`] and [`indented_by`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits,
+//! which adds, steps down by one and sums without passing that bound.
 //!
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
@@ -28,6 +28,9 @@ pub const MAX_DEPTH: usize = 1000;
 
 /// The most decimal digits an integer token of [`parse`] and an [`Integer`] hold.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
+
+/// The reason of the error for nesting past [`MAX_DEPTH`].
+pub const DEPTH_REASON: &str = "nesting deeper than the reader takes";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -524,7 +527,7 @@ impl<'a> Reader<'a> {
 
     fn nest(&mut self, depth: usize) -> Result<(), StrictError> {
         if depth > MAX_DEPTH {
-            return Err(self.error("nesting deeper than the reader takes"));
+            return Err(self.error(DEPTH_REASON));
         }
         self.at += 1;
         self.space();
@@ -811,7 +814,32 @@ fn written(value: &Value, layout: Layout) -> String {
     out
 }
 
-/// A float [`indented`] refuses: `NaN`, `Infinity` or `-Infinity`.
+/// `indented_by` uses the layout of [`indented`] with `width` spaces per level, as Python's
+/// `json.dumps(value, indent=width, sort_keys=True)` writes it.
+///
+/// The indented layout starts each member and item on a line of its own with two spaces per level of
+/// depth, and a string writes each line break as an escape, so every line's leading spaces count its
+/// depth twice.
+///
+/// # Errors
+///
+/// `indented_by` refuses a non-finite float.
+pub fn indented_by(value: &Value, width: u8) -> Result<String, NonFinite> {
+    let two = indented(value)?;
+    let mut out = String::with_capacity(two.len());
+    for (at, line) in two.split('\n').enumerate() {
+        if at > 0 {
+            out.push('\n');
+        }
+        let body = line.trim_start_matches(' ');
+        let depth = (line.len() - body.len()) / 2;
+        out.push_str(&" ".repeat(depth * usize::from(width)));
+        out.push_str(body);
+    }
+    Ok(out)
+}
+
+/// A float [`indented`] and [`indented_by`] refuse: `NaN`, `Infinity` or `-Infinity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonFinite(f64);
 
