@@ -14,7 +14,7 @@ use crate::text::Text;
 
 const COPIES: &str = include_str!("copies.json");
 
-const COPY_COUNT: usize = 252;
+const COPY_COUNT: usize = 254;
 
 fn top() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
