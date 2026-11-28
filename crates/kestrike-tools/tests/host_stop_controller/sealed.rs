@@ -1530,44 +1530,6 @@ fn a_restoration_within_the_clock_error_after_the_window_ends_a_sealed_runs_obse
     }
 }
 
-/// A run that makes `injection/` and then loses its lock to another command of the same directory
-/// removes that directory while the other command still holds the lock: the run exits 2 with the
-/// lock's refusal and `... is removed`, and the holder is left with a lock on a directory that no
-/// longer stands. The run removes the directory it made whenever no `roles.json` counts as
-/// written, whether or not it ever held the lock.
-#[test]
-fn a_run_that_loses_the_lock_of_its_new_injection_removes_it_while_another_holds_the_lock() {
-    let mut case = Case::new("lost-lock");
-    case.contended.set(true);
-    let injection = case.evidence.join("injection");
-    let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let (held, at) = (std::rc::Rc::clone(&holder), injection.clone());
-    case.plant(Box::new(move |_, step| {
-        if matches!(step, Step::TryLock) && held.borrow().is_none() {
-            *held.borrow_mut() = Some(lock(&Disk, &at).expect("the other command locks first"));
-        }
-        None
-    }));
-    assert_eq!(case.run(), 2, "{}", case.output());
-    let stderr = case.stderr();
-    assert!(
-        stderr.contains("is held by a run, restore or seal that has not ended"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!(
-            "before roles.json stood; {} is removed",
-            injection.display()
-        )),
-        "{stderr}"
-    );
-    assert!(!injection.exists(), "the run removed the directory it made");
-    assert!(
-        holder.borrow().is_some(),
-        "the other command still holds its lock"
-    );
-}
-
 /// A lookup of a standing seal that fails other than by a missing entry is refused before any
 /// file of the copy is read, with no call and no mark.
 #[test]

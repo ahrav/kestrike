@@ -924,3 +924,81 @@ fn the_root_sets_the_panic_hook_before_the_entry() {
         assert!(hooks_before_entry(&source).is_err(), "{planted}");
     }
 }
+
+/// The names whose call removes or renames a directory entry.
+const NAME_CHANGES: [&str; 7] = [
+    "rmdir",
+    "remove_dir",
+    "remove_dir_all",
+    "rename",
+    "renameat",
+    "renameat2",
+    "unlinkat",
+];
+
+/// Each call of a name of [`NAME_CHANGES`] in `sources`, as a method or a free call, with the
+/// file's path. A definition `fn name(` is no call.
+fn name_changes(sources: &[Source]) -> Vec<(String, &'static str)> {
+    let mut found = Vec::new();
+    for source in sources {
+        let t = &source.tokens;
+        for at in outside_use(t) {
+            let before = at.checked_sub(1).map(|b| &t[b]);
+            let called = punct(t.get(at + 1), '(') && !ident(before, "fn");
+            if let Some(name) = NAME_CHANGES.iter().find(|name| ident(t.get(at), name))
+                && called
+            {
+                found.push((source.path.clone(), *name));
+            }
+        }
+    }
+    found
+}
+
+/// A `restore` and a `seal` that hold the lock of the directory at the name rely on the run's
+/// `rmdir` as the controller's one removal of a directory, with no rename beside it: the scanned
+/// sources call `rmdir` once, in the run, and `remove_dir` once, in the file step's default. The
+/// scan counts call sites by name; the cases of the lock show that the run's site runs under its
+/// lock. A planted second removal and a planted rename each add a site.
+#[test]
+fn the_runs_rmdir_is_the_one_removal_of_a_directory_and_nothing_renames_one() {
+    let sources = scanned();
+    let sites = [
+        ("src/host_stop/files.rs".to_owned(), "remove_dir"),
+        ("src/host_stop_controller/run.rs".to_owned(), "rmdir"),
+    ];
+    assert_eq!(name_changes(&sources), sites);
+    for (planted, name) in [
+        (
+            "fn f(p: &Path) { let _ = std::fs::remove_dir(p); }\n",
+            "remove_dir",
+        ),
+        (
+            "fn f(c: &Controller) { let _ = c.cx.files.rmdir(p); }\n",
+            "rmdir",
+        ),
+        ("fn f() { let _ = unsafe { libc::rmdir(p) }; }\n", "rmdir"),
+        (
+            "fn f(a: &Path, b: &Path) { let _ = std::fs::rename(a, b); }\n",
+            "rename",
+        ),
+        (
+            "fn f() { let _ = unsafe { libc::renameat2(a, b, c, d, 0) }; }\n",
+            "renameat2",
+        ),
+        (
+            "fn f() { let _ = unsafe { libc::unlinkat(a, b, libc::AT_REMOVEDIR) }; }\n",
+            "unlinkat",
+        ),
+    ] {
+        let mut with = sources.clone();
+        let path = "src/host_stop_controller/seal.rs";
+        let seal = with.iter_mut().find(|source| source.path == path);
+        seal.expect("the seal is scanned")
+            .tokens
+            .extend(tokens(planted));
+        let mut expected = sites.to_vec();
+        expected.push((path.to_owned(), name));
+        assert_eq!(name_changes(&with), expected, "{planted}");
+    }
+}

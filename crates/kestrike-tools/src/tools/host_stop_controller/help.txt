@@ -58,9 +58,13 @@ The snapshot directory, written by the store's reader:
      shows no stop from one), an owned shard with no witness key in the package or a witness key of a shard the target
      does not own, a status read of the declared set that fails, names another set or shows an instance not running (a
      run left open), a `roles.json` past the judge's file size, and a deadline passed before `injection/` is made. Make
-     `injection/`, hold its lock (`flock`) to the run's end and write `roles.json`; a failure before it stands removes
-     `injection/` again and is a refusal. Apply the judge's pre-stop reach conditions (`roles_reach`, with its working
-     role counts MIN_OWNED and MIN_STOOD); unmet, the abort path runs with cause `reach`.
+     `injection/`, hold its lock (`flock`) to the run's end and write `roles.json`; a failure before it stands is a
+     refusal. A run that holds the lock attempts to remove `injection/` again and to sync DIR before it frees the
+     lock, and names `injection/` as possibly standing where either fails. A run that never held it, since another
+     command took it first or the directory cannot be opened, leaves `injection/` and names it; the operator removes
+     it before another run, once no run, restore or seal on DIR holds it. Apply the judge's pre-stop reach conditions
+     (`roles_reach`, with its working role counts MIN_OWNED and MIN_STOOD); unmet, the abort path runs with cause
+     `reach`.
   4. Read the alarms, which must each be quiet (`quiet`): `OK`, missing data treated as `missing` or `breaching` as
      the row states it, no `EvaluationState`, no PromQL alarm (`EvaluationCriteria`), no metric query expression
      (metric math, FILL or Metrics Insights) and no percentile that ignores a low sample count, each of which can read
@@ -94,12 +98,14 @@ deadline (`deadline_seconds` after the run's start), an exception and a signal (
 ignored at start): it writes `abort.json` {cause, guardrail, time, detail}, the detail saying whether no stop request
 was sent, one was sent and answered, or one may have left with its outcome unknown and the call's failure, and ending
 with `; restoration steps sha256 ` and the SHA-256 of the restoration steps text this run prints, and then
-`stopped.json` when the stop was shown. It reads the target's status once when a request may have left, prints that
-read and GD-2's restoration steps from the catalog, and exits 1. It sends no call that changes an instance, and the
-controller holds no call that starts one. A signal raises only before `injection/` is made (exit 2; one that arrives
-before step 1 waits for it) and in steps 3 to 7 (the abort path); during a mark's write it waits for the write's end,
-and during the abort path and the final `stopped.json` it is left unraised. In `restore` a signal raises during the
-poll; in `seal` it raises from the lock to the mark's write, which writes nothing (exit 2), and waits for that write.
+`stopped.json` when the stop was shown. A lone surrogate in the detail's text, from a reply's field or a byte of DIR
+with no UTF-8 form, is written as the six characters `\udXXX` before the detail is cut to its length. It reads the
+target's status once when a request may have left, prints that read and GD-2's restoration steps from the catalog, and
+exits 1. It sends no call that changes an instance, and the controller holds no call that starts one. A signal raises
+only before `injection/` is made (exit 2; one that arrives before step 1 waits for it) and in steps 3 to 7 (the abort
+path); during a mark's write it waits for the write's end, and during the abort path and the final `stopped.json` it is
+left unraised. In `restore` a signal raises during the poll; in `seal` it raises from the lock to the mark's write,
+which writes nothing (exit 2), and waits for that write.
 
 `restore`, run by the operator after starting the instance themselves, refuses: an empty evidence path; an evidence root
 or `injection/` that is a link, no directory or one that takes no unnamed file; a missing or malformed `stop.json`, or
@@ -135,9 +141,10 @@ launch is admitted and the time is the abort's. The judge ends its observation a
 window's start to less than the package's `clock_error_seconds` after its end (its `ends_observation`), and `time` may
 precede the start by 2 * SKEW_SECONDS and the second `LaunchTime` leaves out, so a start less than that plus
 `clock_error_seconds` after the run window's end may end it; `run` prints that bound. `restore` reads and writes the
-marks by the pathname `DIR/injection`: its lock excludes a run and another restore of the directory it opened, keeping
-that directory under that name until `restore` ends is the operator's, and exit 0 says the mark stands in the directory
-so named when the mark was linked.
+marks by the pathname `DIR/injection`: its lock excludes a run and another restore of the directory it opened, it
+refuses once it holds the lock where a lookup of that name finds another entry than the directory it locked, keeping
+that directory under that name until `restore` ends is the operator's, and exit 0 says the mark stands in the
+directory so named when the mark was linked.
 
 `seal`, run by the operator once the run window has ended and every collection named in `DIR/coverage.json` is in DIR,
 makes no AWS call and refuses: an empty evidence path; an evidence root or `injection/` that is a link, no directory or
@@ -161,7 +168,8 @@ observation excepted, one dated at or after the run window's end plus `clock_err
 collection after the seal, with its count lowered to match, and an abort or restoration mark removed or, with that
 exception, added after it are refused. A collection short before the seal stays the collector's declaration, and a seal
 removed and written again reads as the first, so the operator keeps the printed digest, which the judge's record
-carries. `seal` checks for an existing mark and links its own by the pathname `DIR/injection`, as `restore` does, and
+carries. `seal` checks for an existing mark and links its own by the pathname `DIR/injection`, as `restore` does: it
+refuses once it holds the lock where a lookup of that name finds another entry than the directory it locked, and
 keeping DIR under that name until `seal` ends is the operator's.
 
 The marks, in the judge's field names, each written once: an unnamed file in `injection/`, synced, linked

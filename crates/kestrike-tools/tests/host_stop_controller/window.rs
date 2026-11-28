@@ -1,5 +1,7 @@
-//! The window from the making of `injection/` to the roles mark: a failure there removes
-//! `injection/` again and is a refusal, and a roles mark that stands takes the abort path.
+//! The window from the making of `injection/` to the roles mark: a failure there is a refusal, and
+//! a roles mark that stands takes the abort path. A run that holds the lock attempts the removal of
+//! `injection/` and names the directory where the removal fails or is unsynced; a run that never
+//! held the lock leaves `injection/`.
 
 use kestrike_tools::host_stop::Signal;
 
