@@ -9,12 +9,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::record::{Interrupted, Record, SLICE, ignored, left};
+use super::record::{Interrupted, Record, SLICE, ignored, left_at};
 use crate::environ;
 use crate::python::returncode;
 use crate::text::{newlines, strip_str};
@@ -25,8 +25,13 @@ pub const AWS: &str = "aws";
 /// The characters of a failed child's standard error that its failed call keeps.
 const TAIL: usize = 400;
 
-/// The wait's first pause between two reads of the child.
-const FIRST_PAUSE: Duration = Duration::from_millis(1);
+/// The readers of one call, one for each output pipe of the child.
+const READERS: usize = 2;
+
+/// The wait's block between two looks at a child whose output pipes have both closed and whose exit
+/// is not yet visible. The system closes an exiting process's pipes before it makes the exit visible,
+/// so the exit is the last event of a reply, and the wait reads it at most this long after it happens.
+const EXIT_PAUSE: Duration = Duration::from_millis(1);
 
 /// `argv` follows `aws` on the command line; `retry` controls whether the AWS CLI applies its own
 /// retries.
@@ -160,8 +165,11 @@ fn run(
             stopped,
         )));
     };
-    let readers = read_all(stdout, Arc::clone(&abandoned))
-        .and_then(|out| Ok((out, read_all(stderr, Arc::clone(&abandoned))?)));
+    let finished = Arc::new(Finished::default());
+    let readers = read_all(stdout, Arc::clone(&abandoned), Arc::clone(&finished)).and_then(|out| {
+        let err = read_all(stderr, Arc::clone(&abandoned), Arc::clone(&finished))?;
+        Ok((out, err))
+    });
     let (out, err) = match readers {
         Ok(readers) => readers,
         Err(error) => {
@@ -173,9 +181,10 @@ fn run(
         record,
         &mut child,
         &abandoned,
-        [&out, &err],
+        &finished,
         started,
         call.cut,
+        Instant::now,
     )
     .map_err(|end| match end {
         Waited::Raised(raised) => Ended::Interrupted(raised),
@@ -252,19 +261,69 @@ enum Waited {
     Failed(io::Error),
 }
 
-/// A `record.read()` error takes precedence over success even after the child exits and both readers
-/// finish.
+/// The count of a call's readers that have finished. Each finish wakes the thread blocked in
+/// [`Finished::wait`].
+#[derive(Default)]
+struct Finished {
+    count: Mutex<usize>,
+    woken: Condvar,
+}
+
+impl Finished {
+    /// The count is a plain number that every holder of the lock leaves whole, so a poisoned lock
+    /// still reads true.
+    fn lock(&self) -> MutexGuard<'_, usize> {
+        self.count.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn count(&self) -> usize {
+        *self.lock()
+    }
+
+    fn add(&self) {
+        *self.lock() += 1;
+        self.woken.notify_all();
+    }
+
+    /// Blocks until the count differs from `seen` or `timeout` passes. The count is compared under
+    /// the lock before the thread blocks, so a reader that finished after the caller read `seen` ends
+    /// the block at once.
+    fn wait(&self, seen: usize, timeout: Duration) {
+        let _ = self
+            .woken
+            .wait_timeout_while(self.lock(), timeout, |count| *count == seen);
+    }
+}
+
+/// Counts its reader as finished when the reader's thread drops it, at a return and at a panic alike.
+struct Notice(Arc<Finished>);
+
+impl Drop for Notice {
+    fn drop(&mut self) {
+        self.0.add();
+    }
+}
+
+/// Waits for the reply of `child`, which is its exit and the finish of both readers, until the limit
+/// `cut` after `started` on the clock `now`. Each turn looks at the exit and at the count of
+/// `finished`, then reads the record, then reads the clock. A reply is the answer when the clock,
+/// read after the look that saw it, stands before the limit. A turn whose reading stands at or after
+/// the limit is a cut, whatever its look saw. A signal the record raises takes precedence over both.
+///
+/// A turn that ends without an answer blocks until a reader finishes or a pause passes: one [`SLICE`],
+/// or one [`EXIT_PAUSE`] once both readers have finished. The block ends at the limit at the latest.
 fn wait(
     record: &mut Record<'_>,
     child: &mut Child,
     abandoned: &AtomicBool,
-    readers: [&Reader; 2],
+    finished: &Finished,
     started: Instant,
     cut: Duration,
+    mut now: impl FnMut() -> Instant,
 ) -> Result<ExitStatus, Waited> {
     let end = started.checked_add(cut);
-    let mut pause = FIRST_PAUSE;
     loop {
+        let seen = finished.count();
         let status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
@@ -276,17 +335,16 @@ fn wait(
             let _ = stop(child, abandoned);
             return Err(Waited::Raised(raised));
         }
-        let left = left(end);
+        let left = left_at(end, now());
         if left.is_zero() {
             return Err(Waited::Cut(stop(child, abandoned)));
         }
-        if let Some(status) = status
-            && readers.iter().all(|reader| reader.is_finished())
-        {
-            return Ok(status);
-        }
-        thread::sleep(left.min(pause));
-        pause = pause.saturating_mul(2).min(SLICE);
+        let pause = match status {
+            Some(status) if seen == READERS => return Ok(status),
+            None if seen == READERS => EXIT_PAUSE,
+            _ => SLICE,
+        };
+        finished.wait(seen, left.min(pause));
     }
 }
 
@@ -300,12 +358,14 @@ fn stop(child: &mut Child, abandoned: &AtomicBool) -> io::Result<()> {
 }
 
 /// A thread that reads `stream` to its end; once `abandoned` holds, the thread returns at its next
-/// read and drops the bytes.
+/// read and drops the bytes. The thread counts itself in `finished` when it ends.
 fn read_all(
     mut stream: impl Read + Send + 'static,
     abandoned: Arc<AtomicBool>,
+    finished: Arc<Finished>,
 ) -> io::Result<Reader> {
     thread::Builder::new().spawn(move || {
+        let _notice = Notice(finished);
         let mut bytes = Vec::new();
         let mut buffer = [0; 8192];
         loop {
