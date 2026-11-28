@@ -431,23 +431,92 @@ fn an_unreadable_history_without_origin_main_still_notes_the_skipped_scan() {
     );
 }
 
-/// A 64-digit id of zeros is no deletion, which only the 40-digit one is: the line reads on and ends with
-/// the error of the diff against a commit the clone lacks.
+/// `nulls` runs the row of `test` in a repository of each object format, with `BASE` the commit
+/// `origin/main` names, `HELD` a later commit and `HEAD` the one after it, and with Git's trace on.
+fn nulls(test: &str) {
+    for format in ["sha1", "sha256"] {
+        let (repository, base) = based(Repository::of(&format!("null-{format}"), format));
+        let held = repository.commit(&[("crates/plain.rs", "edited\n")]);
+        let head = repository.commit(&[("crates/v.rs", "edited\n")]);
+        let trace = repository.top.join("../trace");
+        repository.in_child_with(
+            &repository.top,
+            test,
+            &[("BASE", &base), ("HELD", &held), ("HEAD", &head)],
+            &[("GIT_TRACE", trace.as_os_str())],
+        );
+    }
+}
+
+/// `trace` is the text `GIT_TRACE` has logged so far.
+fn trace() -> String {
+    std::fs::read_to_string(std::env::var_os("GIT_TRACE").expect("the row traces Git"))
+        .unwrap_or_default()
+}
+
+/// The null id of either object format, 40 or 64 zeros, as a line's local id is a deletion, in a
+/// repository of either format: the line plans no check and no scan, guards nothing and starts no Git
+/// read, where the line of a commit over the same remote id starts some.
 #[test]
-fn a_sha256_null_id_is_read_as_a_commit() {
+fn a_null_local_id_of_either_width_is_a_deletion() {
+    let test = id(
+        module_path!(),
+        "a_null_local_id_of_either_width_is_a_deletion",
+    );
     if let Some(row) = child() {
+        let (held, head) = (row.get("HELD"), row.get("HEAD"));
         let mut plan = Plan::new("origin".as_ref(), || Ok(())).expect("the plan starts");
-        let error = plan
-            .line(&line(&"0".repeat(64), &row.get("BASE")), |_| {})
-            .expect_err("the diff fails");
-        assert!(error.to_string().starts_with("git diff "), "{error}");
+        let started = traced();
+        for null in ["0".repeat(40), "0".repeat(64)] {
+            plan.line(&line(&null, &held), |_| {
+                panic!("{null}: a deletion has no note")
+            })
+            .expect("a deletion reads");
+            assert_eq!(traced(), started, "{null}: a deletion starts a Git read");
+            assert_eq!((checks(&plan), scans(&plan)), (vec![], vec![]), "{null}");
+            assert_eq!(plan.guard().expect("the guard reads"), Vec::<String>::new());
+        }
+        plan.line(&line(&head, &held), |_| panic!("a based line has no note"))
+            .expect("a line of two commits reads");
+        assert!(traced() > started, "a line of two commits starts no read");
         return;
     }
-    let (repository, base) = fixture("long-null");
-    repository.in_child(
-        &id(module_path!(), "a_sha256_null_id_is_read_as_a_commit"),
-        &[("BASE", &base)],
+    nulls(&test);
+}
+
+/// The null id of either object format as a line's remote id is a new ref, in a repository of either
+/// format: the tip is read against its merge base with `origin/main`, and no Git command of the plan
+/// names the null id, where the line over a commit the clone holds names that commit.
+#[test]
+fn a_null_remote_id_of_either_width_is_a_new_ref() {
+    let test = id(
+        module_path!(),
+        "a_null_remote_id_of_either_width_is_a_new_ref",
     );
+    if let Some(row) = child() {
+        let (base, held, head) = (row.get("BASE"), row.get("HELD"), row.get("HEAD"));
+        for null in ["0".repeat(40), "0".repeat(64)] {
+            let plan = planned(&[line(&head, &null)]);
+            assert_eq!(
+                (checks(&plan), scans(&plan)),
+                (
+                    vec![(head.clone(), vec![Check::Reconcile])],
+                    vec![(base.clone(), head.clone())]
+                ),
+                "{null}"
+            );
+            assert!(!trace().contains(&null), "{null}: a Git command names it");
+        }
+        assert!(
+            !trace().contains(&held),
+            "a new ref's plan names the commit"
+        );
+        let plan = planned(&[line(&head, &held)]);
+        assert_eq!(scans(&plan), vec![(held.clone(), head)]);
+        assert!(trace().contains(&held), "the remote commit is not read");
+        return;
+    }
+    nulls(&test);
 }
 
 /// The probe for `origin/main` lists refs under that name and the merge base resolves the short name: a

@@ -36,15 +36,26 @@ fn checks_run_on_the_pushed_commit_not_the_working_tree() {
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
-/// A deleted ref runs no check and passes.
+/// A deleted ref runs no check and passes, its local id the null id of either object format, 40 or 64
+/// zeros: the tool starts no Git command that names the null id.
 #[test]
 fn a_deletion_runs_no_check() {
-    let fx = Fixture::new();
-    let deletion = format!("(delete) {ZERO} refs/heads/gone {}\n", "1".repeat(40));
-    let run = finished(unnamed(&fx, &deletion));
-    assert_eq!(run.code, Some(0), "{}", run.stderr);
-    assert!(run.stderr.is_empty(), "{}", run.stderr);
-    assert!(fx.ran().is_empty());
+    let mut fx = Fixture::new();
+    let trace = fx.temp.join("trace");
+    fx.set("GIT_TRACE", trace.clone());
+    for null in [ZERO.to_owned(), "0".repeat(64)] {
+        let deletion = format!(
+            "(delete) {null} refs/heads/gone {}\n",
+            "1".repeat(null.len())
+        );
+        let run = finished(unnamed(&fx, &deletion));
+        assert_eq!(run.code, Some(0), "{null}: {}", run.stderr);
+        assert!(run.stderr.is_empty(), "{null}: {}", run.stderr);
+        assert!(fx.ran().is_empty(), "{null}: {:?}", fx.ran());
+        let traced = fs::read_to_string(&trace).unwrap_or_default();
+        assert!(!traced.contains(&null), "{null}: {traced}");
+    }
+    fx.unset("GIT_TRACE");
 }
 
 /// A ref line of other than four fields exits 2 and names the line.

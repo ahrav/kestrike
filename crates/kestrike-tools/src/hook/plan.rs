@@ -11,8 +11,8 @@ use crate::text::{Text, words};
 
 use super::guard::{pushed_records, read_accounts, record_pathspecs, tip_records};
 use super::reads::{
-    Probe, Reads, ZERO, changes_ignore, comparison_base, destination_refs, git, holds_check, links,
-    sources,
+    Probe, Reads, changes_ignore, comparison_base, destination_refs, git, holds_check, links,
+    null_id, sources,
 };
 use super::table::{
     GAMEDAY_OWN, HOST_STOP_OWN, JUDGES_SOURCES, chaos_change, gameday_input, host_stop_input,
@@ -181,7 +181,7 @@ impl Plan {
         let Some((local, remote)) = Self::object_ids(line)? else {
             return Ok(());
         };
-        if local.to_str() == Some(ZERO) {
+        if null_id(&local) {
             return Ok(());
         }
         let reads = self.reads();
