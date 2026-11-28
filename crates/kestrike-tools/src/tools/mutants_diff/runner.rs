@@ -22,6 +22,7 @@ use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
 use crate::plants::remove;
+use crate::process::{SIGCHLD_IGNORED, sigchld_ignored};
 use crate::python::{hexdigest, say};
 use crate::stream::emit;
 use crate::text::{Text, text};
@@ -619,8 +620,8 @@ impl Run {
     }
 }
 
-/// `run` is the tool's entry: it reads the command line, runs step 1, then the run with the handlers
-/// installed, the hand-off and the finish.
+/// `run` is the tool's entry: it reads the command line, refuses a start with SIGCHLD ignored, runs step
+/// 1, then the run with the handlers installed, the hand-off and the finish.
 pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     let options = match super::options::parse(args) {
         Parsed::Run(options) => options,
@@ -637,6 +638,13 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
             return if written.is_ok() { code } else { STREAM_FAILED };
         }
     };
+    match sigchld_ignored() {
+        Ok(false) => {}
+        Ok(true) => return Streams::default().refuse(&Stop::rejected(Text::from(SIGCHLD_IGNORED))),
+        Err(error) => {
+            return Streams::default().refuse(&Stop::rejected(Fault::os(&error, None).to_text()));
+        }
+    }
     let prepared = match preflight(options) {
         Ok(prepared) => prepared,
         Err(stop) => return Streams::default().refuse(&stop),
