@@ -6,7 +6,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -15,12 +15,13 @@ use std::process::{Command, Output, Stdio};
 use super::config::debug_assertions;
 use super::options::{Options, TOOL};
 use super::outcomes::{Judgment, Listed, Outcome, Outcomes, judge, read_listing, read_outcomes};
-use super::preflight::{CONFIG, GitError, Prepared, git, is_file, preflight};
+use super::preflight::{CONFIG, GitError, Prepared, git, is_file, preflight, read_regular};
 use super::process::{INTERRUPT, ignore_signals, install_handlers, supervise};
 use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
+use crate::ownership::{Opened, open_regular};
 use crate::plants::{publish, remove};
 use crate::process::{SIGCHLD_IGNORED, sigchld_ignored};
 use crate::python::{hexdigest, say};
@@ -242,14 +243,17 @@ impl Run {
         Ok(tree)
     }
 
-    /// `copy_lock` copies the invoking checkout's `Cargo.lock` into the worktree when the worktree holds no
-    /// entry at that path. Exclusive creation fails on any existing entry, a dangling link included, so the
-    /// copy never writes through a link.
+    /// `copy_lock` copies the invoking checkout's `Cargo.lock` into the worktree when it is a regular file
+    /// and the worktree holds no entry at that path. The lock is opened once and its check and copy read
+    /// that open. Exclusive creation fails on any existing entry, a dangling link included, so the copy
+    /// never writes through a link.
     fn copy_lock(&self, tree: &Path) -> Result<(), Stop> {
         let source = self.prepared.top.join("Cargo.lock");
-        if !is_file(&source).map_err(|fault| Stop::failed(&fault))? {
+        let opened = open_regular(&source)
+            .map_err(|error| Stop::failed(&Fault::os(error.error(), Some(source.as_os_str()))))?;
+        let Opened::File(mut lock) = opened else {
             return Ok(());
-        }
+        };
         let target = tree.join("Cargo.lock");
         let mut copy = match OpenOptions::new()
             .write(true)
@@ -260,17 +264,17 @@ impl Run {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
             Err(error) => return Err(failed(&target)(error)),
         };
-        let bytes = fs::read(&source).map_err(failed(&source))?;
+        let mut bytes = Vec::new();
+        lock.read_to_end(&mut bytes).map_err(failed(&source))?;
         copy.write_all(&bytes).map_err(failed(&target))
     }
 
     /// `read_config` records the digest and the debug-assertion entry of the worktree configuration.
     fn read_config(&mut self, tree: &Path) -> Result<(), Stop> {
         let config = tree.join(CONFIG);
-        if !is_file(&config).map_err(|fault| Stop::failed(&fault))? {
+        let Some(data) = read_regular(&config).map_err(|fault| Stop::failed(&fault))? else {
             return Ok(());
-        }
-        let data = fs::read(&config).map_err(failed(&config))?;
+        };
         self.config_sha256 = Some(hexdigest(&data));
         let read = debug_assertions(&String::from_utf8_lossy(&data)).map_err(|error| {
             Stop::incomplete(text!("the worktree configuration does not parse: ", error))

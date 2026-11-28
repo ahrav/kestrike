@@ -382,3 +382,47 @@ fn a_path_with_a_nul_byte_is_no_file_directory_or_link() {
     assert!(!is_file(path).expect("no error"));
     assert!(!is_dir(path).expect("no error"));
 }
+
+/// `open_regular` opens a path once and reports what the opened entry is: the file of a regular file or
+/// of a link to one, read through that open; `Other` for a directory or a FIFO, whose open does not
+/// wait; `Absent` for a missing path or a dangling link.
+#[test]
+fn open_regular_checks_the_opened_entry_and_reads_through_it() {
+    use kestrike_tools::ownership::{Opened, open_regular};
+    use std::io::Read;
+    let layout = Layout::new("open-regular");
+    let root = &layout.at("opened");
+    fs::create_dir(root).expect("the directory is made");
+    fs::write(root.join("file"), "bytes").expect("the file is written");
+    symlink(root.join("file"), root.join("link")).expect("the link is made");
+    symlink(root.join("gone"), root.join("dangling")).expect("the link is made");
+    fs::create_dir(root.join("dir")).expect("the directory is made");
+    let fifo = std::ffi::CString::new(root.join("fifo").into_os_string().into_encoded_bytes())
+        .expect("no NUL");
+    // SAFETY: `mkfifo` reads the NUL-terminated path, which outlives the call.
+    assert_eq!(
+        unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) },
+        0,
+        "the FIFO is made"
+    );
+    for name in ["file", "link"] {
+        let Ok(Opened::File(mut file)) = open_regular(&root.join(name)) else {
+            panic!("{name} opens as a regular file");
+        };
+        let mut read = String::new();
+        file.read_to_string(&mut read).expect("the file reads");
+        assert_eq!(read, "bytes", "{name}");
+    }
+    for name in ["dir", "fifo"] {
+        assert!(
+            matches!(open_regular(&root.join(name)), Ok(Opened::Other)),
+            "{name} is no regular file"
+        );
+    }
+    for name in ["missing", "dangling"] {
+        assert!(
+            matches!(open_regular(&root.join(name)), Ok(Opened::Absent)),
+            "{name} is absent"
+        );
+    }
+}

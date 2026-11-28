@@ -237,6 +237,47 @@ pub fn is_file(path: &Path) -> Result<bool, PathError> {
     Ok(status(path)?.is_some_and(|found| found.is_file()))
 }
 
+/// What [`open_regular`] found at a path.
+#[derive(Debug)]
+pub enum Opened {
+    /// A path absent by [`ignored`], or one that holds a NUL byte.
+    Absent,
+    /// An entry whose target is no regular file: a directory, a FIFO, a socket or a device.
+    Other,
+    /// The regular file the path names, open for reading.
+    File(fs::File),
+}
+
+/// `open_regular` opens `path` once for reading, following links, and checks the opened file, so a check
+/// and the read that follows it name the same file. The open does not wait on a FIFO.
+///
+/// # Errors
+///
+/// The open fails with an error outside [`ignored`], or the opened file's `fstat` fails.
+pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if path.as_os_str().as_bytes().contains(&0) {
+        return Ok(Opened::Absent);
+    }
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if ignored(&error) => return Ok(Opened::Absent),
+        Err(error) => return Err(PathError::new(path, error)),
+    };
+    let status = file
+        .metadata()
+        .map_err(|error| PathError::new(path, error))?;
+    Ok(if status.is_file() {
+        Opened::File(file)
+    } else {
+        Opened::Other
+    })
+}
+
 /// `is_dir` holds when [`status`] names a directory.
 ///
 /// # Errors

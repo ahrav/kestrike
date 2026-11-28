@@ -8,7 +8,7 @@
 //! workflow file must be UTF-8. Both outputs and both files are read with `\r\n` and `\r` as `\n`.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::io::Read;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -179,14 +179,30 @@ fn rejected_fault(fault: &Fault) -> Stop {
     Stop::rejected(fault.to_text())
 }
 
+/// `read_regular` opens `path` once and returns the bytes of the regular file it names, read through that
+/// open, or `None` when it names none; [`ownership::open_regular`] decides which errors read as no file.
+///
+/// # Errors
+///
+/// The open, its check or the read fails, as a fault that names the path.
+pub(super) fn read_regular(path: &Path) -> Result<Option<Vec<u8>>, Fault> {
+    let fault = |error: &std::io::Error| Fault::os(error, Some(path.as_os_str()));
+    let opened = ownership::open_regular(path).map_err(|error| fault(error.error()))?;
+    let ownership::Opened::File(mut file) = opened else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| fault(&error))?;
+    Ok(Some(bytes))
+}
+
 /// `read_pins` returns the text of `path` when it is a file, with `\r\n` and `\r` read as `\n`, or an
 /// empty text when it is none.
 pub(super) fn read_pins(path: &Path) -> Result<String, Stop> {
-    if !is_file(path).map_err(|fault| rejected_fault(&fault))? {
+    let Some(bytes) = read_regular(path).map_err(|fault| rejected_fault(&fault))? else {
         return Ok(String::new());
-    }
-    let bytes = fs::read(path)
-        .map_err(|error| rejected_fault(&Fault::os(&error, Some(path.as_os_str()))))?;
+    };
     let text = String::from_utf8(bytes)
         .map_err(|error| rejected_fault(&Fault::library("Utf8Error", &error.utf8_error())))?;
     Ok(text.replace("\r\n", "\n").replace('\r', "\n"))
