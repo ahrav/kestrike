@@ -40,9 +40,10 @@ fn plant(case: &mut Case, change: Change) {
     }
 }
 
-/// `from_inside` runs in a process of its own: its working directory is the evidence directory, and
-/// `run` names the evidence directory by an empty path.
-fn from_inside(evidence: &std::path::Path) {
+/// `from_inside` runs in a process of its own: its working directory is its own case's evidence
+/// directory, `run` names the evidence directory by an empty path, and the `passed` marker goes into
+/// `place`, the parent case's scratch directory.
+fn from_inside(place: &std::path::Path) {
     let mut case = Case::new("empty-path");
     std::env::set_current_dir(&case.evidence).expect("the working directory changes");
     let code = case.run_with(std::ffi::OsString::new());
@@ -54,7 +55,7 @@ fn from_inside(evidence: &std::path::Path) {
         output,
         "host-stop-controller: refused: '' is no directory; nothing written\n"
     );
-    fs::write(evidence.join("passed"), b"").expect("the marker is written");
+    fs::write(place.join("passed"), b"").expect("the marker is written");
 }
 
 /// Each row of the first step's table ends the run with exit 2 before any call and leaves the

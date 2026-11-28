@@ -106,8 +106,9 @@ fn a_panic_in_the_abort_status_read_or_its_line_says_the_state_is_unknown() {
     let panicked = Rc::new(Cell::new(false));
     let once = Rc::clone(&panicked);
     case.writes = Some(Rc::new(move |bytes: &[u8]| {
-        let shown = bytes.starts_with(b"host-stop-controller: the target reads {");
-        assert!(!shown || once.replace(true), "a planted stream fault");
+        if bytes.starts_with(b"host-stop-controller: the target reads {") && !once.replace(true) {
+            panic!("a planted stream fault");
+        }
         None
     }));
     case.assert_aborted("guardrail", &ALL, Some(&guardrails()[4]), None);

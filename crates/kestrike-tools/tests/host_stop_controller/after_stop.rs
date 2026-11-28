@@ -115,8 +115,8 @@ fn an_alarm_that_fired_and_recovered_between_two_reads() {
 
 /// The observation's final alarm read, the last call of a run, answers quiet but past the deadline:
 /// the run aborts with cause `deadline`, and no call but the abort's status read starts after it.
-/// The fault is planted on the first alarm read that starts 240 s after the run's first status read
-/// once the target reads stopped.
+/// The fault is planted on the first alarm read that starts 240 s after the confirming record read
+/// returns.
 #[test]
 fn an_alarm_read_that_answers_past_the_deadline_aborts_the_run() {
     let mut case = Case::new("final-late");

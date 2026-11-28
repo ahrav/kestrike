@@ -957,6 +957,22 @@ fn a_system_errors_text_names_the_class_python_gives_its_number() {
             "BlockingIOError: [Errno 115] Operation now in progress",
         ),
         (
+            libc::EALREADY,
+            "BlockingIOError: [Errno 114] Operation already in progress",
+        ),
+        (
+            libc::ESHUTDOWN,
+            "BrokenPipeError: [Errno 108] Cannot send after transport endpoint shutdown",
+        ),
+        (
+            libc::ECONNABORTED,
+            "ConnectionAbortedError: [Errno 103] Software caused connection abort",
+        ),
+        (
+            libc::ECONNREFUSED,
+            "ConnectionRefusedError: [Errno 111] Connection refused",
+        ),
+        (
             libc::ECHILD,
             "ChildProcessError: [Errno 10] No child processes",
         ),

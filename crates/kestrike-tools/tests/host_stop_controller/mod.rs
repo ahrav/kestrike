@@ -557,7 +557,7 @@ pub(crate) fn member<'v>(value: &'v Value, key: &str) -> &'v Value {
     }
 }
 
-/// The fixture's decoded operator file's member `key` of the object `value`, as a text.
+/// The member `key` of the object `value`, as a text.
 pub(crate) fn text_of(value: &Value, key: &str) -> String {
     plain(member(value, key))
 }
