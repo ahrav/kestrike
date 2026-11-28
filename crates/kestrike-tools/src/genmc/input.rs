@@ -106,30 +106,14 @@ pub(crate) fn openable(path: &Path) -> Result<&Path, Error> {
     }
 }
 
-/// The members a Python iteration over the JSON value `value` gives: an array's elements, an object's keys
-/// as strings, or a string's code points as strings of one each; `what` names `value` in an error.
+/// The members a Python iteration over the JSON value `value` gives, as [`crate::python::iterated`] says;
+/// `what` names `value` in an error.
 ///
 /// # Errors
 ///
 /// `listed` returns [`Error::Type`] for a number, a boolean or null, which Python cannot iterate.
 pub(crate) fn listed<'v>(value: &'v Value, what: &str) -> Result<Cow<'v, [Value]>, Error> {
-    match value {
-        Value::Array(items) => Ok(Cow::Borrowed(items)),
-        Value::Object(object) => Ok(Cow::Owned(
-            object
-                .iter()
-                .map(|(key, _)| Value::String(key.clone()))
-                .collect(),
-        )),
-        Value::String(text) => Ok(Cow::Owned(
-            text.code_points()
-                .map(|code| {
-                    Value::String(Text::from_code_points([code]).expect("a code point of a text"))
-                })
-                .collect(),
-        )),
-        _ => Err(Error::Type(format!("{what} is not iterable"))),
-    }
+    crate::python::iterated(value).ok_or_else(|| Error::Type(format!("{what} is not iterable")))
 }
 
 /// The strings of the members [`listed`] gives for `value`, which `what` names in an error: an array's

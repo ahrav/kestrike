@@ -198,6 +198,30 @@ pub fn str_of(value: &Value) -> Text {
     }
 }
 
+/// `iterated` is the members a Python iteration over the JSON value `value` gives: an array's elements,
+/// borrowed, an object's keys as strings, or a string's code points as strings of one each; `None` for a
+/// number, a boolean or null, which Python cannot iterate.
+pub fn iterated(value: &Value) -> Option<std::borrow::Cow<'_, [Value]>> {
+    use std::borrow::Cow;
+    match value {
+        Value::Array(items) => Some(Cow::Borrowed(items)),
+        Value::Object(object) => Some(Cow::Owned(
+            object
+                .iter()
+                .map(|(key, _)| Value::String(key.clone()))
+                .collect(),
+        )),
+        Value::String(text) => Some(Cow::Owned(
+            text.code_points()
+                .map(|code| {
+                    Value::String(Text::from_code_points([code]).expect("a code point of a text"))
+                })
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
 /// `truthy` follows Python's truth of the value: `None`, `False`, a zero integer, a zero float of either
 /// sign, and an empty string, list or object are false, and every other value is true, `NaN` included.
 pub fn truthy(value: &Value) -> bool {
