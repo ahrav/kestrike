@@ -154,8 +154,8 @@ fn outside_use(tokens: &[Token]) -> Vec<usize> {
     kept
 }
 
-/// Each place in `sources` where `name` stands as a free call, `name(` not after `.`, `fn` or `::`,
-/// with the file's path.
+/// Each place in `sources` where `name` stands as a free call, `name(` not after `.` or `fn`, a
+/// path's last name included, with the file's path.
 fn free_calls(sources: &[Source], name: &str) -> Vec<String> {
     let mut found = Vec::new();
     for source in sources {
@@ -165,7 +165,6 @@ fn free_calls(sources: &[Source], name: &str) -> Vec<String> {
             if ident(t.get(at), name)
                 && punct(t.get(at + 1), '(')
                 && !punct(before, '.')
-                && !punct(before, ':')
                 && !ident(before, "fn")
             {
                 found.push(source.path.clone());
@@ -219,6 +218,14 @@ fn arguments(t: &[Token], open: usize) -> Vec<Vec<Token>> {
     args
 }
 
+/// Whether `t[b]` is `name` bound by `let name =` or `let mut name =`.
+fn binds(t: &[Token], b: usize, name: &str) -> bool {
+    let before = |back: usize| b.checked_sub(back).and_then(|at| t.get(at));
+    let introduced =
+        ident(before(1), "let") || (ident(before(1), "mut") && ident(before(2), "let"));
+    ident(t.get(b), name) && introduced && punct(t.get(b + 1), '=')
+}
+
 /// The first two string literals in `tokens`.
 fn words(tokens: &[Token]) -> Option<(String, String)> {
     let mut strings = tokens.iter().filter_map(|token| match token {
@@ -252,13 +259,7 @@ fn call_sites(sources: &[Source]) -> Result<Vec<Site>, String> {
             };
             let words = match first.as_slice() {
                 [Token::Punct('&'), Token::Ident(binding)] => {
-                    let bound = (0..at).rev().find(|&b| {
-                        ident(t.get(b), binding)
-                            && ident(t.get(b.saturating_sub(1)), "let")
-                                | (ident(t.get(b.saturating_sub(1)), "mut")
-                                    && ident(t.get(b.saturating_sub(2)), "let"))
-                            && punct(t.get(b + 1), '=')
-                    });
+                    let bound = (0..at).rev().find(|&b| binds(t, b, binding));
                     let Some(bound) = bound else {
                         return Err(format!(
                             "{}: {binding} is bound before its call",
@@ -418,8 +419,8 @@ const LAUNCHES: [&str; 17] = [
     "dlopen",
 ];
 
-/// The names of the standard library and of `libc` that open a connection.
-const NETWORK: [&str; 9] = [
+/// The types of the standard library that open a connection.
+const NETWORK_TYPES: [&str; 7] = [
     "TcpStream",
     "TcpListener",
     "UdpSocket",
@@ -427,14 +428,37 @@ const NETWORK: [&str; 9] = [
     "UnixListener",
     "UnixDatagram",
     "ToSocketAddrs",
-    "socket",
-    "connect",
 ];
 
-/// The process check over `sources`: `std::process` and `Command::new` stand once each, in the
-/// launch's file, which names `process` nowhere else; no `use` renames an item of `std` or `libc`;
-/// no `libc` call
-/// starts a program or loads code, no `.exec(` replaces this one, and no connection opens.
+/// The names of `libc` that open a connection.
+const NETWORK_CALLS: [&str; 2] = ["socket", "connect"];
+
+/// The library modules the scanned files may name by a `crate::` path, with the one item named where
+/// only one may be: none of them starts a process.
+const CRATE_MODULES: [(&str, Option<&str>); 13] = [
+    ("args", None),
+    ("classes", None),
+    ("decimal", None),
+    ("environ", None),
+    ("fixtures", Some("close")),
+    ("gameday", None),
+    ("host_stop", None),
+    ("host_stop_controller", None),
+    ("json", None),
+    ("paths", None),
+    ("plants", Some("files")),
+    ("python", None),
+    ("text", None),
+];
+
+fn barred(name: &str) -> bool {
+    LAUNCHES.contains(&name) || NETWORK_CALLS.contains(&name)
+}
+
+/// The process check over `sources`: `Command::new` stands once, in the launch's file, which alone
+/// names `process`; no `use` renames an item of `std` or `libc` or takes a launch of `libc`; no
+/// `libc` call starts a program or loads code, no `.exec(` replaces this one, no connection opens,
+/// and each `crate::` path names a library module of [`CRATE_MODULES`].
 fn one_launch(sources: &[Source]) -> Result<(), String> {
     let mut news = Vec::new();
     for source in sources {
@@ -451,9 +475,24 @@ fn one_launch(sources: &[Source]) -> Result<(), String> {
             }
             if path("libc")
                 && let Some(Token::Ident(name)) = t.get(at + 3)
-                && (LAUNCHES.contains(&name.as_str()) || NETWORK.contains(&name.as_str()))
+                && barred(name)
             {
                 return Err(format!("{}: libc::{name} is called", source.path));
+            }
+            if path("crate")
+                && let Some(Token::Ident(module)) = t.get(at + 3)
+            {
+                let allowed = CRATE_MODULES.iter().find(|(name, _)| name == module);
+                let item = |name: &str| {
+                    punct(t.get(at + 4), ':')
+                        && punct(t.get(at + 5), ':')
+                        && ident(t.get(at + 6), name)
+                };
+                match allowed {
+                    Some((_, None)) => {}
+                    Some((_, Some(only))) if item(only) => {}
+                    _ => return Err(format!("{}: crate::{module} is named", source.path)),
+                }
             }
             if path("std") && ident(t.get(at + 3), "net")
                 || path("unix") && ident(t.get(at + 3), "net")
@@ -461,7 +500,7 @@ fn one_launch(sources: &[Source]) -> Result<(), String> {
                 return Err(format!("{}: a network module is named", source.path));
             }
             if let Some(Token::Ident(name)) = t.get(at)
-                && NETWORK[..7].contains(&name.as_str())
+                && NETWORK_TYPES.contains(&name.as_str())
             {
                 return Err(format!("{}: {name} is named", source.path));
             }
@@ -489,27 +528,22 @@ fn one_launch(sources: &[Source]) -> Result<(), String> {
                         source.path
                     ));
                 }
+                let libc = held.iter().any(|token| ident(Some(token), "libc"));
+                let named = held
+                    .iter()
+                    .any(|token| matches!(token, Token::Ident(name) if barred(name)));
+                if libc && named {
+                    return Err(format!(
+                        "{}: a use item takes a launch of libc",
+                        source.path
+                    ));
+                }
                 item = None;
             }
         }
     }
     if news != ["src/host_stop/launch.rs"] {
         return Err(format!("Command::new stands in {news:?}"));
-    }
-    let std_process = sources
-        .iter()
-        .filter(|source| {
-            source.tokens.windows(4).any(|w| {
-                ident(w.first(), "std")
-                    && punct(w.get(1), ':')
-                    && punct(w.get(2), ':')
-                    && ident(w.get(3), "process")
-            })
-        })
-        .map(|source| source.path.clone())
-        .collect::<Vec<_>>();
-    if std_process != ["src/host_stop/launch.rs"] {
-        return Err(format!("std::process stands in {std_process:?}"));
     }
     Ok(())
 }
@@ -557,6 +591,11 @@ fn the_scan_sees_a_launch_written_another_way() {
         "fn f(record: &mut Record<'_>, call: &Call<'_>) { let _ = launch(record, call); }\n",
         "fn f(record: &mut Record<'_>, call: &Call<'_>) { let _ = System.call(record, call); }\n",
         "fn f() { let run = launch; }\n",
+        "fn f(r: &mut Record<'_>, c: &Call<'_>) { let _ = crate::host_stop::launch(r, c); }\n",
+        "fn f(r: &mut Record<'_>, c: &Call<'_>) { let _ = super::launch::launch(r, c); }\n",
+        "use libc::{fork};\nfn f() { let _ = unsafe { fork() }; }\n",
+        "use libc as c;\nfn f() { let _ = unsafe { c::fork() }; }\n",
+        "fn f(e: &Environ, d: &Path) { let _ = crate::plants::git::text(e, d, &[]); }\n",
     ];
     let sources = scanned();
     assert_eq!(one_launch(&sources), Ok(()));
@@ -572,11 +611,75 @@ fn the_scan_sees_a_launch_written_another_way() {
             "{plant}"
         );
     }
-    let mut calls = sources;
-    let site = "fn f(&mut self) { let _ = self.aws(&[\"ec2\", \"start-instances\"], None, Kind::Read); }\n";
-    calls.push(Source {
-        path: "src/host_stop_controller/plant.rs".to_owned(),
-        tokens: tokens(site),
-    });
-    assert!(five_calls(&calls).is_err());
+    for site in [
+        "fn f(&mut self) { let _ = self.aws(&[\"ec2\", \"start-instances\"], None, Kind::Read); }\n",
+        "fn f(s: &mut System, r: &mut Record<'_>, c: &Call<'_>) { let _ = crate::host_stop::reply(s, r, c); }\n",
+    ] {
+        let mut calls = sources.clone();
+        calls.push(Source {
+            path: "src/host_stop_controller/plant.rs".to_owned(),
+            tokens: tokens(site),
+        });
+        assert!(five_calls(&calls).is_err(), "{site}");
+    }
+}
+
+/// The first statement of the tool root's `run` on Linux, after its `use` items, installs the signal
+/// record's handlers, `if let Err(error) = install(&DELIVERED)`.
+fn installs_first(source: &Source) -> Result<(), String> {
+    let t = &source.tokens;
+    let start = (0..t.len())
+        .find(|&at| ident(t.get(at), "fn") && ident(t.get(at + 1), "run"))
+        .ok_or("the root holds no fn run")?;
+    let open = (start..t.len())
+        .find(|&at| punct(t.get(at), '{'))
+        .ok_or("fn run has no body")?;
+    let kept = outside_use(t);
+    let first = kept
+        .into_iter()
+        .find(|&at| at > open)
+        .ok_or("fn run's body is empty")?;
+    let expected = [
+        Token::Ident("if".to_owned()),
+        Token::Ident("let".to_owned()),
+        Token::Ident("Err".to_owned()),
+        Token::Punct('('),
+        Token::Ident("error".to_owned()),
+        Token::Punct(')'),
+        Token::Punct('='),
+        Token::Ident("install".to_owned()),
+        Token::Punct('('),
+        Token::Punct('&'),
+        Token::Ident("DELIVERED".to_owned()),
+        Token::Punct(')'),
+    ];
+    if t.get(first..first + expected.len()) == Some(&expected[..]) {
+        Ok(())
+    } else {
+        Err(format!(
+            "fn run starts with {:?}",
+            t.get(first..first + expected.len())
+        ))
+    }
+}
+
+/// The tool's root installs the signal record's handlers as the first statement of its `run`, ahead
+/// of the argument reading and of every other act of the run; a `run` that reads the environment
+/// first fails the scan.
+#[test]
+fn the_roots_first_statement_installs_the_handlers() {
+    let root = scanned()
+        .into_iter()
+        .find(|source| source.path == "src/tools/host_stop_controller/mod.rs")
+        .expect("the root is scanned");
+    installs_first(&root).unwrap_or_else(|failed| panic!("{failed}"));
+    let planted = Source {
+        path: root.path.clone(),
+        tokens: tokens(
+            "pub fn run(top: &Path, args: &[OsString]) -> u8 {\n    use std::io;\n    \
+             let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();\n    \
+             if let Err(error) = install(&DELIVERED) {\n        return 2;\n    }\n    0\n}\n",
+        ),
+    };
+    assert!(installs_first(&planted).is_err());
 }

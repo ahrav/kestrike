@@ -50,7 +50,8 @@ pub fn run(top: &Path, args: &[OsString]) -> u8 {
         return fail(&format!("{NAME}: the signal handlers: {error}"), 2);
     }
     let destination = args.first().map_or(OsStr::new(""), OsString::as_os_str);
-    push(top, destination).unwrap_or_else(|code| code)
+    let top = std::path::absolute(top).unwrap_or_else(|_| top.to_path_buf());
+    push(&top, destination).unwrap_or_else(|code| code)
 }
 
 /// `say` writes `line` and a line feed to standard error; a failed write is exit 120. While standard error

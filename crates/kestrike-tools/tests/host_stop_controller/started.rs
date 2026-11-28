@@ -31,7 +31,6 @@ use crate::host_stop_support::{
 const BINARY: &str = env!("CARGO_BIN_EXE_kestrike-tools");
 /// The variable that names the stand-in's state directory and puts this test in its role.
 const ROLE: &str = "HOST_STOP_AWS_ROLE";
-const STAND_IN: &str = "host_stop_controller::started::stand_in_aws";
 /// The longest run of the binary in a case.
 const LIMIT: Duration = Duration::from_secs(120);
 /// The two files that declare the package's list bounds, which the scratch top holds.
@@ -153,8 +152,9 @@ impl Started {
         assert!(!shown.contains('\''), "{shown}");
         let text = format!(
             "#!/bin/sh\ni=0\nfor arg; do\n  i=$((i + 1))\n  export \"HOST_STOP_AWS_ARG_$i=$arg\"\ndone\n\
-             export HOST_STOP_AWS_ARGC=$i\nexec '{shown}' --exact {STAND_IN} --nocapture --quiet \
-             --test-threads=1 3>&1 4>&2 >/dev/null 2>/dev/null\n"
+             export HOST_STOP_AWS_ARGC=$i\nexec '{shown}' --exact {} --nocapture --quiet \
+             --test-threads=1 3>&1 4>&2 >/dev/null 2>/dev/null\n",
+            case_id(module_path!(), "stand_in_aws")
         );
         let path = self.bin.join("aws");
         fs::write(&path, text).expect("the stand-in is written");
@@ -172,13 +172,16 @@ impl Started {
         fs::read_to_string(self.state.join("calls"))
             .unwrap_or_default()
             .lines()
-            .map(|line| line.split(' ').take(2).collect::<Vec<_>>().join(" "))
+            .map(|line| {
+                let words = line.split('\t').next().unwrap_or("");
+                words.split(' ').take(2).collect::<Vec<_>>().join(" ")
+            })
             .collect()
     }
 
-    /// Runs the binary as the tool `host-stop-controller` with `args` under `top`, with `PATH`
-    /// holding `path` alone and the stand-in's state named.
-    fn run(&self, top: &Path, path: &Path, args: &[&Path]) -> Output {
+    /// The binary as the tool `host-stop-controller` with `args` under `top`, with `PATH` holding
+    /// `path` alone and the stand-in's state named.
+    fn tool(&self, top: &Path, path: &Path, args: &[&Path]) -> Command {
         let mut command = Command::new(BINARY);
         command
             .arg(top)
@@ -187,7 +190,33 @@ impl Started {
             .env_clear()
             .env("PATH", path)
             .env(ROLE, &self.state);
-        bounded(command)
+        command
+    }
+
+    /// Runs [`Started::tool`] within [`LIMIT`].
+    fn run(&self, top: &Path, path: &Path, args: &[&Path]) -> Output {
+        bounded(self.tool(top, path, args), LIMIT)
+    }
+
+    /// Each logged call: its words, the `SigIgn` mask the stand-in started with, and its
+    /// `AWS_MAX_ATTEMPTS`, `unset` where it had none.
+    fn logged(&self) -> Vec<(String, u64, String)> {
+        fs::read_to_string(self.state.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let mut fields = line.split('\t');
+                let mut field = || {
+                    fields
+                        .next()
+                        .expect("a logged call has three fields")
+                        .to_owned()
+                };
+                let (words, mask, attempts) = (field(), field(), field());
+                let mask = u64::from_str_radix(&mask, 16).expect("the mask is hexadecimal");
+                (words, mask, attempts)
+            })
+            .collect()
     }
 
     fn command(&self, name: &'static str) -> Vec<&Path> {
@@ -204,29 +233,65 @@ impl Started {
     }
 }
 
-/// The output of `command`, which must end within [`LIMIT`]; a child past it is killed while the
-/// thread that reads its output holds it unreaped.
-fn bounded(mut command: Command) -> Output {
-    let child = command
+/// The output of `command`, started as the leader of a process group of its own, which must end
+/// within `limit`. Two threads read its streams while this one holds the child; past the limit the
+/// child's group is killed while the child stands unreaped, and then the child is reaped.
+fn bounded(mut command: Command, limit: Duration) -> Output {
+    let mut child = command
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("the binary starts");
-    let pid = libc::pid_t::try_from(child.id()).expect("a process id fits");
-    let (send, receive) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = send.send(child.wait_with_output());
-    });
-    match receive.recv_timeout(LIMIT) {
-        Ok(output) => output.expect("the binary's output reads"),
-        Err(_) => {
-            // SAFETY: `kill` takes a process id and a signal number and touches no memory of this
-            // process.
-            unsafe { libc::kill(pid, libc::SIGKILL) };
-            panic!("the binary ran past {LIMIT:?}");
+    let drain = |stream: Option<Box<dyn std::io::Read + Send>>| {
+        let mut stream = stream.expect("the stream is piped");
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).expect("the stream reads");
+            bytes
+        })
+    };
+    let stdout = drain(
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr = drain(
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    );
+    let begun = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the child is waited for") {
+            break status;
         }
+        if begun.elapsed() > limit {
+            let group = -libc::pid_t::try_from(child.id()).expect("a process id fits");
+            // SAFETY: `kill` takes a process group and a signal number and touches no memory of
+            // this process; the group's leader stands unreaped, so the group is this case's.
+            let killed = unsafe { libc::kill(group, libc::SIGKILL) };
+            let reaped = child.wait();
+            panic!("the binary ran past {limit:?}; kill {killed}, wait {reaped:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Output {
+        status,
+        stdout: stdout.join().expect("the reader of standard output ends"),
+        stderr: stderr.join().expect("the reader of standard error ends"),
     }
+}
+
+/// The id of the case `name` of the case module `module`, as libtest names it.
+fn case_id(module: &str, name: &str) -> String {
+    let (_, path) = module
+        .split_once("::")
+        .expect("a case module lies under the test executable");
+    format!("{path}::{name}")
 }
 
 /// The variable that puts a case in its child process, where its body runs.
@@ -241,15 +306,12 @@ pub(crate) fn apart(module: &str, name: &str, body: impl FnOnce()) {
         body();
         return;
     }
-    let (_, path) = module
-        .split_once("::")
-        .expect("a case module lies under the test executable");
-    let id = format!("{path}::{name}");
+    let id = case_id(module, name);
     let mut command = Command::new(std::env::current_exe().expect("the test executable is named"));
     command
         .args(["--exact", &id, "--nocapture", "--test-threads", "1"])
         .env(APART, "1");
-    let ran = bounded(command);
+    let ran = bounded(command, 2 * LIMIT);
     assert!(
         ran.status.success() && text(&ran.stdout).contains("1 passed"),
         "{id}: {}\n{}{}",
@@ -368,7 +430,15 @@ fn stand_in_aws() {
         .append(true)
         .open(state.join("calls"))
         .expect("the call log opens");
-    writeln!(log, "{}", words.join(" ")).expect("the call is logged");
+    let status = fs::read_to_string("/proc/self/status").expect("the process status reads");
+    let ignored = status
+        .lines()
+        .find_map(|line| line.strip_prefix("SigIgn:"))
+        .expect("the status names the ignored signals")
+        .trim()
+        .to_owned();
+    let attempts = std::env::var("AWS_MAX_ATTEMPTS").unwrap_or_else(|_| "unset".to_owned());
+    writeln!(log, "{}\t{ignored}\t{attempts}", words.join(" ")).expect("the call is logged");
     let (code, stream, line) = match reply(&state, &words) {
         Some(reply) => (0, "/dev/fd/3", reply),
         None => (
@@ -388,7 +458,9 @@ fn stand_in_aws() {
 /// A run started at the wall clock's present goes through its seven steps against the stand-in and
 /// exits 0 with the restoration pending: the caller's read comes first, the stop request leaves
 /// once, after the second alarm read, and the run writes `roles.json`, `stop.json` and
-/// `stopped.json`, whose request is `stop.json`'s value.
+/// `stopped.json`, whose request is `stop.json`'s value. The stop request alone runs with the CLI's
+/// retries off and names the target, and every call's child starts with `SIGXFSZ` ignored, as the
+/// root left it.
 #[test]
 fn a_started_run_goes_clean_through_step_seven_with_exit_0() {
     apart(
@@ -441,6 +513,22 @@ fn a_started_run_goes_clean_through_step_seven_with_exit_0() {
                 Some(&Value::String(Text::from("stopped")))
             );
             assert!(stdout.contains("restoration"), "{stdout}");
+            let xfsz = 1u64 << (libc::SIGXFSZ - 1);
+            for (words, ignored, attempts) in started.logged() {
+                assert_ne!(
+                    ignored & xfsz,
+                    0,
+                    "{words}: the child inherits SIGXFSZ ignored"
+                );
+                let stop = words.starts_with("ec2 stop-instances ");
+                assert_eq!(attempts == "1", stop, "{words}: {attempts}");
+                if stop {
+                    assert!(
+                        words.starts_with("ec2 stop-instances --instance-ids i-h1 --region "),
+                        "{words}"
+                    );
+                }
+            }
         },
     );
 }
@@ -503,14 +591,7 @@ fn a_signal_delivered_at_the_roots_first_statement_is_recorded() {
         "a_signal_delivered_at_the_roots_first_statement_is_recorded",
         || {
             let started = Started::new("started-signal");
-            let mut command = Command::new(BINARY);
-            command
-                .arg(&started.top)
-                .arg("host-stop-controller")
-                .args(started.command("run"))
-                .env_clear()
-                .env("PATH", &started.bin)
-                .env(ROLE, &started.state);
+            let mut command = started.tool(&started.top, &started.bin, &started.command("run"));
             // SAFETY: the closure runs in the child between fork and exec and calls only `sigemptyset`,
             // `sigaddset`, `pthread_sigmask` and `raise`, which are async-signal-safe, on a set it owns.
             unsafe {
@@ -518,15 +599,17 @@ fn a_signal_delivered_at_the_roots_first_statement_is_recorded() {
                     let mut set: libc::sigset_t = std::mem::zeroed();
                     libc::sigemptyset(&mut set);
                     libc::sigaddset(&mut set, libc::SIGTERM);
-                    if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0
-                        || libc::raise(libc::SIGTERM) != 0
-                    {
+                    let masked = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                    if masked != 0 {
+                        return Err(std::io::Error::from_raw_os_error(masked));
+                    }
+                    if libc::raise(libc::SIGTERM) != 0 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
                 });
             }
-            let ran = bounded(command);
+            let ran = bounded(command, LIMIT);
             assert_eq!(ran.status.code(), Some(2), "{ran:?}");
             assert_eq!(
                 text(&ran.stderr),
@@ -606,6 +689,49 @@ fn the_tool_without_aws_refuses_run_at_step_one_and_restore_at_the_caller_check(
                 listing(&copy.join("injection")),
                 ["roles.json", "stop.json", "stopped.json"]
             );
+        },
+    );
+}
+
+/// `seal` of a copy of the held fixture without `injection/collected.json`, started with no `aws` on
+/// its `PATH`, writes the seal and prints its SHA-256, with exit 0 and no call.
+#[test]
+fn a_started_seal_writes_the_mark_and_prints_its_digest() {
+    apart(
+        module_path!(),
+        "a_started_seal_writes_the_mark_and_prints_its_digest",
+        || {
+            let started = Started::new("started-seal");
+            let empty = started.scratch.0.join("empty");
+            fs::create_dir(&empty).expect("the empty directory is made");
+            let copy = started.scratch.0.join("held");
+            super::sealing::copy_tree(&tree().join("scripts/gameday-fixtures/held"), &copy, &[]);
+            fs::remove_file(copy.join("injection/collected.json")).expect("the seal is removed");
+            let fixture = tree().join("scripts/host-stop-fixtures/operator.json");
+            let args: [&Path; 5] = [
+                Path::new("seal"),
+                Path::new("--operator"),
+                &fixture,
+                Path::new("--evidence"),
+                &copy,
+            ];
+            let ran = started.run(&tree(), &empty, &args);
+            let (stdout, stderr) = (text(&ran.stdout), text(&ran.stderr));
+            assert_eq!(ran.status.code(), Some(0), "{stdout}{stderr}");
+            assert_eq!(stderr, "");
+            let seal = fs::read(copy.join("injection/collected.json")).expect("the seal stands");
+            assert!(
+                stdout.ends_with(&format!(
+                    "; injection/collected.json sha256 {}\n",
+                    hexdigest(&seal)
+                )),
+                "{stdout}"
+            );
+            assert!(
+                stdout.starts_with("host-stop-controller: sealed 16 files at "),
+                "{stdout}"
+            );
+            assert_eq!(started.calls(), Vec::<String>::new());
         },
     );
 }

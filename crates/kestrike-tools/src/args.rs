@@ -122,6 +122,14 @@ struct Match<'a> {
     explicit: Option<&'a [u8]>,
 }
 
+/// How [`Reader::reads`] reads one argument.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reads {
+    Value,
+    Option,
+    Unknown,
+}
+
 #[derive(Clone, Copy)]
 enum Arg<'a> {
     Value,
@@ -189,7 +197,8 @@ impl<'t> Reader<'t> {
         }
     }
 
-    fn refuse<T>(&self, message: String) -> Parsed<T> {
+    /// The refusal of code 2 with `message`, in the form of each refusal of [`Reader::parse`].
+    pub fn refuse<T>(&self, message: String) -> Parsed<T> {
         Parsed::Refused {
             code: 2,
             text: format!("{}\n{}: error: {message}\n", self.usage, self.tool),
@@ -313,6 +322,16 @@ impl<'t> Reader<'t> {
         self.strings()
             .find(|&(_, name)| name == string)
             .map(|(option, _)| option)
+    }
+
+    /// How [`Reader::parse`] reads `arg`, which is not `--`, by the table: a value, a row's option or an
+    /// unknown option; `Err` holds the refusal's message of an ambiguous prefix.
+    pub fn reads(&self, arg: &OsStr) -> Result<Reads, String> {
+        Ok(match self.classify(arg.as_bytes())? {
+            Arg::Value => Reads::Value,
+            Arg::Unknown => Reads::Unknown,
+            Arg::Option(_) => Reads::Option,
+        })
     }
 
     fn classify<'a>(&self, arg: &'a [u8]) -> Result<Arg<'a>, String> {

@@ -378,6 +378,50 @@ fn a_host_stop_controller_input_runs_its_self_test_at_a_tip_that_holds_it() {
     assert_eq!(row.check, Check::HostStop);
 }
 
+/// Each case directory of the host stop controller under `crates/kestrike-tools/tests/` has a filter
+/// of its own in the row's argument vector and selects the row, and each filter names such a
+/// directory, so a case directory added or renamed changes the row with it.
+#[test]
+fn each_host_stop_case_directory_has_its_filter_in_the_row() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut directories: Vec<String> = std::fs::read_dir(&tests)
+        .expect("tests/ lists")
+        .map(|entry| {
+            entry
+                .expect("tests/ lists")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("host_stop"))
+        .collect();
+    directories.sort();
+    let argv = argv(Check::HostStop);
+    let at = argv
+        .iter()
+        .position(|word| *word == "--")
+        .expect("the filters follow --");
+    let mut filters: Vec<String> = argv[at + 1..]
+        .iter()
+        .map(|filter| {
+            filter
+                .strip_suffix("::")
+                .expect("a filter ends with ::")
+                .to_owned()
+        })
+        .collect();
+    filters.sort();
+    assert_eq!(filters, directories);
+    for directory in &directories {
+        let path = format!("crates/kestrike-tools/tests/{directory}/mod.rs");
+        let unheld = Held {
+            host_stop: false,
+            ..Held::default()
+        };
+        assert_eq!(selected(&path, unheld), [Check::HostStop], "{path}");
+    }
+}
+
 /// `matched` holds when a decoded value of the record `text` holds what may be an account number, and
 /// fails the case unless `text` reads as JSON.
 fn matched(text: &str) -> bool {

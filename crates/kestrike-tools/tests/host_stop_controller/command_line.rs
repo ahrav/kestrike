@@ -211,11 +211,41 @@ fn rows() -> Vec<(&'static [&'static str], u8, Option<String>)> {
             missing.clone(),
         ),
         (&["seal", "--operator=a", "--evidence="], 2, missing),
+        (
+            &["-hx=y"],
+            2,
+            error("argument -h/--help: ignored explicit argument 'x=y'"),
+        ),
+        (
+            &["-hx=1", "-h"],
+            2,
+            error("argument -h/--help: ignored explicit argument 'x=1'"),
+        ),
+        (
+            &["-hh=x"],
+            2,
+            error("argument -h/--help: ignored explicit argument '=x'"),
+        ),
+        (
+            &[
+                "-hx=y",
+                "run",
+                "--operator",
+                "a",
+                "--package",
+                "b",
+                "--evidence",
+                "c",
+            ],
+            2,
+            error("argument -h/--help: ignored explicit argument 'x=y'"),
+        ),
     ]
 }
 
 /// Each row's exit code and last line of standard error; help writes the controller's contract to
-/// standard output and nothing to standard error.
+/// standard output and nothing to standard error. The scratch directory holds an operator file `z`
+/// of `{}`, so the row that names `z` before `a` shows that the last `--operator` stands.
 #[test]
 fn each_argument_vector_reads_as_the_controllers_parser_read_it() {
     super::started::apart(
@@ -223,6 +253,7 @@ fn each_argument_vector_reads_as_the_controllers_parser_read_it() {
         "each_argument_vector_reads_as_the_controllers_parser_read_it",
         || {
             let scratch = Scratch::new("command-line");
+            scratch.write("z", b"{}\n");
             for (args, code, last) in rows() {
                 let ran = Command::new(BINARY)
                     .arg(tree())
@@ -258,4 +289,115 @@ fn each_argument_vector_reads_as_the_controllers_parser_read_it() {
             }
         },
     );
+}
+
+/// An argument that is no UTF-8 shows in the invalid choice and among the leftover arguments as
+/// `repr` writes a lone surrogate, `'\\udcff'`.
+#[test]
+fn an_argument_of_no_utf_8_form_shows_as_its_surrogate_escape() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    super::started::apart(
+        module_path!(),
+        "an_argument_of_no_utf_8_form_shows_as_its_surrogate_escape",
+        || {
+            let byte = OsString::from_vec(vec![0xff]);
+            let leftover: Vec<OsString> = [
+                "run",
+                "--operator",
+                "a",
+                "--package",
+                "b",
+                "--evidence",
+                "c",
+            ]
+            .iter()
+            .map(OsString::from)
+            .chain([byte.clone()])
+            .collect();
+            for (args, last) in [
+                (
+                    vec![byte],
+                    format!("argument command: invalid choice: '\\udcff' {CHOICE}"),
+                ),
+                (leftover, "unrecognized arguments: \\udcff".to_owned()),
+            ] {
+                let ran = Command::new(BINARY)
+                    .arg(tree())
+                    .arg("host-stop-controller")
+                    .args(&args)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .output()
+                    .expect("the binary runs");
+                assert_eq!(ran.status.code(), Some(2), "{ran:?}");
+                let stderr = String::from_utf8(ran.stderr).expect("UTF-8");
+                let line = stderr.lines().last().unwrap_or("");
+                assert_eq!(
+                    line.split_once("error: ").map(|(_, w)| w),
+                    Some(last.as_str())
+                );
+            }
+        },
+    );
+}
+
+/// The reader puts each value in its field of the command: the last of a repeated option, a value
+/// given by a prefix or after `=`, and `--reviewed` of `restore` where it is given and `None` where
+/// it is not.
+#[test]
+fn each_value_lands_in_its_field_of_the_command() {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    use kestrike_tools::args::Parsed;
+    use kestrike_tools::host_stop_controller::Command as Read;
+    use kestrike_tools::tools::host_stop_controller::read;
+
+    let args = |words: &[&str]| -> Vec<OsString> { words.iter().map(OsString::from).collect() };
+    let rows = [
+        (
+            args(&[
+                "run",
+                "--op",
+                "o1",
+                "--operator=o",
+                "--evidence",
+                "e",
+                "--pa",
+                "p",
+            ]),
+            Read::Run {
+                operator: PathBuf::from("o"),
+                package: PathBuf::from("p"),
+                evidence: OsString::from("e"),
+            },
+        ),
+        (
+            args(&["restore", "--re", "r", "--evidence=e", "--operator", "o"]),
+            Read::Restore {
+                operator: PathBuf::from("o"),
+                evidence: OsString::from("e"),
+                reviewed: Some(PathBuf::from("r")),
+            },
+        ),
+        (
+            args(&["restore", "--evidence", "e", "--operator", "o"]),
+            Read::Restore {
+                operator: PathBuf::from("o"),
+                evidence: OsString::from("e"),
+                reviewed: None,
+            },
+        ),
+        (
+            args(&["seal", "--ev", "e", "--o", "o"]),
+            Read::Seal {
+                operator: PathBuf::from("o"),
+                evidence: OsString::from("e"),
+            },
+        ),
+    ];
+    for (given, expected) in rows {
+        assert_eq!(read(&given), Parsed::Run(expected), "{given:?}");
+    }
 }

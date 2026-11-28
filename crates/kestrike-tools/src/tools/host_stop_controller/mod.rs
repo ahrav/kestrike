@@ -7,8 +7,9 @@
 //! both standard streams, the catalog under `top` and the judge's file size as both limits.
 //!
 //! `run` sets `SIGXFSZ` to be ignored, so a write past the file size limit fails with `EFBIG` and
-//! reaches the command as an error; a child inherits that disposition. The panic hook `run` sets
-//! prints nothing, so a panic's one line is the one the entry writes.
+//! reaches the command as an error; a child inherits that disposition. Just before the command's
+//! entry, `run` sets a panic hook that prints nothing, so a panic the entry catches is reported by
+//! the entry's one line alone.
 
 pub const NAME: &str = "host-stop-controller";
 
@@ -23,8 +24,8 @@ use crate::host_stop::{DELIVERED, Disk};
 #[cfg(target_os = "linux")]
 use crate::host_stop_controller::Context;
 
-/// `top` is the checkout's top level. Exit 0 is help; 2 is arguments `read` refuses or handlers
-/// that fail to install; any other code is the command's.
+/// `top` is the checkout's top level. Exit 0 is help; 2 is arguments `read` refuses, handlers that
+/// fail to install or a `SIGXFSZ` that fails to be ignored; any other code is the command's.
 #[cfg(target_os = "linux")]
 pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
     use std::ffi::OsString;
@@ -46,7 +47,6 @@ pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
         let _ = io::stderr().write_all(line.as_bytes());
         return 2;
     }
-    std::panic::set_hook(Box::new(|_| {}));
     let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     let (mut out, mut err) = (io::stdout(), io::stderr());
     let command = match read(args) {
@@ -75,6 +75,7 @@ pub fn run(top: &std::path::Path, args: &[std::ffi::OsString]) -> u8 {
         file_limit: FILE_LIMIT,
         mark_limit: FILE_LIMIT,
     };
+    std::panic::set_hook(Box::new(|_| {}));
     let code = entry(&command, &mut cx);
     let _ = out.flush();
     let _ = err.flush();
