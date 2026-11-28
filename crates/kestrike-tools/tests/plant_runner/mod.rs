@@ -15,6 +15,7 @@
 #![cfg(target_os = "linux")]
 
 mod checkout;
+mod confirmed;
 mod exits;
 mod fixture;
 mod git_call;
