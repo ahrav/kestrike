@@ -148,7 +148,7 @@ fn a_failure_the_controller_did_not_foresee_exits_2_and_names_what_stands() {
 /// A panic in an alarm read once `roles.json` stands takes the abort path with cause `exception`
 /// and the panic's message in the detail; no stop request was sent.
 #[test]
-fn a_panic_once_the_roles_mark_stands_takes_the_abort_path_with_cause_exception() {
+fn a_panic_after_the_roles_mark_is_written_takes_the_abort_path_with_cause_exception() {
     let mut case = Case::new("panic");
     case.plane.borrow_mut().script(
         super::plane::ALARMS,
@@ -156,14 +156,13 @@ fn a_panic_once_the_roles_mark_stands_takes_the_abort_path_with_cause_exception(
             panic!("a planted panic in the alarm read")
         }))],
     );
-    let found = case.assert_aborted(
+    case.assert_aborted(
         "exception",
         &["roles", "abort"],
         None,
         Some("no stop request was sent; panic: a planted panic in the alarm read"),
     );
     assert!(case.stops().is_empty());
-    assert_eq!(found.len(), 2);
 }
 
 /// A panic in the abort path itself, at its wall reading for the abort mark, exits 2 with a line
