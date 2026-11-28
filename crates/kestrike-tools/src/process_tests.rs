@@ -158,12 +158,13 @@ fn stat_line(name: &str, fields: &[String]) -> Vec<u8> {
 /// follows it; `Z` is an exited leader only with one thread left, and a stat line of a process that leads
 /// no group of its own is refused.
 ///
-/// `spawn` can return before `/proc/<pid>/comm` shows the script's name `x) Z (y`, whose `) Z ` resembles
-/// the command-name terminator followed by the zombie state in `/proc/<pid>/stat`. Once `comm` shows
-/// `x) Z (y`, a `Leader::Running` result distinguishes the actual state from the embedded `Z`.
+/// `spawn` can return before `/proc/<pid>/comm` shows the script's name `NAME`, whose `) Z ` resembles
+/// the command-name terminator followed by the zombie state in `/proc/<pid>/stat`. The test waits for
+/// `comm` to show `NAME` so the `Leader::Running` assertion exercises the embedded `Z`.
 #[test]
 fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     use super::{Leader, parsed};
+    const NAME: &str = "x) Z (y";
     let own = std::process::id();
     let line = |name: &str, state: &str, group: u32, threads: u32| {
         stat_line(name, &stat_fields(state, own, group, threads))
@@ -215,7 +216,7 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
         );
     }
     let scratch = crate::paths::tests::Scratch::new("probe-name");
-    let program = scratch.0.join("x) Z (y");
+    let program = scratch.0.join(NAME);
     crate::fixtures::tests::script(&program, "#!/bin/sh\nread line\n");
     let mut child = {
         use std::os::unix::process::CommandExt;
@@ -226,17 +227,22 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
             .expect("the script runs")
     };
     let comm = format!("/proc/{}/comm", child.id());
-    let mut name = String::new();
-    let named = super::polled(WAIT, PAUSE, &|| false, || {
-        name = std::fs::read_to_string(&comm)?;
-        Ok((name == "x) Z (y\n").then_some(()))
+    let mut last = String::new();
+    let state = super::polled(WAIT, PAUSE, &|| false, || {
+        last = std::fs::read_to_string(&comm)?;
+        if last.strip_suffix('\n') != Some(NAME) {
+            return Ok(None);
+        }
+        super::leader(child.id()).map(Some)
     });
-    let state = super::leader(child.id());
     child.kill().expect("the child is killed");
     child.wait().expect("the child is reaped");
-    named.expect("comm reads");
-    assert_eq!(name, "x) Z (y\n", "the name {WAIT:?} after the start");
-    assert_eq!(state.expect("the state reads"), Leader::Running);
+    let state = state
+        .expect("the name and the state read")
+        .unwrap_or_else(|| {
+            panic!("the name is {last:?} {WAIT:?} after the start, where {NAME:?} is expected")
+        });
+    assert_eq!(state, Leader::Running);
 }
 
 /// The probe reads a procfs whose `self/status` holds an `NStgid` line of this process's id alone, before
