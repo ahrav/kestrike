@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use kestrike_tools::plants::{
-    Halt, Logged, Outcome, Run, Step, announce, logged, prepare, publish, score,
+    Halt, Logged, Outcome, Run, Step, conclude, logged, prepare, publish, score,
 };
 use kestrike_tools::process::{INTERRUPT, Interrupt, install_handlers};
 
@@ -81,7 +81,7 @@ fn the_handler_exits_128_plus_the_signal_outside_a_deferred_region() {
 fn spawn_window() {
     let place = std::env::current_dir().expect("the case's directory is known");
     install_handlers().expect("the handlers install");
-    let script = "trap 'sleep 0.5; echo 15 > terminated; exit 4' TERM; kill -TERM $PPID; touch ready; \
+    let script = "trap 'sleep 0.5; echo 15 > terminated; exit 4' TERM; kill -TERM $PPID; \
                   i=0; while [ $i -lt 600 ]; do sleep 0.05; i=$((i + 1)); done";
     let argv = ["sh", "-c", script].map(OsString::from);
     let env: Vec<(OsString, OsString)> = std::env::vars_os().collect();
@@ -103,8 +103,8 @@ fn spawn_window() {
     assert_eq!(terminated.trim(), "15");
 }
 
-/// A signal that lands after the child exists and before the run holds its handle stops the child and
-/// ends the run.
+/// A signal that the child sends as it starts, before or during the run's first wait for it, stops the
+/// child with SIGTERM, waits for it, and ends the run.
 #[test]
 fn a_signal_in_the_spawn_window_terminates_and_reaps_the_child() {
     if std::env::var_os(WINDOW).is_some() {
@@ -119,8 +119,8 @@ fn a_signal_in_the_spawn_window_terminates_and_reaps_the_child() {
     );
 }
 
-/// `score_window` runs the store of the arguments in [`ARGS`], writes its score, records SIGTERM, and
-/// takes the run's last step: the exit stays the run's own.
+/// `score_window` runs the store of the arguments in [`ARGS`] and takes the run's last two steps with a
+/// writer that writes the score and then records SIGTERM: the exit stays the run's own.
 fn score_window() {
     let args: Vec<OsString> = std::env::var(ARGS)
         .expect("the arguments are given")
@@ -140,10 +140,22 @@ fn score_window() {
         .expect("the store runs");
     assert!(run.remove_trees().expect("the worktrees go").is_empty());
     let written = score::bytes(&score::score(inputs.head(), &entries, run.settings()));
-    publish(&inputs.score(), &written).expect("the score is written");
-    raise(libc::SIGTERM);
+    let write = |target: &Path, bytes: &str| {
+        publish(target, bytes)?;
+        raise(libc::SIGTERM);
+        Ok::<(), kestrike_tools::ownership::PathError>(())
+    };
+    let code = conclude(
+        inputs.head(),
+        &inputs.score(),
+        &entries,
+        &written,
+        write,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    );
     assert_eq!(INTERRUPT.recorded(), Some(libc::SIGTERM));
-    assert_eq!(announce(inputs.head(), &entries, &mut std::io::stdout()), 0);
+    assert_eq!(code, 0);
 }
 
 /// A signal that lands once the score is written ends nothing: the run prints its score's lines and
@@ -168,6 +180,7 @@ fn a_signal_that_lands_once_the_score_is_written_leaves_the_run_its_own_exit() {
         &repo,
         &env,
     );
+    fx.no_stand_in_failed();
     let (written, _) = fx.results();
     let sentence = super::fixture::text_of(written.get("sentence").expect("a sentence"));
     assert!(stdout.contains(&sentence), "{stdout}");

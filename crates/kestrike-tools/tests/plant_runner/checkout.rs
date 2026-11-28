@@ -119,6 +119,12 @@ fn a_run_leaves_an_index_whose_plant_entry_is_stale_as_it_was() {
     let done = fx.run(&["p-noprofile"], &[]);
     assert_eq!(done.code, 0, "{}", done.stderr);
     assert_eq!(std::fs::read(&index).expect("reads"), before);
+    fx.git(&["status", "--porcelain"]);
+    assert_ne!(
+        std::fs::read(&index).expect("reads"),
+        before,
+        "a refreshing status rewrites the stale index"
+    );
 }
 
 /// A worktree the run cannot remove exits 4, is named, and leaves no score.
@@ -274,6 +280,17 @@ fn a_signal_during_the_build_removes_its_target_and_worktree() {
     assert!(!fx.work.join("plants/p-hangbuild/target").exists());
 }
 
+/// A signal while `campaign confirm` or a seed check runs stops that child and ends the run with 128
+/// plus the signal and no score, though the judgment that asked for the child goes on to its end.
+#[test]
+fn a_signal_during_confirm_or_a_seed_check_ends_the_run() {
+    for name in ["p-hangconfirm", "p-hangseed"] {
+        let mut fx = Fixture::new();
+        let (code, err) = signal_run(&mut fx, name, libc::SIGTERM, None, false);
+        assert_eq!(code, 128 + libc::SIGTERM, "{name}: {err}");
+    }
+}
+
 /// A signal to the tool's process group reaches the proof rerun, which leads a session of its own,
 /// only through the tool; the proof's target and worktree go.
 #[test]
@@ -283,6 +300,39 @@ fn a_signal_to_the_group_during_a_proof_rerun_reaches_the_proof_only_through_the
     assert_eq!(code, 128 + libc::SIGHUP, "{err}");
     assert!(!fx.work.join("proof/target").exists());
     assert!(!fx.work.join("proof/tree").exists());
+}
+
+/// A tool started with SIGTERM blocked still takes it once its handlers stand: the handlers' install
+/// unblocks the three handled signals, so the sweep is stopped and the run ends with 128 plus SIGTERM.
+#[test]
+fn a_sigterm_inherited_as_blocked_is_taken_once_the_handlers_stand() {
+    use std::os::unix::process::CommandExt;
+    let mut fx = Fixture::new();
+    fx.stock(&["p-hang"]);
+    let before = fx.state();
+    let mut runner = fx.spawn_with(&["p-hang"], &[], false, |command| {
+        // SAFETY: the hook runs in the forked child before `exec` and calls only `sigemptyset`,
+        // `sigaddset` and `sigprocmask`, which are async-signal-safe, on a set of its own.
+        unsafe {
+            command.pre_exec(|| {
+                let mut blocked: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut blocked);
+                libc::sigaddset(&mut blocked, libc::SIGTERM);
+                if libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    });
+    wait_for(&fx.scratch.join("ready"), &mut runner.child);
+    runner.signal(libc::SIGTERM, false);
+    wait_for(&fx.scratch.join("handling"), &mut runner.child);
+    std::fs::write(fx.scratch.join("release"), "").expect("released");
+    let (code, err) = runner.finish();
+    assert_eq!(code, 128 + libc::SIGTERM, "{err}");
+    assert!(!fx.score.exists());
+    assert_eq!(fx.state(), before);
 }
 
 /// A SIGHUP the tool inherits as ignored stays ignored; a later SIGTERM ends the run.
@@ -312,45 +362,69 @@ fn a_sighup_inherited_as_ignored_stays_ignored() {
     assert_eq!(fx.state(), before);
 }
 
-/// Every child the run starts reads no replacement object: `campaign` and the head's helper are given
-/// `GIT_NO_REPLACE_OBJECTS=1` in their environment, which the caller did not set.
+/// Every child the run starts reads no replacement object: each call of `campaign`, of the head's
+/// helper and of the question to it is given `GIT_NO_REPLACE_OBJECTS=1`, which the caller did not set.
 #[test]
 fn every_child_is_given_no_replacement_objects() {
     let mut fx = Fixture::new();
     let done = fx.run(&["p-miss"], &[]);
     assert_eq!(done.code, 0, "{}", done.stderr);
-    for role in ["campaign", "python3"] {
+    let calls = [
+        ("campaign", fx.calls(&[]).len()),
+        ("python3", fx.proof_log().len()),
+        ("question", 3),
+    ];
+    for (role, count) in calls {
         let seen = std::fs::read_to_string(fx.scratch.join(format!("{role}-no-replace")))
             .expect("the stand-in ran");
-        assert_eq!(seen, "1", "{role}");
+        assert_eq!(seen, "1\n".repeat(count), "{role}");
     }
 }
 
-/// A signal while a Git step runs kills Git and ends the run within Git's grace, with 128 plus the
-/// signal, the worktree removed and no score.
+/// A signal while a Git step runs kills Git with SIGKILL and ends the run within Git's grace, with 128
+/// plus the signal, the worktrees removed and no score. Each row's Git step ignores SIGTERM, so only
+/// SIGKILL ends it, and the step's process is gone once the tool has exited: the apply check of the
+/// plant, the reset of the proof's worktree and the planted commit.
 #[test]
 fn a_signal_during_a_git_step_kills_git_and_ends_the_run() {
-    let mut fx = Fixture::new();
-    fx.stock(&["p-miss"]);
-    let before = fx.state();
-    let ready = fx.scratch.join("ready");
-    let (_, path) = fx.git_shim(
-        "--check",
-        &format!("touch {}; exec sleep 30", ready.display()),
-    );
-    fx.env.retain(|(name, _)| name != "PATH");
-    fx.env.push(("PATH".into(), path.into()));
-    let mut runner = fx.spawn(&["p-miss"], &[], false);
-    wait_for(&ready, &mut runner.child);
-    let start = std::time::Instant::now();
-    runner.signal(libc::SIGTERM, false);
-    let (code, err) = runner.finish();
-    assert_eq!(code, 128 + libc::SIGTERM, "{err}");
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "the run ended {:?} after the signal",
-        start.elapsed()
-    );
-    assert!(!fx.score.exists());
-    assert_eq!(fx.state(), before);
+    for word in ["--check", "reset", "commit"] {
+        let mut fx = Fixture::new();
+        fx.stock(&["p-miss"]);
+        let before = fx.state();
+        let (ready, pid) = (fx.scratch.join("ready"), fx.scratch.join("git.pid"));
+        let (_, path) = fx.git_shim(
+            word,
+            &format!(
+                "trap '' TERM; echo $$ > {}; touch {}; exec sleep 30",
+                pid.display(),
+                ready.display()
+            ),
+        );
+        let real = fx.env.clone();
+        fx.env.retain(|(name, _)| name != "PATH");
+        fx.env.push(("PATH".into(), path.into()));
+        let mut runner = fx.spawn(&["p-miss"], &[], false);
+        wait_for(&ready, &mut runner.child);
+        let start = std::time::Instant::now();
+        runner.signal(libc::SIGTERM, false);
+        let (code, err) = runner.finish();
+        assert_eq!(code, 128 + libc::SIGTERM, "{word}: {err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "{word}: the run ended {:?} after the signal",
+            start.elapsed()
+        );
+        let pid: libc::pid_t = std::fs::read_to_string(&pid)
+            .expect("the step wrote its process id")
+            .trim()
+            .parse()
+            .expect("a process id");
+        // SAFETY: `kill` with signal 0 takes two integers and only checks that the process exists.
+        let gone = unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        assert!(gone, "{word}: the Git step outlived the tool");
+        fx.env = real;
+        assert!(!fx.score.exists(), "{word}");
+        assert_eq!(fx.state(), before, "{word}");
+    }
 }

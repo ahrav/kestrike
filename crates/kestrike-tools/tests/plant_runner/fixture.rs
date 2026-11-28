@@ -71,8 +71,10 @@ pub const PLANTS: [(&str, Planted); 11] = [
 
 /// Plants for the cases of one test each, kept out of the default store: each is `p-<mode>`, sweeps `a`,
 /// has a cause and replaces the line `base`.
-pub const MODES: [&str; 87] = [
+pub const MODES: [&str; 89] = [
     "panic",
+    "hangconfirm",
+    "hangseed",
     "catchalarm",
     "second",
     "passthenfail",
@@ -162,8 +164,10 @@ pub const MODES: [&str; 87] = [
 ];
 
 /// Plants that need a signal or leave the proof's worktree or target unfit for every later plant.
-pub const APART: [&str; 6] = [
+pub const APART: [&str; 8] = [
     "p-hang",
+    "p-hangconfirm",
+    "p-hangseed",
     "p-hangbuild",
     "p-hangproof",
     "p-relock",
@@ -512,6 +516,7 @@ impl Fixture {
             .command(args, env, cwd)
             .output()
             .expect("the tool starts");
+        self.no_stand_in_failed();
         Done {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -541,6 +546,17 @@ impl Fixture {
     /// `spawn` starts the tool on the plants `names`, after `prefix` when one is given, with both
     /// streams in files of the scratch directory; with `group` it leads a process group of its own.
     pub fn spawn(&mut self, names: &[&str], prefix: &[&str], group: bool) -> Runner {
+        self.spawn_with(names, prefix, group, |_| {})
+    }
+
+    /// `spawn_with` is [`Fixture::spawn`] with `configure` applied to the command before it starts.
+    pub fn spawn_with(
+        &mut self,
+        names: &[&str],
+        prefix: &[&str],
+        group: bool,
+        configure: impl FnOnce(&mut Command),
+    ) -> Runner {
         let args = self.args(names, &[], None);
         let env = self.environment(&[]);
         let mut command = Command::new(prefix.first().copied().unwrap_or(BINARY));
@@ -562,9 +578,18 @@ impl Fixture {
             use std::os::unix::process::CommandExt;
             command.process_group(0);
         }
+        configure(&mut command);
         Runner {
             child: command.spawn().expect("the tool starts"),
             err,
+        }
+    }
+
+    /// `no_stand_in_failed` fails the case when a stand-in panicked.
+    pub fn no_stand_in_failed(&self) {
+        let failed = self.scratch.join(super::standins::FAILED);
+        if let Ok(text) = fs::read_to_string(&failed) {
+            panic!("a stand-in failed: {text}");
         }
     }
 
@@ -677,7 +702,8 @@ impl Fixture {
     }
 
     /// `state` is what a run must leave as it was: the head, the status with ignored files, the
-    /// worktrees, the refs, the stash, the local configuration, `mode` and the index's bytes.
+    /// worktrees, the refs, the stash, the local configuration, and the bytes of `mode`, the index, the
+    /// checkout's `Cargo.lock`, the repository's configuration and its `post-checkout` hook.
     pub fn state(&self) -> Vec<Vec<u8>> {
         let mut state: Vec<Vec<u8>> = [
             &["rev-parse", "HEAD"][..],
@@ -695,8 +721,15 @@ impl Fixture {
         .iter()
         .map(|args| self.git(args).into_bytes())
         .collect();
-        state.push(fs::read(self.repo.join("mode")).expect("mode reads"));
-        state.push(fs::read(self.repo.join(".git/index")).expect("the index reads"));
+        for path in [
+            "mode",
+            ".git/index",
+            "Cargo.lock",
+            ".git/config",
+            ".git/hooks/post-checkout",
+        ] {
+            state.push(fs::read(self.repo.join(path)).expect("a kept file reads"));
+        }
         state
     }
 
@@ -793,6 +826,9 @@ impl Runner {
             std::thread::sleep(Duration::from_millis(20));
         };
         let err = fs::read_to_string(&self.err).unwrap_or_default();
+        if let Ok(text) = fs::read_to_string(self.err.with_file_name(super::standins::FAILED)) {
+            panic!("a stand-in failed: {text}");
+        }
         (status.code().unwrap_or(-1), err)
     }
 }

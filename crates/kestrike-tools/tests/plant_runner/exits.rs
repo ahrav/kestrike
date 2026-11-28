@@ -225,18 +225,21 @@ fn a_patch_that_renames_or_changes_a_mode_is_rejected() {
         &[],
         None,
     );
-    for patch in [
-        "diff --git a/mode b/mode\nold mode 100644\nnew mode 100755\n",
-        "diff --git a/mode b/mode\nsimilarity index 100%\nrename from mode\nrename to mode\n",
+    for (patch, text) in [
+        (
+            "diff --git a/mode b/mode\nold mode 100644\nnew mode 100755\n",
+            "mode change",
+        ),
+        (
+            "diff --git a/mode b/mode\nsimilarity index 100%\nrename from mode\nrename to mode\n",
+            "rename",
+        ),
     ] {
         std::fs::write(place.join("plant.patch"), patch).expect("written");
         let done = fx.run(&[], &[]);
         assert_eq!(done.code, 2, "{}", done.stderr);
-        assert!(
-            done.stderr.contains("p-rename: plant.patch"),
-            "{}",
-            done.stderr
-        );
+        let refused = format!("p-rename: plant.patch does more than change file contents: {text}");
+        assert!(done.stderr.contains(&refused), "{}", done.stderr);
         assert!(fx.calls(&[]).is_empty());
     }
 }
@@ -604,13 +607,7 @@ fn git_variables_that_point_at_another_repository_or_index_are_rejected() {
 fn a_floor_below_300_is_rejected() {
     let mut fx = Fixture::new();
     let done = fx.run_in(&["p-miss"], &["--runs", "299"], &[], None);
-    assert_eq!(done.code, 2);
-    assert!(
-        done.stderr.contains("below the floor of 300"),
-        "{}",
-        done.stderr
-    );
-    assert!(fx.calls(&[]).is_empty());
+    fx.rejected(&done, "below the floor of 300");
 }
 
 /// A work directory inside the checkout, or under a directory another user can write, refuses the run

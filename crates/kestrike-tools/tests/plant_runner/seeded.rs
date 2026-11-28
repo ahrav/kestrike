@@ -280,7 +280,14 @@ fn a_seed_that_ends_in_a_violation_on_the_head_leaves_the_next_suspect_to_catch(
     let mut fx = Fixture::new();
     fx.run(&["p-violatehead"], &[]);
     let caught = fx.verdict("p-violatehead", "caught", "run 8 of a");
-    assert_eq!(failures(&caught)[0].2, "complete: a rule failed");
+    assert_eq!(
+        failures(&caught),
+        [(
+            "7".to_owned(),
+            "665".to_owned(),
+            "complete: a rule failed".to_owned()
+        )]
+    );
     assert_eq!(fx.calls(&["sim", "run"]).len(), 2);
 }
 
@@ -325,4 +332,24 @@ fn a_seed_check_that_fails_leaves_another_suspect_s_catch_in_either_order() {
         let caught = fx.verdict(name, "caught", "violation: a rule in run");
         assert_eq!(suspect(&caught, "profile"), "\"a\"", "{name}");
     }
+}
+
+#[test]
+fn a_failed_worktree_of_the_unpatched_head_fails_its_seed_checks_and_keeps_its_error() {
+    let mut fx = Fixture::new();
+    let (name, path) = fx.git_shim(
+        "add",
+        "case \"$*\" in */base/tree*) echo 'fatal: no base' >&2; exit 128;; esac",
+    );
+    let done = fx.run(&["p-catch"], &[(name, path.as_str())]);
+    exited(&done, 3);
+    fx.verdict(
+        "p-catch",
+        "no verdict",
+        "the seed check of violation: a rule in run 7 of b did not run: the unpatched head's worktree: \
+         `git worktree` exited 128; its error is in base/git.err",
+    );
+    let kept = fs::read_to_string(fx.work.join("base/git.err")).expect("the error is kept");
+    assert_eq!(kept, "git worktree exited 128:\nfatal: no base\n");
+    assert!(fx.calls(&["sim", "run"]).is_empty());
 }

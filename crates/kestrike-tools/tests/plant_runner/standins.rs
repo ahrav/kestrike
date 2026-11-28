@@ -24,6 +24,9 @@ use kestrike_tools::python::hexdigest;
 use kestrike_tools::text::Text;
 
 pub const ROLE: &str = "PLANT_STANDIN";
+/// The file beside the call log where a stand-in that panics writes its role, its arguments and the
+/// panic, so a broken stand-in fails its case and reads as no child's outcome.
+pub const FAILED: &str = "standin-failed";
 const ROLE_TEST: &str = "plant_runner::standins::role";
 
 /// `wrapper` is the `sh` text that starts this test executable in `role`.
@@ -46,6 +49,13 @@ fn role() {
         .skip_while(|arg| arg != "--")
         .skip(1)
         .collect();
+    if let Some(log) = var("STANDIN_LOG") {
+        let failed = Path::new(&log).with_file_name(FAILED);
+        let shown = format!("{role:?} {args:?}");
+        std::panic::set_hook(Box::new(move |info| {
+            append(&failed, &format!("{shown}: {info}\n"));
+        }));
+    }
     // SAFETY: the wrapper opens descriptor 3 as the caller's standard output, and nothing else in this
     // process owns it.
     let mut out = unsafe { File::from_raw_fd(3) };
@@ -138,8 +148,10 @@ fn hold_until_released(log: &Path) -> ! {
 type Line = (Option<&'static str>, u64, u64, &'static str);
 
 /// The modes with the suspect line `ONE`: a violation in run 7 of the last swept profile, seed 42.
-const ONE_MODES: [&str; 24] = [
+const ONE_MODES: [&str; 26] = [
     "catch",
+    "hangconfirm",
+    "hangseed",
     "catchalarm",
     "refuse",
     "mismatch",
@@ -259,11 +271,14 @@ fn add(object: &mut Object, name: &str, more: u64) {
     object.insert(name, int(now + more));
 }
 
-/// `seen_replacement` writes the `GIT_NO_REPLACE_OBJECTS` the stand-in `role` was given, or `unset`,
-/// to `ROLE-no-replace` in `place`.
+/// `seen_replacement` appends the `GIT_NO_REPLACE_OBJECTS` the stand-in `role` was given, or `unset`,
+/// as a line of `ROLE-no-replace` in `place`: one line a call.
 fn seen_replacement(place: &Path, role: &str) {
     let seen = std::env::var("GIT_NO_REPLACE_OBJECTS").unwrap_or_else(|_| "unset".to_owned());
-    write(&place.join(format!("{role}-no-replace")), &seen);
+    append(
+        &place.join(format!("{role}-no-replace")),
+        &format!("{seen}\n"),
+    );
 }
 
 fn say(out: &mut File, line: &str) {
@@ -659,6 +674,11 @@ fn big(number: u128) -> Value {
 fn confirm(args: &[String], out: &mut File) -> i32 {
     let root = PathBuf::from(option(args, "--root"));
     let mode = mode_of(Path::new(option(args, "--archive")));
+    if mode == "hangconfirm" {
+        hold_until_released(&PathBuf::from(
+            var("STANDIN_LOG").expect("the call log is named"),
+        ));
+    }
     if mode == "deepconfirm" {
         say(out, &"[".repeat(100_000));
         return 0;
@@ -803,6 +823,11 @@ fn result(out: &mut File, class: &str, reason: &str, artifact: Option<&str>) {
 
 fn seed(args: &[String], out: &mut File) -> i32 {
     let mode = mode_of(Path::new(option(args, "--archive")));
+    if option(args, "--manifest").contains("/plants/p-hangseed/") {
+        hold_until_released(&PathBuf::from(
+            var("STANDIN_LOG").expect("the call log is named"),
+        ));
+    }
     let text = read(Path::new(option(args, "--manifest")));
     let manifest: Vec<(&str, &str)> = text
         .lines()
@@ -882,6 +907,12 @@ fn python(args: &[String], out: &mut File) -> i32 {
 
 fn question(args: &[String], out: &mut File) -> i32 {
     let helper = read(Path::new(&args[0]));
+    if let Some(log) = var("STANDIN_LOG") {
+        let place = Path::new(&log)
+            .parent()
+            .expect("the log lies in the scratch directory");
+        seen_replacement(place, "question");
+    }
     if let Some(log) = var("STANDIN_QUESTION_LOG") {
         append(Path::new(&log), &format!("{}\n", args.len()));
     }

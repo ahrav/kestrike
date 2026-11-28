@@ -899,19 +899,19 @@ fn work_directory_ancestors_the_run_makes_are_private_under_any_umask() {
 }
 
 /// The proof's output is read as UTF-8 under an English single-byte locale, whose Git messages are
-/// ASCII.
+/// ASCII; on a host without that locale the case runs under `C`, since the tool's reading takes no
+/// locale.
 #[test]
 fn proof_output_is_read_as_utf_8_under_a_single_byte_locale() {
-    let Ok(listed) = std::process::Command::new("locale").arg("-a").output() else {
-        return;
-    };
-    let names = String::from_utf8_lossy(&listed.stdout).into_owned();
-    let Some(latin) = names
+    let names = std::process::Command::new("locale")
+        .arg("-a")
+        .output()
+        .map(|listed| String::from_utf8_lossy(&listed.stdout).into_owned())
+        .unwrap_or_default();
+    let latin = names
         .split_whitespace()
         .find(|name| name.to_lowercase() == "en_us.iso88591")
-    else {
-        return;
-    };
+        .unwrap_or("C");
     let mut fx = Fixture::new();
     write_plant(
         &fx.store,
