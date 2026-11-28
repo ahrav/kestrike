@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{Judged, check_graph, check_line, judge_case};
-use crate::genmc::refusal::{Code, Error};
+use crate::genmc::refusal::{Code, Error, Refusal, read_json};
 use crate::json::{Integer, Value, parse};
 use crate::paths::tests::Scratch;
 
@@ -126,6 +126,7 @@ fn a_positive_run_is_judged_by_its_lines_and_its_exit() {
     #[rustfmt::skip]
     let rows: Vec<(Refused, (u8, &str, &str))> = vec![
         (judge(POSITIVE, 130, &[], &positive), (3, "join-production was interrupted (exit 130)", "timeout")),
+        (judge(POSITIVE, 143, &[], &positive), (3, "join-production was interrupted (exit 143)", "timeout")),
         (judge(POSITIVE, 0, &["llvm.a"], &pinned),
          (2, "join-production's bitcode calls ['llvm.a'], declared ['llvm.a', 'llvm.b']", "tool failure")),
         (judge(&aborted, 0, &[], &positive), (2, "join-production aborted: 'Segmentation fault (core dumped)'", "tool failure")),
@@ -242,7 +243,81 @@ fn a_graph_is_read_from_the_events_after_the_violation() {
     fs::write(&path, violation_graph(line)).expect("the graph writes");
     let at = Integer::from(line);
     assert!(check_graph("c", &text, &path, ("0", "4"), ("join_kernel.rs", &at)).is_ok());
-    let ended = violation_graph(line).replace("}\n", "\t\"(1, 3)\" [label=<THREAD_END>]\n}\n");
+    let ended = violation_graph(line).replace(
+        "}\n",
+        "\t\"(1, 3)\" [label=<THREAD_END>]\n\t\"(2, 1)\" [label=<BLOCK>]\n}\n",
+    );
     fs::write(&path, ended).expect("the graph writes");
     assert!(check_graph("c", &text, &path, ("0", "4"), ("join_kernel.rs", &at)).is_ok());
+}
+
+#[test]
+fn a_refusal_takes_the_completion_of_its_code() {
+    let completion = |code| Refusal::new(code, String::new()).completion();
+    assert_eq!(
+        [
+            completion(Code::Mismatch),
+            completion(Code::ToolFailure),
+            completion(Code::Incomplete)
+        ],
+        ["completed", "tool failure", "exhausted"]
+    );
+    assert_eq!(
+        [Code::Mismatch, Code::ToolFailure, Code::Incomplete].map(Code::exit),
+        [1, 2, 3]
+    );
+    let drift = Refusal::drift(&["a".to_owned(), "b".to_owned()]);
+    assert_eq!(
+        (drift.reason(), drift.completion(), drift.is_drift()),
+        ("correspondence drift: a; b", "correspondence drift", true)
+    );
+    assert!(!Refusal::new(Code::ToolFailure, String::new()).is_drift());
+}
+
+#[test]
+fn an_unreadable_json_file_is_a_tool_failure_naming_it() {
+    let scratch = Scratch::new("read-json");
+    let path = scratch.0.join("x.json");
+    for text in [None, Some("{")] {
+        if let Some(text) = text {
+            fs::write(&path, text).expect("the file writes");
+        }
+        match read_json(&path) {
+            Err(Error::Refusal(refusal)) => {
+                assert_eq!(refusal.code(), Code::ToolFailure);
+                let prefix = format!("unreadable {}: ", path.display());
+                assert!(
+                    refusal.reason().starts_with(&prefix),
+                    "{}",
+                    refusal.reason()
+                );
+            }
+            other => panic!("a refusal, not {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_message_outside_every_check_invocation_sits_in_none() {
+    let scratch = Scratch::new("check-line");
+    let package = scratch.0.join("verification/genmc/packages/kernels/src");
+    fs::create_dir_all(&package).expect("the package is made");
+    fs::write(
+        scratch.0.join("verification/genmc/expected.json"),
+        r#"{"package": "verification/genmc/packages/kernels"}"#,
+    )
+    .expect("the declaration writes");
+    fs::write(
+        package.join("k.rs"),
+        "fn f() {\n    let m = c\"lost\";\n}\n",
+    )
+    .expect("the kernel writes");
+    let file = parse(r#"{"file": "src/k.rs"}"#).expect("JSON");
+    match check_line(&scratch.0, &file, &Value::String("lost".into())) {
+        Err(Error::Refusal(refusal)) => assert_eq!(
+            refusal.reason(),
+            "the message 'lost' sits in no check! invocation"
+        ),
+        other => panic!("a refusal, not {other:?}"),
+    }
 }

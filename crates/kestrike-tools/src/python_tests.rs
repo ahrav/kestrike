@@ -287,17 +287,18 @@ fn repr_and_str_write_values_as_python_writes_the_loaded_objects() {
 }
 
 #[test]
-fn equal_compares_numbers_by_value_and_objects_by_members() {
+fn equal_compares_objects_by_members_and_scalars_of_one_type_by_value() {
     let value = |text: &str| parse(text).expect("the value parses");
     #[rustfmt::skip]
-    let rows: [(&str, &str, bool); 8] = [
-        ("1", "1.0", true),
-        ("1.0", "true", true),
-        (r#"{"a": 1, "b": 2}"#, r#"{"b": 2, "a": 1.0}"#, true),
-        ("[1]", "[true]", true),
-        ("0", "false", true),
-        ("2", "2.5", false),
+    let rows: [(&str, &str, bool); 9] = [
+        (r#"{"a": 1, "b": [2, "c"]}"#, r#"{"b": [2, "c"], "a": 1}"#, true),
         (r#"{"a": 1}"#, r#"{"a": 1, "b": 2}"#, false),
+        ("[1, 2]", "[2, 1]", false),
+        ("1", "1", true),
+        ("1.5", "1.5", true),
+        ("1", "1.0", false),
+        ("1", "true", false),
+        ("0", "false", false),
         (r#""1""#, "1", false),
     ];
     for (left, right, equal) in rows {
@@ -307,29 +308,6 @@ fn equal_compares_numbers_by_value_and_objects_by_members() {
             "{left} == {right}"
         );
     }
-    assert!(!python::equal(
-        &Value::Float(f64::NAN),
-        &Value::Float(f64::NAN)
-    ));
-}
-
-#[test]
-fn members_iterate_items_keys_and_code_points() {
-    let value = |text: &str| parse(text).expect("the value parses");
-    let text = |item: &str| Value::String(item.into());
-    assert_eq!(
-        python::members(&value("[1, 2]")),
-        Some(vec![value("1"), value("2")])
-    );
-    assert_eq!(
-        python::members(&value(r#"{"a": 1, "b": 2}"#)),
-        Some(vec![text("a"), text("b")])
-    );
-    assert_eq!(
-        python::members(&value(r#""ab""#)),
-        Some(vec![text("a"), text("b")])
-    );
-    assert_eq!(python::members(&value("1")), None);
 }
 
 #[test]

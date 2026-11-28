@@ -1,15 +1,18 @@
+//! [`transcription_drift`] records drift when a named `before` or `after` anchor lacks a site entry on
+//! the referencing site's `side`.
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::refusal::{Error, Refusal, lookup, member, read_error, string};
+use super::refusal::{Error, Refusal, listed, lookup, member, read_error, string, strings};
 use crate::classes::{WORD, compiled, is_word};
 use crate::genmc::{bodies, normalized, read_source};
 use crate::json::{Integer, Object, Text, Value};
 use crate::orderings::sources::joined;
-use crate::python::{equal, members, repr, str_of};
+use crate::python::{equal, repr, str_of};
 
 static ORDERING: LazyLock<Regex> =
     LazyLock::new(|| compiled(&format!(r"^(?:{WORD}+::)*Ordering::({WORD}+)$")));
@@ -33,10 +36,6 @@ fn kind_holds(kind: &str, method: &str) -> bool {
         "fence" => matches!(method, "fence" | "$fence" | "fence_release"),
         _ => true,
     }
-}
-
-fn listed(value: &Value, what: &str) -> Result<Vec<Value>, Error> {
-    members(value).ok_or_else(|| Error::Type(format!("{what} is not iterable")))
 }
 
 fn texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
@@ -73,20 +72,7 @@ fn count_is(count: usize, wanted: Option<&Value>) -> bool {
 fn contains(container: &Value, needle: &Value) -> Result<bool, Error> {
     match container {
         Value::Array(items) => Ok(items.iter().any(|item| equal(item, needle))),
-        Value::Object(object) => match needle {
-            Value::String(needle) => Ok(object.iter().any(|(key, _)| key == needle)),
-            Value::Array(_) | Value::Object(_) => Err(Error::Type(
-                "an unhashable value is looked up by key".into(),
-            )),
-            _ => Ok(false),
-        },
-        Value::String(text) => match needle {
-            Value::String(needle) => Ok(text.to_string().contains(&needle.to_string())),
-            _ => Err(Error::Type(
-                "a value other than a string is looked up in a string".into(),
-            )),
-        },
-        _ => Err(Error::Type("the container is not iterable".into())),
+        _ => Err(Error::Type("the transcribed files are no array".into())),
     }
 }
 
@@ -99,7 +85,7 @@ fn arguments(text: &str, start: usize) -> Option<Vec<String>> {
         match bytes[index] {
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => {
-                depth = depth.wrapping_sub(1);
+                depth -= 1;
                 if depth == 0 {
                     args.push(text[begun..index].to_owned());
                     return Some(args.into_iter().filter(|arg| !arg.is_empty()).collect());
@@ -145,10 +131,11 @@ fn strengths(
     };
     for strength in listed(listed_strengths, "the declared strengths")? {
         let file = member(&strength, "file")?;
-        let path = joined(package, string(file, "a strength's file")?);
+        let path = package_path(package, string(file, "a strength's file")?);
+        let source = sources.normalized(&path)?;
         let implementation = member(&strength, "impl")?;
         let header = normalized(string(implementation, "a strength's impl")?);
-        let blocks = bodies(&sources.normalized(&path)?, &header);
+        let blocks = bodies(&source, &header);
         if blocks.len() != 1 {
             drift.push(format!(
                 "{} declares {} {} times",
@@ -204,10 +191,11 @@ fn locate(
     let id = str_of(member(entry, "id")?);
     let scope_value = member(site, "scope")?;
     let headers = texts(scope_value, "a site's scope")?;
-    let where_ = if headers.is_empty() {
-        "the file".to_owned()
+    let joined_headers = headers.join(" > ");
+    let where_ = if joined_headers.is_empty() {
+        "the file"
     } else {
-        headers.join(" > ")
+        joined_headers.as_str()
     };
     let file = member(site, "file")?;
     let mut scopes = vec![sources.normalized(string(file, "a site's file")?)?];
@@ -271,27 +259,24 @@ fn locate(
         .filter(|&index| candidates[index].0 == bound)
         .collect();
     if !count_is(matching.len(), lookup(site, "matching")?) {
-        let as_value = |items: &[String]| {
-            Value::Array(
-                items
-                    .iter()
-                    .map(|item| Value::String(item.as_str().into()))
-                    .collect(),
-            )
-        };
         let found_operands = Value::Array(
             candidates
                 .iter()
-                .map(|candidate| as_value(&candidate.0))
+                .map(|candidate| strings(&candidate.0))
                 .collect(),
         );
         return Ok(Err(format!(
             "{id}: the {side} {call_text} operands are {}, bound {}",
             repr(&found_operands),
-            repr(&as_value(&bound))
+            repr(&strings(&bound))
         )));
     }
-    let (_, orderings, constants, offset) = candidates.swap_remove(matching[0]);
+    let Some(&first) = matching.first() else {
+        return Err(Error::Index(format!(
+            "{id}: the {side} {call_text} has no matching occurrence"
+        )));
+    };
+    let (_, orderings, constants, offset) = candidates.swap_remove(first);
     Ok(Ok(Located {
         scope,
         offset,
@@ -300,13 +285,75 @@ fn locate(
     }))
 }
 
-fn strings(items: &[String]) -> Value {
-    Value::Array(
-        items
-            .iter()
-            .map(|item| Value::String(item.as_str().into()))
-            .collect(),
-    )
+fn package_path(package: &str, file: &str) -> String {
+    joined(if package.is_empty() { "." } else { package }, file)
+}
+
+type Sites = BTreeMap<(Text, &'static str), (Value, Located)>;
+
+fn anchor_drift(
+    name: &Text,
+    side: &str,
+    site: &Value,
+    found: &Located,
+    sites: &Sites,
+    ids: &[Value],
+    drift: &mut Vec<String>,
+) -> Result<(), Error> {
+    for relation in ["before", "after"] {
+        let anchors = match lookup(site, relation)? {
+            Some(anchors) => listed(anchors, "a site's anchors")?,
+            None => Vec::new(),
+        };
+        for anchor in &anchors {
+            if matches!(anchor, Value::Array(_) | Value::Object(_)) {
+                return Err(Error::Type("an anchor is unhashable".into()));
+            }
+            let places = if ids.iter().any(|id| equal(id, anchor)) {
+                let other = match anchor {
+                    Value::String(anchor) => sites.get(&(anchor.clone(), side)),
+                    _ => None,
+                };
+                let Some((other_site, other)) = other else {
+                    drift.push(format!(
+                        "{name}: the {side} anchor entry {} was not located",
+                        str_of(anchor)
+                    ));
+                    continue;
+                };
+                let same = equal(member(other_site, "file")?, member(site, "file")?)
+                    && equal(member(other_site, "scope")?, member(site, "scope")?);
+                if !same {
+                    drift.push(format!(
+                        "{name}: the {side} anchor entry {} sits in another scope",
+                        str_of(anchor)
+                    ));
+                    continue;
+                }
+                vec![other.offset]
+            } else {
+                let text = normalized(string(anchor, "an anchor")?);
+                found
+                    .scope
+                    .match_indices(text.as_str())
+                    .map(|(start, _)| start)
+                    .collect()
+            };
+            if places.len() != 1 {
+                drift.push(format!(
+                    "{name}: the {side} anchor {} appears {} times in its scope",
+                    repr(anchor),
+                    places.len()
+                ));
+            } else if (found.offset < places[0]) != (relation == "before") {
+                drift.push(format!(
+                    "{name}: the {side} operation no longer comes {relation} {}",
+                    repr(anchor)
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>, Error> {
@@ -328,7 +375,7 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
         read: HashMap::new(),
     };
     let (declared_strengths, mut drift) = strengths(declared, package, &mut sources)?;
-    let mut sites: BTreeMap<(Text, &'static str), (Value, Located)> = BTreeMap::new();
+    let mut sites: Sites = BTreeMap::new();
     let mut bound: BTreeMap<String, BTreeSet<String>> = declared_strengths
         .keys()
         .map(|path| (path.clone(), BTreeSet::new()))
@@ -364,7 +411,7 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
                     return Err(Error::Type("a kernel site is no object".into()));
                 };
                 let mut object: Object = object.clone();
-                let path = joined(package, string(file, "a site's file")?);
+                let path = package_path(package, string(file, "a site's file")?);
                 object.insert("file", Value::String(path.into()));
                 Value::Object(object)
             } else {
@@ -378,7 +425,7 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
                 drift.push(format!("{}: the {side} {call} is no {kind}", str_of(id)));
                 continue;
             }
-            let path = str_of(member(&site, "file")?);
+            let path = str_of(member(&site, "file")?).to_string();
             let located = match locate(
                 entry,
                 side,
@@ -404,7 +451,7 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
                     "{}: the {side} orderings are {}, bound {}",
                     str_of(id),
                     repr(&strings(&located.orderings)),
-                    repr(orderings)
+                    str_of(orderings)
                 ));
             }
             let Value::String(key) = id else {
@@ -414,59 +461,7 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
         }
     }
     for ((name, side), (site, found)) in &sites {
-        for relation in ["before", "after"] {
-            let anchors = match lookup(site, relation)? {
-                Some(anchors) => listed(anchors, "a site's anchors")?,
-                None => Vec::new(),
-            };
-            for anchor in &anchors {
-                if matches!(anchor, Value::Array(_) | Value::Object(_)) {
-                    return Err(Error::Type("an anchor is unhashable".into()));
-                }
-                let places = if ids.iter().any(|id| equal(id, anchor)) {
-                    let other = match anchor {
-                        Value::String(anchor) => sites.get(&(anchor.clone(), *side)),
-                        _ => None,
-                    };
-                    let Some((other_site, other)) = other else {
-                        drift.push(format!(
-                            "{name}: the {side} anchor entry {} was not located",
-                            str_of(anchor)
-                        ));
-                        continue;
-                    };
-                    let same = equal(member(other_site, "file")?, member(site, "file")?)
-                        && equal(member(other_site, "scope")?, member(site, "scope")?);
-                    if !same {
-                        drift.push(format!(
-                            "{name}: the {side} anchor entry {} sits in another scope",
-                            str_of(anchor)
-                        ));
-                        continue;
-                    }
-                    vec![other.offset]
-                } else {
-                    let text = normalized(string(anchor, "an anchor")?);
-                    found
-                        .scope
-                        .match_indices(text.as_str())
-                        .map(|(start, _)| start)
-                        .collect()
-                };
-                if places.len() != 1 {
-                    drift.push(format!(
-                        "{name}: the {side} anchor {} appears {} times in its scope",
-                        repr(anchor),
-                        places.len()
-                    ));
-                } else if (found.offset < places[0]) != (relation == "before") {
-                    drift.push(format!(
-                        "{name}: the {side} operation no longer comes {relation} {}",
-                        repr(anchor)
-                    ));
-                }
-            }
-        }
+        anchor_drift(name, side, site, found, &sites, &ids, &mut drift)?;
     }
     for (path, names) in &bound {
         for constant in declared_strengths[path].keys() {

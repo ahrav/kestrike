@@ -209,28 +209,15 @@ pub fn repr(value: &Value) -> String {
 
 /// For strings, `str_of` returns the text with each surrogate escaped as `\udXXX`; for other values, it
 /// returns [`repr`].
-pub fn str_of(value: &Value) -> String {
+pub fn str_of(value: &Value) -> Text {
     match value {
-        Value::String(text) => text.to_string(),
-        _ => repr(value),
+        Value::String(text) => text.clone(),
+        _ => Text::from(repr(value)),
     }
 }
 
-fn integral(value: &Value) -> Option<Integer> {
-    match value {
-        Value::Integer(integer) => Some(integer.clone()),
-        Value::Bool(flag) => Some(Integer::from(u64::from(*flag))),
-        Value::Float(value) if value.is_finite() && value.fract() == 0.0 => {
-            let digits = format!("{:.0}", value.abs());
-            Integer::from_digits(*value < 0.0, &digits)
-        }
-        _ => None,
-    }
-}
-
-/// `equal` is Python's `==` over `json.loads` objects. Objects hold the same keys with equal values in
-/// any order, arrays equal items in order, and numbers and booleans compare by exact value, `true` being
-/// 1. `equal` returns `false` when either operand is NaN.
+/// `equal` compares objects by their members in any order and arrays by their items in order, and uses
+/// `Value`'s `PartialEq` implementation for scalar comparisons.
 pub fn equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Object(left), Value::Object(right)) => {
@@ -248,36 +235,7 @@ pub fn equal(left: &Value, right: &Value) -> bool {
                     .zip(right)
                     .all(|(left, right)| equal(left, right))
         }
-        (Value::String(left), Value::String(right)) => left == right,
-        (Value::Null, Value::Null) => true,
-        (Value::Float(left), Value::Float(right)) => left == right,
-        (Value::Integer(_) | Value::Bool(_) | Value::Float(_), _) => {
-            matches!(right, Value::Integer(_) | Value::Bool(_) | Value::Float(_))
-                && integral(left).is_some_and(|left| integral(right) == Some(left))
-        }
-        _ => false,
-    }
-}
-
-/// `members` follows Python's iteration: an array yields its items, an object its keys, and a string one
-/// string per code point. A number, a boolean and `null` give `None`.
-pub fn members(value: &Value) -> Option<Vec<Value>> {
-    match value {
-        Value::Array(items) => Some(items.clone()),
-        Value::Object(object) => Some(
-            object
-                .iter()
-                .map(|(key, _)| Value::String(key.clone()))
-                .collect(),
-        ),
-        Value::String(text) => Some(
-            text.code_points()
-                .map(|code| {
-                    Value::String(Text::from_code_points([code]).expect("a code point of a text"))
-                })
-                .collect(),
-        ),
-        Value::Integer(_) | Value::Float(_) | Value::Bool(_) | Value::Null => None,
+        _ => left == right,
     }
 }
 

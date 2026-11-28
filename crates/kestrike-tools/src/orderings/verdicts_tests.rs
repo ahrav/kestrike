@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use super::{Outcome, Verdict, case_exit, genmc_result, loom_result};
+use super::{LOOM_REBUILT, Outcome, Verdict, case_exit, genmc_result, loom_result};
 use crate::genmc::case::tests::{
     DEPARTURE, FREED, POSITIVE, POSITIVE_GRAPH, declaration, line_of, root, violation,
     violation_graph,
@@ -298,6 +298,7 @@ fn a_loom_result_follows_the_order_of_its_rules() {
     #[rustfmt::skip]
     let rows: Vec<(Judged, (Verdict, &str))> = vec![
         (result(&pass, None, true), (Verdict::NoVerdict, "timeout")),
+        (result(&pass, None, false), (Verdict::NoVerdict, "timeout")),
         (result(&pass, Some(0), false), (Verdict::NoVerdict, "no evidence that kestrike rebuilt")),
         (result(&pass, Some(0), true), (Verdict::Survived, "one executed test passed")),
         (result(&pass, Some(101), true), (Verdict::NoVerdict, "the test crashed: its run ended without a summary")),
@@ -394,5 +395,125 @@ fn a_lane_without_a_file_or_an_exit_code_gives_no_verdict() {
     assert_eq!(
         (survived.verdict(), survived.executions()),
         (Verdict::Survived, Some(&Integer::from(3_u64)))
+    );
+}
+
+#[test]
+fn each_file_the_lane_leaves_is_needed_for_a_verdict() {
+    let declared = declaration();
+    for name in [
+        "genmc-join-production.txt",
+        "genmc-join-production.exit",
+        "genmc-join-production.argv",
+        "genmc-join-production.env",
+        "identity.json",
+    ] {
+        let scratch = Scratch::new("genmc-each-file");
+        Lane::new(POSITIVE, POSITIVE_GRAPH, "0").write(&scratch.0, &declared);
+        fs::remove_file(scratch.0.join(name)).expect("the file is removed");
+        let outcome = genmc_result(
+            &root(),
+            &declared,
+            CASE,
+            Some((DEPARTURE, KERNEL)),
+            &scratch.0,
+            true,
+            Some(&Integer::from(0_u64)),
+        )
+        .expect("the evidence is judged");
+        assert_eq!(
+            (outcome.verdict(), outcome.reason(), outcome.executions()),
+            (Verdict::NoVerdict, "the lane left no output", None),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_identity_record_of_another_shape_gives_no_verdict() {
+    let declared = declaration();
+    let lane = Lane {
+        record: Some(r#"{"binary": {"path": 5}, "rustc": {"name": "x", "toolchain": "y"}}"#),
+        ..Lane::new(POSITIVE, POSITIVE_GRAPH, "0")
+    };
+    assert_eq!(
+        judged(&lane, &declared, Some(KERNEL)),
+        (
+            Verdict::NoVerdict,
+            "the lane's build or command is not the declared one: the identity record lacks a \
+             binary path or a rustc name and toolchain"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn a_planted_run_needs_the_kernel_package_compiled_and_an_unplanted_run_does_not() {
+    let declared = declaration();
+    let scratch = Scratch::new("genmc-planted");
+    let lane = Lane {
+        check: false,
+        ..Lane::new(POSITIVE, POSITIVE_GRAPH, "0")
+    };
+    lane.write(&scratch.0, &declared);
+    let code = Integer::from(0_u64);
+    let judge = |planted| {
+        genmc_result(
+            &root(),
+            &declared,
+            CASE,
+            None,
+            &scratch.0,
+            planted,
+            Some(&code),
+        )
+        .expect("the evidence is judged")
+    };
+    assert_eq!(judge(true).reason(), "no evidence that the kernel rebuilt");
+    let unplanted = judge(false);
+    assert_eq!(
+        (unplanted.verdict(), unplanted.executions()),
+        (Verdict::Survived, Some(&Integer::from(3_u64)))
+    );
+    fs::write(
+        scratch.0.join("check-join-production.txt"),
+        "   Compiling genmc-kernels v0.0.0\n",
+    )
+    .expect("the log writes");
+    assert_eq!(judge(true).verdict(), Verdict::Survived);
+}
+
+#[test]
+fn a_graph_path_that_loops_ends_the_judgment() {
+    let declared = declaration();
+    let scratch = Scratch::new("genmc-loop");
+    Lane::new(POSITIVE, POSITIVE_GRAPH, "0").write(&scratch.0, &declared);
+    let graph = scratch.0.join("genmc-join-production.dot");
+    fs::remove_file(&graph).expect("the graph is removed");
+    std::os::unix::fs::symlink(&graph, &graph).expect("the link is made");
+    let result = genmc_result(
+        &root(),
+        &declared,
+        CASE,
+        None,
+        &scratch.0,
+        true,
+        Some(&Integer::from(0_u64)),
+    );
+    assert!(
+        matches!(result, Err(crate::genmc::refusal::Error::Runtime(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn verdicts_have_their_report_names_and_a_loom_rebuild_reads_its_status_line() {
+    assert_eq!(
+        [Verdict::Killed, Verdict::Survived, Verdict::NoVerdict].map(Verdict::name),
+        ["killed", "survived", "no verdict"]
+    );
+    assert!(LOOM_REBUILT.is_match("running\n   Compiling kestrike v0.1.0 (/x)\n"));
+    assert!(
+        !LOOM_REBUILT.is_match("   Compiling kestrike-tools v0.1.0\n   Checking kestrike v0.1.0\n")
     );
 }

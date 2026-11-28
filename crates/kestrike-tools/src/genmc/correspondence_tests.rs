@@ -90,6 +90,46 @@ fn site<'v>(entry: &'v mut crate::json::Object, side: &str) -> &'v mut crate::js
     site
 }
 
+fn strengths_of(declared: &mut Value) -> &mut Vec<Value> {
+    let Value::Object(declared) = declared else {
+        panic!("the declaration is an object");
+    };
+    let Some(Value::Array(strengths)) = declared.get_mut("strengths") else {
+        panic!("the declaration holds strengths");
+    };
+    strengths
+}
+
+fn strength(declared: &mut Value) -> &mut crate::json::Object {
+    let Some(Value::Object(strength)) = strengths_of(declared).first_mut() else {
+        panic!("the declaration holds a strength");
+    };
+    strength
+}
+
+/// The drift of the grace kernel's binding entries once no declared strength defines their constants.
+fn undefined(package: &str) -> Vec<String> {
+    let kernel = format!("{package}/src/grace_kernel.rs");
+    let mut drift: Vec<String> = [
+        ("claim-load", "CLAIM_LOAD"),
+        ("claim-raise", "CLAIM_RAISE"),
+        ("pass-bound-load", "BOUND_LOAD"),
+        ("sequence-first-load", "OBSERVE"),
+        ("sequence-commit", "COMMIT"),
+    ]
+    .iter()
+    .map(|(id, constant)| {
+        format!(
+            "{id}: the kernel names S::{constant}, which no declared strength of {kernel} defines"
+        )
+    })
+    .collect();
+    drift.push(
+        "retain-current-load: the kernel anchor entry sequence-first-load was not located".into(),
+    );
+    drift
+}
+
 fn json(text: &str) -> Value {
     parse(text).expect("JSON")
 }
@@ -129,6 +169,36 @@ fn one_drifted_binding_of_each_kind_is_correspondence_drift() {
             "claim-raise: the production anchor entry claim-load was not located".into(),
             format!("{package}/src/grace_kernel.rs transcribes CLAIM_LOAD in its strength and no binding entry binds it"),
         ]),
+        ("impl", edited(|d| strength(d).insert("impl", json(r#""impl ModelStrength for Nothing""#))), {
+            let mut drift = vec!["src/grace_kernel.rs declares impl ModelStrength for Nothing 0 times".to_owned()];
+            drift.extend(undefined(package));
+            drift
+        }),
+        ("strength", edited(|d| { strengths_of(d).clear(); }), undefined(package)),
+        ("among", edited(|d| site(binding(d, "claim-load"), "production").insert("among", json("2"))), vec![
+            "claim-load: the production bound.load appears 1 times in fn register".into(),
+            "claim-raise: the production anchor entry claim-load was not located".into(),
+        ]),
+        ("scope", edited(|d| site(binding(d, "claim-raise"), "production").insert("scope", json("[]"))), vec![
+            "claim-load: the production anchor entry claim-raise sits in another scope".into(),
+            "claim-raise: the production anchor entry claim-load sits in another scope".into(),
+        ]),
+        ("relation", edited(|d| {
+            let production = site(binding(d, "claim-load"), "production");
+            let before = production.remove("before").expect("the site has anchors");
+            production.insert("after", before);
+        }), vec![
+            "claim-load: the production operation no longer comes after 'claim-raise'".into(),
+            "claim-load: the production operation no longer comes after 'Ok(Registration {'".into(),
+        ]),
+        ("the file", edited(|d| site(binding(d, "claim-load"), "production").insert("scope", json(r#"[""]"#))), vec![
+            "claim-load: the production scope the file in crates/kestrike/src/storage/register.rs appears 443 times".into(),
+            "claim-raise: the production anchor entry claim-load was not located".into(),
+        ]),
+        ("bound text", edited(|d| binding(d, "claim-load").insert("orderings", json(r#""Acquire""#))), vec![
+            "claim-load: the production orderings are ['SeqCst'], bound Acquire".into(),
+            "claim-load: the kernel orderings are ['SeqCst'], bound Acquire".into(),
+        ]),
     ];
     for (kind, declared, drift) in rows {
         assert_eq!(
@@ -148,4 +218,17 @@ fn one_drifted_binding_of_each_kind_is_correspondence_drift() {
             other => panic!("{kind}: a refusal, not {other:?}"),
         }
     }
+}
+
+#[test]
+fn a_site_whose_matching_count_is_zero_has_no_occurrence_to_read() {
+    let declared = edited(|d| {
+        let production = site(binding(d, "claim-load"), "production");
+        production.insert("matching", json("0"));
+        production.insert("operands", json(r#"["x"]"#));
+    });
+    assert!(matches!(
+        transcription_drift(&declared, &root()),
+        Err(Error::Index(_))
+    ));
 }

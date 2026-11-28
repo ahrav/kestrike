@@ -12,7 +12,9 @@ use crate::genmc::case::judge_case;
 use crate::genmc::evidence::{check_command, check_config};
 use crate::genmc::is_file;
 use crate::genmc::read_text;
-use crate::genmc::refusal::{Error, member, parse_json, read_error, read_replaced, read_strict};
+use crate::genmc::refusal::{
+    Error, lines, member, parse_json, read_error, read_replaced, read_strict,
+};
 use crate::json::{Integer, Object, Text, Value};
 use crate::python::{decimal, int, str_of};
 
@@ -125,10 +127,12 @@ pub fn case_exit(evidence: &Path, case: &str) -> Option<Integer> {
 pub fn identity_record(evidence: &Path) -> Result<Value, Error> {
     let record = parse_json(&read_strict(&evidence.join("identity.json"))?)?;
     let text = |value: Option<&Value>| matches!(value, Some(Value::String(_)));
-    let object = |value: Option<&Value>| match value {
-        Some(Value::Object(object)) => Some(object.clone()),
-        _ => None,
-    };
+    fn object(value: Option<&Value>) -> Option<&Object> {
+        match value {
+            Some(Value::Object(object)) => Some(object),
+            _ => None,
+        }
+    }
     let shaped = match &record {
         Value::Object(record) => {
             object(record.get("binary")).is_some_and(|binary| text(binary.get("path")))
@@ -172,14 +176,6 @@ impl Outcome {
     pub fn executions(&self) -> Option<&Integer> {
         self.executions.as_ref()
     }
-}
-
-fn lines(text: &str) -> Vec<String> {
-    Text::from(text)
-        .splitlines()
-        .iter()
-        .map(ToString::to_string)
-        .collect()
 }
 
 fn checked_command(

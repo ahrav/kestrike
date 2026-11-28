@@ -3,45 +3,35 @@
 
 use std::path::Path;
 
-use super::refusal::{Code, Error, Refusal, lookup, member, read_json};
+use super::refusal::{Error, lookup, member, read_json, tool_failure};
 use crate::json::Value;
-use crate::python::{equal, members, repr, str_of};
+use crate::python::{equal, repr, str_of};
 
 const LITMUS: &str = "verification/rc11/expected.json";
-
-fn tool_failure(reason: String) -> Error {
-    Error::Refusal(Refusal::new(Code::ToolFailure, reason))
-}
-
-fn object_items<'v>(value: &'v Value, what: &str) -> Result<Vec<(String, &'v Value)>, Error> {
-    match value {
-        Value::Object(object) => Ok(object
-            .iter()
-            .map(|(name, value)| (name.to_string(), value))
-            .collect()),
-        _ => Err(Error::Type(format!("{what} is no object"))),
-    }
-}
 
 pub fn check_correspondence(root: &Path, expected: &Value) -> Result<(), Error> {
     let litmus = read_json(&root.join(LITMUS))?;
     let declared = member(&litmus, "tests")?;
-    let mut cases = object_items(member(expected, "cases")?, "the declared cases")?;
+    let Value::Object(cases) = member(expected, "cases")? else {
+        return Err(Error::Type("the declared cases are no object".to_owned()));
+    };
+    let mut cases: Vec<_> = cases.iter().collect();
     cases.sort_by(|left, right| left.0.cmp(&right.0));
     for (name, case) in cases {
-        let listed = match lookup(case, "litmus")? {
-            Some(listed @ Value::Array(_)) => listed,
+        let (listed, tests) = match lookup(case, "litmus")? {
+            Some(listed @ Value::Array(tests)) => (listed, tests),
             _ => return Err(tool_failure(format!("{name} names no litmus list"))),
         };
         let mut outcomes = Vec::new();
-        for test in members(listed).expect("an array is iterable") {
-            let found = match &test {
-                Value::String(test) => match declared {
-                    Value::Object(tests) => {
-                        tests.iter().find(|(key, _)| key == test).map(|(_, v)| v)
-                    }
-                    _ => return Err(Error::Type("the litmus tests are no object".into())),
-                },
+        for test in tests {
+            let Value::Object(declared) = declared else {
+                return Err(Error::Type("the litmus tests are no object".to_owned()));
+            };
+            let found = match test {
+                Value::String(test) => declared
+                    .iter()
+                    .find(|(key, _)| key == test)
+                    .map(|(_, found)| found),
                 Value::Array(_) | Value::Object(_) => {
                     return Err(Error::Type("a litmus test name is unhashable".into()));
                 }

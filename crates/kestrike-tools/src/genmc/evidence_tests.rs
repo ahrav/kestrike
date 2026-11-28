@@ -192,3 +192,82 @@ fn a_command_is_the_identified_genmc_with_the_cases_own_graph_and_manifest() {
         Err(format!("join-production ran ['x'], {wanted}"))
     );
 }
+
+#[test]
+fn every_shaping_table_and_build_key_is_named_in_order() {
+    let all = r#"{"source": {}, "patch": {}, "unstable": {}, "target": {}, "profile": {}, "build": {"rustdocflags": 1, "rustflags": 1, "build-dir": 1, "target-dir": 1, "target": 1, "rustc-workspace-wrapper": 1, "rustc-wrapper": 1, "rustc": 1, "jobs": 1}}"#;
+    assert_eq!(
+        refused(all),
+        "the cargo configuration sets profile, target, unstable, patch, source, build.rustc, \
+         build.rustc-wrapper, build.rustc-workspace-wrapper, build.target, build.target-dir, \
+         build.build-dir, build.rustflags, build.rustdocflags"
+    );
+    for table in ["profile", "target", "unstable", "patch", "source"] {
+        let text = format!(r#"{{"{table}": {{}}}}"#);
+        assert_eq!(
+            refused(&text),
+            format!("the cargo configuration sets {table}")
+        );
+    }
+    for key in [
+        "rustc",
+        "rustc-wrapper",
+        "rustc-workspace-wrapper",
+        "target",
+        "target-dir",
+        "build-dir",
+        "rustflags",
+        "rustdocflags",
+    ] {
+        let text = format!(r#"{{"build": {{"{key}": "x"}}}}"#);
+        assert_eq!(
+            refused(&text),
+            format!("the cargo configuration sets build.{key}")
+        );
+    }
+}
+
+#[test]
+fn a_command_path_counts_by_its_resolved_form() {
+    let scratch = Scratch::new("check-command-spelling");
+    let evidence = &scratch.0;
+    let mut spelled = command(evidence);
+    spelled.argv[3] = format!(
+        "--dump-error-graph={}/./genmc-join-production.dot",
+        evidence.display()
+    );
+    spelled.argv[4] = root()
+        .join("verification/genmc/packages/kernels/../run-join-production/Cargo.toml")
+        .display()
+        .to_string();
+    assert_eq!(commanded(evidence, &spelled), Ok(()));
+    let mut bare = command(evidence);
+    bare.argv[3] = evidence
+        .join("genmc-join-production.dot")
+        .display()
+        .to_string();
+    assert!(commanded(evidence, &bare).is_err());
+}
+
+#[test]
+fn a_graph_path_that_loops_is_a_runtime_error() {
+    let scratch = Scratch::new("check-command-loop");
+    let evidence = &scratch.0;
+    let graph = evidence.join("genmc-join-production.dot");
+    std::os::unix::fs::symlink(&graph, &graph).expect("the link is made");
+    let record = parse(
+        r#"{"binary": {"path": "/genmc/build/bin/genmc"}, "rustc": {"name": "n", "toolchain": "/t"}}"#,
+    )
+    .expect("JSON");
+    let good = command(evidence);
+    let result = check_command(
+        &root(),
+        "join-production",
+        &declaration(),
+        &record,
+        &good.argv,
+        &good.env,
+        evidence,
+    );
+    assert!(matches!(result, Err(Error::Runtime(_))), "{result:?}");
+}

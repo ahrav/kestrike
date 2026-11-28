@@ -8,12 +8,13 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 use super::refusal::{
-    Code, Error, Refusal, lookup, member, read_json, read_replaced, read_strict, single, string,
+    Code, Error, Refusal, lines, listed, lookup, member, read_json, read_replaced, read_strict,
+    single, string, strings, tool_failure,
 };
 use crate::classes::{SPACE, compiled};
 use crate::genmc::is_file;
 use crate::json::{Integer, Text, Value};
-use crate::python::{decimal, equal, members, str_of};
+use crate::python::{decimal, equal, repr, str_of};
 
 const EXPECTED: &str = "verification/genmc/expected.json";
 
@@ -57,10 +58,6 @@ fn refused(code: Code, reason: String) -> Error {
     Error::Refusal(Refusal::new(code, reason))
 }
 
-fn tool_failure(reason: String) -> Error {
-    refused(Code::ToolFailure, reason)
-}
-
 fn quoted(text: &str) -> String {
     Text::from(text).repr()
 }
@@ -76,14 +73,6 @@ fn name_of(path: &str) -> &str {
         .unwrap_or("")
 }
 
-fn lines_of(text: &str) -> Vec<String> {
-    Text::from(text)
-        .splitlines()
-        .iter()
-        .map(|line| line.to_string())
-        .collect()
-}
-
 pub fn check_line(root: &Path, declared: &Value, message: &Value) -> Result<usize, Error> {
     let expected = read_json(&root.join(EXPECTED))?;
     let package = string(member(&expected, "package")?, "the declared package")?;
@@ -91,7 +80,7 @@ pub fn check_line(root: &Path, declared: &Value, message: &Value) -> Result<usiz
     let path = root
         .join(package)
         .join(string(file, "the declared kernel file")?);
-    let source = lines_of(&read_strict(&path)?);
+    let source = lines(&read_strict(&path)?);
     let needle = format!("c\"{}\"", str_of(message));
     let lines: Vec<usize> = source
         .iter()
@@ -201,18 +190,12 @@ fn integer(digits: &str) -> Result<Integer, Error> {
 }
 
 fn sorted_texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
-    let listed = members(value).ok_or_else(|| Error::Type(format!("{what} is not iterable")))?;
     let mut texts = Vec::new();
-    for item in &listed {
+    for item in &listed(value, what)? {
         texts.push(string(item, what)?.to_owned());
     }
     texts.sort();
     Ok(texts)
-}
-
-fn texts_repr(texts: &[String]) -> String {
-    let items: Vec<String> = texts.iter().map(|text| quoted(text)).collect();
-    format!("[{}]", items.join(", "))
 }
 
 pub fn judge_case(
@@ -228,7 +211,7 @@ pub fn judge_case(
         .iter()
         .any(|&code| *exit_code == Integer::from(code))
     {
-        return Err(Error::Refusal(Refusal::completed(
+        return Err(Error::Refusal(Refusal::with_completion(
             Code::Incomplete,
             format!("{name} was interrupted (exit {exit_code})"),
             "timeout",
@@ -239,12 +222,12 @@ pub fn judge_case(
         if intrinsics != wanted.as_slice() {
             return Err(tool_failure(format!(
                 "{name}'s bitcode calls {}, declared {}",
-                texts_repr(intrinsics),
-                texts_repr(&wanted)
+                repr(&strings(intrinsics)),
+                repr(&strings(&wanted))
             )));
         }
     }
-    let lines: Vec<String> = lines_of(text)
+    let lines: Vec<String> = lines(text)
         .iter()
         .map(|line| Text::from(line.as_str()).strip().to_string())
         .filter(|line| !line.is_empty())
@@ -338,8 +321,7 @@ pub fn judge_case(
     let file = &found[3];
     let line = integer(&found[4])?;
     let checks = member(declared, "checks")?;
-    let checks = members(checks)
-        .ok_or_else(|| Error::Type("the declared checks are not iterable".into()))?;
+    let checks = listed(checks, "the declared checks")?;
     let mut wanted = Vec::new();
     for message in &checks {
         let kernel = string(member(declared, "file")?, "the declared kernel file")?;

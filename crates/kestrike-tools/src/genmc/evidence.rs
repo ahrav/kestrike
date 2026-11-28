@@ -2,14 +2,19 @@
 //! case's command line and environment. The caller vouches for the evidence directory and the checkout
 //! root it names, and these functions read the files under both as the caller's own.
 
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-use super::refusal::{Code, Error, Refusal, member, parse_json, read_error, string};
+use super::refusal::{
+    Error, listed, member, parse_json, read_error, string, strings, tool_failure,
+};
 use crate::genmc::{is_file, read_text};
-use crate::json::{Object, Value};
+use crate::json::{Object, Text, Value};
 use crate::paths::resolve;
-use crate::python::{equal, members, repr, str_of};
+use crate::python::{equal, repr, str_of};
+
+const OPTION: &str = "--dump-error-graph=";
 
 const SHAPING_TABLES: [&str; 5] = ["profile", "target", "unstable", "patch", "source"];
 
@@ -32,10 +37,6 @@ static ADMITTED_TARGET: LazyLock<Value> = LazyLock::new(|| {
     )
     .expect("the admitted target table is JSON")
 });
-
-fn tool_failure(reason: String) -> Error {
-    Error::Refusal(Refusal::new(Code::ToolFailure, reason))
-}
 
 /// `check_config` rejects build-shaping entries in `evidence/cargo-config.json` except for the
 /// permitted `target` table.
@@ -92,9 +93,10 @@ pub fn check_config(evidence: &Path) -> Result<(), Error> {
         })
         .map(|&table| table.to_owned())
         .collect();
+    let empty = Object::new();
     let table = |key: &str| match config.get(key) {
-        Some(Value::Object(table)) => table.clone(),
-        _ => Object::new(),
+        Some(Value::Object(table)) => table,
+        _ => &empty,
     };
     let build = table("build");
     entries.extend(
@@ -128,11 +130,34 @@ pub fn check_config(evidence: &Path) -> Result<(), Error> {
 }
 
 fn resolved(path: &Path) -> Result<PathBuf, Error> {
-    resolve(path).map_err(Error::Os)
+    resolve(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::Other {
+            Error::Runtime(error.to_string())
+        } else {
+            Error::Os(error)
+        }
+    })
 }
 
-fn listed(value: &Value, what: &str) -> Result<Vec<Value>, Error> {
-    members(value).ok_or_else(|| Error::Type(format!("{what} is not iterable")))
+fn ran_declared(
+    argv: &[String],
+    record: &Value,
+    options: &Value,
+    graph: &Path,
+    manifest: &Path,
+) -> Result<bool, Error> {
+    let [head @ .., graph_option, manifest_argument] = argv else {
+        return Ok(false);
+    };
+    let mut wanted = vec![member(member(record, "binary")?, "path")?.clone()];
+    wanted.extend(listed(options, "the declared options")?);
+    if !equal(&strings(head), &Value::Array(wanted)) {
+        return Ok(false);
+    }
+    let Some(path) = graph_option.strip_prefix(OPTION) else {
+        return Ok(false);
+    };
+    Ok(resolved(Path::new(path))? == graph && resolved(Path::new(manifest_argument))? == manifest)
 }
 
 /// `check_command` checks the recorded command and environment of case `name`. The command is the
@@ -153,44 +178,29 @@ pub fn check_command(
     evidence: &Path,
 ) -> Result<(), Error> {
     let graph = resolved(&evidence.join(format!("genmc-{name}.dot")))?;
-    let package = string(member(expected, "package")?, "the declared package")?;
-    let parent = Path::new(package).parent().unwrap_or(Path::new(""));
-    let manifest = root
-        .join(parent)
+    let package = Path::new(string(
+        member(expected, "package")?,
+        "the declared package",
+    )?);
+    let manifest: PathBuf = root
+        .join(package.parent().unwrap_or(package))
         .join(format!("run-{name}"))
-        .join("Cargo.toml");
-    let option = "--dump-error-graph=";
+        .join("Cargo.toml")
+        .components()
+        .collect();
     let options = member(expected, "options")?;
-    let matches = argv.len() >= 2 && {
-        let mut wanted = vec![member(member(record, "binary")?, "path")?.clone()];
-        wanted.extend(listed(options, "the declared options")?);
-        let head: Vec<Value> = argv[..argv.len() - 2]
-            .iter()
-            .map(|argument| Value::String(argument.as_str().into()))
-            .collect();
-        equal(&Value::Array(head), &Value::Array(wanted))
-            && match argv[argv.len() - 2].strip_prefix(option) {
-                Some(path) => {
-                    resolved(Path::new(path))? == graph
-                        && resolved(Path::new(&argv[argv.len() - 1]))? == manifest
-                }
-                None => false,
-            }
-    };
-    if !matches {
+    if !ran_declared(argv, record, options, &graph, &manifest)? {
         let mut joined = Vec::new();
         for item in listed(options, "the declared options")? {
-            joined.push(string(&item, "a declared option")?.to_owned());
+            let Value::String(item) = item else {
+                return Err(Error::Type("a declared option is no string".to_owned()));
+            };
+            joined.push(item);
         }
-        let argv = Value::Array(
-            argv.iter()
-                .map(|argument| Value::String(argument.as_str().into()))
-                .collect(),
-        );
         return Err(tool_failure(format!(
-            "{name} ran {}, not genmc {} {option}{} {}",
-            repr(&argv),
-            joined.join(" "),
+            "{name} ran {}, not genmc {} {OPTION}{} {}",
+            repr(&strings(argv)),
+            Text::join(" ", &joined),
             graph.display(),
             manifest.display()
         )));

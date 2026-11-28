@@ -59,7 +59,7 @@ impl Refusal {
         }
     }
 
-    pub fn completed(code: Code, reason: String, completion: &'static str) -> Self {
+    pub(crate) fn with_completion(code: Code, reason: String, completion: &'static str) -> Self {
         Self {
             code,
             reason,
@@ -70,7 +70,7 @@ impl Refusal {
     /// The tool failure whose reason is `correspondence drift: ` followed by the lines of `drift` joined
     /// by `; `, with the completion [`DRIFT`].
     pub fn drift(drift: &[String]) -> Self {
-        Self::completed(
+        Self::with_completion(
             Code::ToolFailure,
             format!("{DRIFT}: {}", drift.join("; ")),
             DRIFT,
@@ -87,6 +87,10 @@ impl Refusal {
 
     pub fn completion(&self) -> &'static str {
         self.completion
+    }
+
+    pub fn is_drift(&self) -> bool {
+        self.completion == DRIFT
     }
 }
 
@@ -107,6 +111,7 @@ pub enum Error {
     Key(String),
     Type(String),
     Runtime(String),
+    Index(String),
 }
 
 impl fmt::Display for Error {
@@ -114,9 +119,11 @@ impl fmt::Display for Error {
         match self {
             Self::Refusal(refusal) => refusal.fmt(f),
             Self::Os(error) => error.fmt(f),
-            Self::Value(text) | Self::Key(text) | Self::Type(text) | Self::Runtime(text) => {
-                f.write_str(text)
-            }
+            Self::Value(text)
+            | Self::Key(text)
+            | Self::Type(text)
+            | Self::Runtime(text)
+            | Self::Index(text) => f.write_str(text),
         }
     }
 }
@@ -252,4 +259,32 @@ pub fn string<'v>(value: &'v Value, what: &str) -> Result<&'v str, Error> {
             .ok_or_else(|| Error::Type(format!("{what} holds a lone surrogate"))),
         _ => Err(Error::Type(format!("{what} is no string"))),
     }
+}
+
+pub(crate) fn tool_failure(reason: String) -> Error {
+    Error::Refusal(Refusal::new(Code::ToolFailure, reason))
+}
+
+pub(crate) fn listed(value: &Value, what: &str) -> Result<Vec<Value>, Error> {
+    match value {
+        Value::Array(items) => Ok(items.clone()),
+        _ => Err(Error::Type(format!("{what} is no array"))),
+    }
+}
+
+pub(crate) fn lines(text: &str) -> Vec<String> {
+    Text::from(text)
+        .splitlines()
+        .iter()
+        .map(ToString::to_string)
+        .collect()
+}
+
+pub(crate) fn strings(items: &[String]) -> Value {
+    Value::Array(
+        items
+            .iter()
+            .map(|item| Value::String(item.as_str().into()))
+            .collect(),
+    )
 }
