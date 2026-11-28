@@ -42,6 +42,10 @@ pub(crate) enum Action {
     Lose,
     /// Answers after this many seconds more.
     Delay(f64),
+    /// Applies the call and runs to the call's cut.
+    Stall,
+    /// Applies the call and answers half a second past its cut.
+    Late,
     Hook(Box<dyn FnOnce(&mut State) -> Action>),
 }
 
@@ -76,6 +80,8 @@ pub(crate) struct Logged {
     pub(crate) time: Option<f64>,
     pub(crate) cut: bool,
     pub(crate) fault: bool,
+    /// `stop.json` as it stood at a stop request.
+    pub(crate) stop_json: Option<Value>,
 }
 
 /// The plane's state and clock, shared by the seam and the file steps of one case.
@@ -218,6 +224,24 @@ impl State {
             .collect()
     }
 
+    /// Whether the record read that shows the stop has been made.
+    pub(crate) fn shown(&self) -> bool {
+        self.log.iter().any(|logged| logged.op == RECORD)
+    }
+
+    /// The index in the log of the call a fault marked.
+    pub(crate) fn fault_index(&self) -> usize {
+        self.log
+            .iter()
+            .position(|logged| logged.fault)
+            .expect("the fault was planted")
+    }
+
+    /// Each call after the one the fault marked.
+    pub(crate) fn after_fault(&self) -> Vec<String> {
+        self.ops()[self.fault_index() + 1..].to_vec()
+    }
+
     fn standing(&self) -> Vec<String> {
         let root = self.evidence.join("injection");
         let Ok(entries) = fs::read_dir(&root) else {
@@ -287,6 +311,10 @@ impl State {
         let begin = self.t;
         self.envs.push(call.env.to_vec());
         let marks = self.standing();
+        let stop_json = (op == STOP)
+            .then(|| fs::read_to_string(self.evidence.join("injection/stop.json")).ok())
+            .flatten()
+            .map(|json| value(&json));
         self.log.push(Logged {
             op: op.clone(),
             args: args.clone(),
@@ -298,6 +326,7 @@ impl State {
             time: None,
             cut: false,
             fault: false,
+            stop_json,
         });
         let key = [CALLER, STATUS, RECORD, ALARMS, STOP]
             .into_iter()
@@ -322,8 +351,18 @@ impl State {
         }
         let failed = |reason: &str| Err(Ended::Failed(CallFailed::no_answer(argv, reason)));
         let mut delay = 0.0;
-        if let Action::Delay(seconds) = action {
-            delay = seconds;
+        match action {
+            Action::Delay(seconds) => delay = seconds,
+            Action::Stall => {
+                let _ = self.apply(key, &args);
+                delay = CALL_SECONDS as f64;
+            }
+            Action::Late => {
+                self.t = begin + timeout + 0.5;
+                self.log.last_mut().expect("logged").time = Some(self.t);
+                return self.apply(key, &args).map(|reply| text(&reply));
+            }
+            _ => {}
         }
         let spent = self.t - begin + self.call_seconds + delay;
         if spent >= timeout {

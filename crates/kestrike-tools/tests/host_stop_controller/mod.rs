@@ -5,6 +5,7 @@
 
 #![cfg(target_os = "linux")]
 
+mod after_stop;
 mod before_stop;
 mod marks;
 mod plane;
@@ -12,6 +13,7 @@ mod refusals;
 mod signals;
 mod step_one;
 mod steps;
+mod stop_run;
 mod window;
 
 use std::cell::{Cell, RefCell};
@@ -31,7 +33,7 @@ use kestrike_tools::python::hexdigest;
 use crate::host_stop_support::{
     START, Scratch, gd2_mut, json, met, object, operator, package, rewrite, tree, value,
 };
-use plane::{CHANGES, Logged, Plane, STATUS, STOP, Shared, State};
+use plane::{ALARMS, Action, CHANGES, Logged, Plane, STATUS, STOP, Shared, State};
 use steps::{Plant, Plants, Step, Steps};
 
 /// The name under which the evidence directory holds the operator's copy of the package.
@@ -45,6 +47,25 @@ impl Write for Output {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.borrow_mut().extend_from_slice(bytes);
         Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// What a case's stream does at one write: `None` takes the bytes into the case's [`Output`].
+pub(crate) type Writes = Rc<dyn Fn(&[u8]) -> Option<io::Result<usize>>>;
+
+/// The run's stream over a case's [`Output`], through the case's [`Writes`] when it has one.
+struct Hooked(Output, Option<Writes>);
+
+impl Write for Hooked {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if let Some(ended) = self.1.as_ref().and_then(|writes| writes(bytes)) {
+            return ended;
+        }
+        self.0.write(bytes)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -121,6 +142,7 @@ pub(crate) struct Case {
     pub(crate) stall: Rc<Cell<bool>>,
     pub(crate) delivered: &'static Delivered,
     pub(crate) output: Output,
+    pub(crate) writes: Option<Writes>,
     pub(crate) env: Vec<(OsString, OsString)>,
     pub(crate) file_limit: u64,
     pub(crate) mark_limit: u64,
@@ -165,6 +187,7 @@ impl Case {
             stall: Rc::new(Cell::new(false)),
             delivered: Box::leak(Box::new(Delivered::new())),
             output: Output::default(),
+            writes: None,
             env: vec![(OsString::from("PATH"), OsString::from("/nonexistent"))],
             file_limit: FILE_LIMIT,
             mark_limit: FILE_LIMIT,
@@ -210,7 +233,8 @@ impl Case {
         let mut seam = Plane(Rc::clone(&self.plane));
         let files = self.steps();
         let mut record = Record::new(self.delivered);
-        let (mut out, mut err) = (self.output.clone(), self.output.clone());
+        let mut out = Hooked(self.output.clone(), self.writes.clone());
+        let mut err = Hooked(self.output.clone(), self.writes.clone());
         let top = tree();
         let mut cx = Context {
             seam: &mut seam,
@@ -480,4 +504,54 @@ impl Case {
             })
         }));
     }
+
+    /// Plants `action` on the first alarm read after the stop is shown, or, with `while_stopping`,
+    /// after the stop request and before the record read.
+    pub(crate) fn faulted(&self, action: Action, while_stopping: bool) {
+        let mut action = Some(action);
+        self.plane.borrow_mut().fault = Some(Box::new(move |state, op| {
+            if op != ALARMS || state.stops().is_empty() || state.shown() == while_stopping {
+                return None;
+            }
+            action.take()
+        }));
+    }
+
+    pub(crate) fn fault_index(&self) -> usize {
+        self.plane.borrow().fault_index()
+    }
+
+    /// Each call after the one the fault marked.
+    pub(crate) fn after_fault(&self) -> Vec<String> {
+        self.plane.borrow().after_fault()
+    }
+}
+
+/// The variable that tells a test executable started again by [`child`] to run its case's body.
+pub(crate) const CHILD: &str = "HOST_STOP_CONTROLLER_CHILD";
+
+/// Runs the case `name` of this module again in a process of its own, with an environment that
+/// holds [`CHILD`] set to `place`, `TMPDIR` and `extra` alone, and returns its exit status and its
+/// output.
+pub(crate) fn child(
+    name: &str,
+    place: &Path,
+    extra: &[(&str, &str)],
+) -> (std::process::ExitStatus, String) {
+    let case = format!("host_stop_controller::{name}");
+    let output = std::process::Command::new(std::env::current_exe().expect("the test executable"))
+        .args(["--exact", &case, "--nocapture", "--test-threads", "1"])
+        .env_clear()
+        .env(CHILD, place)
+        .env("TMPDIR", place)
+        .envs(extra.iter().copied())
+        .output()
+        .expect("the test executable starts again");
+    let shown = format!(
+        "{}\n{}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status, shown)
 }
