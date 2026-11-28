@@ -569,10 +569,13 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         lower <= at as f64 && (at + 1) as f64 <= upper
     }
 
-    /// The abort path, unarmed and with no deadline: `abort.json` with the detail cut at
-    /// [`DETAIL_MAX`] characters ahead of the steps' digest, then `stopped.json` when the stop was
-    /// shown and the abort mark counts as written, one status read of the target when a request may
-    /// have left, and GD-2's restoration steps. It makes no call that changes an instance; returns 1.
+    /// The abort path, unarmed and with no deadline: `abort.json` with each lone surrogate of the
+    /// detail written as the six characters `\udXXX` and the detail then cut at [`DETAIL_MAX`]
+    /// characters ahead of the steps' digest, then `stopped.json` when the stop was shown and the
+    /// abort mark counts as written, one status read of the target when a request may have left, and
+    /// GD-2's restoration steps. The detail can hold text of a reply or a path, and a text with a
+    /// lone surrogate has no UTF-8 form, which the mark's layout requires; the cut can end inside an
+    /// escape. It makes no call that changes an instance; returns 1.
     fn abort(&mut self, cause: &'static str, guardrail: Option<Text>, detail: &Text) -> u8 {
         self.deadline = None;
         let mut text = if !self.sent {
@@ -591,6 +594,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             text.push_str("; ");
             text.push_text(detail);
         }
+        let text = Text::from(text.to_string());
         let steps = self.gd2.steps();
         let tail = steps_tail(steps);
         let time = self.wall();

@@ -1,8 +1,6 @@
 use std::cell::Cell;
 use std::rc::Rc;
 
-use kestrike_tools::json::{Text, Value};
-
 use super::plane::{ALARMS, Action, CALLER, STATUS, State};
 use super::steps::{Step, links, syncs};
 use super::{COPY, Case, listing, text_of};
@@ -65,36 +63,6 @@ fn a_panic_after_the_abort_marks_link_leaves_it_uncounted() {
         "{}",
         case.stderr()
     );
-}
-
-/// The alarm reply's `StateValue` contains U+D800 and stdout renders it as `\ud800`. The controller
-/// reports a refusal to write `abort.json` and exits with status 1, leaving only `roles.json` and
-/// `stop.json`.
-#[test]
-fn a_lone_surrogate_in_an_alarm_reply_leaves_the_abort_mark_unwritten() {
-    let mut case = Case::new("surrogate-reply");
-    let surrogate = Text::from_code_points([0xd800]).expect("a text holds a lone surrogate");
-    case.faulted(
-        Action::Hook(Box::new(move |state| {
-            state.row(
-                "gd2-guardrail-5",
-                "StateValue",
-                Some(Value::String(surrogate)),
-            );
-            Action::Answer
-        })),
-        false,
-    );
-    let code = case.run();
-    assert_eq!(code, 1, "{}", case.output());
-    let names: Vec<String> = case.marks().into_keys().collect();
-    assert_eq!(names, ["roles", "stop"]);
-    let stderr = case.stderr();
-    assert!(
-        stderr.starts_with("host-stop-controller: abort.json is unwritten: Refusal: "),
-        "{stderr}"
-    );
-    assert!(case.stdout().contains("reads \\ud800"), "{}", case.stdout());
 }
 
 /// The controller treats `EACCES` from the `injection/` lookup as a missing entry. `mkdir` then
