@@ -157,6 +157,11 @@ impl Halt {
     pub(crate) fn aborted(cause: &'static str, guardrail: Option<Text>, detail: Text) -> Self {
         Self::Aborted(Aborted::new(cause, guardrail, detail))
     }
+
+    /// The fault of a step asked for before the state it reads.
+    pub(crate) fn order(sentence: &str) -> Self {
+        Self::Fault(Fault::Order(sentence.to_owned()))
+    }
 }
 
 impl From<Interrupted> for Halt {
