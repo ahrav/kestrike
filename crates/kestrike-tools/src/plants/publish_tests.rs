@@ -6,7 +6,9 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use std::io::Write;
 
-use super::{UNANNOUNCED, conclude, publish, staging_with, umask as read_umask};
+use super::{
+    Creation, UNANNOUNCED, conclude, publish, publish_with, staging_with, umask as read_umask,
+};
 use crate::paths::tests::Scratch;
 
 fn umask() -> u32 {
@@ -52,6 +54,54 @@ fn a_score_replaces_a_link_and_takes_its_mode() {
     assert_eq!(staged(&scratch.0), 0);
 }
 
+/// A file published with a creation mode takes the permission bits of any file created there with that
+/// mode, as `elsewhere` and `beside` are, whether the kernel applies the umask or the directory's default
+/// ACL, and replaces a link at its path while the link's target stays.
+#[test]
+fn a_file_published_with_a_creation_mode_takes_the_bits_of_a_file_created_beside_it() {
+    let scratch = Scratch::new("publish-mode");
+    let (target, elsewhere) = (scratch.0.join("report.json"), scratch.0.join("elsewhere"));
+    fs::write(&elsewhere, "kept\n").expect("written");
+    symlink(&elsewhere, &target).expect("linked");
+    publish_with(&target, "{}\n", Creation::Mode(0o666)).expect("the report is written");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "{}\n");
+    assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "kept\n");
+    let status = fs::symlink_metadata(&target).expect("stats");
+    assert!(status.is_file());
+    let control = fs::metadata(&elsewhere)
+        .expect("stats")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(status.permissions().mode() & 0o777, control);
+    let leftover = fs::read_dir(&scratch.0)
+        .expect("lists")
+        .filter(|entry| {
+            let name = entry.as_ref().expect("an entry").file_name();
+            name.to_string_lossy().starts_with(".report.json.")
+        })
+        .count();
+    assert_eq!(leftover, 0);
+    let (narrow, beside) = (scratch.0.join("narrow.json"), scratch.0.join("beside"));
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o640)
+            .open(&beside)
+            .expect("the control is made");
+    }
+    publish_with(&narrow, "{}\n", Creation::Mode(0o640)).expect("the file is written");
+    let mode =
+        |path: &std::path::Path| fs::metadata(path).expect("stats").permissions().mode() & 0o777;
+    assert_eq!(
+        mode(&narrow),
+        mode(&beside),
+        "the mode, not 0666, is created"
+    );
+}
+
 #[test]
 fn a_score_takes_the_publishing_thread_s_mask() {
     let scratch = Scratch::new("publish");
@@ -90,7 +140,7 @@ fn a_taken_staging_name_is_left_as_it_is() {
     fs::write(scratch.0.join(".score.json.aaaaaaaa"), "taken\n").expect("written");
     symlink(&elsewhere, scratch.0.join(".score.json.bbbbbbbb")).expect("linked");
     let mut names = b"abc".iter().copied();
-    let (path, mut file) = staging_with(&target, |letters| {
+    let (path, mut file) = staging_with(&target, 0o600, |letters| {
         letters.fill(names.next().expect("three names are drawn at most"));
         Ok(())
     })

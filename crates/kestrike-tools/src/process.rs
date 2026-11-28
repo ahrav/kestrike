@@ -1,26 +1,36 @@
 //! Signals and child processes that two tools share: the record of the first handled signal and its
-//! handlers, the reading of a child's exit, the wait for a child that sees a recorded signal, and the
-//! captured child.
+//! handlers, the refusal of a run with SIGCHLD ignored, the reading of a child's exit, the wait for a
+//! child that sees a recorded signal, the captured child, and the stop of a process group that a child
+//! leads.
 //!
 //! The handlers of SIGINT, SIGTERM and SIGHUP record the first of them in [`INTERRUPT`]; a later signal
 //! changes nothing. A tool reads the record between its steps and while it waits for a child, so a signal
 //! that arrives while a child is being started is acted on once that child has started. A wait polls the
-//! child and the record at pauses that start at 0.5 ms and double up to 20 ms, on the monotonic clock.
+//! child and the record at pauses that start at 0.5 ms and double up to a cap, 20 ms unless the caller
+//! names another, on the monotonic clock.
+//!
+//! A group's stop reads its leader's state from `/proc/<pid>/stat` and reaps the leader only after its
+//! last signal, so while the stop signals the group the leader's id names that group alone. That holds
+//! while the caller is the leader's only waiter from its start until the stop returns: no other code of
+//! the process waits for that child or for any child, and SIGCHLD is neither ignored nor set with
+//! `SA_NOCLDWAIT`. A missing state file, `ECHILD` and [`GroupStopped::ReapedElsewhere`] report a reap
+//! outside the stop after it happened; they do not prevent one.
 
+use std::fs;
 use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
-/// The wait for a captured child after SIGKILL, and each of the two waits of `mutants-diff` for its
-/// group leader, after SIGTERM and after SIGKILL.
+/// The wait for a captured child after SIGKILL.
 pub(crate) const GRACE: Duration = Duration::from_secs(10);
 /// The longest pause between two checks of a child and of the record while a tool waits; the pause
 /// starts at [`FIRST_PAUSE`] and doubles up to this bound.
-const POLL: Duration = Duration::from_millis(20);
+pub(crate) const POLL: Duration = Duration::from_millis(20);
 const FIRST_PAUSE: Duration = Duration::from_micros(500);
 
 /// The first handled signal, or 0 while none has arrived.
@@ -212,18 +222,389 @@ pub(crate) fn exited_within(
     limit: Duration,
     interrupt: Option<&Interrupt>,
 ) -> io::Result<Option<ExitStatus>> {
+    let recorded = || interrupt.is_some_and(|interrupt| interrupt.recorded().is_some());
+    polled(limit, POLL, &recorded, || child.try_wait())
+}
+
+/// The refusal of a tool started with SIGCHLD ignored: the kernel then reaps each child as it ends, so
+/// every wait fails once the child has run and the child's outcome is unknown.
+pub(crate) const SIGCHLD_IGNORED: &str = "SIGCHLD is ignored, so the child's exit cannot be read";
+
+/// `refuse_ignored_sigchld` is the refusal of a start with SIGCHLD ignored. A tool that starts children
+/// through this module calls it before its first child starts and ends the run with the returned sentence
+/// as it ends a run whose child failed to start.
+///
+/// # Errors
+///
+/// [`SIGCHLD_IGNORED`] when SIGCHLD is ignored, or the sentence of a disposition that cannot be read.
+pub(crate) fn refuse_ignored_sigchld() -> Result<(), String> {
+    match ignored(libc::SIGCHLD) {
+        Ok(false) => Ok(()),
+        Ok(true) => Err(SIGCHLD_IGNORED.to_owned()),
+        Err(error) => Err(format!("SIGCHLD's disposition cannot be read: {error}")),
+    }
+}
+
+/// The state of a child that leads its process group, read from `/proc/<pid>/stat` without reaping it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Leader {
+    /// A state other than `Z`, or `Z` while another thread of the process still runs.
+    Running,
+    /// The state `Z` with one thread left: the process exited and is held unreaped, so its id still names
+    /// its group.
+    Exited,
+    /// The state file is gone: a wait outside this module reaped the leader.
+    Reaped,
+}
+
+/// `parsed` reads `stat` as the `/proc/<pid>/stat` record of the group leader `pid`, a child of `parent`.
+/// `parsed` takes the last `)` as the end of the command name because the name can contain spaces and
+/// parentheses. The state follows the last `)`. Offsets 1, 2 and 17 after the state identify the parent,
+/// the process group and the thread count. A leader whose main thread ended reads `Z` while other threads
+/// run, so `Z` with one thread is an exited process.
+///
+/// # Errors
+///
+/// `parsed` returns an error if it cannot locate a one-byte state after the command name, the parent PID,
+/// process group ID or thread count fails to parse as `u64`, the parent PID differs from `parent`, or the
+/// process group ID differs from `pid`.
+fn parsed(stat: &[u8], pid: u32, parent: u32) -> Result<Leader, String> {
+    let close = stat
+        .iter()
+        .rposition(|&byte| byte == b')')
+        .ok_or("holds no command name")?;
+    let rest = stat[close + 1..]
+        .strip_prefix(b" ")
+        .ok_or("holds no state field")?;
+    let fields: Vec<&[u8]> = rest.split(|&byte| byte == b' ').collect();
+    let number = |at: usize| {
+        let field = fields.get(at)?;
+        std::str::from_utf8(field)
+            .ok()?
+            .trim_end()
+            .parse::<u64>()
+            .ok()
+    };
+    let state = match fields.first() {
+        Some(&[state]) => state,
+        _ => return Err("holds no state field".to_owned()),
+    };
+    let named = number(1).ok_or("holds no parent")?;
+    if named != u64::from(parent) {
+        return Err(format!(
+            "names the parent {named}, so the process is no child of the process {parent}"
+        ));
+    }
+    let group = number(2).ok_or("holds no process group")?;
+    if group != u64::from(pid) {
+        return Err(format!(
+            "names the process group {group}, so the child leads no group of its own"
+        ));
+    }
+    let threads = number(17).ok_or("holds no thread count")?;
+    Ok(if *state == b'Z' && threads <= 1 {
+        Leader::Exited
+    } else {
+        Leader::Running
+    })
+}
+
+fn at(path: &Path, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
+/// `own_view` returns `Ok` when the `NStgid` line of `<root>/self/status` holds one id, `own`. One id
+/// there means the procfs at `root` is that of the PID namespace this process lives in, so the ids it
+/// shows are the ids this process signals and waits for.
+///
+/// # Errors
+///
+/// `own_view` returns an error if `<root>/self/status` cannot be read, as when `/proc` is not mounted, or
+/// its `NStgid` line is missing or holds anything other than the one id `own`.
+fn own_view(root: &Path, own: u32) -> io::Result<()> {
+    let path = root.join("self/status");
+    let status = fs::read(&path).map_err(|error| at(&path, &error))?;
+    let single = status
+        .split(|&byte| byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"NStgid:"))
+        .and_then(|ids| {
+            let mut ids = ids
+                .split(u8::is_ascii_whitespace)
+                .filter(|id| !id.is_empty());
+            let first = ids.next()?;
+            ids.next().is_none().then_some(first)
+        })
+        .and_then(|id| std::str::from_utf8(id).ok()?.parse::<u32>().ok());
+    if single == Some(own) {
+        return Ok(());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "{} holds no NStgid line of the one id {own}, so /proc shows another PID namespace",
+            path.display()
+        ),
+    ))
+}
+
+/// `leader` reads the state of the group leader `pid`, a child of this process, from
+/// `/proc/<pid>/stat` after [`own_view`] confirms that `/proc` is this process's view. A missing state
+/// file is [`Leader::Reaped`].
+///
+/// # Errors
+///
+/// `leader` returns an error if [`own_view`] fails, the read of the state file fails other than with
+/// `ENOENT` or `ESRCH`, or [`parsed`] refuses the record. Each error names the path it concerns and a
+/// failed read keeps its kind.
+pub(crate) fn leader(pid: u32) -> io::Result<Leader> {
+    leader_under(Path::new("/proc"), pid, std::process::id())
+}
+
+/// `leader_under` is [`leader`] with `root` as the procfs and `own` as this process's id.
+fn leader_under(root: &Path, pid: u32, own: u32) -> io::Result<Leader> {
+    own_view(root, own)?;
+    let path = root.join(pid.to_string()).join("stat");
+    match fs::read(&path) {
+        Ok(stat) => parsed(&stat, pid, own).map_err(|reason| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} {reason}", path.display()),
+            )
+        }),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
+            Ok(Leader::Reaped)
+        }
+        Err(error) => Err(at(&path, &error)),
+    }
+}
+
+/// `polled` calls `step` until it returns a value, `limit` passes on the monotonic clock or `ended`
+/// holds, pausing between two calls for a time that starts at [`FIRST_PAUSE`] and doubles up to `cap`.
+/// It returns `None` when the limit passes or `ended` holds first.
+fn polled<T>(
+    limit: Duration,
+    cap: Duration,
+    ended: &dyn Fn() -> bool,
+    mut step: impl FnMut() -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
     let start = Instant::now();
-    let mut pause = FIRST_PAUSE;
+    let mut pause = FIRST_PAUSE.min(cap);
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
+        if let Some(value) = step()? {
+            return Ok(Some(value));
         }
         let waited = start.elapsed();
-        if waited >= limit || interrupt.is_some_and(|interrupt| interrupt.recorded().is_some()) {
+        if waited >= limit || ended() {
             return Ok(None);
         }
         thread::sleep(pause.min(limit - waited));
-        pause = (pause * 2).min(POLL);
+        pause = (pause * 2).min(cap);
+    }
+}
+
+/// `leader_left_within` reads the state of the leader `pid` until it leaves [`Leader::Running`], `limit`
+/// passes or `ended` holds, at the pauses of [`polled`] up to `cap`, and returns the last state read. It
+/// reaps nothing.
+///
+/// # Errors
+///
+/// A read of the state fails as [`leader`] states.
+pub(crate) fn leader_left_within(
+    pid: u32,
+    limit: Duration,
+    cap: Duration,
+    ended: &dyn Fn() -> bool,
+) -> io::Result<Leader> {
+    let left = polled(limit, cap, ended, || {
+        Ok(Some(leader(pid)?).filter(|&state| state != Leader::Running))
+    })?;
+    Ok(left.unwrap_or(Leader::Running))
+}
+
+/// `signal_group` sends `signal` to the process group `group` and returns false when no member is left.
+///
+/// # Errors
+///
+/// `killpg` fails with an error other than `ESRCH`.
+fn signal_group(group: libc::pid_t, signal: i32) -> io::Result<bool> {
+    // SAFETY: `killpg` takes two integers and touches no memory of the caller.
+    if unsafe { libc::killpg(group, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(error)
+}
+
+/// How [`stop_group`] stops the process group a child leads.
+#[derive(Clone, Copy)]
+pub(crate) struct GroupStop<'a> {
+    grace: Duration,
+    ends_grace: Option<&'a dyn Fn() -> bool>,
+    second_grace: bool,
+    reap: Option<Duration>,
+    poll: Duration,
+}
+
+impl<'a> GroupStop<'a> {
+    /// `new` is a stop whose grace after SIGTERM lasts `grace`, whose reap is bounded by `reap` (`None`
+    /// permits an unbounded reap wait), and which pauses up to `poll` between two reads of the leader's
+    /// state. Each grace ends once `ends` holds, as when a further signal is delivered; the stop calls
+    /// `ends` at each pause of a grace. `ends` must preserve each child's wait status for its reaper.
+    ///
+    /// # Panics
+    ///
+    /// `poll` is zero, which would read the state with no pause.
+    pub(crate) const fn new(
+        grace: Duration,
+        ends: Option<&'a dyn Fn() -> bool>,
+        reap: Option<Duration>,
+        poll: Duration,
+    ) -> Self {
+        assert!(!poll.is_zero(), "a stop pauses between two reads");
+        Self {
+            grace,
+            ends_grace: ends,
+            second_grace: false,
+            reap,
+            poll,
+        }
+    }
+
+    /// `with_second_grace` sends SIGKILL after a grace the leader outlives and waits a second grace of the
+    /// same length before the closing SIGKILL.
+    #[must_use]
+    pub(crate) const fn with_second_grace(mut self) -> Self {
+        self.second_grace = true;
+        self
+    }
+
+    fn ends(&self) -> bool {
+        self.ends_grace.is_some_and(|ends| ends())
+    }
+}
+
+/// How [`stop_group`] left the child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupStopped {
+    /// The reap's status.
+    Reaped(ExitStatus),
+    /// The leader still ran when the reap's bound passed and stays unreaped.
+    Running,
+    /// A wait outside this module reaped the leader, so the stop sent no signal after it saw that.
+    ReapedElsewhere,
+}
+
+/// What [`signals`] leaves to do.
+enum Signalled {
+    /// The leader is held unreaped and the reap follows.
+    Reap,
+    /// The leader's state file is gone.
+    Gone,
+}
+
+/// `stop_group` stops the process group that `child`, held unreaped, leads, and then reaps it: SIGTERM to
+/// the group; a grace for the leader's exit; when the leader still runs and the stop has a second grace,
+/// SIGKILL to the group and the second grace; a closing SIGKILL to the group; and the reap within its
+/// bound. Each grace starts once its signal is sent and ends at the leader's exit, at its bound or when the
+/// stop's check holds. Keeping the leader unreaped reserves its id, and so its group's, throughout
+/// signaling, which holds only while the caller is `child`'s only waiter from its start until the stop
+/// returns: no other code of the process waits for `child` or for any child, and SIGCHLD is neither
+/// ignored nor set with `SA_NOCLDWAIT`. An exited leader held unreaped meets that. If a signal finds the
+/// group empty, `stop_group` proceeds to the reap. The stop detects a wait elsewhere only after that wait
+/// has reaped the leader, and does not prevent it. A missing state file stops the signals and prompts a
+/// wait for the child: `ECHILD` from that wait or from the reap is [`GroupStopped::ReapedElsewhere`].
+///
+/// # Errors
+///
+/// A read of the leader's state, a signal other than to an empty group, or the reap fails, or the state
+/// file is gone while the child still runs. `stop_group` then reads the leader's state once more: a
+/// leader that reads running or exited, and so is still held unreaped, gets SIGKILL to its group before
+/// any wait. A child that `child.try_wait()` then finds running gets SIGKILL to the group when that read
+/// failed or found no state file, and SIGKILL to itself, and the reap runs again. `stop_group` returns
+/// the first error.
+pub(crate) fn stop_group(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
+    stop_with(child, stop, &mut signal_group)
+}
+
+/// `stop_with` is [`stop_group`] with `send` sending each signal to the group.
+fn stop_with(
+    child: &mut Child,
+    stop: &GroupStop<'_>,
+    send: &mut dyn FnMut(libc::pid_t, i32) -> io::Result<bool>,
+) -> io::Result<GroupStopped> {
+    let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
+    let ended = signals(child.id(), group, stop, send).and_then(|signalled| match signalled {
+        Signalled::Reap => reap(child, stop),
+        Signalled::Gone => match child.try_wait() {
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                Ok(GroupStopped::ReapedElsewhere)
+            }
+            Err(error) => Err(error),
+            Ok(Some(status)) => Ok(GroupStopped::Reaped(status)),
+            Ok(None) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the state file of a running child is gone",
+            )),
+        },
+    });
+    ended.inspect_err(|_error| {
+        let held = matches!(leader(child.id()), Ok(Leader::Running | Leader::Exited));
+        if held {
+            let _ = send(group, libc::SIGKILL);
+        }
+        if matches!(child.try_wait(), Ok(None)) {
+            if !held {
+                let _ = send(group, libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = reap(child, stop);
+        }
+    })
+}
+
+/// `signals` sends the stop's signals. Once a read of the leader's state finds its state file gone it
+/// sends no further signal.
+fn signals(
+    pid: u32,
+    group: libc::pid_t,
+    stop: &GroupStop<'_>,
+    send: &mut dyn FnMut(libc::pid_t, i32) -> io::Result<bool>,
+) -> io::Result<Signalled> {
+    if leader(pid)? == Leader::Reaped {
+        return Ok(Signalled::Gone);
+    }
+    if !send(group, libc::SIGTERM)? {
+        return Ok(Signalled::Reap);
+    }
+    let ends = || stop.ends();
+    let mut state = leader_left_within(pid, stop.grace, stop.poll, &ends)?;
+    if state == Leader::Running && stop.second_grace {
+        if !send(group, libc::SIGKILL)? {
+            return Ok(Signalled::Reap);
+        }
+        state = leader_left_within(pid, stop.grace, stop.poll, &ends)?;
+    }
+    if state == Leader::Reaped {
+        return Ok(Signalled::Gone);
+    }
+    send(group, libc::SIGKILL)?;
+    Ok(Signalled::Reap)
+}
+
+fn reap(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
+    let status = match stop.reap {
+        Some(limit) => polled(limit, stop.poll, &|| false, || child.try_wait()),
+        None => child.wait().map(Some),
+    };
+    match status {
+        Ok(status) => Ok(status.map_or(GroupStopped::Running, GroupStopped::Reaped)),
+        Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+            Ok(GroupStopped::ReapedElsewhere)
+        }
+        Err(error) => Err(error),
     }
 }
 
