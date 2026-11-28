@@ -819,3 +819,7 @@ fn rows(
     }
     Ok(mismatched)
 }
+
+#[cfg(test)]
+#[path = "run_tests.rs"]
+mod tests;

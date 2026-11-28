@@ -1,8 +1,16 @@
 //! The cases of the `weaken-orderings` tool that start the built binary: the `check` command on the
-//! checkout and on trees that lack its inputs, and the command reader's usage and help.
+//! checkout and on trees that lack its inputs, the command reader's usage and help, and the `run` command
+//! over a clone of the checkout.
 #![cfg(target_os = "linux")]
 
 mod check;
+mod drift;
+mod fixture;
+mod genmc;
+mod loom;
+mod refusals;
+mod signals;
+mod standins;
 
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
