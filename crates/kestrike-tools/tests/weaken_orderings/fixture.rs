@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -14,6 +14,7 @@ use kestrike_tools::genmc::read_source;
 use kestrike_tools::json::{self, Object, Text, Value};
 use kestrike_tools::orderings::check::CATALOG;
 use kestrike_tools::orderings::sources::loom_site;
+use kestrike_tools::plants::{Creation, Staging, publish_staged};
 
 use super::standins::{suffixed, wrapper};
 use super::{BINARY, Scratch, top};
@@ -217,15 +218,74 @@ pub fn read_json(path: &Path) -> Value {
     json::parse(&read).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-fn git(repo: &Path, args: &[&str]) -> String {
+/// The settings each Git call of the cases runs with: an identity, no signing and no hooks.
+pub const GIT_SETTINGS: [&str; 8] = [
+    "-c",
+    "user.name=t",
+    "-c",
+    "user.email=t@t",
+    "-c",
+    "commit.gpgsign=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
+/// `git` runs Git in `repo` with [`GIT_SETTINGS`] and `args`, fails the case where it exits nonzero and
+/// returns its standard output.
+pub fn git(repo: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
+        .args(GIT_SETTINGS)
         .args(args)
         .output()
         .expect("git starts");
     assert!(output.status.success(), "git {args:?}: {output:?}");
     String::from_utf8(output.stdout).expect("UTF-8")
+}
+
+/// `head_bytes` is the bytes of the regular file `name` at `repo`'s `HEAD`, read from Git's object.
+pub fn head_bytes(repo: &Path, name: &str) -> Vec<u8> {
+    let listed = git(repo, &["ls-tree", "HEAD", "--", name]);
+    assert!(
+        listed.starts_with("100644 ") || listed.starts_with("100755 "),
+        "{name} is a regular file at HEAD: {listed}"
+    );
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("HEAD:{name}")])
+        .output()
+        .expect("git starts");
+    assert!(output.status.success(), "git show {name}: {output:?}");
+    output.stdout
+}
+
+/// `restore_entry` puts back the entry `HEAD` holds at `name` in `repo`'s working tree, leaving the
+/// index as it stands; Git writes the entry itself, a link as a link.
+pub fn restore_entry(repo: &Path, name: &str) {
+    checked_parents(repo, name);
+    git(
+        repo,
+        &["restore", "--source=HEAD", "--worktree", "--", name],
+    );
+}
+
+/// `checked_parents` fails the case where a directory of `name` under `repo` is no directory of its own,
+/// as a link is, and makes a missing one.
+pub fn checked_parents(repo: &Path, name: &str) {
+    let mut at = repo.to_owned();
+    for part in Path::new(name)
+        .parent()
+        .into_iter()
+        .flat_map(Path::components)
+    {
+        at.push(part);
+        match fs::symlink_metadata(&at) {
+            Ok(status) => assert!(status.is_dir(), "{} is no directory", at.display()),
+            Err(_) => fs::create_dir(&at).expect("made"),
+        }
+    }
 }
 
 pub fn status(repo: &Path) -> String {
@@ -266,6 +326,8 @@ pub struct Opts {
     pub plan: Option<Value>,
     pub env: Vec<Setting>,
     pub umask: Option<libc::mode_t>,
+    /// Standard output goes to `/dev/full`, which refuses every write.
+    pub full_stdout: bool,
 }
 
 /// A clone of the checkout with its tracked changes and untracked files, `cargo` and `rustc` stand-ins in
@@ -334,7 +396,8 @@ impl Fixture {
             let (source, target) = (top.join(name), repo.join(name));
             if source.is_file() {
                 replace_entry(&repo, name, &fs::read(&source).expect("reads"));
-            } else if target.exists() {
+            } else if fs::symlink_metadata(&target).is_ok() {
+                checked_parents(&repo, name);
                 fs::remove_file(&target).expect("removed");
             }
         }
@@ -373,23 +436,7 @@ impl Fixture {
         change(&mut planted);
         replace_entry(&self.repo, CATALOG, json::line(&planted).as_bytes());
         git(&self.repo, &["add", "-A"]);
-        git(
-            &self.repo,
-            &[
-                "-c",
-                "user.name=t",
-                "-c",
-                "user.email=t@t",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "commit",
-                "-qm",
-                "planted",
-                "--allow-empty",
-            ],
-        );
+        git(&self.repo, &["commit", "-qm", "planted", "--allow-empty"]);
         git(&self.repo, &["rev-parse", "HEAD"]).trim().to_owned()
     }
 
@@ -422,7 +469,6 @@ impl Fixture {
             ".sleeping",
             ".stopped",
             ".failed",
-            ".parent",
         ] {
             let _ = fs::remove_file(suffixed(&self.plan, suffix));
         }
@@ -480,6 +526,13 @@ impl Fixture {
                     Ok(())
                 });
             }
+        }
+        if opts.full_stdout {
+            let full = fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .expect("opens");
+            command.stdout(full);
         }
         let output = command
             .stdin(Stdio::null())
@@ -583,43 +636,22 @@ impl Fixture {
 /// `replace_entry` puts a new regular file holding `bytes` at `name` under `repo`: created exclusively
 /// beside the entry with the entry's permission bits, or 0644 where none stands, and renamed over it, so a
 /// link at `name` is replaced and its target keeps its bytes. A parent of `name` under `repo` that is a
-/// link fails the case; a missing one is made.
+/// link fails the case before any write; a missing one is made.
 pub fn replace_entry(repo: &Path, name: &str, bytes: &[u8]) {
-    let relative = Path::new(name);
-    let mut at = repo.to_owned();
-    if let Some(parent) = relative.parent() {
-        for part in parent.components() {
-            at.push(part);
-            match fs::symlink_metadata(&at) {
-                Ok(status) => assert!(status.is_dir(), "{} is no directory", at.display()),
-                Err(_) => fs::create_dir(&at).expect("made"),
-            }
-        }
-    }
-    let target = repo.join(relative);
+    checked_parents(repo, name);
+    let target = repo.join(name);
     let mode = fs::symlink_metadata(&target)
         .ok()
         .filter(fs::Metadata::is_file)
         .map_or(0o644, |status| status.permissions().mode() & 0o7777);
-    let leaf = relative.file_name().expect("a name").to_string_lossy();
-    let staged = at.join(format!(".{leaf}.fixture"));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&staged)
-        .unwrap_or_else(|error| panic!("{}: {error}", staged.display()));
-    std::io::Write::write_all(&mut file, bytes).expect("written");
-    file.set_permissions(fs::Permissions::from_mode(mode))
-        .expect("moded");
-    drop(file);
-    fs::rename(&staged, &target).expect("renamed");
+    let staging = Staging::new(Creation::Exact(mode)).suffix(".fixture");
+    publish_staged(&target, bytes, staging).unwrap_or_else(|error| panic!("{error}"));
 }
 
 /// `executable` writes the stand-in at `path` through a child, the one process that holds the file open
 /// for writing, so no fork of this process holds a descriptor that would make its `execve` fail with
 /// `ETXTBSY`.
-fn executable(path: &Path, text: &str) {
+pub fn executable(path: &Path, text: &str) {
     let mut writer = Command::new("sh")
         .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
         .arg(path)
@@ -682,10 +714,6 @@ impl Running {
         let pid = libc::pid_t::try_from(self.0.id()).expect("a pid");
         // SAFETY: `kill` takes two integers; the child is unreaped, so its pid names it.
         assert_eq!(unsafe { libc::kill(pid, number) }, 0);
-    }
-
-    pub fn id(&self) -> u32 {
-        self.0.id()
     }
 
     /// `wait` reaps the run within `limit`, or kills it and fails the case.

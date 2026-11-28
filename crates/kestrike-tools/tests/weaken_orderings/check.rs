@@ -111,21 +111,28 @@ fn a_helper_that_cannot_load_or_a_usage_error_exits_2() {
     );
 }
 
-/// `copy_tree` copies the directory `from` to `to`, passing over each directory named `target` and
-/// `__pycache__`; links are copied as the files they name.
-fn copy_tree(from: &Path, to: &Path) {
-    fs::create_dir(to).expect("made");
-    for entry in fs::read_dir(from).expect("lists") {
-        let entry = entry.expect("an entry");
-        let name = entry.file_name();
-        let (source, copy) = (entry.path(), to.join(&name));
-        if fs::metadata(&source).expect("stats").is_dir() {
-            if name != "target" && name != "__pycache__" {
-                copy_tree(&source, &copy);
-            }
-        } else {
-            fs::copy(&source, &copy).expect("copied");
+/// `copy_tracked` copies each file Git tracks under `directory` of the checkout `top` into `to`, each a
+/// regular file at its own path.
+fn copy_tracked(top: &Path, directory: &str, to: &Path) {
+    let listed = Command::new("git")
+        .arg("-C")
+        .arg(top)
+        .args(["ls-files", "-z", "--", directory])
+        .output()
+        .expect("git starts");
+    assert!(listed.status.success(), "{listed:?}");
+    for name in String::from_utf8(listed.stdout).expect("UTF-8").split('\0') {
+        if name.is_empty() {
+            continue;
         }
+        let source = top.join(name);
+        let status = fs::symlink_metadata(&source).expect("stats");
+        if !status.is_file() {
+            continue;
+        }
+        let copy = to.join(name);
+        fs::create_dir_all(copy.parent().expect("a parent")).expect("made");
+        fs::copy(&source, &copy).expect("copied");
     }
 }
 
@@ -135,7 +142,7 @@ fn copy_tree(from: &Path, to: &Path) {
 fn the_command_exits_1_and_prints_the_refusing_report() {
     let top = top();
     let scratch = Scratch::new("refusing");
-    copy_tree(&top.join("verification"), &scratch.0.join("verification"));
+    copy_tracked(&top, "verification", &scratch.0);
     let run = tool(&scratch.0, &["check"], &scratch.0);
     assert_eq!(
         run.status.code(),
@@ -160,7 +167,8 @@ fn the_command_exits_1_and_prints_the_refusing_report() {
 }
 
 /// A report written past the soft file size limit fails with `EFBIG` and exits 120: the tool ignores
-/// SIGXFSZ, so the limit ends no process.
+/// SIGXFSZ, so the limit ends no process. The tool starts with SIGXFSZ at its default action and unblocked,
+/// and the limit lowers the soft bound alone.
 #[test]
 fn a_report_past_the_file_size_limit_exits_120() {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -173,14 +181,21 @@ fn a_report_past_the_file_size_limit_exits_120() {
         .args(["weaken-orderings", "check"])
         .current_dir(&scratch.0)
         .stdout(sink);
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `setrlimit`, which is
-    // async-signal-safe, on a local value.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, `sigemptyset`,
+    // `sigaddset`, `sigprocmask`, `getrlimit` and `setrlimit`, which are async-signal-safe, on local
+    // values that outlive the calls.
     unsafe {
         command.pre_exec(|| {
-            let limit = libc::rlimit {
-                rlim_cur: 100,
-                rlim_max: libc::RLIM_INFINITY,
-            };
+            libc::signal(libc::SIGXFSZ, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGXFSZ);
+            libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = limit.rlim_max.min(100);
             if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -191,4 +206,23 @@ fn a_report_past_the_file_size_limit_exits_120() {
     assert_eq!(status.signal(), None, "{status:?}");
     assert_eq!(status.code(), Some(120));
     assert!(fs::metadata(scratch.0.join("out")).expect("stats").len() <= 100);
+}
+
+/// The help written to a standard output that refuses every write exits 120.
+#[test]
+fn a_help_that_standard_output_refuses_exits_120() {
+    let top = top();
+    let scratch = Scratch::new("help-full");
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("opens");
+    let status = Command::new(super::BINARY)
+        .arg(&top)
+        .args(["weaken-orderings", "--help"])
+        .current_dir(&scratch.0)
+        .stdout(full)
+        .status()
+        .expect("the binary starts");
+    assert_eq!(status.code(), Some(120));
 }

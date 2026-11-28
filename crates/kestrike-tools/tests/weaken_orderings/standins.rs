@@ -18,7 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use kestrike_tools::genmc::case::check_line;
@@ -88,8 +88,53 @@ fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
+/// `checked_parents` fails the stand-in where a directory of the relative `path` under the working
+/// directory is no directory of its own, as a link is, so a write stays inside the copy.
+fn checked_parents(path: &Path) {
+    if path.is_absolute() {
+        return;
+    }
+    let mut at = PathBuf::new();
+    for part in path.parent().into_iter().flat_map(Path::components) {
+        at.push(part);
+        let status =
+            fs::symlink_metadata(&at).unwrap_or_else(|error| panic!("{}: {error}", at.display()));
+        assert!(status.is_dir(), "{} is no directory", at.display());
+    }
+}
+
+/// `write` replaces `path` with a new regular file holding `text`, created exclusively beside it with the
+/// mode of the regular file it replaces, or 0644, and renamed over it, so a link at `path` is replaced and
+/// its target keeps its bytes.
 fn write(path: &Path, text: &str) {
-    fs::write(path, text).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    write_bytes(path, text.as_bytes());
+}
+
+fn write_bytes(path: &Path, bytes: &[u8]) {
+    checked_parents(path);
+    let mode = fs::symlink_metadata(path)
+        .ok()
+        .filter(fs::Metadata::is_file)
+        .map_or(0o644, |status| status.permissions().mode() & 0o7777);
+    let staged = suffixed(path, ".standin");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .unwrap_or_else(|error| panic!("{}: {error}", staged.display()));
+    file.write_all(bytes)
+        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(mode)))
+        .unwrap_or_else(|error| panic!("{}: {error}", staged.display()));
+    drop(file);
+    fs::rename(&staged, path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+}
+
+/// `regular` fails the stand-in unless the relative `path` names a regular file of the copy itself.
+fn regular(path: &Path) {
+    checked_parents(path);
+    let status =
+        fs::symlink_metadata(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    assert!(status.is_file(), "{} is no regular file", path.display());
 }
 
 fn append(path: &Path, text: &str) {
@@ -232,7 +277,6 @@ fn cargo(args: &[String], plan: &Path, out: &mut File) -> i32 {
 
 static STOPPED: OnceLock<CString> = OnceLock::new();
 static TWICE: AtomicBool = AtomicBool::new(false);
-static PARENT: AtomicI32 = AtomicI32::new(0);
 
 extern "C" fn stopped(_: libc::c_int) {
     if let Some(path) = STOPPED.get() {
@@ -249,13 +293,7 @@ extern "C" fn stopped(_: libc::c_int) {
             }
         }
     }
-    // SAFETY: `getppid` takes no argument and is async-signal-safe.
-    let parent = unsafe { libc::getppid() };
-    if TWICE.load(Ordering::SeqCst) && parent == PARENT.load(Ordering::SeqCst) {
-        // SAFETY: `kill` takes plain values and is async-signal-safe; `parent` is the run that started this
-        // test, which still holds it unreaped.
-        unsafe { libc::kill(parent, libc::SIGHUP) };
-    } else {
+    if !TWICE.load(Ordering::SeqCst) {
         // SAFETY: `_exit` ends the process without running any handler of this process.
         unsafe { libc::_exit(143) };
     }
@@ -263,12 +301,6 @@ extern "C" fn stopped(_: libc::c_int) {
 
 fn sleep_until_stopped(plan: &Path, twice: bool) {
     TWICE.store(twice, Ordering::SeqCst);
-    if twice {
-        // SAFETY: `getppid` takes no argument and touches no memory of the caller.
-        let parent = unsafe { libc::getppid() };
-        PARENT.store(parent, Ordering::SeqCst);
-        write(&suffixed(plan, ".parent"), &parent.to_string());
-    }
     let path = CString::new(suffixed(plan, ".stopped").as_os_str().as_bytes()).expect("no NUL");
     let _ = STOPPED.set(path);
     // SAFETY: `stopped` is an `extern "C"` handler that calls only async-signal-safe functions.
@@ -317,19 +349,28 @@ fn loom_test(test: &str, plan: &Path, out: &mut File) -> i32 {
     match mode.as_str() {
         "drift" | "drift-own" => {
             let target = if mode == "drift" { other } else { own };
-            let mut file = OpenOptions::new().append(true).open(target).expect("opens");
-            file.write_all(b"// drift\n").expect("written");
+            regular(target);
+            let mut bytes = fs::read(target).expect("reads");
+            bytes.extend_from_slice(b"// drift\n");
+            write_bytes(target, &bytes);
             mode = "pass".to_owned();
         }
         "link" => {
             let twin = PathBuf::from(format!("{}.twin", files[0]));
-            fs::write(&twin, fs::read(other).expect("reads")).expect("written");
+            regular(other);
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&twin)
+                .and_then(|mut file| file.write_all(&fs::read(other)?))
+                .expect("the twin is written");
             fs::remove_file(other).expect("removed");
             symlink(twin.file_name().expect("a name"), other).expect("linked");
             mode = "pass".to_owned();
         }
         "gone" | "dangling" | "loop" | "dir-own" | "gone-other" | "dir-other" => {
             let target = if mode.ends_with("-other") { other } else { own };
+            regular(target);
             fs::remove_file(target).expect("removed");
             if mode == "dangling" {
                 symlink("absent", target).expect("linked");
@@ -342,6 +383,7 @@ fn loom_test(test: &str, plan: &Path, out: &mut File) -> i32 {
         }
         "unreadable" | "unreadable-other" => {
             let target = if mode.ends_with("-other") { other } else { own };
+            regular(target);
             fs::set_permissions(target, fs::Permissions::from_mode(0o000)).expect("changed");
             mode = "pass".to_owned();
         }

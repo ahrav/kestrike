@@ -1,34 +1,14 @@
-//! The run's behaviors that the script's own statements give and that stand as kept defects, each pinned
-//! as the run gives it, and the fixture's own writes into a clone that tracks links.
+//! The run's behaviors that stand as kept defects, each pinned as the run gives it, and the fixture's
+//! own writes into a clone that tracks links.
 
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::process::Command;
 
 use kestrike_tools::json::{self, Value};
 use kestrike_tools::orderings::check::{CATALOG, GENMC};
 
 use super::fixture::*;
-
-fn git(repo: &Path, args: &[&str]) {
-    let done = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args([
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "-c",
-            "commit.gpgsign=false",
-        ])
-        .args(["-c", "core.hooksPath=/dev/null"])
-        .args(args)
-        .status()
-        .expect("git starts");
-    assert!(done.success(), "git {args:?}");
-}
 
 /// The fixture replaces the lane script and the catalog of a clone that tracks a link at each by a new
 /// regular file renamed over the link, so each link's target keeps its bytes.
@@ -57,6 +37,47 @@ fn the_fixture_replaces_a_tracked_link_and_its_target_keeps_its_bytes() {
     }
 }
 
+/// The fixture refuses a clone whose tracked directory is a link out of the clone before it writes there:
+/// the lane script's replacement under a linked `scripts` fails the fixture, and the file the link reaches
+/// keeps its bytes and its mode.
+#[test]
+fn the_fixture_refuses_a_linked_parent_before_any_write_outside_the_clone() {
+    let outside = super::Scratch::new("kept-outside-parent");
+    let moved = outside.0.join("scripts");
+    let lane = moved.join("rust-lane.sh");
+    let mut before = None;
+    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Fixture::prepared("kept-linked-parent", |repo| {
+            fs::rename(repo.join("scripts"), &moved).expect("moved out");
+            symlink(&moved, repo.join("scripts")).expect("linked");
+            let status = fs::metadata(&lane).expect("stats");
+            before = Some((fs::read(&lane).expect("reads"), status.permissions().mode()));
+        })
+    }));
+    assert!(made.is_err(), "the fixture refuses the linked parent");
+    let status = fs::metadata(&lane).expect("stats");
+    assert_eq!(
+        Some((fs::read(&lane).expect("reads"), status.permissions().mode())),
+        before
+    );
+    let names: Vec<String> = fs::read_dir(&moved)
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("lists")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert_eq!(
+        names,
+        Vec::<String>::new(),
+        "no staging file outside the clone"
+    );
+}
+
 /// A declared GenMC case whose name holds path parts reaches the lane's command line as the declaration
 /// spells it: the run derives the lane's arguments and the case's evidence names from it, and the lane
 /// stand-in records the arguments and writes nothing for such a case.
@@ -72,13 +93,13 @@ fn a_genmc_case_name_with_path_parts_reaches_the_lane_as_declared() {
     let Some(Value::Object(cases)) = object.get_mut("cases") else {
         panic!("the declaration holds cases");
     };
-    cases.insert("join/../../escape", case);
+    cases.insert("join/../../zq-outside", case);
     replace_entry(&fixture.repo, GENMC, json::line(&declared).as_bytes());
     fixture.commit_with(|catalog| {
         needing(
             catalog,
             JOIN_ROW,
-            vec![entry("genmc", &["join/../../escape"], JOIN_FREED)],
+            vec![entry("genmc", &["join/../../zq-outside"], JOIN_FREED)],
         );
     });
     let ran = fixture.run_rows(&[JOIN_ROW]);
@@ -91,23 +112,27 @@ fn a_genmc_case_name_with_path_parts_reaches_the_lane_as_declared() {
     let calls = fixture.lines(".lane");
     assert_eq!(calls.len(), 1, "{calls:?}");
     assert!(
-        calls[0].ends_with(" genmc scheduled join/../../escape"),
+        calls[0].ends_with(" genmc scheduled join/../../zq-outside"),
         "{calls:?}"
     );
-    for directory in [fixture.resolved("work"), fixture.base.clone()] {
-        let names: Vec<String> = fs::read_dir(&directory)
-            .expect("lists")
-            .map(|entry| {
-                entry
-                    .expect("lists")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .filter(|name| name.contains("escape"))
-            .collect();
-        assert_eq!(names, Vec::<String>::new(), "{}", directory.display());
+    let mut escaped = Vec::new();
+    let mut pending = vec![fixture.base.clone()];
+    while let Some(at) = pending.pop() {
+        for listed in fs::read_dir(&at).expect("lists") {
+            let listed = listed.expect("lists");
+            if listed.file_name().to_string_lossy().contains("zq-outside") {
+                escaped.push(listed.path());
+            }
+            if listed.file_type().expect("a type").is_dir() {
+                pending.push(listed.path());
+            }
+        }
     }
+    assert_eq!(
+        escaped,
+        Vec::<std::path::PathBuf>::new(),
+        "no entry anywhere under the fixture"
+    );
 }
 
 /// A tracked `.gitattributes` that marks a file `export-ignore` leaves that file out of the copy, which
@@ -158,6 +183,7 @@ fn a_catalog_committed_as_a_link_is_read_through_it() {
     fixture.commit();
     let outside = fixture.base.join("catalog.json");
     fs::copy(fixture.repo.join(CATALOG), &outside).expect("copied");
+    checked_parents(&fixture.repo, CATALOG);
     fs::remove_file(fixture.repo.join(CATALOG)).expect("removed");
     symlink(&outside, fixture.repo.join(CATALOG)).expect("linked");
     git(&fixture.repo, &["add", "-A"]);

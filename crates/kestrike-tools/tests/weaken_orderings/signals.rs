@@ -86,6 +86,10 @@ fn progress_records_each_finished_baseline_test_and_skipped_row() {
     );
 }
 
+/// Both JSON files take mode 0666 less the run's umask, as each is given once written; in a directory
+/// whose default ACL grants every class read and write, where a plain create keeps 0666 under umask 077,
+/// they still take 0600. Where the filesystem refuses the default ACL the ACL row is left out with a line
+/// that says so.
 #[test]
 fn report_files_take_the_umask_mode() {
     let fixture = Fixture::new("umask");
@@ -106,11 +110,55 @@ fn report_files_take_the_umask_mode() {
             assert_eq!(status.permissions().mode() & 0o777, mode, "{file}");
         }
     }
+    let shared = fixture.resolved("acl");
+    std::fs::create_dir(&shared).expect("made");
+    let set = std::process::Command::new("setfacl")
+        .args(["-d", "-m", "u::rwx,g::rwx,o::rwx"])
+        .arg(&shared)
+        .status();
+    if !matches!(&set, Ok(status) if status.success()) {
+        eprintln!("the default ACL row is left out: setfacl gave {set:?}");
+        return;
+    }
+    let control = shared.join("control");
+    let made = std::process::Command::new("sh")
+        .args(["-c", "umask 077 && : > \"$1\"", "sh"])
+        .arg(&control)
+        .status()
+        .expect("sh starts");
+    assert!(made.success());
+    assert_eq!(
+        std::fs::metadata(&control)
+            .expect("stats")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o666,
+        "the default ACL sets a plain create's mode"
+    );
+    let ran = fixture.run_with(
+        &[RUN_FENCE],
+        Opts {
+            work: Some(fixture.work("acl/work")),
+            umask: Some(0o077),
+            ..Opts::default()
+        },
+    );
+    assert_eq!(ran.code(), Some(0), "{}", ran.stderr);
+    for file in ["report.json", "progress.json"] {
+        let status = std::fs::metadata(shared.join("work").join(file)).expect("a status");
+        assert_eq!(
+            status.permissions().mode() & 0o777,
+            0o600,
+            "{file} under the ACL"
+        );
+    }
 }
 
-/// A planted test that outlives SIGTERM and sends the run SIGHUP as that SIGTERM arrives makes a second
-/// delivery, which alone can end the stop's 45 s grace before 30 s, since the test keeps running; the run
-/// then kills the test's group, writes the plant back, leaves no staging file and ends by SIGINT.
+/// A planted test that outlives SIGTERM keeps running through the stop's grace; once it has received
+/// that SIGTERM the case sends the run SIGHUP, a second delivery, which alone can end the stop's 45 s grace
+/// before 30 s. The run then kills the test's group, writes the plant back, leaves no staging file and
+/// ends by SIGINT.
 #[test]
 fn a_second_signal_during_the_stop_of_a_planted_test_still_restores_the_plant() {
     let fixture = Fixture::new("second-signal");
@@ -123,15 +171,10 @@ fn a_second_signal_during_the_stop_of_a_planted_test_still_restores_the_plant() 
         plan(&[(&tests[1], &[("planted", "sleep-twice")])]),
     );
     fixture.wait_for(".sleeping");
-    let parent = std::fs::read_to_string(super::standins::suffixed(&fixture.plan, ".parent"))
-        .expect("the test wrote its parent");
-    assert_eq!(
-        parent,
-        child.id().to_string(),
-        "the run is the planted test's parent"
-    );
     let started = Instant::now();
     child.signal(libc::SIGTERM);
+    fixture.wait_for(".stopped");
+    child.signal(libc::SIGHUP);
     let status = child.wait(Duration::from_secs(120));
     assert!(
         started.elapsed() < Duration::from_secs(30),

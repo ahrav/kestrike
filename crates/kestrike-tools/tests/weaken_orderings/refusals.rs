@@ -90,11 +90,9 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
         ".github/workflows/agent-checks.yml",
     ];
     for (index, name) in tracked.iter().enumerate() {
-        let path = fixture.repo.join(name);
-        let original = fs::read(&path).expect("reads");
-        let mut changed = original.clone();
+        let mut changed = head_bytes(&fixture.repo, name);
         changed.push(b'\n');
-        fs::write(&path, changed).expect("written");
+        replace_entry(&fixture.repo, name, &changed);
         let ran = fixture.run_with(
             &[RUN_FENCE],
             Opts {
@@ -102,7 +100,7 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
                 ..Opts::default()
             },
         );
-        fs::write(&path, original).expect("written");
+        restore_entry(&fixture.repo, name);
         assert_eq!(ran.code(), Some(2), "{name}: {}", ran.stderr);
         assert!(
             ran.stderr.contains("differ from HEAD"),
@@ -111,22 +109,13 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
         );
         nothing_ran(&fixture, &ran);
     }
-    let staged = fixture.repo.join("scripts/judge-rc11.py");
-    let original = fs::read(&staged).expect("reads");
-    fs::write(&staged, [original.as_slice(), b"\n"].concat()).expect("written");
-    let git = |args: &[&str]| {
-        let done = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&fixture.repo)
-            .args(args)
-            .status()
-            .expect("git starts");
-        assert!(done.success());
-    };
-    git(&["add", "scripts/judge-rc11.py"]);
+    let staged = "scripts/judge-rc11.py";
+    let changed = [head_bytes(&fixture.repo, staged).as_slice(), b"\n"].concat();
+    replace_entry(&fixture.repo, staged, &changed);
+    git(&fixture.repo, &["add", staged]);
     for (state, restore) in [("staged", false), ("staged-then-restored", true)] {
         if restore {
-            fs::write(&staged, &original).expect("written");
+            restore_entry(&fixture.repo, staged);
         }
         let ran = fixture.run_with(
             &[RUN_FENCE],
@@ -139,9 +128,9 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
         assert!(ran.stderr.contains("differ from HEAD"), "{}", ran.stderr);
         nothing_ran(&fixture, &ran);
     }
-    git(&["reset", "-q", "--", "scripts/judge-rc11.py"]);
+    git(&fixture.repo, &["reset", "-q", "--", staged]);
     let stray = fixture.repo.join("crates/kestrike-tools/src/stray.rs");
-    fs::write(&stray, "").expect("written");
+    replace_entry(&fixture.repo, "crates/kestrike-tools/src/stray.rs", b"");
     let ran = fixture.run_with(
         &[RUN_FENCE],
         Opts {
@@ -153,11 +142,10 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
     assert_eq!(ran.code(), Some(2), "{}", ran.stderr);
     assert!(ran.stderr.contains("differ from HEAD"), "{}", ran.stderr);
     nothing_ran(&fixture, &ran);
-    let classifier = fixture.repo.join("scripts/classify-atomics.py");
-    let original = fs::read(&classifier).expect("reads");
-    let mut changed = original.clone();
+    let classifier = "scripts/classify-atomics.py";
+    let mut changed = head_bytes(&fixture.repo, classifier);
     changed.push(b'\n');
-    fs::write(&classifier, changed).expect("written");
+    replace_entry(&fixture.repo, classifier, &changed);
     let ran = fixture.run_with(
         &[RUN_FENCE],
         Opts {
@@ -165,7 +153,7 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
             ..Opts::default()
         },
     );
-    fs::write(&classifier, original).expect("written");
+    restore_entry(&fixture.repo, classifier);
     assert_eq!(ran.code(), Some(0), "{}", ran.stderr);
 }
 
@@ -192,7 +180,7 @@ fn a_refused_catalog_or_declaration_stops_the_run() {
         panic!("the declaration is an object");
     };
     object.insert("package", Value::Null);
-    fs::write(&declaration, json::line(&declared)).expect("written");
+    replace_entry(&fixture.repo, GENMC, json::line(&declared).as_bytes());
     fixture.commit();
     let ran = fixture.run_with(
         &[RUN_FENCE],
@@ -223,11 +211,11 @@ fn nothing_ran(fixture: &Fixture, ran: &Ran) {
 fn a_stray_source_in_the_invoking_checkout_leaves_the_copy_s_check_alone() {
     let fixture = Fixture::new("stray");
     fixture.commit();
-    fs::write(
-        fixture.repo.join("crates/kestrike/src/stray.rs"),
-        "#[path = concat!(\"storage/\", \"fill.rs\")] mod fill;\n",
-    )
-    .expect("written");
+    replace_entry(
+        &fixture.repo,
+        "crates/kestrike/src/stray.rs",
+        b"#[path = concat!(\"storage/\", \"fill.rs\")] mod fill;\n",
+    );
     let read = |path: &str| read_source(&fixture.repo, path);
     let (report, code) = check(
         &read,
@@ -404,7 +392,7 @@ fn a_genmc_declaration_the_copys_judge_refuses_stops_a_run_that_selects_a_case()
     for (name, change, wanted) in changes {
         let mut planted = committed.clone();
         change(&mut planted);
-        fs::write(&declaration, json::line(&planted)).expect("written");
+        replace_entry(&fixture.repo, GENMC, json::line(&planted).as_bytes());
         fixture.commit();
         let ran = fixture.run_with(
             &[CREDIT_ROW],
@@ -434,11 +422,10 @@ fn a_genmc_declaration_the_copys_judge_refuses_stops_a_run_that_selects_a_case()
 fn a_planted_file_a_text_restore_cannot_reproduce_is_refused() {
     let fixture = Fixture::new("line-endings");
     let files = super::standins::scoped_files(&fixture.repo);
-    let credit = fixture.repo.join(&files[0]);
-    let bytes = fs::read_to_string(&credit)
-        .expect("reads")
+    let bytes = String::from_utf8(head_bytes(&fixture.repo, &files[0]))
+        .expect("UTF-8")
         .replace('\n', "\r\n");
-    fs::write(&credit, bytes).expect("written");
+    replace_entry(&fixture.repo, &files[0], bytes.as_bytes());
     fixture.commit();
     let ran = fixture.run_rows(&[CREDIT_ROW]);
     assert_eq!(ran.code(), Some(2), "{}", ran.stderr);
@@ -449,7 +436,7 @@ fn a_planted_file_a_text_restore_cannot_reproduce_is_refused() {
 }
 
 /// A work directory inside the checkout is refused when the checkout is named through a link, as the
-/// script compared the two resolved paths.
+/// tool compares the two resolved paths.
 #[test]
 fn a_work_directory_inside_a_checkout_named_through_a_link_is_refused() {
     let fixture = Fixture::new("refused-linked-top");
@@ -465,7 +452,15 @@ fn a_work_directory_inside_a_checkout_named_through_a_link_is_refused() {
         .expect("the binary starts");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
-    assert!(stderr.contains("lies inside the checkout"), "{stderr}");
+    assert_eq!(
+        stderr,
+        format!(
+            "weaken-orderings: the work directory {} lies inside the checkout {}\n",
+            fixture.repo.join("work").display(),
+            fixture.repo.display()
+        ),
+        "the refusal names the resolved checkout it compared"
+    );
     assert!(!fixture.repo.join("work").exists());
 }
 
@@ -475,19 +470,37 @@ fn a_work_directory_inside_a_checkout_named_through_a_link_is_refused() {
 fn a_tar_that_ends_early_fails_the_copy() {
     let fixture = Fixture::new("refused-tar");
     fixture.commit();
-    let tar = fixture.base.join("bin/tar");
-    super::fixture::replace_entry(&fixture.base, "bin/tar", b"#!/bin/sh\nexit 1\n");
-    std::fs::set_permissions(&tar, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .expect("moded");
-    let started = std::time::Instant::now();
-    let ran = fixture.run_rows(&[RUN_FENCE]);
-    assert!(started.elapsed() < std::time::Duration::from_secs(60));
-    assert_eq!(ran.code(), Some(1), "{}", ran.stderr);
+    executable(&fixture.base.join("bin/tar"), "#!/bin/sh\nexit 1\n");
+    let work = fixture.work("work");
+    let mut running = fixture.start(&[RUN_FENCE], &work, Value::Object(json::Object::new()));
+    let status = running.wait(std::time::Duration::from_secs(60));
+    assert_eq!(status.code(), Some(1), "{:?}", fixture.lines(".stderr"));
     assert!(
-        ran.stderr
+        fixture
+            .halt_line()
             .contains("Command 'git archive | tar -x' returned non-zero exit status"),
-        "{}",
-        ran.stderr
+        "{:?}",
+        fixture.lines(".stderr")
     );
-    nothing_ran(&fixture, &ran);
+    assert!(!work.join("report.json").exists());
+    assert_eq!(fixture.stub_calls(), Vec::<Value>::new());
+    assert_eq!(fixture.lines(".log"), Vec::<String>::new());
+    assert_eq!(fixture.lines(".lane"), Vec::<String>::new());
+}
+
+/// A completed run whose standard output refuses its result line exits 120 and leaves its report
+/// written.
+#[test]
+fn a_run_whose_standard_output_refuses_its_line_exits_120_with_its_report() {
+    let fixture = Fixture::new("refused-stdout");
+    fixture.commit();
+    let ran = fixture.run_with(
+        &[RUN_FENCE],
+        Opts {
+            full_stdout: true,
+            ..Opts::default()
+        },
+    );
+    assert_eq!(ran.code(), Some(120), "{}", ran.stderr);
+    assert_eq!(results(ran.report(), RUN_FENCE), ["survived"; 2]);
 }
