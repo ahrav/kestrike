@@ -1410,3 +1410,201 @@ fn a_successful_call_passes_the_caller_through() {
     );
     assert_eq!(tree.take_log(), tree.resolved(PIN, ("unset", "unset"), 8));
 }
+
+/// The launcher's text holds no here-string and no here-document, which a bash before 5.1 keeps in a
+/// file it makes under `TMPDIR`.
+#[test]
+fn the_launcher_holds_no_here_string_and_no_here_document() {
+    let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/tool.sh");
+    let text = fs::read_to_string(launcher).expect("the launcher reads");
+    let found: Vec<String> = text
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.contains("<<"))
+        .map(|(at, line)| format!("{}: {line}", at + 1))
+        .collect();
+    assert_eq!(found, Vec::<String>::new());
+}
+
+/// Each of rustup's two answers is read line by line. `show` names the host in exactly one line that
+/// starts with `Default host: `, wherever the line stands and whether or not the answer ends in a line
+/// feed. `toolchain list` holds the pinned toolchain where it is the first field of a line, after
+/// spaces and tabs and before a space, a tab or the line's end. A row that holds neither is refused
+/// with the launcher's line for it.
+#[test]
+fn rustup_s_answers_are_read_by_the_line_rule() {
+    let pinned = format!("{PIN}-{HOST}");
+    let no_host = Some("rustup names no single host".to_owned());
+    let not_installed = Some(format!(
+        "the pinned toolchain {pinned} is not installed; install it with: rustup toolchain install {PIN}"
+    ));
+    let rows: Vec<(&str, &str, String, Option<String>)> = vec![
+        (
+            "one host line",
+            "show",
+            format!("Default host: {HOST}\n"),
+            None,
+        ),
+        (
+            "the host line last, without its line feed",
+            "show",
+            format!("rustup home: x\nDefault host: {HOST}"),
+            None,
+        ),
+        (
+            "empty lines around the host line",
+            "show",
+            format!("\n\nDefault host: {HOST}\n\n\n"),
+            None,
+        ),
+        (
+            "no host line",
+            "show",
+            "rustup home: x\n".to_owned(),
+            no_host.clone(),
+        ),
+        (
+            "two host lines, the second without its line feed",
+            "show",
+            format!("Default host: {HOST}\nDefault host: other"),
+            no_host.clone(),
+        ),
+        (
+            "an empty answer of show",
+            "show",
+            String::new(),
+            no_host.clone(),
+        ),
+        (
+            "a host line after a space",
+            "show",
+            format!(" Default host: {HOST}\n"),
+            no_host.clone(),
+        ),
+        (
+            "an empty host after the host",
+            "show",
+            format!("Default host: {HOST}\nDefault host: \n"),
+            no_host.clone(),
+        ),
+        (
+            "a host line that ends in a carriage return",
+            "show",
+            format!("Default host: {HOST}\r\n"),
+            no_host,
+        ),
+        (
+            "a toolchain line with its suffix",
+            "list",
+            format!("{pinned} (default)\n"),
+            None,
+        ),
+        (
+            "a toolchain line without a suffix",
+            "list",
+            format!("{pinned}\n"),
+            None,
+        ),
+        (
+            "the toolchain line last, without its line feed",
+            "list",
+            format!("nightly-{HOST}\n{pinned}"),
+            None,
+        ),
+        (
+            "blanks before the toolchain and a tab after it",
+            "list",
+            format!(" \t {pinned}\t(default)\n"),
+            None,
+        ),
+        (
+            "empty lines around the toolchain line",
+            "list",
+            format!("\n\n{pinned}\n\n"),
+            None,
+        ),
+        (
+            "an empty answer of list",
+            "list",
+            String::new(),
+            not_installed.clone(),
+        ),
+        (
+            "the toolchain as a line's second field",
+            "list",
+            format!("nightly-{HOST} {pinned}\n"),
+            not_installed.clone(),
+        ),
+        (
+            "a longer first field",
+            "list",
+            format!("{pinned}x (default)\n"),
+            not_installed.clone(),
+        ),
+        (
+            "a toolchain line that ends in a carriage return",
+            "list",
+            format!("{pinned}\r\n"),
+            not_installed,
+        ),
+    ];
+    for (row, answer, text, refusal) in rows {
+        let tree = Tree::new(workflow_text("\n").as_bytes());
+        tree.answer(answer, Some(&text));
+        let output = tree.call(&["scan-weakened-tests"]);
+        match refusal {
+            None => ran(row, &output, 1),
+            Some(line) => refused(row, &output, &format!("tool.sh: {line}\n")),
+        }
+    }
+}
+
+/// The preparation makes no entry under the directory `TMPDIR` names: over a call that builds nothing,
+/// an empty directory there keeps the modification time the case gave it. A bash before 5.1 keeps every
+/// here-string and here-document in a file under `TMPDIR`, and a later one does so at the compatibility
+/// level 5.0, which the case sets through `BASH_COMPAT` for such a bash.
+#[test]
+fn the_preparation_makes_no_entry_under_tmpdir() {
+    let tree = Tree::new(workflow_text("\n").as_bytes()).with_old_binary();
+    tree.answer("build-noop", Some(""));
+    let scratch = tree.at("scratch");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&scratch)
+        .expect("the directory is made");
+    let past = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    File::open(&scratch)
+        .and_then(|opened| opened.set_modified(past))
+        .expect("the directory's time is set");
+    let version = Command::new(bash())
+        .args([
+            "-c",
+            r#"printf '%s' "$((BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1]))""#,
+        ])
+        .output()
+        .expect("bash starts");
+    let version: u32 = text(&version.stdout)
+        .parse()
+        .expect("bash prints its version");
+    let scratch_text = scratch.to_str().expect("the scratch path reads as UTF-8");
+    let mut env = vec![("TMPDIR", scratch_text)];
+    if version >= 501 {
+        env.push(("BASH_COMPAT", "5.0"));
+    }
+    let output = tree.start(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.default_path(),
+        &env,
+        &["scan-weakened-tests"],
+    );
+    ran("a call with its own TMPDIR", &output, 1);
+    let modified = fs::metadata(&scratch)
+        .and_then(|status| status.modified())
+        .expect("the directory's time reads");
+    assert_eq!(modified, past, "an entry was made or removed under TMPDIR");
+    assert_eq!(
+        fs::read_dir(&scratch).expect("the directory lists").count(),
+        0
+    );
+}
