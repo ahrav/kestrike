@@ -9,8 +9,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::{
-    Call, CallFailed, EXIT_PAUSE, Ended, Finished, READERS, Reader, TAIL, Waited, finish, read_all,
-    run, tail, wait, whole_seconds,
+    Call, CallFailed, EXIT_PAUSE, Ended, Finished, READERS, Reader, TAIL, Waited, block, finish,
+    joined, read_all, run, tail, wait, whole_seconds,
 };
 use crate::host_stop::{Delivered, Interrupted, Record, SLICE, Signal};
 
@@ -213,6 +213,7 @@ fn an_answer_seen_at_or_after_the_cut_is_a_cut() {
     );
     assert!(matches!(waited, Err(Waited::Cut(Ok(())))));
     assert!(gone(child));
+    assert!(abandoned.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -246,27 +247,30 @@ fn a_signal_that_may_raise_wins_over_the_cut() {
     assert!(gone(child));
 }
 
-/// Turns the wait makes with its end an hour off before the clock of a case moves.
+/// Turns the wait makes with its end an hour off before the last interval of a case starts. Six is
+/// the fewest after which a wait that sleeps a pause doubling from 1 ms at each turn sleeps one whole
+/// [`SLICE`]: that wait sleeps through the last interval to the end, and the cases on
+/// [`completed_in_the_last_interval`] reject it.
 const EARLY: usize = 6;
+const _: () = assert!(1 << EARLY >= SLICE.as_millis());
 
 /// The end of every wait with a scripted clock stands this long after its start.
 const HOUR: Duration = Duration::from_secs(3600);
 
-/// Waits on a shell that runs `script` to the `read` that the gate holds, and returns what the wait
-/// gave. The clock reads one [`SLICE`] before the end at the turn after the early ones. During that
-/// reading the gate opens and the reply completes: the child exits and both readers finish. From the
-/// completed reply on, the clock runs with real time.
+/// Waits on a shell that runs to the `read` that `gate` holds, and returns what the wait gave. The
+/// clock reads one [`SLICE`] before the end at the turn after the early ones. During that reading the
+/// gate opens and the reply completes: the child exits and both readers finish. From the completed
+/// reply on, the clock runs with real time.
 ///
 /// A case on this wait rests on real time in one stretch: from the completed reply to the wait's next
 /// reading of the clock, which must come within one `SLICE`. The stretch holds the end of one turn,
 /// one block and one look. The child's exit and the readers' finish stand outside it, since the clock
 /// starts at the completed reply. A host fails such a case only by keeping the waiting thread off its
 /// processor for the rest of a `SLICE` inside that stretch.
-fn completed_in_the_last_interval(script: &str) -> Result<Option<i32>, Waited> {
-    let (mut watched, gate) = gated(script);
-    if script.starts_with("exec >&- 2>&-;") {
-        closed(&[&watched.out, &watched.err]);
-    }
+fn completed_in_the_last_interval(
+    mut watched: Watched,
+    gate: ChildStdin,
+) -> Result<Option<i32>, Waited> {
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
     let Watched {
@@ -313,22 +317,84 @@ fn completed_in_the_last_interval(script: &str) -> Result<Option<i32>, Waited> {
 /// pipes to its exit, and the readers' finish ends the wait's block before the end.
 #[test]
 fn a_reply_complete_inside_the_last_interval_is_an_answer() {
-    match completed_in_the_last_interval("read line; exit 7") {
+    let (watched, gate) = gated("read line; exit 7");
+    match completed_in_the_last_interval(watched, gate) {
         Ok(code) => assert_eq!(code, Some(7)),
         Err(_) => panic!("a reply {SLICE:?} before the end is cut"),
     }
 }
 
 /// A child that closed both pipes at its start and exits inside the last interval is an answer: its
-/// exit is the reply's last event, and the wait reads it one [`EXIT_PAUSE`] later, where a block of
-/// one [`SLICE`] would run to the end.
+/// exit is the reply's last event, and the wait sees it after a block of one [`EXIT_PAUSE`], where a
+/// block of one [`SLICE`] in that state runs to the end.
 #[test]
-fn an_exit_after_both_outputs_closed_is_read_within_an_exit_pause() {
-    assert!(EXIT_PAUSE * 10 <= SLICE);
-    match completed_in_the_last_interval("exec >&- 2>&-; read line; exit 7") {
+fn an_exit_after_both_outputs_closed_is_seen_after_a_short_block() {
+    let (watched, gate) = gated("exec >&- 2>&-; read line; exit 7");
+    closed(&[&watched.out, &watched.err]);
+    match completed_in_the_last_interval(watched, gate) {
         Ok(code) => assert_eq!(code, Some(7)),
         Err(_) => panic!("an exit {SLICE:?} before the end is cut"),
     }
+}
+
+/// The block a turn requests: 1 ms once both readers have finished, one [`SLICE`] of 50 ms while a
+/// reader is unfinished, and the time left to the limit where that is shorter.
+#[test]
+fn a_turn_blocks_an_exit_pause_or_a_slice_and_never_past_the_limit() {
+    assert_eq!(EXIT_PAUSE, Duration::from_millis(1));
+    assert_eq!(SLICE, Duration::from_millis(50));
+    assert_eq!(READERS, 2);
+    assert_eq!(block(READERS, HOUR), EXIT_PAUSE);
+    for unfinished in 0..READERS {
+        assert_eq!(block(unfinished, HOUR), SLICE, "{unfinished}");
+        assert_eq!(block(unfinished, SLICE / 2), SLICE / 2, "{unfinished}");
+    }
+    let short = Duration::from_nanos(1);
+    assert_eq!(block(READERS, EXIT_PAUSE / 2), EXIT_PAUSE / 2);
+    assert_eq!(block(READERS, short), short);
+    assert_eq!(block(0, short), short);
+}
+
+/// A reply seen by the look of a turn whose clock reads 1 ns before the end is the answer, at that
+/// one reading.
+#[test]
+fn a_reply_seen_just_before_the_end_is_an_answer() {
+    let mut watched = watched("/bin/true", &[]);
+    ended(&watched);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let Watched {
+        child,
+        abandoned,
+        finished,
+        ..
+    } = &mut watched;
+    let started = Instant::now();
+    let end = started + HOUR;
+    let mut readings = 0;
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        HOUR,
+        || {
+            readings += 1;
+            if readings == 1 {
+                end - Duration::from_nanos(1)
+            } else {
+                end
+            }
+        },
+    );
+    match waited {
+        Ok(status) => assert_eq!(status.code(), Some(0)),
+        Err(_) => panic!("a reply seen 1 ns before the end is no answer"),
+    }
+    assert_eq!(readings, 1);
+    assert!(!abandoned.load(Ordering::SeqCst));
+    assert!(gone(child));
 }
 
 /// A reply whose last reader finishes at the end is a cut, though the clock read before the end at
@@ -370,9 +436,57 @@ fn a_reply_whose_last_reader_finishes_at_the_end_is_a_cut() {
     assert!(abandoned.load(Ordering::SeqCst));
 }
 
+/// A reply whose last event, the child's exit, comes at the end is a cut, though the clock read before
+/// the end at the turn's reading: both readers finished earlier, the child exits during that reading,
+/// and the clock then reads the end. The turn's look came before its reading and saw the child
+/// running, and the turn that first sees the exit reads the end.
+#[test]
+fn a_reply_whose_exit_comes_at_the_end_is_a_cut() {
+    let (mut watched, gate) = gated("exec >&- 2>&-; read line; exit 7");
+    closed(&[&watched.out, &watched.err]);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let Watched {
+        child,
+        abandoned,
+        finished,
+        ..
+    } = &mut watched;
+    let started = Instant::now();
+    let end = started + HOUR;
+    let stat = PathBuf::from(format!("/proc/{}/stat", child.id()));
+    let mut gate = Some(gate);
+    let mut readings = 0;
+    let waited = wait(
+        &mut record,
+        child,
+        abandoned,
+        finished,
+        started,
+        HOUR,
+        || {
+            readings += 1;
+            match gate.take() {
+                Some(gate) => {
+                    drop(gate);
+                    zombie(&stat);
+                    end - Duration::from_nanos(1)
+                }
+                None => end,
+            }
+        },
+    );
+    assert!(matches!(waited, Err(Waited::Cut(Ok(())))));
+    assert_eq!(readings, 2);
+    assert!(gone(child));
+    assert!(abandoned.load(Ordering::SeqCst));
+    let status = child.try_wait().expect("cached").expect("reaped");
+    assert_eq!((status.code(), status.signal()), (Some(7), None));
+}
+
 /// One part of a reply is no answer. A child that has exited while one output stays open, and a
-/// child that runs on after both outputs closed, are each cut at the end, after turns that found
-/// the part and waited on.
+/// child that runs on after both outputs closed, are each cut at the end, after two turns that
+/// found the part and waited on.
 #[test]
 fn an_exit_alone_and_two_closed_outputs_alone_are_no_answer() {
     let (exit_alone, held) = held_open();
@@ -398,22 +512,14 @@ fn an_exit_alone_and_two_closed_outputs_alone_are_no_answer() {
             HOUR,
             || {
                 turns += 1;
-                if turns <= EARLY {
-                    started
-                } else {
-                    started + HOUR
-                }
+                if turns <= 2 { started } else { started + HOUR }
             },
         );
         assert!(
             matches!(waited, Err(Waited::Cut(Ok(())))),
             "killed {killed}"
         );
-        assert_eq!(
-            turns,
-            EARLY + 1,
-            "killed {killed}: each turn reads the clock"
-        );
+        assert_eq!(turns, 3, "killed {killed}: each turn reads the clock once");
         assert!(gone(child), "killed {killed}");
         assert!(abandoned.load(Ordering::SeqCst));
         let status = child.try_wait().expect("cached").expect("reaped");
@@ -423,10 +529,10 @@ fn an_exit_alone_and_two_closed_outputs_alone_are_no_answer() {
     drop(held);
 }
 
-/// A finish counted after the wait's look ends its block at once, and a finish counted during the
-/// block wakes it: each block returns long before its timeout of 60 seconds.
+/// A finish counted after the wait's look ends its block at once, and a block with no finish lasts its
+/// timeout.
 #[test]
-fn a_finish_ends_the_block_whether_it_comes_before_or_during_it() {
+fn a_finish_after_the_look_ends_the_block_at_once() {
     let timeout = Duration::from_secs(60);
     let finished = Finished::default();
     let seen = finished.count();
@@ -434,24 +540,65 @@ fn a_finish_ends_the_block_whether_it_comes_before_or_during_it() {
     let start = Instant::now();
     finished.wait(seen, timeout);
     assert!(start.elapsed() < timeout / 2, "{:?}", start.elapsed());
-    let seen = finished.count();
-    assert_eq!(seen, 1);
     let start = Instant::now();
-    thread::scope(|scope| {
-        scope.spawn(|| {
-            thread::sleep(Duration::from_millis(100));
-            finished.add();
-        });
-        finished.wait(seen, timeout);
-    });
-    assert!(start.elapsed() < timeout / 2, "{:?}", start.elapsed());
-    assert_eq!(finished.count(), READERS);
-    let start = Instant::now();
-    finished.wait(READERS, SLICE);
+    finished.wait(finished.count(), SLICE);
     assert!(
         start.elapsed() >= SLICE,
         "no finish: the block lasts its timeout"
     );
+}
+
+/// A finish counted while the wait is blocked wakes it. The waiter holds the lock from before the
+/// other thread starts until its block releases it, so that thread counts its finish only once the
+/// waiter has compared the count and blocked; the waiter then returns on the wake alone, long before
+/// its timeout of 60 seconds.
+#[test]
+fn a_finish_during_the_block_wakes_it() {
+    let timeout = Duration::from_secs(60);
+    let finished = Finished::default();
+    let start = Instant::now();
+    thread::scope(|scope| {
+        let held = finished.lock();
+        let seen = *held;
+        scope.spawn(|| finished.add());
+        finished.wait_locked(held, seen, timeout);
+    });
+    assert!(start.elapsed() < timeout / 2, "{:?}", start.elapsed());
+    assert_eq!(finished.count(), 1);
+}
+
+/// A stream whose first read fails with the error given, or panics with none.
+struct Broken(Option<io::ErrorKind>);
+
+impl io::Read for Broken {
+    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+        match self.0 {
+            Some(kind) => Err(kind.into()),
+            None => panic!("the stream breaks"),
+        }
+    }
+}
+
+/// A reader whose read fails or panics counts as finished once, and its call keeps the failure: the
+/// read's error, or the sentence for a reader that panicked.
+#[test]
+fn a_reader_that_fails_or_panics_counts_as_finished() {
+    for (broken, message) in [
+        (Some(io::ErrorKind::BrokenPipe), "broken pipe"),
+        (None, "a reader of the child's output panicked"),
+    ] {
+        let finished = Arc::new(Finished::default());
+        let reader = read_all(
+            Broken(broken),
+            Arc::new(AtomicBool::new(false)),
+            Arc::clone(&finished),
+        )
+        .expect("a reader starts");
+        closed(&[&reader]);
+        assert_eq!(finished.count(), 1, "{broken:?}");
+        let error = joined(reader).expect_err("the reader failed");
+        assert_eq!(error.to_string(), message, "{broken:?}");
+    }
 }
 
 #[test]
