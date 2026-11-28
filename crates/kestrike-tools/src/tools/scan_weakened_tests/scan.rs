@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -27,6 +27,7 @@ const HELP: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\
                     and exit\n  --base BASE\n  --head HEAD\n";
 const TIMEOUT_FILES: [&str; 2] = [".github/workflows/agent-checks.yml", "scripts/rust-lane.sh"];
 const STREAM_FAILED: u8 = 120;
+const LOG_BATCH: usize = 1024;
 
 const OPTIONS: [Opt; 3] = [
     Opt {
@@ -260,8 +261,7 @@ fn acknowledgements(
         .iter()
         .map(|key| (format!("Weakens-Test: {key}: "), key))
         .collect();
-    let range = format!("{base}..{head}");
-    let log = git_text(&["log", "--encoding=UTF-8", "--format=%B", &range])?;
+    let log = messages(base, head)?;
     for line in log.split('\n') {
         if !line.starts_with("Weakens-Test: ") {
             continue;
@@ -280,6 +280,31 @@ fn acknowledgements(
         }
     }
     Ok(reasons)
+}
+
+/// `messages` returns messages for commits reachable from `head` but not from `base`, in the order
+/// `git rev-list base..head` lists them. That walk bounds its `base` side by committer date and can list a
+/// commit that `base` reaches, so `messages` drops every commit that `git rev-list base` lists.
+fn messages(base: &str, head: &str) -> Result<String, Failure> {
+    let listed = git(&["rev-list", &format!("{base}..{head}")])?;
+    let reached = git(&["rev-list", base])?;
+    let reached: HashSet<&str> = reached.lines().collect();
+    let commits: Vec<&str> = listed
+        .lines()
+        .filter(|commit| !reached.contains(commit))
+        .collect();
+    let mut log = String::new();
+    for batch in commits.chunks(LOG_BATCH) {
+        let mut args = vec![
+            "log",
+            "--no-walk=unsorted",
+            "--encoding=UTF-8",
+            "--format=%B",
+        ];
+        args.extend(batch);
+        log.push_str(&git_text(&args)?);
+    }
+    Ok(log)
 }
 
 fn resolve(rev: &OsStr) -> Result<String, Failure> {
