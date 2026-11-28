@@ -417,7 +417,7 @@ fn a_count_or_a_bound_text_that_changes_its_type_is_refused() {
     .expect_err("the type changes");
     assert_eq!(
         error.to_string(),
-        "scripts/test-inventory.json: the value at a\\n::x.seeds changes from an integer to a text"
+        "scripts/test-inventory.json: the value at a\n::x.seeds changes from an integer to a text"
     );
     let old = r#"{"seeds": true, "seconds": 2.0, "executions": 3, "bound": "depth: 4"}"#;
     let new = r#"{"seeds": 1, "seconds": 1, "executions": {"x": 1}, "bound": ["depth: 1"]}"#;

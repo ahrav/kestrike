@@ -8,7 +8,7 @@ use std::fmt;
 use std::io::{self, Write};
 use std::process::{Child, Command, Output, Stdio};
 
-use crate::text::{Text, escaped, strip_str};
+use crate::text::{Text, strip_str};
 
 /// The variables that point Git at another repository, work tree, index or object store than the one the
 /// working directory names, in the order a refusal lists them.
@@ -23,7 +23,7 @@ pub const REPOSITORY_VARIABLES: [&str; 5] = [
 const PATHSPEC_AND_DIFF_VARIABLES: [&str; 3] =
     ["GIT_ICASE_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_DIFF_OPTS"];
 
-/// A Git command that did not give its output. `Display` writes the line a tool prints after its own name.
+/// `Display` writes the text a tool prints after its own name.
 #[derive(Debug)]
 pub enum GitError {
     /// `Start` wraps an error from `Command::output` or `Command::spawn`, including a failure to launch Git:
@@ -181,14 +181,12 @@ pub(crate) fn batch_texts(data: &[u8], specs: &[String]) -> Result<Vec<String>, 
     for spec in specs {
         let ends = || {
             GitError::Truncated(format!(
-                "git cat-file --batch: the reply ends before its answer for {}",
-                escaped(spec)
+                "git cat-file --batch: the reply ends before its answer for {spec}"
             ))
         };
         let other = || {
             GitError::Truncated(format!(
-                "git cat-file --batch: the answer for {} has another form",
-                escaped(spec)
+                "git cat-file --batch: the answer for {spec} has another form"
             ))
         };
         let at = rest
