@@ -9,7 +9,6 @@ mod options;
 #[cfg(target_os = "linux")]
 mod outcomes;
 #[cfg(target_os = "linux")]
-pub(crate) mod pieces;
 #[cfg(target_os = "linux")]
 mod preflight;
 #[cfg(target_os = "linux")]

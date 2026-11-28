@@ -13,7 +13,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use crate::decimal::spells_shortest;
+use crate::decimal::{nearest_double, spells_shortest};
 use crate::python::repr_float;
 pub use crate::text::Text;
 
@@ -256,7 +256,7 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
 
 /// A number that strict JSON refuses, holding the token as the text spells it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unnumber {
+pub enum Unnumber {
     /// `NaN`, `Infinity` or `-Infinity`.
     Constant(&'static str),
     /// A token with a fraction or an exponent whose nearest double is infinite.
@@ -269,7 +269,7 @@ pub(crate) enum Unnumber {
 /// A refusal of [`parse_strict`]: an error of [`parse`], an object that repeats the member `name`, or a
 /// number strict JSON refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StrictError {
+pub enum StrictError {
     Syntax(Error),
     Repeated(Text),
     Number(Unnumber),
@@ -311,7 +311,7 @@ impl std::error::Error for StrictError {}
 /// The reader stops at the first refusal in document order. A number is judged where it stands and a
 /// repeated key when its object closes, so in `[{"k": 1, "k": 2}, NaN]` the repeat comes first and in
 /// `{"k": 1, "k": NaN}` the constant does.
-pub(crate) fn parse_strict(text: &str) -> Result<Value, StrictError> {
+pub fn parse_strict(text: &str) -> Result<Value, StrictError> {
     Reader::new(text, Mode::Strict).document()
 }
 
@@ -517,10 +517,12 @@ impl<'a> Reader<'a> {
         }
         let text = std::str::from_utf8(&self.text[start..self.at]).expect("a number is ASCII");
         if self.at > integer {
-            let value = text.parse().expect("a JSON number parses as an f64");
             if self.mode == Mode::Strict {
+                let value = nearest_double(text);
                 double(text, value).map_err(StrictError::Number)?;
+                return Ok(Value::Float(value));
             }
+            let value = text.parse().expect("a JSON number parses as an f64");
             return Ok(Value::Float(value));
         }
         if integer - digits > MAX_INTEGER_DIGITS {

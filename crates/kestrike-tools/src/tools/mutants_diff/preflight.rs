@@ -15,7 +15,6 @@ use std::process::Command;
 
 use super::config::{self, pins, stables};
 use super::options::Options;
-use super::pieces::text;
 use super::process::{INTERRUPT, capture, exit_code};
 use super::stop::{Fault, Stop};
 pub(super) use crate::environ::Environ;
@@ -24,6 +23,7 @@ use crate::git::REPOSITORY_VARIABLES;
 use crate::ownership::{self, foreign_toolchain_paths};
 use crate::paths;
 use crate::text::Text;
+use crate::text::text;
 
 pub(super) const CONFIG: &str = ".cargo/mutants.toml";
 const WORKFLOW: &str = ".github/workflows/agent-checks.yml";

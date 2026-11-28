@@ -2,10 +2,11 @@
 //! order and the whole-quotient test of Python's fractions.
 //!
 //! A [`Decimal`] holds its digits with no leading or trailing zero, and zero as no digits and no sign, so
-//! two decimals of one value are equal and [`Ord`] orders them by value. The public constructors take a
-//! JSON integer or a finite float's shortest form, so every exponent lies from -1074 to
-//! [`MAX_INTEGER_DIGITS`](crate::json::MAX_INTEGER_DIGITS) and every sum or difference of such numbers is
-//! exact.
+//! two decimals of one value are equal and [`Ord`] orders them by value. Its constructors take a JSON
+//! integer or a finite float's shortest form, so the exponent of a decimal they build lies from -324, the
+//! exponent of the shortest form of the least positive double, to
+//! [`MAX_INTEGER_DIGITS`](crate::json::MAX_INTEGER_DIGITS); sums and differences are exact, with their digit
+//! lists as long as the difference of the operands' exponents asks.
 
 use std::cmp::Ordering;
 use std::ops::{Add, Sub};
@@ -57,21 +58,14 @@ impl Decimal {
         }
     }
 
-    pub(crate) fn from_integer(integer: &Integer) -> Self {
-        let shown = integer.to_string();
-        let (negative, digits) = match shown.strip_prefix('-') {
-            Some(rest) => (true, rest),
-            None => (false, shown.as_str()),
-        };
-        Self::normal(
-            negative,
-            digits.bytes().map(|byte| byte - b'0').collect(),
-            0,
-        )
+    /// `from_integer` is the value of `integer`.
+    pub fn from_integer(integer: &Integer) -> Self {
+        Self::literal(&integer.to_string())
+            .expect("an integer holds at most MAX_INTEGER_DIGITS digits and exponent 0, inside EMAX and ETINY")
     }
 
     /// `from_float` is the decimal value of the shortest form of `value`, or `None` for a non-finite float.
-    pub(crate) fn from_float(value: f64) -> Option<Self> {
+    pub fn from_float(value: f64) -> Option<Self> {
         if !value.is_finite() {
             return None;
         }
@@ -118,13 +112,14 @@ impl Decimal {
         Some(Self::normal(negative, digits, exponent))
     }
 
-    pub(crate) fn is_zero(&self) -> bool {
+    /// Whether the value is zero.
+    pub fn is_zero(&self) -> bool {
         self.digits.is_empty()
     }
 
     /// `whole_quotient` is the whole number `self / divisor` when it lies from 1 to `most`, and `None`
     /// otherwise; a zero divisor gives `None`.
-    pub(crate) fn whole_quotient(&self, divisor: &Self, most: u32) -> Option<u32> {
+    pub fn whole_quotient(&self, divisor: &Self, most: u32) -> Option<u32> {
         if self.is_zero() || divisor.is_zero() || self.negative != divisor.negative {
             return None;
         }
@@ -145,35 +140,33 @@ impl Decimal {
     }
 
     /// `whole_digits` writes a whole number's digits with its sign, and gives `None` for any other value.
-    pub(crate) fn whole_digits(&self) -> Option<String> {
+    pub fn whole_digits(&self) -> Option<String> {
         if self.is_zero() {
             return Some("0".to_owned());
         }
         let zeros = usize::try_from(self.exponent).ok()?;
         let sign = if self.negative { "-" } else { "" };
-        let digits: String = self
-            .digits
-            .iter()
-            .map(|digit| char::from(b'0' + digit))
-            .collect();
-        Some(format!("{sign}{digits}{}", "0".repeat(zeros)))
+        Some(format!("{sign}{}{}", self.digit_text(), "0".repeat(zeros)))
     }
 
-    /// `nearest` is the double nearest the value, rounded half to even; a value past the largest double
-    /// gives an infinity.
-    pub(crate) fn nearest(&self) -> f64 {
-        let sign = if self.negative { "-" } else { "" };
-        let digits: String = self
-            .digits
-            .iter()
-            .map(|digit| char::from(b'0' + digit))
-            .collect();
-        if digits.is_empty() {
+    /// `nearest` is the double nearest the value, rounded half to even, at any magnitude; a value whose
+    /// rounding overflows the largest double gives an infinity of its sign.
+    pub fn nearest(&self) -> f64 {
+        if self.is_zero() {
             return 0.0;
         }
-        format!("{sign}{digits}e{}", self.exponent)
+        let sign = if self.negative { "-" } else { "" };
+        format!("{sign}{}e{}", self.digit_text(), self.exponent)
             .parse()
             .expect("a decimal parses as an f64")
+    }
+
+    /// The digits as ASCII text, most significant first.
+    fn digit_text(&self) -> String {
+        self.digits
+            .iter()
+            .map(|digit| char::from(b'0' + digit))
+            .collect()
     }
 
     fn negated(&self) -> Self {
@@ -324,6 +317,47 @@ fn sub_whole(left: &[u8], right: &[u8]) -> Vec<u8> {
     }
     out.reverse();
     out
+}
+
+/// `nearest_double` is the double nearest the JSON number `token` with a fraction or an exponent, rounded
+/// half to even, with a negative zero for a negative token that rounds to zero. The token's written
+/// exponent, its digits' position and the leading zeros fold into one exponent before the conversion, so a
+/// long run of digits and an exponent that cancel it read as the value they spell.
+pub(crate) fn nearest_double(token: &str) -> f64 {
+    let (negative, rest) = match token.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let (mantissa, power) = match rest.find(['e', 'E']) {
+        Some(at) => (&rest[..at], Some(&rest[at + 1..])),
+        None => (rest, None),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let joined = [whole, fraction].concat();
+    let significant = joined.trim_start_matches('0');
+    let (zero, infinity) = if negative {
+        (-0.0, f64::NEG_INFINITY)
+    } else {
+        (0.0, f64::INFINITY)
+    };
+    if significant.is_empty() {
+        return zero;
+    }
+    let count = |text: &str| i128::try_from(text.len()).expect("a length fits an i128");
+    // The exponent of the first significant digit: the written power, less the fraction's digits, plus
+    // the significant digits after the first.
+    let adjusted = power.map_or(0, saturating_exponent) - count(fraction) + count(significant) - 1;
+    if adjusted > 400 {
+        return infinity;
+    }
+    if adjusted < -400 {
+        return zero;
+    }
+    let (first, others) = significant.split_at(1);
+    let sign = if negative { "-" } else { "" };
+    format!("{sign}{first}.{others}0e{adjusted}")
+        .parse()
+        .expect("a folded decimal parses as an f64")
 }
 
 /// `spells_shortest` holds when the JSON number `token` has the decimal value of the shortest form of

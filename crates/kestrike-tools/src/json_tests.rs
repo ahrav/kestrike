@@ -285,3 +285,16 @@ fn the_unique_read_refuses_the_first_repeat_of_the_first_object_to_close() {
         "the present read keeps the last value"
     );
 }
+
+/// With no repeated key, the unique read reads each number as the read that keeps repeats does: the three
+/// constants, an overflow, an underflow and a form longer than its double's shortest one.
+#[test]
+fn the_unique_read_takes_the_numbers_a_strict_read_refuses() {
+    let text = "[NaN, Infinity, -Infinity, 1e999, -1e999, 1e-400, 0.10000000000000001]";
+    let unique = parse_unique(text).expect("no key repeats");
+    assert_eq!(dump(&unique), dump(&parse(text).expect("the text parses")));
+    assert_eq!(
+        dump(&unique),
+        "[NaN,Infinity,-Infinity,Infinity,-Infinity,0.0,0.1]\n"
+    );
+}
