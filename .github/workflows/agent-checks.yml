@@ -56,8 +56,6 @@ jobs:
         run: >-
           exec timeout --kill-after=30s 5m
           rustup toolchain install "$STABLE" --profile minimal
-      - name: Hook regression tests
-        run: python3 scripts/test-agent-hooks.py
       - name: Receipt replay self-test
         run: python3 scripts/test-chaos-receipt-replay.py
       - name: Review workflow contract tests

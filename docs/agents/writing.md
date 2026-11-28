@@ -26,22 +26,22 @@ Read the [review policy](../../REVIEW.md) before a code review.
 ## Enforcement
 
 `.github/workflows/agent-checks.yml` rejects comment-lint override markers,
-runs the hook and review-workflow contract tests and the receipt replay
-self-test, and checks that every link,
+runs the review-workflow contract tests and the receipt replay self-test, and
+checks that every link,
 anchor, and backticked repository path in `REVIEW.md`, `AGENTS.md`, and
 `docs/agents/` resolves in a clean clone. Run the same checks locally:
 
 ```sh
 bash scripts/forbid-comment-markers.sh
-python3 scripts/test-agent-hooks.py
 python3 scripts/test-chaos-receipt-replay.py
-cargo test -p kestrike-tools --test tools agent_hooks::
+cargo test -p kestrike-tools --test tools -- agent_hooks:: pre_push_checks::
 python3 scripts/test-review-workflow.py
 ```
 
 `git config --local core.hooksPath .githooks` enables the tracked hooks. The
 pre-commit hook runs the marker check on staged additions; the pre-push hook
-runs [the pre-push checks](ci.md#pre-push-checks), then a configured global
+runs [the pre-push checks](ci.md#pre-push-checks) through the tool
+`pre-push-checks`, then a configured global
 pre-push hook. Inspect existing hooks before
 changing the hook path and keep their checks. Workstation steering hooks review
 comments and prose; they can fail open, so follow the policy when none runs.
