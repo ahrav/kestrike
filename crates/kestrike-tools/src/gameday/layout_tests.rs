@@ -4,23 +4,13 @@
 
 use std::collections::BTreeSet;
 
-use super::{LAYOUT, VERSION_FIELDS, layout};
+use super::{LAYOUT, RECORD, layout};
 use crate::gameday::constants::FILE_LIMIT;
 use crate::gameday::schema::{Each, Names, Scalar, Schema};
 use crate::gameday::test_support::{held, object, patched, tree};
 use crate::gameday::{FleetBounds, check_package, conform, parsed};
 use crate::json::Value;
 use crate::text::Text;
-
-/// `{"time": "time", **VERSION}`, the schema of a line of `records/<shard>.jsonl`.
-const RECORD: Schema = Schema::Object(&[
-    ("time", Schema::scalar(Scalar::Time)),
-    VERSION_FIELDS[0],
-    VERSION_FIELDS[1],
-    VERSION_FIELDS[2],
-    VERSION_FIELDS[3],
-    VERSION_FIELDS[4],
-]);
 
 /// The held package's names with `observed` and `sealed` as a run's evidence sets them.
 fn held_names() -> Names {

@@ -5,7 +5,8 @@
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
-//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
+//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead, and
+//! [`parse_members`] keeps every member of an object, a repeated key's included.
 //! The strict read also refuses the three constants and a fractional number whose decimal value is not
 //! the shortest form of a finite double, so each float it reads stands for the decimal the text spells.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
@@ -15,6 +16,7 @@
 //! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::decimal::{nearest_double, spells_shortest};
@@ -407,6 +409,24 @@ pub(crate) fn parse_strict(text: &str) -> Result<Value, StrictError> {
     Reader::new(text, Mode::Strict).document()
 }
 
+/// `parse_members` reads what [`parse`] reads and returns each object as an array of its keys and values in
+/// document order, `[key, value, key, value, ...]`, so each member of a repeated key stands in it. An
+/// object and an array of the same items read alike in the result.
+///
+/// # Errors
+///
+/// `parse_members` refuses what [`parse`] refuses.
+pub fn parse_members(text: &str) -> Result<Value, Error> {
+    Reader::new(text, Mode::Members)
+        .document()
+        .map_err(|error| match error {
+            StrictError::Syntax(error) => error,
+            StrictError::Repeated(_) | StrictError::Number(_) => {
+                unreachable!("a read that keeps every member and every number refuses neither")
+            }
+        })
+}
+
 struct Reader<'a> {
     text: &'a [u8],
     at: usize,
@@ -422,6 +442,8 @@ enum Mode {
     Unique,
     /// A repeated key, and a number the strict read refuses.
     Strict,
+    /// Nothing more, and an object reads as the array of its keys and values, a repeated key's included.
+    Members,
 }
 
 impl<'a> Reader<'a> {
@@ -528,11 +550,13 @@ impl<'a> Reader<'a> {
     fn object(&mut self, depth: usize) -> Result<Value, StrictError> {
         self.nest(depth)?;
         let mut object = Object::new();
+        let mut members = Vec::new();
         if self.peek() == Some(b'}') {
             self.at += 1;
-            return Ok(Value::Object(object));
+            return Ok(self.closed(object, members));
         }
         let mut repeated = None;
+        let mut keys = HashSet::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -545,20 +569,36 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.mode != Mode::Keep
-                && repeated.is_none()
-                && object.iter().any(|(name, _)| *name == key)
-            {
-                repeated = Some(key.clone());
+            if self.mode == Mode::Members {
+                members.extend([Value::String(key), value]);
+            } else if self.mode == Mode::Keep {
+                object.insert(key, value);
+            } else if repeated.is_none() {
+                // The parser defers the first duplicate-key error until the object closes, and the
+                // members after it are read and dropped.
+                if keys.insert(key.clone()) {
+                    object.0.push((key, value));
+                } else {
+                    repeated = Some(key);
+                }
             }
-            object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
                     return Err(StrictError::Repeated(name));
                 }
-                return Ok(Value::Object(object));
+                return Ok(self.closed(object, members));
             }
+        }
+    }
+
+    /// `closed` is the value of a read object: the array of its keys and values when the read keeps every
+    /// member, else the object.
+    fn closed(&self, object: Object, members: Vec<Value>) -> Value {
+        if self.mode == Mode::Members {
+            Value::Array(members)
+        } else {
+            Value::Object(object)
         }
     }
 
