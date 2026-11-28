@@ -20,10 +20,11 @@ pub use failure::Failure;
 pub use guard::{Record, account_number, account_numbers, record_values};
 pub use members::Members;
 pub use plan::{Plan, Skipped};
-pub use reads::{destination_refs, ignored_tests};
+pub use reads::{Probe, destination_refs, ignored_tests};
 pub use table::{Check, Held, ORDER, Row, checks_for};
 
-use failure::{argument, short, shown};
+use failure::shown;
+pub(crate) use failure::{argument, short};
 
 #[cfg(test)]
 #[path = "../hook_tests.rs"]

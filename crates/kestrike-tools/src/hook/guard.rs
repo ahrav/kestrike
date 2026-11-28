@@ -9,10 +9,10 @@ use regex::Regex;
 
 use crate::classes::compiled;
 use crate::environ::Environ;
-use crate::git::{blob_bytes, git};
 use crate::json::{Value, parse_members};
 use crate::text::Text;
 
+use super::reads::{Probe, Reads, blob_bytes, git};
 use super::{Failure, argument, short, shown};
 
 /// The directories that hold chaos records.
@@ -71,7 +71,7 @@ fn form(command: &str, commit: &Text, line: &str) -> Failure {
 /// that is a link or a submodule, a chaos tree that is no directory, and a record path that is no regular
 /// file each fail, so the records read are the ones the tree itself holds.
 pub(super) fn tip_records(
-    environ: &Environ,
+    reads: Reads<'_>,
     commit: &Text,
 ) -> Result<(Vec<String>, Vec<Record>), Failure> {
     let mut args = vec![
@@ -82,7 +82,7 @@ pub(super) fn tip_records(
         "--full-tree".into(),
     ];
     args.extend([argument(commit), "--".into(), "chaos".into()]);
-    let listed = git(environ, &args)?;
+    let listed = git(reads, &args)?;
     let (mut failures, mut records) = (Vec::new(), Vec::new());
     for entry in listed.split('\0').filter(|entry| !entry.is_empty()) {
         let parsed = entry.split_once('\t').and_then(|(meta, path)| {
@@ -118,7 +118,7 @@ pub(super) fn tip_records(
 /// holds. A record that a commit deletes is skipped, and a commit that makes a record path a link or a
 /// submodule fails: Git sends that entry with the commit, and it is no JSON record to read.
 pub(super) fn pushed_records(
-    environ: &Environ,
+    reads: Reads<'_>,
     commits: &[Text],
 ) -> Result<(Vec<String>, Vec<Record>), Failure> {
     let (mut failures, mut records) = (Vec::new(), Vec::new());
@@ -136,7 +136,7 @@ pub(super) fn pushed_records(
         .to_vec();
         args.extend([argument(commit), "--".into()]);
         args.extend(record_pathspecs());
-        let listed = git(environ, &args)?;
+        let listed = git(reads, &args)?;
         let fields: Vec<&str> = listed.split('\0').collect();
         for at in (0..fields.len().saturating_sub(1)).step_by(2) {
             let words: Vec<&str> = crate::text::words(fields[at]).collect();
@@ -173,6 +173,17 @@ pub(super) fn pushed_records(
 ///
 /// The batch read of the blobs fails.
 pub fn account_numbers(environ: &Environ, records: &[Record]) -> Result<Vec<String>, Failure> {
+    let unprobed: Probe = || Ok(());
+    let reads = Reads {
+        environ,
+        probe: unprobed,
+    };
+    read_accounts(reads, records)
+}
+
+/// `read_accounts` is [`account_numbers`] with the batch read made through `reads`, whose probe runs once
+/// it returns.
+pub(super) fn read_accounts(reads: Reads<'_>, records: &[Record]) -> Result<Vec<String>, Failure> {
     let mut seen = HashSet::new();
     let unique: Vec<&Record> = records
         .iter()
@@ -182,7 +193,7 @@ pub fn account_numbers(environ: &Environ, records: &[Record]) -> Result<Vec<Stri
         return Ok(Vec::new());
     }
     let oids: Vec<String> = unique.iter().map(|record| record.oid.clone()).collect();
-    let blobs = blob_bytes(environ, &oids)?;
+    let blobs = blob_bytes(reads, &oids)?;
     let mut failures = Vec::new();
     for (record, blob) in unique.iter().zip(blobs) {
         let at = format!("{} at {}", shown(&record.path), short(&record.commit));

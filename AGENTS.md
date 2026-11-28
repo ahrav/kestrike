@@ -50,8 +50,8 @@ block device.
   file it names, run `python3 scripts/judge-verus.py reconcile`. Resolve stale
   source digests or trust declarations before pushing; do not weaken the
   inventory to make reconciliation pass. With
-  `git config --local core.hooksPath .githooks`, the pre-push hook runs these
-  checks on the pushed commits; see
+  `git config --local core.hooksPath .githooks`, the pre-push hook starts the
+  tool `pre-push-checks`, which runs these checks on the pushed commits; see
   [the pre-push checks](docs/agents/ci.md#pre-push-checks).
 - Before pushing a change under `chaos/`, run
   `python3 -I chaos/tools/validate_contract.py chaos/ledger.json --root . --project chaos/project.yaml --receipts chaos/receipts --check-claim chaos/READINESS.md`.
@@ -88,14 +88,14 @@ block device.
   cite a pass as evidence, read the header of `scripts/model-links.py`, which
   states what a pass shows and what it leaves unchecked.
 - Before pushing a change to `scripts/gameday-judge.py`, its self-test, a
-  file under `scripts/gameday-fixtures/` or a file the self-test reads (the
-  header of `scripts/pre-push-checks.py` lists them), run
+  file under `scripts/gameday-fixtures/` or a file the self-test reads
+  ([the pre-push checks](docs/agents/ci.md#pre-push-checks) list them), run
   `python3 -I scripts/test-gameday-judge.py`. The pre-push hook runs it on the
   pushed tips that need it; no CI job runs it yet.
 - Before pushing a change to `scripts/host-stop-controller.py`, its self-test,
   a file under `scripts/host-stop-fixtures/` or `scripts/gameday-fixtures/`, or
-  a file the self-test reads (the header of `scripts/pre-push-checks.py` lists
-  them), run `python3 -I scripts/test-host-stop-controller.py`. The pre-push
+  a file the self-test reads ([the pre-push checks](docs/agents/ci.md#pre-push-checks)
+  list them), run `python3 -I scripts/test-host-stop-controller.py`. The pre-push
   hook runs it on the pushed tips that need it; no CI job runs it yet.
 - Do not run Miri unless the user asks for it or a change touches `unsafe`
   code in a way the test suite cannot otherwise check. A Miri pass over
@@ -156,9 +156,9 @@ Before you deploy, configure or run the zone reconciler service, or change
 `crates/kestrike-reconciler`, read `docs/agents/reconciler.md`.
 
 Before you start, add or change a tool under `crates/kestrike-tools`, change
-`scripts/tool.sh`, port a script to a tool, or change a file that a row of
-[Rules held twice](docs/agents/tools.md#rules-held-twice) names, read
-`docs/agents/tools.md`.
+`scripts/tool.sh`, port a script to a tool, or change a file at or under a
+path that a row of [Rules held twice](docs/agents/tools.md#rules-held-twice)
+names, read `docs/agents/tools.md`.
 
 Before you read, change or validate a file under `chaos/`, or report what a
 chaos campaign on the simulated Kestrike shows, read `docs/agents/chaos.md`.
