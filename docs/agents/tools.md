@@ -20,7 +20,8 @@ runs `bash scripts/tool.sh <tool> <arguments>` and changes nothing else.
 `scripts/tool.sh` finds the checkout's top level from its own file, with every link to the file or to a
 directory above it resolved, so it runs from any directory and leaves the caller's working directory as it
 is. The preparation below runs in a subshell, so its working variables, its working directory and the
-environment it gives rustup and Cargo stay out of the final step. It runs each rustup and Cargo call in the
+environment it gives rustup and Cargo stay out of the final step. The preparation reads its standard input
+from `/dev/null`, and the tool the launcher starts last reads the caller's standard input. It runs each rustup and Cargo call in the
 top level. Before the first, it makes a relative `RUSTUP_HOME` or `CARGO_HOME` absolute against the caller's
 physical directory, since rustup and Cargo read a relative value against their own working directory, and
 finds `rustup` on the caller's `PATH` from the caller's directory: it takes each entry as written, as

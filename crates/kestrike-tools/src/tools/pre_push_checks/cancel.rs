@@ -14,10 +14,10 @@
 //! [`install`] blocks [`SIGNALS`] while it registers their handlers. Unblocking [`SIGNALS`] permits
 //! delivery of pending signals. [`RECORD`] retains the first signal a handler records.
 //!
-//! A check starts with [`SIGNALS`] and SIGCHLD at their default dispositions, since `execve` resets
-//! each caught signal to its default, and with the signal mask of the thread that starts it, since
-//! `Command` passes that mask on: [`install`] unblocked [`SIGNALS`] there, and any other signal the tool's
-//! starter blocked stays blocked in the check.
+//! A check starts with [`SIGNALS`] at their default dispositions, since `execve` resets each caught signal
+//! to its default, and with SIGCHLD at its default, which [`install`] set and `execve` keeps. It starts
+//! with the signal mask of the thread that starts it, since `Command` passes that mask on: [`install`]
+//! unblocked [`SIGNALS`] there, and any other signal the tool's starter blocked stays blocked in the check.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -139,29 +139,62 @@ pub(super) enum Unwaited {
     /// On a recorded signal, the SIGKILL or the reap failed, so the check's group may still run and its
     /// leader may stand unreaped; the fields are the exit code and the error.
     Unstopped(u8, io::Error),
-    /// The `waitid` probe of the check or the final reap failed. The probe fails where the check is no
-    /// longer this process's child, and then its process id may name another process, so `wait` signals
-    /// neither the leader nor its group.
+    /// The `waitid` probe of the check or the final reap failed. A probe that fails with `ECHILD` finds the
+    /// check no longer this process's child, and then its process id may name another process, so `wait`
+    /// signals neither the leader nor its group. A probe that fails with another error leaves the leader
+    /// the tool's unreaped child, so `wait` first sends SIGKILL to its group and leader and reaps it; the
+    /// error then names the probe's failure and, where that stop failed too, the stop's.
     Failed(io::Error),
 }
 
-/// `child` leads its own process group. Each poll keeps an exited leader waitable through `check()`,
-/// preserving its process group id for [`stop`].
-pub(super) fn wait(child: &mut Child) -> Result<ExitStatus, Unwaited> {
+/// `wait` returns `child`'s status once `child` has ended and `done` holds, with `done` asked only after
+/// `child` ended. `child` leads its own process group. Each poll keeps an exited leader waitable through
+/// `check()`, preserving its process group id for [`stop`], so a signal recorded while `done` does not
+/// hold still stops the group.
+pub(super) fn wait(child: &mut Child, done: impl FnMut() -> bool) -> Result<ExitStatus, Unwaited> {
+    waited(child, ended, done)
+}
+
+/// `waited` is [`wait`] with `probe` in place of [`ended`].
+fn waited(
+    child: &mut Child,
+    probe: impl Fn(&Child) -> io::Result<bool>,
+    mut done: impl FnMut() -> bool,
+) -> Result<ExitStatus, Unwaited> {
     let mut pause = FIRST_PAUSE;
     loop {
-        let ended = ended(child).map_err(Unwaited::Failed)?;
+        let ended = match probe(child) {
+            Ok(ended) => ended,
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => {
+                return Err(Unwaited::Failed(error));
+            }
+            Err(error) => return Err(abandoned(child, error)),
+        };
         if let Err(code) = check() {
             return Err(match stop(child, ended) {
                 Ok(()) => Unwaited::Cancelled(code),
                 Err(error) => Unwaited::Unstopped(code, error),
             });
         }
-        if ended {
+        if ended && done() {
             return child.wait().map_err(Unwaited::Failed);
         }
         thread::sleep(pause);
         pause = (pause * 2).min(LONGEST_PAUSE);
+    }
+}
+
+/// `abandoned` stops `child`, still the tool's unreaped child, after its probe failed with `error`. A
+/// signal recorded by then gives its exit code.
+fn abandoned(child: &mut Child, error: io::Error) -> Unwaited {
+    let stopped = stop(child, false);
+    match (check(), stopped) {
+        (Err(code), Ok(())) => Unwaited::Cancelled(code),
+        (Err(code), Err(failed)) => Unwaited::Unstopped(code, failed),
+        (Ok(()), Ok(())) => Unwaited::Failed(error),
+        (Ok(()), Err(failed)) => Unwaited::Failed(io::Error::other(format!(
+            "{error}; the stop that followed failed: {failed}"
+        ))),
     }
 }
 
@@ -187,11 +220,7 @@ fn ended(child: &Child) -> io::Result<bool> {
             (status, info)
         };
         if status == 0 {
-            return Ok(info.si_signo != 0
-                && matches!(
-                    info.si_code,
-                    libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
-                ));
+            return Ok(info.si_signo != 0 && terminal(info.si_code));
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
@@ -200,16 +229,24 @@ fn ended(child: &Child) -> io::Result<bool> {
     }
 }
 
+/// `terminal` holds for the `si_code` of a child that exited or died of a signal, and not for one that
+/// stopped, was trapped or continued.
+fn terminal(code: libc::c_int) -> bool {
+    matches!(code, libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED)
+}
+
 /// `stop` sends SIGKILL to the group `child` leads and to the leader, which the caller has not reaped, so
 /// its process id still names it and its group, and then reaps the leader. A leader that left its group
-/// still ends, and `killpg` finding no process in the group reads as a group already ended, as does the
-/// `EPERM` that Apple's systems give for a group holding only its ended leader. The reap waits
-/// only on a leader whose SIGKILL was sent.
+/// still ends, and `killpg` finding no process in the group reads as a group already ended. On Apple's
+/// systems an `EPERM` beside a leader that has ended, as `ended` says before the call or a second probe
+/// after it, also reads as a group already ended: those systems give it for a group holding only its ended
+/// leader, and also for a group whose only live members the tool may not signal, which then run on. Linux
+/// gives success in both cases. The reap waits only on a leader whose SIGKILL was sent.
 ///
 /// # Errors
 ///
 /// `killpg` fails otherwise, or the kill or the reap of the leader fails; the first error is returned.
-fn stop(child: &mut Child, ended: bool) -> io::Result<()> {
+pub(super) fn stop(child: &mut Child, exited: bool) -> io::Result<()> {
     let group = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
     // SAFETY: `killpg` takes two integers and touches no memory of the caller.
     let grouped = if unsafe { libc::killpg(group, libc::SIGKILL) } == 0 {
@@ -218,7 +255,11 @@ fn stop(child: &mut Child, ended: bool) -> io::Result<()> {
         let error = io::Error::last_os_error();
         match error.raw_os_error() {
             Some(libc::ESRCH) => Ok(()),
-            Some(libc::EPERM) if ended && cfg!(target_vendor = "apple") => Ok(()),
+            Some(libc::EPERM)
+                if cfg!(target_vendor = "apple") && (exited || ended(child).unwrap_or(false)) =>
+            {
+                Ok(())
+            }
             _ => Err(error),
         }
     };

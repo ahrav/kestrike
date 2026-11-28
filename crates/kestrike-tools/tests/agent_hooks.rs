@@ -10,7 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use crate::pre_push_checks::push::{executable, finished, spawn_with_input};
+use crate::pre_push_checks::push::{Run, executable, finished, spawn_with_input};
 
 /// The override marker the cases plant. Splitting its literal keeps the scan from matching this
 /// definition in the case file.
@@ -95,12 +95,6 @@ impl Drop for Repo {
             panic!("{}: {error}", self.path.display());
         }
     }
-}
-
-struct Run {
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
 }
 
 impl fmt::Display for Run {
@@ -290,12 +284,7 @@ impl Repo {
         let hook = self.pre_push();
         let mut command = self.command("bash");
         command.arg(&hook).args(args).env("TOOL_EXIT", tool_exit);
-        let done = finished(spawn_with_input(&mut command, input));
-        Run {
-            code: done.code,
-            stdout: done.stdout,
-            stderr: done.stderr,
-        }
+        finished(spawn_with_input(&mut command, input))
     }
 
     fn launched(&self) -> (String, String) {
