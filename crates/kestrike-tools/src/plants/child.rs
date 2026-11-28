@@ -197,9 +197,19 @@ pub fn logged(started: &Logged<'_>, interrupt: &Interrupt) -> Result<(i32, Strin
     }
 }
 
+/// `MFD_NOEXEC_SEAL` of Linux 6.3, which makes a memory file that can never be made executable.
+const NOEXEC_SEAL: libc::c_uint = 0x0008;
+
+/// `memory_file` makes a memory file that can never be made executable; a kernel that refuses that
+/// flag with `EINVAL` gets the plain call.
 fn memory_file(name: &CStr) -> io::Result<File> {
     // SAFETY: `name` is a NUL-terminated string that outlives the call.
-    let descriptor = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    let mut descriptor =
+        unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC | NOEXEC_SEAL) };
+    if descriptor < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL) {
+        // SAFETY: `name` is a NUL-terminated string that outlives the call.
+        descriptor = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
+    }
     if descriptor < 0 {
         return Err(io::Error::last_os_error());
     }
