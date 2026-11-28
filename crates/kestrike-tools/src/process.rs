@@ -10,10 +10,15 @@
 //! names another, on the monotonic clock.
 //!
 //! A group's stop reads its leader's state from `/proc/<pid>/stat` and reaps the leader only after its
-//! last signal, so while the stop signals the group the leader's id names that group alone.
+//! last signal, so while the stop signals the group the leader's id names that group alone. That holds
+//! while the caller is the leader's only waiter from its start until the stop returns: no other code of
+//! the process waits for that child or for any child, and SIGCHLD is neither ignored nor set with
+//! `SA_NOCLDWAIT`. A missing state file, `ECHILD` and [`GroupStopped::ReapedElsewhere`] report a reap
+//! outside the stop after it happened; they do not prevent one.
 
 use std::fs;
 use std::io::{self, Read};
+use std::path::Path;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -300,50 +305,69 @@ fn parsed(stat: &[u8], pid: u32, parent: u32) -> Result<Leader, String> {
     })
 }
 
-fn at(path: &str, error: &io::Error) -> io::Error {
-    io::Error::new(error.kind(), format!("{path}: {error}"))
+fn at(path: &Path, error: &io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
-/// `own_view` returns `Ok` when the first field of `/proc/self/stat` is this process's id, which holds
-/// for the `/proc` of this process's PID namespace.
+/// `own_view` returns `Ok` when the `NStgid` line of `<root>/self/status` holds one id, `own`. One id
+/// there means the procfs at `root` is that of the PID namespace this process lives in, so the ids it
+/// shows are the ids this process signals and waits for.
 ///
 /// # Errors
 ///
-/// `own_view` returns an error if `/proc/self/stat` cannot be read, as when `/proc` is not mounted, or
-/// its first field is not this process's id.
-fn own_view() -> io::Result<()> {
-    const OWN: &str = "/proc/self/stat";
-    let stat = fs::read(OWN).map_err(|error| at(OWN, &error))?;
-    let named = stat
-        .split(|&byte| byte == b' ')
-        .next()
-        .and_then(|field| std::str::from_utf8(field).ok())
-        .and_then(|field| field.parse::<u32>().ok());
-    let id = std::process::id();
-    if named == Some(id) {
+/// `own_view` returns an error if `<root>/self/status` cannot be read, as when `/proc` is not mounted, or
+/// its `NStgid` line is missing or holds anything other than the one id `own`.
+fn own_view(root: &Path, own: u32) -> io::Result<()> {
+    let path = root.join("self/status");
+    let status = fs::read(&path).map_err(|error| at(&path, &error))?;
+    let single = status
+        .split(|&byte| byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"NStgid:"))
+        .and_then(|ids| {
+            let mut ids = ids
+                .split(u8::is_ascii_whitespace)
+                .filter(|id| !id.is_empty());
+            let first = ids.next()?;
+            ids.next().is_none().then_some(first)
+        })
+        .and_then(|id| std::str::from_utf8(id).ok()?.parse::<u32>().ok());
+    if single == Some(own) {
         return Ok(());
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
-        format!("{OWN} names no process {id}, so /proc shows another PID namespace"),
+        format!(
+            "{} holds no NStgid line of the one id {own}, so /proc shows another PID namespace",
+            path.display()
+        ),
     ))
 }
 
 /// `leader` reads the state of the group leader `pid`, a child of this process, from
-/// `/proc/<pid>/stat`. A missing state file is [`Leader::Reaped`] once [`own_view`] holds.
+/// `/proc/<pid>/stat` after [`own_view`] confirms that `/proc` is this process's view. A missing state
+/// file is [`Leader::Reaped`].
 ///
 /// # Errors
 ///
-/// `leader` returns an error if the read fails other than with `ENOENT` or `ESRCH`, [`own_view`] fails
-/// after a missing state file, or [`parsed`] refuses the record. Each error names the path it concerns.
+/// `leader` returns an error if [`own_view`] fails, the read of the state file fails other than with
+/// `ENOENT` or `ESRCH`, or [`parsed`] refuses the record. Each error names the path it concerns and a
+/// failed read keeps its kind.
 pub(crate) fn leader(pid: u32) -> io::Result<Leader> {
-    let path = format!("/proc/{pid}/stat");
+    leader_under(Path::new("/proc"), pid, std::process::id())
+}
+
+/// `leader_under` is [`leader`] with `root` as the procfs and `own` as this process's id.
+fn leader_under(root: &Path, pid: u32, own: u32) -> io::Result<Leader> {
+    own_view(root, own)?;
+    let path = root.join(pid.to_string()).join("stat");
     match fs::read(&path) {
-        Ok(stat) => parsed(&stat, pid, std::process::id()).map_err(|reason| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("{path} {reason}"))
+        Ok(stat) => parsed(&stat, pid, own).map_err(|reason| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} {reason}", path.display()),
+            )
         }),
         Err(error) if matches!(error.raw_os_error(), Some(libc::ENOENT | libc::ESRCH)) => {
-            own_view()?;
             Ok(Leader::Reaped)
         }
         Err(error) => Err(at(&path, &error)),
@@ -481,18 +505,22 @@ enum Signalled {
 /// the group; a grace for the leader's exit; when the leader still runs and the stop has a second grace,
 /// SIGKILL to the group and the second grace; a closing SIGKILL to the group; and the reap within its
 /// bound. Each grace starts once its signal is sent and ends at the leader's exit, at its bound or when the
-/// stop's check holds. The caller holds the only wait for `child` until the stop returns. Keeping the
-/// leader unreaped reserves its id, and so its group's, throughout signaling. If a signal finds the group
-/// empty, `stop_group` proceeds to the reap. The stop detects a wait elsewhere only after that wait has
-/// reaped the leader. A missing state file stops the signals and prompts a wait for the child: `ECHILD`
-/// from that wait or from the reap is [`GroupStopped::ReapedElsewhere`].
+/// stop's check holds. Keeping the leader unreaped reserves its id, and so its group's, throughout
+/// signaling, which holds only while the caller is `child`'s only waiter from its start until the stop
+/// returns: no other code of the process waits for `child` or for any child, and SIGCHLD is neither
+/// ignored nor set with `SA_NOCLDWAIT`. An exited leader held unreaped meets that. If a signal finds the
+/// group empty, `stop_group` proceeds to the reap. The stop detects a wait elsewhere only after that wait
+/// has reaped the leader, and does not prevent it. A missing state file stops the signals and prompts a
+/// wait for the child: `ECHILD` from that wait or from the reap is [`GroupStopped::ReapedElsewhere`].
 ///
 /// # Errors
 ///
 /// A read of the leader's state, a signal other than to an empty group, or the reap fails, or the state
-/// file is gone while the child still runs. If `child.try_wait()` then finds the child running,
-/// `stop_group` attempts SIGKILL on the group and the child, retries the reap, and returns the first
-/// error.
+/// file is gone while the child still runs. `stop_group` then reads the leader's state once more: a
+/// leader that reads running or exited, and so is still held unreaped, gets SIGKILL to its group before
+/// any wait. A child that `child.try_wait()` then finds running gets SIGKILL to the group when that read
+/// failed or found no state file, and SIGKILL to itself, and the reap runs again. `stop_group` returns
+/// the first error.
 pub(crate) fn stop_group(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
     stop_with(child, stop, &mut signal_group)
 }
@@ -519,8 +547,14 @@ fn stop_with(
         },
     });
     ended.inspect_err(|_error| {
-        if matches!(child.try_wait(), Ok(None)) {
+        let held = matches!(leader(child.id()), Ok(Leader::Running | Leader::Exited));
+        if held {
             let _ = send(group, libc::SIGKILL);
+        }
+        if matches!(child.try_wait(), Ok(None)) {
+            if !held {
+                let _ = send(group, libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = reap(child, stop);
         }
