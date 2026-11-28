@@ -737,7 +737,8 @@ fn mask_holds(signal: i32) -> bool {
 /// A SIGHUP sent to the thread while the handled signals are blocked stays pending and unrecorded, and the
 /// handler records it once the mask is set back; the mask set back is the one the thread held before, so
 /// SIGINT, blocked before, stays blocked. The handlers stand in this test executable started again in a
-/// role, so the other tests keep their dispositions.
+/// role with SIGHUP at its default, so the other tests keep their dispositions; the role's own exit code
+/// tells its checks from a filter that matched no test.
 #[test]
 fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
     if std::env::var_os(BLOCKED_ROLE).is_some() {
@@ -770,19 +771,38 @@ fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
             mask_holds(libc::SIGINT),
         );
         let held = inside == (0, true, 0, true) && after == (1, Some(libc::SIGHUP), false, true);
-        std::process::exit(if held { 0 } else { 3 });
+        if !held {
+            eprintln!("inside the block {inside:?}, after it {after:?}");
+        }
+        std::process::exit(if held { 42 } else { 3 });
     }
     let name = module_path!()
         .split_once("::")
         .map_or("", |(_, rest)| rest)
         .to_owned()
         + "::a_blocked_signal_is_recorded_once_the_mask_is_set_back";
-    let status = Command::new(std::env::current_exe().expect("the test executable"))
-        .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
-        .env(BLOCKED_ROLE, "1")
-        .status()
-        .expect("the role runs");
-    assert_eq!(status.code(), Some(0), "{status:?}");
+    let mut role = Command::new(std::env::current_exe().expect("the test executable"));
+    role.args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(BLOCKED_ROLE, "1");
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal` and
+    // `pthread_sigmask`, which are async-signal-safe, on a local set.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        role.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGHUP);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            Ok(())
+        });
+    }
+    let status = role.status().expect("the role runs");
+    assert_eq!(
+        status.code(),
+        Some(42),
+        "the role ran and its checks held: {status:?}"
+    );
 }
 
 /// A read of the state that fails while the exited child is held unreaped sends SIGKILL to the child's
