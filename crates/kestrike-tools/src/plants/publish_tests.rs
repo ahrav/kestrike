@@ -221,10 +221,24 @@ fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
     fs::write(&elsewhere, "kept\n").expect("written");
     symlink(&elsewhere, &target).expect("linked");
     let later: i128 = 1_900_000_000_123_456_789;
-    let staging = Staging::new(Creation::Exact(0o4766))
-        .suffix(".weaken")
-        .modified(later);
-    publish_staged(&target, b"planted\n", staging).expect("the file is written");
+    let published = target.clone();
+    std::thread::spawn(move || {
+        // SAFETY: on success, `unshare(CLONE_FS)` gives the calling thread a private filesystem
+        // context.
+        let unshared = unsafe { libc::unshare(libc::CLONE_FS) };
+        assert_eq!(
+            unshared, 0,
+            "the thread takes a filesystem context of its own"
+        );
+        // SAFETY: `umask` sets the mask of the private context unshared above.
+        unsafe { libc::umask(0o077) };
+        let staging = Staging::new(Creation::Exact(0o4766))
+            .suffix(".weaken")
+            .modified(later);
+        publish_staged(&published, b"planted\n", staging).expect("the file is written");
+    })
+    .join()
+    .expect("the thread ends");
     let status = fs::symlink_metadata(&target).expect("stats");
     assert!(status.is_file());
     assert_eq!(status.permissions().mode() & 0o7777, 0o4766);
