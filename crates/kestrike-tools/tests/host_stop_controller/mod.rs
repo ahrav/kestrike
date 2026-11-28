@@ -8,6 +8,7 @@
 mod abort_path;
 mod after_stop;
 mod before_stop;
+mod late_reads;
 mod marks;
 mod plane;
 mod refusals;
@@ -230,6 +231,12 @@ impl Case {
     /// Runs `run` over the plane and the clock with `evidence` as the evidence argument, and
     /// returns the exit code.
     pub(crate) fn run_with(&mut self, evidence: OsString) -> u8 {
+        let mut record = Record::new(self.delivered);
+        self.run_on(&mut record, evidence)
+    }
+
+    /// Runs `run` as [`Case::run_with`] does, over `record` in place of a fresh one.
+    pub(crate) fn run_on(&mut self, record: &mut Record<'static>, evidence: OsString) -> u8 {
         let deadline = object(self.operator.clone())
             .get("deadline_seconds")
             .and_then(kestrike_tools::host_stop::Number::of)
@@ -243,7 +250,7 @@ impl Case {
             package: self.package.clone(),
             evidence,
         };
-        self.in_context(|cx| entry(&command, cx))
+        self.in_context_on(record, |cx| entry(&command, cx))
     }
 
     /// Runs `body` on a context over this case's plane, file steps, record, environment and streams.
@@ -251,9 +258,18 @@ impl Case {
         &self,
         body: impl FnOnce(&mut Context<'_, Plane, Steps>) -> T,
     ) -> T {
+        let mut record = Record::new(self.delivered);
+        self.in_context_on(&mut record, body)
+    }
+
+    /// Runs `body` as [`Case::in_context`] does, over `record`.
+    pub(crate) fn in_context_on<T>(
+        &self,
+        record: &mut Record<'static>,
+        body: impl FnOnce(&mut Context<'_, Plane, Steps>) -> T,
+    ) -> T {
         let mut seam = Plane(Rc::clone(&self.plane));
         let files = self.steps();
-        let mut record = Record::new(self.delivered);
         let mut out = Hooked(
             self.output.clone(),
             self.stdout.clone(),
@@ -268,7 +284,7 @@ impl Case {
         let mut cx = Context {
             seam: &mut seam,
             files: &files,
-            record: &mut record,
+            record,
             env: &self.env,
             out: &mut out,
             err: &mut err,

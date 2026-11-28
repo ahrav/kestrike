@@ -27,7 +27,7 @@ pub(crate) enum Step<'p> {
     Link(&'p OsStr),
     Unlink(&'p OsStr),
     TryLock,
-    Lstat,
+    Lstat(&'p Path),
     Exists(&'p Path),
     Mkdir(&'p Path),
     Rmdir,
@@ -111,7 +111,7 @@ impl Files for Steps {
     }
 
     fn lstat(&self, path: &Path) -> io::Result<fs::Metadata> {
-        self.enter(&Step::Lstat)?;
+        self.enter(&Step::Lstat(path))?;
         Disk.lstat(path)
     }
 
