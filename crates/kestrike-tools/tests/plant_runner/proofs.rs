@@ -342,6 +342,34 @@ fn a_head_without_the_proof_helper_leaves_no_verdict() {
     assert!(fx.proof_log().is_empty());
 }
 
+/// A head whose selector is a link to a named pipe gives every plant no verdict: the copy opens the
+/// pipe without waiting for a writer and refuses it on the opened file.
+#[test]
+fn a_head_whose_helper_links_to_a_named_pipe_leaves_no_verdict() {
+    let mut fx = Fixture::new();
+    let pipe = fx.scratch.join("pipe");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&pipe)
+        .status()
+        .expect("mkfifo starts");
+    assert!(made.success());
+    let selector = fx.repo.join("scripts/select-tests.py");
+    std::fs::remove_file(&selector).expect("removed");
+    std::os::unix::fs::symlink(&pipe, &selector).expect("linked");
+    fx.commit("a selector that links to a pipe");
+    let done = fx.run(&["p-miss"], &[]);
+    assert_eq!(done.code, 3, "{}", done.stderr);
+    fx.verdict(
+        "p-miss",
+        "no verdict",
+        "the head's scripts/select-tests.py cannot be copied:",
+    );
+    let (_, plants) = fx.results();
+    let reason = super::fixture::text_of(plants["p-miss"].get("reason").expect("a reason"));
+    assert!(reason.ends_with("is a named pipe"), "{reason}");
+    assert!(fx.proof_log().is_empty());
+}
+
 /// `side_plant` writes `p-side`, whose patch adds the file `side`, and commits it.
 fn side_plant(fx: &mut Fixture) {
     let side = "--- /dev/null\n+++ b/side\n@@ -0,0 +1 @@\n+planted\n";
