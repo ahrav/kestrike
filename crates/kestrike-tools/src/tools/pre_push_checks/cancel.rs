@@ -134,7 +134,8 @@ pub(super) fn wait(child: &mut Child) -> Result<ExitStatus, Unwaited> {
     }
 }
 
-/// `ended` holds once `child` has exited; `waitid` with `WNOWAIT` keeps the child waitable.
+/// `ended` holds once `child` has exited or died of a signal; a stopped or continued child reads as running.
+/// `waitid` with `WNOWAIT` keeps the child waitable.
 ///
 /// # Errors
 ///
@@ -142,7 +143,8 @@ pub(super) fn wait(child: &mut Child) -> Result<ExitStatus, Unwaited> {
 fn ended(child: &Child) -> io::Result<bool> {
     let pid = libc::id_t::from(child.id());
     loop {
-        // SAFETY: `info` is a zeroed `siginfo_t` that outlives the call, and `waitid` fills it.
+        // SAFETY: `info` is a zeroed `siginfo_t` that outlives the call; `waitid` writes it only where a
+        // child changed state, so a zero `si_signo` reads as no change.
         let (status, info) = unsafe {
             let mut info: libc::siginfo_t = std::mem::zeroed();
             let status = libc::waitid(
@@ -154,7 +156,11 @@ fn ended(child: &Child) -> io::Result<bool> {
             (status, info)
         };
         if status == 0 {
-            return Ok(info.si_signo != 0);
+            return Ok(info.si_signo != 0
+                && matches!(
+                    info.si_code,
+                    libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+                ));
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {

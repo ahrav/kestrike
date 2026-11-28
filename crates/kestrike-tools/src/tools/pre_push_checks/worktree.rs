@@ -24,6 +24,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::thread;
+use std::time::Duration;
 
 use crate::environ::Environ;
 use crate::git::{self, GitError};
@@ -130,7 +131,9 @@ fn checks_in(
         cancel::check().map_err(Ended::Cancelled)?;
         let argv = check.row().argv;
         let command = argv.join(" ");
-        say(&format!("pre-push: {}: {command}", short(tip))).map_err(Ended::Stream)?;
+        let said = say(&format!("pre-push: {}: {command}", short(tip)));
+        cancel::check().map_err(Ended::Cancelled)?;
+        said.map_err(Ended::Stream)?;
         let (program, args) = argv.split_first().expect("every check has a program");
         let mut child = git::command(environ, program)
             .args(args)
@@ -165,34 +168,62 @@ fn add(environ: &Environ, tree: &Path, tip: &Text) -> Result<(), Ended> {
     let mut child = git::command(environ, "git")
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn()
         .map_err(|error| Ended::Git(GitError::Start(error)))?;
-    let drained = child.stderr.take().map(|mut stream| {
-        thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = stream.read_to_end(&mut bytes);
-            bytes
-        })
-    });
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
     let status = cancel::wait(&mut child).map_err(|unwaited| match unwaited {
         Unwaited::Cancelled(code) => Ended::Cancelled(code),
         Unwaited::Unstopped(code, error) => Ended::Unstopped(code, format!("git: {error}")),
         Unwaited::Failed(error) => Ended::Git(GitError::Start(error)),
     })?;
+    let stdout = drained(stdout)?;
     if status.success() {
-        return Ok(());
+        return String::from_utf8(stdout).map(drop).map_err(|error| {
+            Ended::Git(GitError::NotUtf8(format!("{}: {error}", git::label(&args))))
+        });
     }
-    let stderr = drained
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default();
+    let stderr = drained(stderr)?;
     Err(Ended::Git(GitError::Failed(format!(
         "{}: {}",
         git::label(&args),
         strip_str(&String::from_utf8_lossy(&stderr))
     ))))
+}
+
+/// `drain` reads `stream` to its end on a thread of its own. Where the thread cannot start, the stream is
+/// closed and its bytes read as none.
+fn drain(stream: Option<impl Read + Send + 'static>) -> Option<thread::JoinHandle<Vec<u8>>> {
+    let mut stream = stream?;
+    thread::Builder::new()
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes);
+            bytes
+        })
+        .ok()
+}
+
+/// `drained` waits for the reader of `drain`, reading the signal record between polls, since a descendant
+/// of Git can hold the stream open after Git exits.
+///
+/// # Errors
+///
+/// A signal was recorded while the reader ran.
+fn drained(reader: Option<thread::JoinHandle<Vec<u8>>>) -> Result<Vec<u8>, Ended> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    let mut pause = Duration::from_micros(500);
+    while !reader.is_finished() {
+        cancel::check().map_err(Ended::Cancelled)?;
+        thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(20));
+    }
+    Ok(reader.join().unwrap_or_default())
 }
 
 enum Removal {

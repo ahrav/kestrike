@@ -91,11 +91,13 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
     let environ = plan.environ();
     let mut failures = Vec::new();
     for (base, tip) in plan.scans() {
-        say(&format!(
+        let said = say(&format!(
             "pre-push: {}: tool.sh scan-weakened-tests --base {}",
             short(tip),
             short(base)
-        ))?;
+        ));
+        cancel::check()?;
+        said?;
         let code = scan_range(
             environ,
             &argument(base),
@@ -116,7 +118,9 @@ fn push(destination: &OsStr) -> Result<Exit, Exit> {
         failures.extend(worktree::run_checks(environ, tip, &checks)?);
     }
     for failure in &failures {
-        say(&format!("pre-push: failed: {failure}"))?;
+        let said = say(&format!("pre-push: failed: {failure}"));
+        cancel::check()?;
+        said?;
     }
     Ok(u8::from(!failures.is_empty()))
 }
