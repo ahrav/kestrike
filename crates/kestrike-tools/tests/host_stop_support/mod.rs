@@ -1,10 +1,13 @@
 //! What the host stop controller's cases share: the tree's fixtures, a scratch directory per case,
-//! JSON values changed at a path, and the refusals of a run's first step as one table in
-//! [`step_one`].
+//! JSON values changed at a path, the bounded wait for a directory's lock in [`lock`], and the
+//! refusals of a run's first step as one table in [`step_one`].
 
 #![cfg(target_os = "linux")]
 
+mod lock;
 pub(crate) mod step_one;
+
+pub(crate) use lock::free_lock;
 
 use std::fs::{self, DirBuilder};
 use std::io;
