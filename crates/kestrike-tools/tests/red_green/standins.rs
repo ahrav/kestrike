@@ -95,6 +95,7 @@ with open(Path(os.environ["CARGO_TARGET_DIR"]) / "red-green.lock", "a") as probe
         held = True
 with (state / "builds.txt").open("a") as out:
     out.write(json.dumps({"leg": tree.name, "argv": sys.argv[1:], "lock_held": held, "stdin": sys.stdin.read(),
+                          "runner_session": os.getsid(os.getppid()),
                           "target_dir": os.environ.get("CARGO_TARGET_DIR"),
                           "build_dir": os.environ.get("CARGO_BUILD_BUILD_DIR")}) + "\n")
 if leg.get("replace"):

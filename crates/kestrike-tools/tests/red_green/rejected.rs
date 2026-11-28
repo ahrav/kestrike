@@ -10,17 +10,18 @@ use std::path::Path;
 use kestrike_tools::ownership::foreign_toolchain_paths_for;
 use kestrike_tools::red_green::run::resolved_by;
 
-use super::support::{Call, Fixture, UID, chmod, private_dir, words};
-
-fn me() -> u32 {
-    // SAFETY: `getuid` takes no argument and always succeeds.
-    unsafe { libc::getuid() }
-}
+use super::support::{Call, Fixture, MADE, UID, chmod, me, private_dir, read, words};
 
 /// `rejects` runs `call` and asserts a rejection whose line holds one of `reasons`, with nothing on
 /// standard output, no escape byte on standard error, no build, no `target/` and the checkout as it was.
 fn rejects(fx: &Fixture, name: &str, call: &Call, reasons: &[&str]) {
-    let done = fx.red_green(call);
+    let made = fx.state.join("made.txt");
+    let mut call = call.clone();
+    let mut env = call.env.take().unwrap_or_else(|| fx.env.clone());
+    env.push((MADE.into(), made.clone().into_os_string()));
+    call.env = Some(env);
+    let done = fx.red_green(&call);
+    assert!(!made.exists(), "{name}: the run made a temporary directory");
     assert_eq!(done.code, 2, "{name}: {}", done.shown());
     assert!(
         done.stderr.contains("red-green rejected: "),
@@ -342,12 +343,18 @@ fn rejected_input_starts_no_worktree_and_no_build() {
         let reasons: Vec<&str> = reasons.iter().map(String::as_str).collect();
         rejects(&fx, name, call, &reasons);
     }
-    // The control: the default call, from which each row differs in one input, builds both legs.
+    // The control: the default call, from which each row differs in one input, builds both legs and
+    // makes its temporary directory in the fixture's.
     fx.git(&["update-ref", "refs/remotes/origin/main", &fx.base]);
-    let done = fx.red_green(&Call::default());
+    let made = fx.state.join("made.txt");
+    let done = fx.red_green(&Call {
+        env: Some(fx.with_env(&[(MADE, made.as_os_str())])),
+        ..Call::default()
+    });
     assert_eq!(done.code, 0, "{}", done.shown());
     assert_eq!(fx.build_legs(), ["base", "head"]);
     assert!(fx.repo.join("target").exists());
+    assert_eq!(read(&made), format!("{}\n", fx.tmp.display()));
 }
 
 /// `found` is `foreign_toolchain_paths_for(tmp, uid)` as texts.
@@ -378,10 +385,15 @@ fn toolchain_configuration_another_user_owns_or_can_add_above_the_temporary_dire
     );
     assert!(!reported.contains(&"/".to_owned()));
     let uid = other.to_string();
+    let made = fx.state.join("made.txt");
     let done = fx.red_green(&Call {
-        env: Some(fx.with_env(&[(UID, OsStr::new(&uid))])),
+        env: Some(fx.with_env(&[(UID, OsStr::new(&uid)), (MADE, made.as_os_str())])),
         ..Call::default()
     });
+    assert!(
+        !made.exists(),
+        "the rejected run made a temporary directory"
+    );
     assert_eq!(
         (done.code, done.stdout.as_str()),
         (2, ""),
@@ -395,10 +407,15 @@ fn toolchain_configuration_another_user_owns_or_can_add_above_the_temporary_dire
     );
     assert!(fx.builds().is_empty());
     fx.assert_checkout_unchanged();
-    // The control: the same run judged by the fixture's own user ID builds both legs.
-    let done = fx.red_green(&Call::default());
+    // The control: the same run judged by the fixture's own user ID builds both legs and makes its
+    // temporary directory.
+    let done = fx.red_green(&Call {
+        env: Some(fx.with_env(&[(MADE, made.as_os_str())])),
+        ..Call::default()
+    });
     assert_eq!(done.code, 0, "{}", done.shown());
     assert_eq!(fx.build_legs(), ["base", "head"]);
+    assert_eq!(read(&made), format!("{}\n", fx.tmp.display()));
 }
 
 /// Toolchain configuration another user can write above the temporary directory is reported: a

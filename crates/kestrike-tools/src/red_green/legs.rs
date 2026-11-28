@@ -8,13 +8,14 @@
 //! for the lock and for a runner have no deadline: the lock's ends at the holder's release or a signal,
 //! a runner's at its exit and the end of both its pipes. A signal while a runner runs sends it SIGTERM,
 //! by its process ID while it is held unreaped, and waits for its exit and its pipes; from a runner's
-//! exit on, a signal waits until that leg is judged and stops the run only before a head leg starts.
+//! exit and the end of both its pipes on, a signal waits until that leg is judged and stops the run
+//! only before a head leg starts.
 //! Each runner leads a session of its own, with the handled signals at their default actions, and reads
 //! the held lock file as its standard input.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -22,7 +23,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use super::evidence::{self, Evidence};
 use super::reasons;
@@ -35,12 +36,9 @@ use super::runner;
 use super::tree::{self, Entries};
 use crate::environ::{self, Environ};
 use crate::git;
-use crate::process::{self, Interrupt};
+use crate::process::{self, FIRST_PAUSE, Interrupt, POLL as PAUSE, drain, joined};
 use crate::python;
 use crate::text::{Text, text};
-
-const FIRST_PAUSE: Duration = Duration::from_micros(500);
-const PAUSE: Duration = Duration::from_millis(20);
 
 /// The arguments that lead each Git step that builds a leg tree.
 const HOOKLESS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
@@ -106,9 +104,9 @@ impl<'a> Run<'a> {
     /// own result. A step records what it makes before it returns, so the cleanup finds it.
     fn run_whole<T>(&mut self, step: impl FnOnce(&mut Self) -> Result<T, Halt>) -> Result<T, Halt> {
         self.check()?;
-        self.holding = true;
+        let outer = std::mem::replace(&mut self.holding, true);
         let done = step(self);
-        self.holding = false;
+        self.holding = outer;
         self.check()?;
         done
     }
@@ -537,20 +535,6 @@ fn session(command: &mut std::process::Command) {
     }
 }
 
-fn drain(stream: Option<impl Read + Send + 'static>) -> io::Result<Reader> {
-    thread::Builder::new().spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut stream) = stream {
-            stream.read_to_end(&mut bytes)?;
-        }
-        Ok(bytes)
-    })
-}
-
-fn joined(reader: Reader) -> io::Result<Vec<u8>> {
-    reader.join().expect("a reader thread returns its bytes")
-}
-
 /// `terminate` sends SIGTERM to the runner, which the caller holds unreaped, and waits with no deadline
 /// for its exit and, where `readers` stand, for both its pipes to end.
 ///
@@ -561,7 +545,8 @@ fn terminate(child: &mut Child, readers: Option<(Reader, Reader)>) -> Result<(),
     let failed =
         |error: io::Error| Halt::Failed(text!("the runner cannot be stopped: ", error.to_string()));
     let pid = libc::pid_t::try_from(child.id()).expect("a process id fits pid_t");
-    // SAFETY: `kill` takes two integers and touches no memory of the caller.
+    // SAFETY: `kill` takes two integers and touches no memory of the caller. Every caller holds
+    // `child` unreaped, so `pid` names the runner or its zombie.
     if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
         return Err(failed(io::Error::last_os_error()));
     }

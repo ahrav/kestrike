@@ -9,12 +9,7 @@ use std::path::{Path, PathBuf};
 
 use kestrike_tools::ownership::{PrivateError, make_private_with, shared_directories};
 
-use super::support::{Call, Fixture, MADE, RUN_NAME, chmod, private_dir, read, write};
-
-fn me() -> u32 {
-    // SAFETY: `getuid` takes no argument and always succeeds.
-    unsafe { libc::getuid() }
-}
+use super::support::{Call, Fixture, MADE, RUN_NAME, chmod, me, private_dir, read, write};
 
 /// Under an open umask each directory the run makes on the way to the build directory has no group or
 /// world write permission, so a second run accepts it; an ancestor all users can write is then shared.
@@ -189,4 +184,30 @@ fn a_build_directory_that_another_run_creates_first_is_used() {
         panic!("a file in the place is no shared directory: {taken}");
     };
     assert_eq!(error.error().kind(), std::io::ErrorKind::AlreadyExists);
+}
+
+/// A run directory's name that is not one normal path component fails the run before the build
+/// directory, with exit 1 and one line naming it; a name of one component is used.
+#[test]
+fn a_run_directory_name_of_more_than_one_component_fails_the_run() {
+    let fx = Fixture::new();
+    for name in ["a/b", "/abs", "..", "."] {
+        let done = fx.red_green(&Call {
+            env: Some(fx.with_env(&[(RUN_NAME, OsStr::new(name))])),
+            ..Call::default()
+        });
+        assert_eq!(done.code, 1, "{name}: {}", done.shown());
+        assert_eq!(
+            done.stderr,
+            format!("red-green: the run directory's name '{name}' is not one path component\n"),
+            "{name}"
+        );
+        assert!(!fx.repo.join("target").exists(), "{name}");
+    }
+    let done = fx.red_green(&Call {
+        env: Some(fx.with_env(&[(RUN_NAME, OsStr::new("one"))])),
+        ..Call::default()
+    });
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert!(fx.repo.join("target/red-green/one/receipt.json").is_file());
 }

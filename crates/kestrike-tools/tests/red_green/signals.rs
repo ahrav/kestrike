@@ -38,7 +38,7 @@ pub fn stopped(fx: &Fixture, done: &Done, signal: i32) {
     assert_eq!(fx.receipts(), Vec::<PathBuf>::new());
     let runner = fx.state.join("base.pid");
     if runner.exists() {
-        assert_ended(pid_in(&runner));
+        assert_eq!(state_of(pid_in(&runner)), None, "the run reaped its runner");
     }
     fx.assert_checkout_unchanged();
 }
@@ -104,6 +104,16 @@ fn a_runner_left_by_a_killed_command_keeps_the_build_lock() {
     assert_eq!(killed.code, -libc::SIGKILL, "{}", killed.shown());
     let runner = pid_in(&fx.state.join("base.pid"));
     assert_alive(runner);
+    let _group = Orphan(runner);
+    let second = second_run_waits(&fx);
+    assert!(kill(runner, libc::SIGTERM));
+    let done = second.finish();
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert_eq!(done.stderr.matches("waiting for another run").count(), 1);
+    assert_gone(pid_in(&fx.state.join("grandchild.pid")));
+}
+
+fn second_run_waits(fx: &Fixture) -> super::support::Running {
     fx.plan("{}");
     let second = fx.spawn_tool(&Call::default());
     let target = fx.repo.join("target/red-green/build");
@@ -115,11 +125,7 @@ fn a_runner_left_by_a_killed_command_keeps_the_build_lock() {
         ))
     );
     assert_eq!(fx.build_legs(), ["base"]);
-    assert!(kill(runner, libc::SIGTERM));
-    let done = second.finish();
-    assert_eq!(done.code, 0, "{}", done.shown());
-    assert_eq!(done.stderr.matches("waiting for another run").count(), 1);
-    assert_gone(pid_in(&fx.state.join("grandchild.pid")));
+    second
 }
 
 struct Orphan(i32);
@@ -149,17 +155,7 @@ fn a_build_left_by_a_killed_runner_keeps_the_build_lock() {
         done.shown()
     );
     assert_eq!(state_of(orphan.0), Some('S'));
-    fx.plan("{}");
-    let second = fx.spawn_tool(&Call::default());
-    let target = fx.repo.join("target/red-green/build");
-    assert_eq!(
-        second.first_stderr_line(),
-        Some(format!(
-            "red-green: waiting for another run that builds in {}\n",
-            target.display()
-        ))
-    );
-    assert_eq!(fx.build_legs(), ["base"]);
+    let second = second_run_waits(&fx);
     drop(orphan);
     let done = second.finish();
     assert_eq!(done.code, 0, "{}", done.shown());
@@ -231,6 +227,12 @@ fn a_sigterm_during_a_build_stops_the_leg_and_removes_the_worktrees() {
     );
     assert_gone(pid_in(&fx.state.join("grandchild.pid")));
     assert_gone(pid_in(&fx.state.join("supervised.pid")));
+    let builds = fx.builds();
+    let session = kestrike_tools::json::text(at(&builds[0], "runner_session"));
+    assert_eq!(session, read(&fx.state.join("base.pid")).trim());
+    // SAFETY: `getsid(0)` reads this process's session ID and touches no memory.
+    let own = unsafe { libc::getsid(0) };
+    assert_ne!(session, own.to_string());
 }
 
 /// A SIGTERM during an attempt that ignores SIGTERM stops the leg: the run waits through a second
@@ -327,6 +329,16 @@ fn a_sigterm_during_the_overlay_waits_for_it_and_starts_no_leg() {
     );
     assert!(finished.exists());
     assert_eq!(fx.build_legs(), Vec::<String>::new());
+    let quiet = fx.git_wrapper(&format!(
+        "GIT \"$@\"\nstatus=$?\ncase \"$*\" in \"{HOOKLESS}--literal-pathspecs checkout \"*)\n  sleep 1 ;;\n\
+         esac\nexit \"$status\"\n"
+    ));
+    let done = fx.tool(&Call {
+        env: Some(quiet),
+        ..Call::default()
+    });
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert_eq!(fx.build_legs(), ["base", "head"]);
 }
 
 /// When SIGTERM arrives during the head worktree's add, the run waits for that Git step to finish,

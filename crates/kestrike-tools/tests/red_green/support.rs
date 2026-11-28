@@ -69,8 +69,8 @@ pub fn root() -> PathBuf {
 
 /// The role runs the tool in a process of its own: the file [`ARGS`] names holds the top and the tool's
 /// arguments, each ended by a NUL, and the variables [`UID`], [`RUN_NAME`], [`MADE`], [`MAKE_TEMP`] and
-/// [`SPAWN`] set its facts. The wrapper hands the
-/// caller's standard output over as descriptor 3 while libtest's own lines go to `/dev/null`.
+/// [`SPAWN`] set its facts. The wrapper hands the caller's standard output over as descriptor 3 while
+/// libtest writes its own output to `/dev/null`.
 #[test]
 fn role() {
     if std::env::var_os(ROLE).is_none() {
@@ -83,11 +83,8 @@ fn role() {
         .map(|arg| OsStr::from_bytes(arg).to_os_string())
         .collect();
     let (top, rest) = args.split_first().expect("the role is given the top");
-    let uid = std::env::var(UID).map_or_else(
-        // SAFETY: `getuid` takes no argument and always succeeds.
-        |_| unsafe { libc::getuid() },
-        |uid| uid.parse().expect("the user ID is decimal"),
-    );
+    let uid = std::env::var(UID)
+        .map_or_else(|_| me(), |uid| uid.parse().expect("the user ID is decimal"));
     let made = std::env::var_os(MADE);
     let make_temp = std::env::var(MAKE_TEMP).unwrap_or_default();
     let maker = |prefix: &str, parent: &Path| {
@@ -145,10 +142,32 @@ fn role() {
             1,
             "the caller's standard output is descriptor 3"
         );
-        libc::close(3);
+        assert_eq!(libc::close(3), 0);
     }
     let code = run_with(Path::new(top), rest, &facts);
     std::process::exit(i32::from(code));
+}
+
+/// `me` is this process's real user ID.
+pub fn me() -> u32 {
+    // SAFETY: `getuid` takes no argument and always succeeds.
+    unsafe { libc::getuid() }
+}
+
+static HOST: std::sync::Once = std::sync::Once::new();
+
+/// `prepare_host` sets, once for the test process, the umask 022, so the fixtures get the same modes
+/// under any caller's mask, and the subreaper flag, so a leg process that outlives the run it belongs
+/// to becomes this process's zombie and is never reaped by another.
+fn prepare_host() {
+    HOST.call_once(|| {
+        // SAFETY: `umask` takes an integer and always succeeds; `prctl` with
+        // `PR_SET_CHILD_SUBREAPER` reads its integer arguments alone.
+        unsafe {
+            libc::umask(0o022);
+            assert_eq!(libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0), 0);
+        }
+    });
 }
 
 pub fn append(path: &Path, bytes: &[u8]) {
@@ -332,6 +351,7 @@ impl Fixture {
     /// fixes `table.rs` and adds the fix marker, the carried test file and files whose names a pathspec
     /// or a terminal could misread, with `origin/main` at the base.
     pub fn new() -> Self {
+        prepare_host();
         let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
         fs::create_dir_all(base).unwrap_or_else(|error| panic!("{}: {error}", base.display()));
         let root = claimed(base, "red-green")
@@ -751,11 +771,7 @@ pub fn sha256(path: &Path) -> String {
 pub fn assert_gone(pid: i32) {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(10) {
-        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            return;
-        };
-        let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
-        if state.is_some_and(|rest| rest.starts_with('Z')) {
+        if state_of(pid).is_none_or(|state| state == 'Z') {
             return;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -764,7 +780,13 @@ pub fn assert_gone(pid: i32) {
 }
 
 pub fn pid_in(path: &Path) -> i32 {
-    read(path).trim().parse().expect("a process ID")
+    let pid: i32 = read(path).trim().parse().expect("a process ID");
+    assert!(
+        pid > 1,
+        "{} names a process of its own: {pid}",
+        path.display()
+    );
+    pid
 }
 
 /// `json_of` is `value` as compact JSON, members in their order.

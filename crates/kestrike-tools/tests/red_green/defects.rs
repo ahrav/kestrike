@@ -11,12 +11,7 @@ use kestrike_tools::ownership::{PrivateError, make_private_with, shared_director
 use kestrike_tools::paths;
 use kestrike_tools::red_green::run::resolved_by;
 
-use super::support::{Call, Fixture, at, chmod, private_dir, read, text};
-
-fn me() -> u32 {
-    // SAFETY: `getuid` takes no argument and always succeeds.
-    unsafe { libc::getuid() }
-}
+use super::support::{Call, Fixture, at, chmod, me, private_dir, read, text};
 
 #[test]
 fn a_looping_temporary_directory_is_rejected_as_a_receipt_or_build_directory() {
@@ -36,6 +31,9 @@ fn a_looping_temporary_directory_is_rejected_as_a_receipt_or_build_directory() {
     );
     assert_eq!(fx.build_legs(), Vec::<String>::new());
     assert!(!fx.repo.join("target").exists());
+    let done = fx.tool(&Call::default());
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert_eq!(fx.build_legs(), ["base", "head"]);
 }
 
 #[test]

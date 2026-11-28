@@ -15,7 +15,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,6 +26,7 @@ use super::tree;
 use crate::args::Parsed;
 use crate::environ::Environ;
 use crate::git;
+pub(super) use crate::hook::short;
 use crate::ownership::{self, PathError};
 use crate::paths;
 use crate::process::{self, INTERRUPT, Interrupt, Interrupted};
@@ -68,12 +69,13 @@ pub const SOURCES: [&str; 2] = ["reproduce-test.py", "select-tests.py"];
 /// The prefix of the run's temporary directory.
 pub const TEMP_PREFIX: &str = "kestrike-red-green-";
 
-/// The facts a run reads from its host, each a value its caller sets.
+/// The host facts a caller may replace. The run reads its environment, its working directory, its
+/// process ID and the clock itself, so a caller that varies those starts a process of its own.
 pub struct Facts<'a> {
     /// The user ID by which the ownership checks and the lock judge an owner.
     pub uid: u32,
-    /// The run directory's name; `None` names it `local-SECONDS-PID` from the wall clock's whole seconds
-    /// and the process ID.
+    /// The run directory's name, one normal path component; `None` names it `local-SECONDS-PID` from
+    /// the wall clock's whole seconds and the process ID. Any other name fails the run with exit 1.
     pub run_name: Option<OsString>,
     /// `make_temp(prefix, parent)` makes the run's temporary directory under `parent`.
     pub make_temp: &'a dyn Fn(&str, &Path) -> Result<PathBuf, TempDirError>,
@@ -92,19 +94,10 @@ impl Facts<'static> {
             uid: ownership::real_uid(),
             run_name: None,
             make_temp: &temp_dir::make_temp_dir,
-            spawn: &spawn,
+            spawn: &Command::spawn,
             interrupt: &INTERRUPT,
         }
     }
-}
-
-/// `spawn` starts `command` as [`Command::spawn`] does.
-///
-/// # Errors
-///
-/// [`Command::spawn`]'s.
-pub fn spawn(command: &mut Command) -> io::Result<Child> {
-    command.spawn()
 }
 
 /// How a step ends the run when it does not return.
@@ -143,12 +136,13 @@ pub(super) fn shown(path: &Path) -> Text {
 
 /// `say` writes `line` escaped as one line on standard error where `err` holds, else on standard output.
 pub(super) fn say(err: bool, line: &Text) -> io::Result<()> {
+    fn on(mut stream: impl Write, line: &Text) -> io::Result<()> {
+        python::say(&mut stream, line).and_then(|()| stream.flush())
+    }
     if err {
-        let mut stream = io::stderr().lock();
-        python::say(&mut stream, line).and_then(|()| stream.flush())
+        on(io::stderr().lock(), line)
     } else {
-        let mut stream = io::stdout().lock();
-        python::say(&mut stream, line).and_then(|()| stream.flush())
+        on(io::stdout().lock(), line)
     }
 }
 
@@ -226,15 +220,6 @@ pub fn resolved_by(
     }
 }
 
-/// `resolved_dir` is [`resolved_by`] with [`paths::resolve`].
-///
-/// # Errors
-///
-/// [`resolved_by`]'s rejection.
-pub fn resolved_dir(path: &Path) -> Result<PathBuf, Text> {
-    resolved_by(path, paths::resolve)
-}
-
 /// `temp_root` is `TMPDIR` when it is set and not empty, and `/tmp` otherwise.
 fn temp_root() -> PathBuf {
     match std::env::var_os("TMPDIR") {
@@ -304,7 +289,7 @@ impl Checks<'_> {
     }
 
     fn resolved_path(path: &Path) -> Result<PathBuf, Halt> {
-        resolved_dir(path).map_err(Halt::Rejected)
+        resolved_by(path, paths::resolve).map_err(Halt::Rejected)
     }
 
     fn failed(error: &PathError) -> Halt {
@@ -483,11 +468,6 @@ impl Checks<'_> {
     }
 }
 
-/// `short` is the first twelve characters of a commit ID.
-pub(super) fn short(id: &Text) -> String {
-    crate::hook::short(id)
-}
-
 /// `install` makes SIGINT, SIGTERM and SIGHUP record into `interrupt` whatever disposition the process
 /// inherited, and unblocks the three in the calling thread. The three stay blocked while the handlers
 /// register, so a signal sent then is recorded at the unblock; the caller starts no thread before.
@@ -497,24 +477,14 @@ pub(super) fn short(id: &Text) -> String {
 /// A mask change or a registration fails; the mask is restored either way.
 fn install(interrupt: &'static Interrupt) -> io::Result<()> {
     let handled = process::handled_set();
-    mask(libc::SIG_BLOCK, &handled)?;
+    process::mask(libc::SIG_BLOCK, &handled)?;
     let registered = process::SIGNALS.into_iter().try_for_each(|signal| {
         // SAFETY: the action is one atomic compare-exchange on a static, which is async-signal-safe.
         unsafe { signal_hook::low_level::register(signal, move || interrupt.record(signal)) }
             .map(drop)
     });
-    let unblocked = mask(libc::SIG_UNBLOCK, &handled);
+    let unblocked = process::mask(libc::SIG_UNBLOCK, &handled);
     registered.and(unblocked)
-}
-
-fn mask(how: libc::c_int, set: &libc::sigset_t) -> io::Result<()> {
-    // SAFETY: `set` is an initialized signal set that outlives the call, and a null old set makes
-    // `pthread_sigmask` write nothing back.
-    let status = unsafe { libc::pthread_sigmask(how, set, std::ptr::null_mut()) };
-    if status != 0 {
-        return Err(io::Error::from_raw_os_error(status));
-    }
-    Ok(())
 }
 
 /// `lock_problem` is why a build lock of `status` is refused when `uid` judges it: no regular file, or
@@ -645,10 +615,28 @@ fn finish(
     env: &Environ,
 ) -> u8 {
     let name = facts.run_name.clone().unwrap_or_else(run_name);
+    let mut parts = Path::new(&name).components();
+    if !matches!(
+        (parts.next(), parts.next()),
+        (Some(Component::Normal(_)), None)
+    ) {
+        return failed(&text!(
+            "the run directory's name ",
+            Text::from_os(&name).repr(),
+            " is not one path component"
+        ));
+    }
     let directory = checked.parent.join(name);
     let target_dir = &checked.target_dir;
-    if let Err(Interrupted(signal)) = facts.interrupt.check() {
-        return interrupted(signal);
+    let stopped = || {
+        facts
+            .interrupt
+            .check()
+            .err()
+            .map(|Interrupted(signal)| interrupted(signal))
+    };
+    if let Some(code) = stopped() {
+        return code;
     }
     let exists = |path: &Path| Ok(ownership::status(path)?.is_some());
     if let Err(error) = ownership::make_private_with(target_dir, facts.uid, &exists) {
@@ -659,8 +647,8 @@ fn finish(
             error.to_string()
         ));
     }
-    if let Err(Interrupted(signal)) = facts.interrupt.check() {
-        return interrupted(signal);
+    if let Some(code) = stopped() {
+        return code;
     }
     if let Err(error) = create_receipt_directory(&directory) {
         return refused(&text!(
@@ -670,8 +658,8 @@ fn finish(
             error.to_string()
         ));
     }
-    if let Err(Interrupted(signal)) = facts.interrupt.check() {
-        return interrupted(signal);
+    if let Some(code) = stopped() {
+        return code;
     }
     let mut run = Run::new(facts, env, checked, &directory, sources);
     let outcome = run.legs();

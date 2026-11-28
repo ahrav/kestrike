@@ -4,22 +4,13 @@
 
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
-use std::process::Stdio;
-use std::sync::mpsc;
-use std::time::Duration;
 
 use kestrike_tools::red_green::run::lock_problem;
 
-use super::support::{Call, Fixture, at, chmod, text, write};
-
-fn me() -> u32 {
-    // SAFETY: `getuid` takes no argument and always succeeds.
-    unsafe { libc::getuid() }
-}
+use super::support::{Call, Fixture, at, chmod, me, text, write};
 
 /// A run started while another holds the lock prints the waiting line once, makes no worktree, no
 /// temporary directory and no build until the lock is released, then holds it through both builds.
@@ -35,45 +26,19 @@ fn a_run_waits_for_the_build_lock_before_any_worktree_and_holds_it_through_both_
         .expect("the lock opens");
     // SAFETY: `flock` takes the descriptor `lock` owns and a flag.
     assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
-    let mut child = fx
-        .start(&Call::default())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the run starts");
-    let stderr = child.stderr.take().expect("piped");
-    let (sent, received) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        let mut lines = BufReader::new(stderr);
-        let mut line = String::new();
-        let _ = lines.read_line(&mut line);
-        let _ = sent.send(line);
-        let mut rest = String::new();
-        let _ = std::io::Read::read_to_string(&mut lines, &mut rest);
-        rest
-    });
-    let first = received.recv_timeout(Duration::from_secs(30));
+    let running = fx.spawn_tool(&Call::default());
     let waiting = format!(
         "red-green: waiting for another run that builds in {}\n",
         target.display()
     );
-    if first.as_deref() != Ok(waiting.as_str()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("the first line is {first:?}");
-    }
+    assert_eq!(running.first_stderr_line(), Some(waiting));
     assert!(fx.builds().is_empty());
     assert_eq!(fs::read_dir(&fx.tmp).expect("lists").count(), 0);
     assert_eq!(fx.worktrees(), 1);
     drop(lock);
-    let output = child.wait_with_output().expect("the run ends");
-    let rest = reader.join().expect("the reader ends");
-    assert!(
-        output.status.success(),
-        "{}{rest}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    let done = running.finish();
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert_eq!(done.stderr.matches("waiting for another run").count(), 1);
     let held: Vec<String> = fx
         .builds()
         .iter()
@@ -154,7 +119,7 @@ fn a_build_lock_that_is_not_a_regular_file_is_refused() {
         } else {
             symlink(&aim, &lock).expect("linked");
         }
-        let done = fx.red_green(&Call::default());
+        let done = fx.spawn_tool(&Call::default()).finish();
         assert_eq!(done.code, 1, "{kind}: {}", done.shown());
         assert!(
             done.stdout.starts_with(&format!(

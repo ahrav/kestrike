@@ -31,7 +31,7 @@ pub(crate) const GRACE: Duration = Duration::from_secs(10);
 /// The longest pause between two checks of a child and of the record while a tool waits; the pause
 /// starts at [`FIRST_PAUSE`] and doubles up to this bound.
 pub(crate) const POLL: Duration = Duration::from_millis(20);
-const FIRST_PAUSE: Duration = Duration::from_micros(500);
+pub(crate) const FIRST_PAUSE: Duration = Duration::from_micros(500);
 
 /// The first handled signal, or 0 while none has arrived.
 #[derive(Debug, Default)]
@@ -132,7 +132,7 @@ pub fn install_handlers() -> io::Result<()> {
     installed.and(unblocked)
 }
 
-fn mask(how: libc::c_int, set: &libc::sigset_t) -> io::Result<()> {
+pub(crate) fn mask(how: libc::c_int, set: &libc::sigset_t) -> io::Result<()> {
     // SAFETY: `set` is an initialized signal set that outlives the call, and a null old set makes
     // `pthread_sigmask` write nothing back.
     let status = unsafe { libc::pthread_sigmask(how, set, std::ptr::null_mut()) };
@@ -608,7 +608,7 @@ fn reap(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
     }
 }
 
-fn drain(
+pub(crate) fn drain(
     stream: Option<impl Read + Send + 'static>,
 ) -> io::Result<JoinHandle<io::Result<Vec<u8>>>> {
     thread::Builder::new().spawn(move || {
@@ -620,7 +620,7 @@ fn drain(
     })
 }
 
-fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+pub(crate) fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
     reader.join().expect("a reader thread returns its bytes")
 }
 
