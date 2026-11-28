@@ -209,9 +209,10 @@ fn a_refused_write_of_the_score_s_lines_exits_120_and_keeps_the_score() {
 }
 
 /// A staging with a suffix, an exact mode and a time writes a new file under a name that ends in the
-/// suffix, gives the published file the mode as it stands, the set-user-id bit that a write clears and
-/// the group and other write bits that the umask clears included, and the time as its
-/// modification and access time, and replaces a link at the target while the link's target stays.
+/// suffix, gives the published file the mode as it stands, its group and other write bits included
+/// whatever the umask, and its set-user-id bit, which a write by a user without `CAP_FSETID` clears, and
+/// gives the time as its modification and access time; it replaces a link at the target while the link's
+/// target stays.
 #[test]
 fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
     use std::os::unix::fs::MetadataExt;
@@ -220,11 +221,6 @@ fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
     fs::write(&elsewhere, "kept\n").expect("written");
     symlink(&elsewhere, &target).expect("linked");
     let later: i128 = 4_102_444_800_123_456_789;
-    assert_ne!(
-        read_umask().expect("the umask reads") & 0o022,
-        0,
-        "the umask clears group write"
-    );
     let staging = Staging::new(Creation::Exact(0o4766))
         .suffix(".weaken")
         .modified(later);

@@ -7,16 +7,17 @@
 //! caller read with [`umask`]; a file published with [`Creation::Mode`] is created new with that mode,
 //! which the kernel lessens by the umask or, in a directory with a default ACL, sets from that ACL; one
 //! published with [`Creation::Exact`] is created new with mode 0600, written, and then given that mode as
-//! it stands, so the write leaves its set-id bits. A [`Staging`] with a modification time gives the written
-//! file that time, as its access time too, through its descriptor. The rename replaces a link at the target's path, whose target stays. A write,
-//! close or rename that fails leads to an attempt to remove the staging file. The write makes no sync.
+//! it stands, so the write leaves its set-id bits. A [`Staging`] with a modification time gives the
+//! written file that time, as its access time too, through its descriptor. The rename replaces a link at
+//! the target's path, whose target stays. A write, close or rename that fails leads to an attempt to
+//! remove the staging file. The write makes no sync.
 
 use std::fs::{self, File, FileTimes, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::entry::Finished;
 use super::prepare::Inputs;
@@ -200,13 +201,15 @@ pub fn publish_with(target: &Path, written: &str, creation: Creation) -> Result<
 /// a time before it where negative.
 fn times(file: &File, nanoseconds: i128) -> io::Result<()> {
     let past = || io::Error::new(io::ErrorKind::InvalidInput, "a time past the clock's range");
-    let span = u64::try_from(nanoseconds.unsigned_abs()).map_err(|_| past())?;
-    let span = std::time::Duration::from_nanos(span);
-    let at = if nanoseconds < 0 {
-        UNIX_EPOCH.checked_sub(span)
+    let seconds = nanoseconds.div_euclid(1_000_000_000);
+    let rest = u64::try_from(nanoseconds.rem_euclid(1_000_000_000)).map_err(|_| past())?;
+    let whole = Duration::from_secs(u64::try_from(seconds.unsigned_abs()).map_err(|_| past())?);
+    let at = if seconds < 0 {
+        UNIX_EPOCH.checked_sub(whole)
     } else {
-        UNIX_EPOCH.checked_add(span)
+        UNIX_EPOCH.checked_add(whole)
     }
+    .and_then(|at| at.checked_add(Duration::from_nanos(rest)))
     .ok_or_else(past)?;
     file.set_times(FileTimes::new().set_accessed(at).set_modified(at))
 }
