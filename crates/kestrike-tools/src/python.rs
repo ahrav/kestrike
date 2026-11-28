@@ -1,4 +1,5 @@
-//! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` for floats,
+//! Python-style `len`, `int`, `round`, `repr`, `str` and truth for JSON values, `repr` and the format `g`
+//! for floats,
 //! [`hexdigest`] for the SHA-256 hex of bytes, [`say`], which writes one line with its control
 //! characters and surrogates escaped, and the digit rules of a string: [`isdigit`], [`digit_value`],
 //! [`ascii_digits`], [`int_digits`] and [`decimal`], which reads a run through [`int_digits`].
@@ -145,6 +146,46 @@ pub fn repr_float(value: f64) -> String {
         return format!("{sign}{digits}{zeros}.0");
     }
     format!("{sign}{}.{}", &digits[..before], &digits[before..])
+}
+
+/// `format_g` follows Python's `format(value, 'g')`. It rounds the exact binary value to six significant
+/// digits, half to even. It uses fixed notation when the rounded decimal exponent is in `-4..=5`;
+/// otherwise it uses scientific notation with a signed exponent of at least two digits. It trims
+/// trailing fractional zeros and removes the decimal point when the fraction is empty (`900`, `1295.5`,
+/// `1e+06`, `1e-05`, `-0`). It writes `nan`, `inf` and `-inf` for the non-finite floats.
+pub fn format_g(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_owned();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 { "inf" } else { "-inf" }.to_owned();
+    }
+    let sign = if value.is_sign_negative() { "-" } else { "" };
+    let magnitude = value.abs();
+    let scientific = format!("{magnitude:.5e}");
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("`{:e}` writes an exponent");
+    let exponent: i32 = exponent.parse().expect("`{:e}` writes a decimal exponent");
+    if (-4..6).contains(&exponent) {
+        let decimals = (5 - exponent).unsigned_abs() as usize;
+        let fixed = format!("{magnitude:.decimals$}");
+        return format!("{sign}{}", without_trailing_zeros(&fixed));
+    }
+    let exponent_sign = if exponent < 0 { '-' } else { '+' };
+    format!(
+        "{sign}{}e{exponent_sign}{:02}",
+        without_trailing_zeros(mantissa),
+        exponent.abs()
+    )
+}
+
+fn without_trailing_zeros(digits: &str) -> &str {
+    if digits.contains('.') {
+        digits.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        digits
+    }
 }
 
 /// `repr` follows Python's `repr` of the value: `None`, `True` and `False`, an integer's digits, a float

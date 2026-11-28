@@ -7,6 +7,8 @@ pub mod args;
 pub mod classes;
 pub mod decimal;
 pub mod environ;
+#[cfg(target_os = "linux")]
+pub mod fis_controller;
 pub mod fixtures;
 #[cfg(target_os = "linux")]
 pub mod gameday;
