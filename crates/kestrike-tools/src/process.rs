@@ -31,7 +31,8 @@ pub(crate) const GRACE: Duration = Duration::from_secs(10);
 /// The longest pause between two checks of a child and of the record while a tool waits; the pause
 /// starts at [`FIRST_PAUSE`] and doubles up to this bound.
 pub(crate) const POLL: Duration = Duration::from_millis(20);
-const FIRST_PAUSE: Duration = Duration::from_micros(500);
+/// The first pause between two checks of a child while a tool waits.
+pub(crate) const FIRST_PAUSE: Duration = Duration::from_micros(500);
 
 /// The record of the handled signals: the first one, 0 while none has arrived, the count of deliveries,
 /// and the depth of the holds that stand.

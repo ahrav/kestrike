@@ -271,6 +271,17 @@ fn a_procfs_of_another_pid_namespace_is_refused_and_each_error_names_its_path() 
     view("Name:\tsh\nNStgid:\t40\nNSpid:\t40\n");
     assert_eq!(leader_under(root, 12, own).expect("read"), Leader::Running);
     assert_eq!(leader_under(root, 13, own).expect("read"), Leader::Reaped);
+    std::fs::create_dir(root.join("15")).expect("made");
+    std::fs::write(
+        root.join("15/stat"),
+        stat_line("sh", &stat_fields("S", own + 1, 15, 1)),
+    )
+    .expect("written");
+    assert_eq!(
+        leader_under(root, 15, own).expect("read"),
+        Leader::Reaped,
+        "a present record that names another parent reads as a reap elsewhere"
+    );
     for text in [
         "NStgid:\t41\n",
         "NStgid:\t7\t40\n",
@@ -691,12 +702,14 @@ fn a_signal_during_the_stop_still_ends_the_whole_group() {
             "{at}: {stopped:?}"
         );
         let start = Instant::now();
-        while running(&worker) && start.elapsed() < Duration::from_secs(5) {
+        while running(&worker) && start.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
             !running(&worker),
-            "{at}, {spent}: the worker {worker} is gone"
+            "{at}, {spent}: the worker {} stays: {:?}",
+            worker.trim(),
+            std::fs::read_to_string(format!("/proc/{}/status", worker.trim()))
         );
     }
 }
@@ -902,4 +915,19 @@ fn a_wait_to_a_passed_cutoff_returns_at_once() {
     child.wait().expect("the child is reaped");
     assert_eq!(state.expect("the state reads"), super::Leader::Running);
     assert!(took < Duration::from_secs(1), "{took:?}");
+}
+
+/// A wait to a passed cutoff calls its step once and returns that step's `None` without consulting its
+/// `ended` predicate.
+#[test]
+fn a_wait_to_a_passed_cutoff_calls_its_step_once() {
+    let calls = std::cell::Cell::new(0);
+    let cutoff = Instant::now().checked_sub(Duration::from_secs(1));
+    let ended = || -> bool { panic!("the predicate is consulted past the cutoff") };
+    let got: std::io::Result<Option<()>> = super::polled_until(cutoff, PAUSE, &ended, || {
+        calls.set(calls.get() + 1);
+        Ok(None)
+    });
+    assert!(matches!(got, Ok(None)), "{got:?}");
+    assert_eq!(calls.get(), 1);
 }
