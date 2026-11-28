@@ -4,7 +4,7 @@
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
 //! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
-//! [`parse_strict`] also refuses the three constants and a fractional number whose decimal value is not
+//! The strict read also refuses the three constants and a fractional number whose decimal value is not
 //! the shortest form of a finite double, so each float it reads stands for the decimal the text spells.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
@@ -256,7 +256,7 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
 
 /// A number that strict JSON refuses, holding the token as the text spells it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Unnumber {
+pub(crate) enum Unnumber {
     /// `NaN`, `Infinity` or `-Infinity`.
     Constant(&'static str),
     /// A token with a fraction or an exponent whose nearest double is infinite.
@@ -266,10 +266,10 @@ pub enum Unnumber {
     Digits(String),
 }
 
-/// A refusal of [`parse_strict`]: an error of [`parse`], an object that repeats the member `name`, or a
+/// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, or a
 /// number strict JSON refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StrictError {
+pub(crate) enum StrictError {
     Syntax(Error),
     Repeated(Text),
     Number(Unnumber),
@@ -311,7 +311,8 @@ impl std::error::Error for StrictError {}
 /// The reader stops at the first refusal in document order. A number is judged where it stands and a
 /// repeated key when its object closes, so in `[{"k": 1, "k": 2}, NaN]` the repeat comes first and in
 /// `{"k": 1, "k": NaN}` the constant does.
-pub fn parse_strict(text: &str) -> Result<Value, StrictError> {
+#[cfg(target_os = "linux")]
+pub(crate) fn parse_strict(text: &str) -> Result<Value, StrictError> {
     Reader::new(text, Mode::Strict).document()
 }
 
@@ -328,7 +329,7 @@ enum Mode {
     Keep,
     /// A repeated key.
     Unique,
-    /// A repeated key, and a number [`parse_strict`] refuses.
+    /// A repeated key, and a number the strict read refuses.
     Strict,
 }
 

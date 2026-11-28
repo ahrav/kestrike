@@ -11,6 +11,7 @@
 use std::cmp::Ordering;
 use std::ops::{Add, Sub};
 
+#[cfg(target_os = "linux")]
 use crate::json::Integer;
 use crate::python::repr_float;
 
@@ -59,13 +60,14 @@ impl Decimal {
     }
 
     /// `from_integer` is the value of `integer`.
-    pub fn from_integer(integer: &Integer) -> Self {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn from_integer(integer: &Integer) -> Self {
         Self::literal(&integer.to_string())
             .expect("an integer holds at most MAX_INTEGER_DIGITS digits and exponent 0, inside EMAX and ETINY")
     }
 
     /// `from_float` is the decimal value of the shortest form of `value`, or `None` for a non-finite float.
-    pub fn from_float(value: f64) -> Option<Self> {
+    pub(crate) fn from_float(value: f64) -> Option<Self> {
         if !value.is_finite() {
             return None;
         }
@@ -112,14 +114,14 @@ impl Decimal {
         Some(Self::normal(negative, digits, exponent))
     }
 
-    /// Whether the value is zero.
-    pub fn is_zero(&self) -> bool {
+    pub(crate) fn is_zero(&self) -> bool {
         self.digits.is_empty()
     }
 
     /// `whole_quotient` is the whole number `self / divisor` when it lies from 1 to `most`, and `None`
     /// otherwise; a zero divisor gives `None`.
-    pub fn whole_quotient(&self, divisor: &Self, most: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn whole_quotient(&self, divisor: &Self, most: u32) -> Option<u32> {
         if self.is_zero() || divisor.is_zero() || self.negative != divisor.negative {
             return None;
         }
@@ -140,7 +142,8 @@ impl Decimal {
     }
 
     /// `whole_digits` writes a whole number's digits with its sign, and gives `None` for any other value.
-    pub fn whole_digits(&self) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn whole_digits(&self) -> Option<String> {
         if self.is_zero() {
             return Some("0".to_owned());
         }
@@ -151,7 +154,8 @@ impl Decimal {
 
     /// `nearest` is the double nearest the value, rounded half to even, at any magnitude; a value whose
     /// rounding overflows the largest double gives an infinity of its sign.
-    pub fn nearest(&self) -> f64 {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn nearest(&self) -> f64 {
         if self.is_zero() {
             return 0.0;
         }
@@ -162,6 +166,7 @@ impl Decimal {
     }
 
     /// The digits as ASCII text, most significant first.
+    #[cfg(target_os = "linux")]
     fn digit_text(&self) -> String {
         self.digits
             .iter()
@@ -200,6 +205,7 @@ fn shifted(digits: &[u8], zeros: i64) -> Vec<u8> {
 }
 
 /// `digits × factor`, with no leading zero.
+#[cfg(target_os = "linux")]
 fn times(digits: &[u8], factor: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(digits.len() + 10);
     let mut carry = 0_u64;
