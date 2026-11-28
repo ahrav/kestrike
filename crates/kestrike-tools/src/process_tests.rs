@@ -732,3 +732,41 @@ fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
         assert_eq!((held, is), (1, was), "signal {signal}");
     }
 }
+
+/// A read of the state that fails while the exited child is held unreaped sends SIGKILL to the child's
+/// group before the wait that reaps it, so no member outlives a stop that returns the read's error.
+#[test]
+fn a_failed_read_of_the_state_of_an_exited_child_kills_its_group_before_the_reap() {
+    let mut child = Command::new("sh")
+        .args(["-c", "exit 3"])
+        .spawn()
+        .expect("the child starts");
+    let pid = pid_of(&child);
+    let stat = format!("/proc/{pid}/stat");
+    let zombie = || {
+        std::fs::read(&stat).is_ok_and(|stat| {
+            let close = stat.iter().rposition(|&byte| byte == b')');
+            close.and_then(|at| stat.get(at + 2)) == Some(&b'Z')
+        })
+    };
+    let start = Instant::now();
+    while !zombie() && start.elapsed() < WAIT {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(zombie(), "the child exits within {WAIT:?}");
+    let mut sent = Vec::new();
+    let mut undelivered = |group: libc::pid_t, signal: i32| {
+        sent.push((group, signal, zombie()));
+        Ok(false)
+    };
+    let stop = super::GroupStop::new(WAIT, None, Some(WAIT), PAUSE);
+    let stopped = super::stop_with(&mut child, &stop, &mut undelivered);
+    let reaped = !Path::new(&stat).exists();
+    let status = child.try_wait();
+    let error = stopped.expect_err("the child leads no group, so its state is refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(sent, [(pid, libc::SIGKILL, true)]);
+    assert!(reaped, "the stop reaped the child before it returned");
+    let status = status.expect("the wait runs").expect("the stop reaped it");
+    assert_eq!(status.code(), Some(3));
+}

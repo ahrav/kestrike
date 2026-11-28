@@ -616,10 +616,11 @@ enum Signalled {
 ///
 /// A read of the leader's state, a signal other than to an empty group, or the reap fails, or the state
 /// file is gone while the child still runs. `stop_group` then reads the leader's state once more: a
-/// leader that reads running or exited, and so is still held unreaped, gets SIGKILL to its group before
-/// any wait. A child that `child.try_wait()` then finds running gets SIGKILL to the group when that read
-/// failed or found no state file, and SIGKILL to itself, and the reap runs again. `stop_group` returns
-/// the first error.
+/// leader that reads running or exited, or whose read fails, gets SIGKILL to its group before any wait,
+/// since the sole-waiter precondition holds it unreaped; a caller that breaks that precondition while the
+/// read also fails gets one SIGKILL to a group id that may have been taken again. A leader whose state
+/// file is gone gets that SIGKILL only where `child.try_wait()` then finds it running. A running child
+/// also gets SIGKILL to itself, and the reap runs again. `stop_group` returns the first error.
 pub(crate) fn stop_group(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
     stop_with(child, stop, &mut signal_group)
 }
@@ -646,12 +647,12 @@ fn stop_with(
         },
     });
     ended.inspect_err(|_error| {
-        let held = matches!(leader(child.id()), Ok(Leader::Running | Leader::Exited));
-        if held {
+        let gone = matches!(leader(child.id()), Ok(Leader::Reaped));
+        if !gone {
             let _ = send(group, libc::SIGKILL);
         }
         if matches!(child.try_wait(), Ok(None)) {
-            if !held {
+            if gone {
                 let _ = send(group, libc::SIGKILL);
             }
             let _ = child.kill();
