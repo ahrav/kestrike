@@ -769,4 +769,9 @@ fn a_command_word_selects_its_reader_as_argparse_reads_subparsers() {
         panic!("a check parses");
     };
     assert_eq!(index, 0);
+    let Parsed::Run((_, values)) = parse("run --work=-- --row=--") else {
+        panic!("an attached -- is a value");
+    };
+    assert_eq!(values.get("--work"), Some(OsStr::new("--")));
+    assert_eq!(values.all("--row"), [OsString::from("--")]);
 }

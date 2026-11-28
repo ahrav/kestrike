@@ -818,5 +818,9 @@ fn a_genmc_failure_that_is_no_text_is_the_kill_attempt_s_check_as_it_stands() {
     let zero = judge("0");
     assert_eq!(zero.verdict(), Verdict::NoVerdict);
     assert!(!zero.reason().contains("the check"), "{}", zero.reason());
-    assert!(!zero.reason().contains(';'), "one attempt: {}", zero.reason());
+    assert!(
+        !zero.reason().contains(';'),
+        "one attempt: {}",
+        zero.reason()
+    );
 }
