@@ -16,4 +16,4 @@ mod tests;
 
 use failure::Failure;
 use finding::{Change, Class, Finding, Shown};
-pub use scan::run;
+pub use scan::{run, scan_range};
