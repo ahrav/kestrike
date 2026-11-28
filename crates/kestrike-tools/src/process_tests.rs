@@ -157,6 +157,10 @@ fn stat_line(name: &str, fields: &[String]) -> Vec<u8> {
 /// The fields are read after the last `)`, so a command name that holds `) Z (` reads as the state that
 /// follows it; `Z` is an exited leader only with one thread left, and a stat line of a process that leads
 /// no group of its own is refused.
+///
+/// `spawn` can return before `/proc/<pid>/comm` shows the script's name `x) Z (y`, whose `) Z ` resembles
+/// the command-name terminator followed by the zombie state in `/proc/<pid>/stat`. Once `comm` shows
+/// `x) Z (y`, a `Leader::Running` result distinguishes the actual state from the embedded `Z`.
 #[test]
 fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     use super::{Leader, parsed};
@@ -221,13 +225,18 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
             .spawn()
             .expect("the script runs")
     };
-    let comm = std::fs::read_to_string(format!("/proc/{}/comm", child.id()));
+    let comm = format!("/proc/{}/comm", child.id());
+    let mut name = String::new();
+    let named = super::polled(WAIT, PAUSE, &|| false, || {
+        name = std::fs::read_to_string(&comm)?;
+        Ok((name == "x) Z (y\n").then_some(()))
+    });
     let state = super::leader(child.id());
     child.kill().expect("the child is killed");
     child.wait().expect("the child is reaped");
-    let (comm, state) = (comm.expect("comm reads"), state.expect("the state reads"));
-    assert_eq!(comm, "x) Z (y\n");
-    assert_eq!(state, Leader::Running);
+    named.expect("comm reads");
+    assert_eq!(name, "x) Z (y\n", "the name {WAIT:?} after the start");
+    assert_eq!(state.expect("the state reads"), Leader::Running);
 }
 
 /// The probe reads a procfs whose `self/status` holds an `NStgid` line of this process's id alone, before
