@@ -1,5 +1,6 @@
-//! [`Reader::parse`] parses command-line arguments against an [`Opt`] table. Missing required options take
-//! precedence over leftover arguments.
+//! [`Reader::parse`] parses command-line arguments against an [`Opt`] table, and [`Commands::parse`] reads a
+//! command word before the options of that word's reader. Missing required options take precedence over
+//! leftover arguments.
 
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -480,6 +481,106 @@ impl<'t> Reader<'t> {
             }
         }
         matches
+    }
+}
+
+/// One command word of a [`Commands`] reader and the reader of the arguments that follow it.
+pub struct Word<'a> {
+    pub word: &'a str,
+    pub reader: Reader<'a>,
+}
+
+/// [`Commands::parse`] reads a command word and the options after it, as `argparse` reads a parser with
+/// required subparsers named `command`.
+pub struct Commands<'a> {
+    top: Reader<'a>,
+    words: &'a [Word<'a>],
+}
+
+/// The help row of a [`Commands`] reader's own table.
+const TOP: [Opt; 1] = [Opt {
+    names: &["-h", "--help"],
+    kind: Kind::Help,
+}];
+
+impl<'a> Commands<'a> {
+    /// `tool`, `usage` and `help` are those of the reader's own refusals and help, as [`Reader::new`]
+    /// takes them; its one option is `-h`/`--help`, which a unique prefix selects. `words` holds each
+    /// command word with the reader of its options.
+    pub fn new(tool: &'a str, usage: &'a str, help: &'a str, words: &'a [Word<'a>]) -> Self {
+        Self {
+            top: Reader::new(tool, usage, help, Prefixes::Select, &TOP),
+            words,
+        }
+    }
+
+    /// `parse` reads `args` in order up to the command word: help before it returns the reader's help,
+    /// another argument that reads as an option is unrecognized, and the first other argument, `--`
+    /// included where another argument follows it, is the command word; a `--` that ends `args` leaves the
+    /// command missing. The word's reader parses the arguments after it, and its help and
+    /// refusals are its own. The arguments that neither reader recognizes, those before the word first,
+    /// are refused as unrecognized with the reader's own usage. `parse` returns the index of the word in
+    /// `words` and the word's values.
+    pub fn parse(&self, args: &[OsString]) -> Parsed<(usize, Values)> {
+        let mut extras = Vec::new();
+        let mut at = 0;
+        while at < args.len() {
+            let arg = args[at].as_bytes();
+            if arg == b"--" {
+                break;
+            }
+            match self.top.classify(arg) {
+                Ok(Arg::Value) => break,
+                Ok(Arg::Unknown) | Err(_) => extras.push(args[at].clone()),
+                Ok(Arg::Option(found)) => match found
+                    .explicit
+                    .and_then(|explicit| ignored(found.string, explicit))
+                {
+                    None => return Parsed::Help(self.top.help.to_owned()),
+                    Some(rest) => {
+                        return self.top.refuse(format!(
+                            "argument -h/--help: ignored explicit argument {}",
+                            Text::from_os(OsStr::from_bytes(rest)).repr()
+                        ));
+                    }
+                },
+            }
+            at += 1;
+        }
+        let trailing = args.get(at).is_some_and(|arg| arg == "--") && at + 1 == args.len();
+        let Some(given) = args.get(at).filter(|_| !trailing) else {
+            return self
+                .top
+                .refuse("the following arguments are required: command".to_owned());
+        };
+        let Some(index) = self
+            .words
+            .iter()
+            .position(|word| given.as_bytes() == word.word.as_bytes())
+        else {
+            let choices: Vec<String> = self
+                .words
+                .iter()
+                .map(|word| Text::from(word.word).repr())
+                .collect();
+            return self.top.refuse(format!(
+                "argument command: invalid choice: {} (choose from {})",
+                Text::from_os(given).repr(),
+                choices.join(", ")
+            ));
+        };
+        match self.words[index].reader.parse_known(&args[at + 1..]) {
+            Parsed::Run((values, more)) => {
+                extras.extend(more);
+                if extras.is_empty() {
+                    Parsed::Run((index, values))
+                } else {
+                    self.top.refuse(unrecognized(&extras))
+                }
+            }
+            Parsed::Help(text) => Parsed::Help(text),
+            Parsed::Refused { code, text } => Parsed::Refused { code, text },
+        }
     }
 }
 

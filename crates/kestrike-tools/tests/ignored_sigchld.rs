@@ -1,7 +1,8 @@
-//! `mutants-diff` and `plant-runner`, the tools that call the library's SIGCHLD refusal, refuse a start
-//! with SIGCHLD ignored after their argument reading and before their first child: the kernel would reap
-//! each child as it ends and every wait would fail. Each tool runs in a window that
-//! `env --ignore-signal=CHLD` starts, since a shell between the two can reset the disposition.
+//! `mutants-diff`, `plant-runner` and `weaken-orderings run`, the tools that call the library's SIGCHLD
+//! refusal, refuse a start with SIGCHLD ignored after their argument reading and before their first
+//! child: the kernel would reap each child as it ends and every wait would fail. Each tool runs in a
+//! window that `env --ignore-signal=CHLD` starts, since a shell between the two can reset the
+//! disposition.
 #![cfg(target_os = "linux")]
 
 use std::ffi::OsString;
@@ -87,18 +88,34 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
     );
     let top = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let top = top.to_str().expect("the top level is UTF-8");
-    for (tool, code, line) in [
+    let outside = make_temp_dir("ignored-sigchld-work-", &std::env::temp_dir()).expect("made");
+    let work = outside.join("work");
+    let work = work.to_str().expect("the work path is UTF-8");
+    let rows: [(&str, &[&str], i32, &str); 3] = [
         (
             "mutants-diff",
+            &[],
             2,
             "mutants rejected: SIGCHLD is ignored, so the child's exit cannot be read\n",
         ),
         (
             "plant-runner",
+            &[],
             4,
             "plant-runner: SIGCHLD is ignored, so the child's exit cannot be read\n",
         ),
-    ] {
+        (
+            "weaken-orderings",
+            &["run", "--work", work],
+            2,
+            "weaken-orderings: SIGCHLD is ignored, so the child's exit cannot be read\n",
+        ),
+    ];
+    for (tool, options, code, line) in rows {
+        let args: Vec<&str> = [top, tool]
+            .into_iter()
+            .chain(options.iter().copied())
+            .collect();
         let help = in_window(IGNORED, &stand_in, BINARY, &[top, tool, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{tool} --help");
         assert!(help.stderr.is_empty(), "{tool} --help");
@@ -107,13 +124,13 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
             "{tool} --help prints its usage"
         );
         let _ = std::fs::remove_file(&marker);
-        let control = in_window(DEFAULT, &stand_in, BINARY, &[top, tool]);
+        let control = in_window(DEFAULT, &stand_in, BINARY, &args);
         assert!(
             marker.exists(),
             "{tool} reaches the stand-in with SIGCHLD at its default: {control:?}"
         );
         std::fs::remove_file(&marker).expect("the marker is removed");
-        let out = in_window(IGNORED, &stand_in, BINARY, &[top, tool]);
+        let out = in_window(IGNORED, &stand_in, BINARY, &args);
         assert!(
             !marker.exists(),
             "{tool} starts no Git with SIGCHLD ignored"
@@ -129,4 +146,5 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
         assert!(out.stdout.is_empty(), "{tool}");
     }
     std::fs::remove_dir_all(&stand_in).expect("the scratch is removed");
+    std::fs::remove_dir_all(&outside).expect("the work's scratch is removed");
 }

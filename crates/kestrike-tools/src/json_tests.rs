@@ -423,3 +423,28 @@ fn indented_in_order_keeps_members_in_document_order() {
                   \"c\": \"\\u00e9\",\n  \"d\": Infinity\n}";
     assert_eq!(indented_in_order(&value), python);
 }
+
+/// Each expected line was recorded from Python 3.9's `json.dumps` of the same value.
+#[test]
+fn line_writes_python_s_default_separators_on_one_line() {
+    let rows = [
+        (
+            r#"{"report": "/w/report.json", "mismatched": [], "no verdict": ["a", "b"]}"#,
+            r#"{"report": "/w/report.json", "mismatched": [], "no verdict": ["a", "b"]}"#,
+        ),
+        ("[]", "[]"),
+        ("{}", "{}"),
+        (
+            "{\"a\": {\"b\": [1, 2.5, null, true, false]}, \"\u{e9}\": \"\u{2028}\u{1f600}\"}",
+            r#"{"a": {"b": [1, 2.5, null, true, false]}, "\u00e9": "\u2028\ud83d\ude00"}"#,
+        ),
+        (
+            "[NaN, Infinity, -Infinity, 1e100, -0.0]",
+            "[NaN, Infinity, -Infinity, 1e+100, -0.0]",
+        ),
+    ];
+    for (source, expected) in rows {
+        let value = super::parse(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+        assert_eq!(super::line(&value), expected, "{source}");
+    }
+}

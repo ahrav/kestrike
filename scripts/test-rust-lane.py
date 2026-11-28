@@ -3751,10 +3751,10 @@ class LaneCancellation(unittest.TestCase):
                                     capture_output=True, text=True, timeout=120, check=False)
         self.assertEqual(listed.returncode, 0, listed.stderr)
         self.assertEqual(sorted(path.name for path in evidence.glob("genmc-*.argv")), ["genmc-join-production.argv", "genmc-sb_sc.argv"])
-        weaken = load("weaken_orderings", ROOT / "scripts/weaken-orderings.py")
+        rebuilt = re.compile(r"^\s*(?:Checking|Compiling) genmc-kernels v", re.M)
         for case in ("sb_sc", "join-production"):
             log = evidence / f"check-{case}.txt"
-            self.assertTrue(log.is_file() and weaken.REBUILT["genmc"].search(log.read_text()), f"{case} leaves the rebuild evidence run reads")
+            self.assertTrue(log.is_file() and rebuilt.search(log.read_text()), f"{case} leaves the rebuild evidence run reads")
         for name in ("receipt.json", "report.json", "credit.json", "exit.txt"):
             self.assertFalse((evidence / name).exists(), name)
         packages = ROOT / "verification/genmc/packages"

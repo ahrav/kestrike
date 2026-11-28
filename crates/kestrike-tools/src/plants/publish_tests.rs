@@ -7,7 +7,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::io::Write;
 
 use super::{
-    Creation, UNANNOUNCED, conclude, publish, publish_with, staging_with, umask as read_umask,
+    Creation, Staging, UNANNOUNCED, conclude, publish, publish_staged, publish_with, staging_with,
+    umask as read_umask,
 };
 use crate::paths::tests::Scratch;
 
@@ -140,7 +141,7 @@ fn a_taken_staging_name_is_left_as_it_is() {
     fs::write(scratch.0.join(".score.json.aaaaaaaa"), "taken\n").expect("written");
     symlink(&elsewhere, scratch.0.join(".score.json.bbbbbbbb")).expect("linked");
     let mut names = b"abc".iter().copied();
-    let (path, mut file) = staging_with(&target, 0o600, |letters| {
+    let (path, mut file) = staging_with(&target, 0o600, "", |letters| {
         letters.fill(names.next().expect("three names are drawn at most"));
         Ok(())
     })
@@ -205,4 +206,137 @@ fn a_refused_write_of_the_score_s_lines_exits_120_and_keeps_the_score() {
     assert_eq!(code, UNANNOUNCED);
     assert_eq!(fs::read_to_string(&target).expect("reads"), "{}\n");
     assert!(err.is_empty());
+}
+
+/// A staging with a suffix, an exact mode and a time writes a new file under a name that ends in the
+/// suffix, gives the published file the mode as it stands, its group and other write bits included
+/// whatever the umask, and its set-user-id bit, which a write by a user without `CAP_FSETID` clears, and
+/// gives the time as its modification and access time; it replaces a link at the target while the link's
+/// target stays.
+#[test]
+fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = Scratch::new("publish-staged");
+    let (target, elsewhere) = (scratch.0.join("f.rs"), scratch.0.join("elsewhere"));
+    fs::write(&elsewhere, "kept\n").expect("written");
+    symlink(&elsewhere, &target).expect("linked");
+    let later: i128 = 1_900_000_000_123_456_789;
+    let published = target.clone();
+    std::thread::spawn(move || {
+        // SAFETY: on success, `unshare(CLONE_FS)` gives the calling thread a private filesystem
+        // context.
+        let unshared = unsafe { libc::unshare(libc::CLONE_FS) };
+        assert_eq!(
+            unshared, 0,
+            "the thread takes a filesystem context of its own"
+        );
+        // SAFETY: `umask` sets the mask of the private context unshared above.
+        unsafe { libc::umask(0o077) };
+        let staging = Staging::new(Creation::Exact(0o4766))
+            .suffix(".weaken")
+            .modified(later);
+        publish_staged(&published, b"planted\n", staging).expect("the file is written");
+    })
+    .join()
+    .expect("the thread ends");
+    let status = fs::symlink_metadata(&target).expect("stats");
+    assert!(status.is_file());
+    assert_eq!(status.permissions().mode() & 0o7777, 0o4766);
+    let at = |seconds: i64, nanoseconds: i64| {
+        i128::from(seconds) * 1_000_000_000 + i128::from(nanoseconds)
+    };
+    assert_eq!(at(status.mtime(), status.mtime_nsec()), later);
+    assert_eq!(at(status.atime(), status.atime_nsec()), later);
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "planted\n");
+    assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "kept\n");
+    let mut names = b"ab".iter().copied();
+    fs::write(scratch.0.join(".g.rs.aaaaaaaa.weaken"), "taken\n").expect("written");
+    let (path, _) = staging_with(&scratch.0.join("g.rs"), 0o600, ".weaken", |letters| {
+        letters.fill(names.next().expect("two names are drawn at most"));
+        Ok(())
+    })
+    .expect("a free name is found");
+    assert_eq!(path, scratch.0.join(".g.rs.bbbbbbbb.weaken"));
+    let left: Vec<String> = fs::read_dir(&scratch.0)
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(".f.rs."))
+        .collect();
+    assert_eq!(
+        left,
+        Vec::<String>::new(),
+        "no staging file of the write stays"
+    );
+}
+
+/// The names in `directory`, sorted.
+fn names_in(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(directory)
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("lists")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A gate runs once the staging file holds the whole text and is closed. A gate that refuses without the
+/// rename leaves the target as it stood and no staging file, and its error is returned; a gate that runs
+/// the rename publishes the bytes; a gate that runs the rename and then fails returns its error and
+/// leaves the published file in place.
+#[test]
+fn a_gate_runs_the_rename_once_the_staging_file_is_whole() {
+    let scratch = Scratch::new("publish-gate");
+    let target = scratch.0.join("report.json");
+    fs::write(&target, "before\n").expect("written");
+    let staged_text = || -> Vec<String> {
+        names_in(&scratch.0)
+            .into_iter()
+            .filter(|name| name.ends_with(".weaken"))
+            .map(|name| fs::read_to_string(scratch.0.join(name)).expect("reads"))
+            .collect()
+    };
+    let refused = |_: &mut dyn FnMut() -> std::io::Result<()>| {
+        assert_eq!(staged_text(), ["after\n"], "the staging file is whole");
+        Err(std::io::Error::other("signal 15"))
+    };
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .gate(&refused);
+    let error = publish_staged(&target, b"after\n", staging).expect_err("the gate refuses");
+    assert!(error.to_string().contains("signal 15"), "{error}");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "before\n");
+    assert_eq!(names_in(&scratch.0), ["report.json"]);
+    let passed = |rename: &mut dyn FnMut() -> std::io::Result<()>| {
+        assert_eq!(staged_text(), ["after\n"], "the staging file is whole");
+        rename()
+    };
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .gate(&passed);
+    publish_staged(&target, b"after\n", staging).expect("the gate passes");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "after\n");
+    assert_eq!(names_in(&scratch.0), ["report.json"]);
+    let late = |rename: &mut dyn FnMut() -> std::io::Result<()>| {
+        rename()?;
+        Err(std::io::Error::other("after the rename"))
+    };
+    let staging = Staging::new(Creation::Masked(0o022))
+        .suffix(".weaken")
+        .gate(&late);
+    let error = publish_staged(&target, b"later\n", staging).expect_err("the gate fails late");
+    assert!(error.to_string().contains("after the rename"), "{error}");
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "later\n");
+    assert_eq!(names_in(&scratch.0), ["report.json"]);
 }

@@ -191,11 +191,8 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     );
     assert_eq!(
         parsed(&line("sh", "S", 12, 1), 12, own + 1),
-        Err(format!(
-            "names the parent {own}, so the process is no child of the process {}",
-            own + 1
-        )),
-        "a process with another parent"
+        Ok(Leader::Reaped),
+        "a process with another parent holds an id taken again after a reap elsewhere"
     );
     let cut = |count: usize| {
         let mut fields = stat_fields("S", own, 12, 1);
@@ -274,6 +271,17 @@ fn a_procfs_of_another_pid_namespace_is_refused_and_each_error_names_its_path() 
     view("Name:\tsh\nNStgid:\t40\nNSpid:\t40\n");
     assert_eq!(leader_under(root, 12, own).expect("read"), Leader::Running);
     assert_eq!(leader_under(root, 13, own).expect("read"), Leader::Reaped);
+    std::fs::create_dir(root.join("15")).expect("made");
+    std::fs::write(
+        root.join("15/stat"),
+        stat_line("sh", &stat_fields("S", own + 1, 15, 1)),
+    )
+    .expect("written");
+    assert_eq!(
+        leader_under(root, 15, own).expect("read"),
+        Leader::Reaped,
+        "a present record that names another parent reads as a reap elsewhere"
+    );
     for text in [
         "NStgid:\t41\n",
         "NStgid:\t7\t40\n",
@@ -614,4 +622,314 @@ fn a_failed_read_of_the_state_kills_and_reaps_the_child_itself() {
         .expect("the wait runs")
         .expect("the stop reaped the child");
     assert_eq!(status.signal(), Some(libc::SIGKILL));
+}
+
+/// `running` holds while `pid` names a live process that is no zombie.
+fn running(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())).is_ok_and(|stat| {
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .is_some_and(|state| state != "Z")
+    })
+}
+
+/// `worker_group` starts a group leader that writes `leader` once a worker of its group, which ignores
+/// SIGTERM, has written its pid to `worker`; the leader keeps SIGTERM's default action.
+fn worker_group(marker: &Path, leader_ignores_term: bool) -> (std::process::Child, String) {
+    let trap = if leader_ignores_term {
+        "trap '' TERM; "
+    } else {
+        ""
+    };
+    let script = format!(
+        "{trap}sh -c 'trap \"\" TERM; echo $$ > \"$1/worker\"; exec sleep 120' sh \"$1\" & \
+         while [ ! -s \"$1/worker\" ]; do sleep 0.05; done; echo $$ > \"$1/leader\"; exec sleep 120"
+    );
+    let child = {
+        use std::os::unix::process::CommandExt;
+        Command::new("sh")
+            .args(["-c", &script, "sh"])
+            .arg(marker)
+            .process_group(0)
+            .spawn()
+            .expect("the leader starts")
+    };
+    let start = Instant::now();
+    while !marker.join("leader").exists() {
+        assert!(start.elapsed() < WAIT, "the group stands within {WAIT:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let worker = std::fs::read_to_string(marker.join("worker")).expect("the worker wrote its pid");
+    (child, worker)
+}
+
+/// A handled signal recorded as the stop begins, after a deadline (no delivery spent) or after the
+/// delivery that ended a wait, or recorded just before the stop's SIGKILL, leaves no member of the group
+/// running: the worker ignores SIGTERM, so only the SIGKILL ends it. Where the signal is recorded as the
+/// stop begins the leader ignores SIGTERM too, so only the deliveries passing the spent ones end the 45 s
+/// grace before 20 s; the stop reaps the leader.
+#[test]
+fn a_signal_during_the_stop_still_ends_the_whole_group() {
+    for (at, spent) in [("stop", 0), ("stop", 1), ("kill", 0)] {
+        let scratch = crate::paths::tests::Scratch::new("stop-signal");
+        let (mut child, worker) = worker_group(&scratch.0, at == "stop");
+        let interrupt = Interrupt::new();
+        if spent == 1 {
+            interrupt.record(libc::SIGINT);
+        }
+        let ends = || interrupt.deliveries() > spent;
+        let mut fired = false;
+        let mut send = |group: libc::pid_t, signal: i32| {
+            let begins = at == "stop" && signal == libc::SIGTERM;
+            let kills = at == "kill" && signal == libc::SIGKILL;
+            if !fired && (begins || kills) {
+                fired = true;
+                interrupt.record(libc::SIGTERM);
+            }
+            super::signal_group(group, signal)
+        };
+        let stop = super::GroupStop::new(Duration::from_secs(45), Some(&ends), None, PAUSE);
+        let start = Instant::now();
+        let stopped = super::stop_with(&mut child, &stop, &mut send).expect("the stop runs");
+        assert!(fired, "{at}: the signal was delivered");
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "{at}: the stop took {:?}",
+            start.elapsed()
+        );
+        assert!(
+            matches!(stopped, super::GroupStopped::Reaped(_)),
+            "{at}: {stopped:?}"
+        );
+        let start = Instant::now();
+        while running(&worker) && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !running(&worker),
+            "{at}, {spent}: the worker {} stays: {:?}",
+            worker.trim(),
+            std::fs::read_to_string(format!("/proc/{}/status", worker.trim()))
+        );
+    }
+}
+
+/// The record keeps the first signal and counts each delivery; a hold nests, only the outermost
+/// release reports a recorded signal, and a dropped hold ends as a released one does.
+#[test]
+fn a_hold_nests_and_its_outermost_release_reports_the_first_signal() {
+    let interrupt = Interrupt::new();
+    {
+        let quiet = interrupt.hold();
+        assert!(interrupt.held());
+        assert_eq!(quiet.release(), Ok(()));
+    }
+    assert!(!interrupt.held());
+    let outer = interrupt.hold();
+    let inner = interrupt.hold();
+    interrupt.record(libc::SIGTERM);
+    assert_eq!(inner.release(), Ok(()), "a nested release reports nothing");
+    assert!(interrupt.held());
+    interrupt.record(libc::SIGHUP);
+    assert_eq!(interrupt.deliveries(), 2);
+    assert_eq!(outer.release(), Err(Interrupted(libc::SIGTERM)));
+    assert!(!interrupt.held());
+    drop(interrupt.hold());
+    assert!(!interrupt.held(), "a dropped hold ends");
+}
+
+const BLOCKED_ROLE: &str = "KESTRIKE_PROCESS_BLOCKED_ROLE";
+
+/// `pending` holds where `signal` is pending for the calling thread or the process.
+fn pending(signal: i32) -> bool {
+    // SAFETY: all-zero bytes are a valid `sigset_t`, which `sigpending` overwrites and `sigismember` then
+    // reads; `set` outlives both calls.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(libc::sigpending(&mut set), 0);
+        libc::sigismember(&set, signal) == 1
+    }
+}
+
+/// `mask_holds` holds where `signal` is blocked in the calling thread.
+fn mask_holds(signal: i32) -> bool {
+    // SAFETY: a null new set makes `pthread_sigmask` only write the current mask into `set`, which all-zero
+    // bytes initialize, `sigismember` then reads, and which outlives the calls.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        assert_eq!(
+            libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut set),
+            0
+        );
+        libc::sigismember(&set, signal) == 1
+    }
+}
+
+/// A SIGHUP sent to the thread while the handled signals are blocked stays pending and unrecorded, and the
+/// handler records it once the mask is set back; the mask set back is the one the thread held before, so
+/// SIGINT, blocked before, stays blocked. The handlers stand in this test executable started again in a
+/// role with SIGHUP at its default, so the other tests keep their dispositions; the role's own exit code
+/// tells its checks from a filter that matched no test.
+#[test]
+fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
+    if std::env::var_os(BLOCKED_ROLE).is_some() {
+        super::install_handlers().expect("the handlers stand");
+        // SAFETY: `sigemptyset` initializes the set before `sigaddset` and `pthread_sigmask` read it.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGINT);
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+                0
+            );
+        }
+        let inside = super::blocked(|| {
+            // SAFETY: `pthread_self` names the calling thread, which runs, and `pthread_kill` sends it a
+            // signal; neither touches memory of the caller.
+            let sent = unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGHUP) };
+            (
+                sent,
+                pending(libc::SIGHUP),
+                super::INTERRUPT.deliveries(),
+                mask_holds(libc::SIGHUP),
+            )
+        })
+        .expect("the mask changes");
+        let after = (
+            super::INTERRUPT.deliveries(),
+            super::INTERRUPT.recorded(),
+            mask_holds(libc::SIGHUP),
+            mask_holds(libc::SIGINT),
+        );
+        let held = inside == (0, true, 0, true) && after == (1, Some(libc::SIGHUP), false, true);
+        if !held {
+            eprintln!("inside the block {inside:?}, after it {after:?}");
+        }
+        std::process::exit(if held { 42 } else { 3 });
+    }
+    let name = module_path!()
+        .split_once("::")
+        .map_or("", |(_, rest)| rest)
+        .to_owned()
+        + "::a_blocked_signal_is_recorded_once_the_mask_is_set_back";
+    let mut role = Command::new(std::env::current_exe().expect("the test executable"));
+    role.args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(BLOCKED_ROLE, "1");
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, `sigemptyset`,
+    // `sigaddset` and `pthread_sigmask`, which are async-signal-safe, on a local set.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        role.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_DFL);
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGHUP);
+            libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+            Ok(())
+        });
+    }
+    let status = role.status().expect("the role runs");
+    assert_eq!(
+        status.code(),
+        Some(42),
+        "the role ran and its checks held: {status:?}"
+    );
+}
+
+/// A read of the state that fails while the exited child is held unreaped sends SIGKILL to the child's
+/// group before the wait that reaps it, so no member outlives a stop that returns the read's error.
+#[test]
+fn a_failed_read_of_the_state_of_an_exited_child_kills_its_group_before_the_reap() {
+    let mut child = Command::new("sh")
+        .args(["-c", "exit 3"])
+        .spawn()
+        .expect("the child starts");
+    let pid = pid_of(&child);
+    let stat = format!("/proc/{pid}/stat");
+    let zombie = || {
+        std::fs::read(&stat).is_ok_and(|stat| {
+            let close = stat.iter().rposition(|&byte| byte == b')');
+            close.and_then(|at| stat.get(at + 2)) == Some(&b'Z')
+        })
+    };
+    let start = Instant::now();
+    while !zombie() && start.elapsed() < WAIT {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(zombie(), "the child exits within {WAIT:?}");
+    let mut sent = Vec::new();
+    let mut undelivered = |group: libc::pid_t, signal: i32| {
+        sent.push((group, signal, zombie()));
+        Ok(false)
+    };
+    let stop = super::GroupStop::new(WAIT, None, Some(WAIT), PAUSE);
+    let stopped = super::stop_with(&mut child, &stop, &mut undelivered);
+    let reaped = !Path::new(&stat).exists();
+    let status = child.try_wait();
+    let error = stopped.expect_err("the child leads no group, so its state is refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(sent, [(pid, libc::SIGKILL, true)]);
+    assert!(reaped, "the stop reaped the child before it returned");
+    let status = status.expect("the wait runs").expect("the stop reaped it");
+    assert_eq!(status.code(), Some(3));
+}
+
+/// Holds released out of the order they started end as nested holds do: the release that ends the last
+/// standing hold reports the recorded signal, and the earlier release reports nothing.
+#[test]
+fn the_release_that_ends_the_last_hold_reports_the_signal() {
+    let interrupt = Interrupt::new();
+    let outer = interrupt.hold();
+    let inner = interrupt.hold();
+    interrupt.record(libc::SIGTERM);
+    assert_eq!(outer.release(), Ok(()), "a hold still stands");
+    assert!(interrupt.held());
+    assert_eq!(inner.release(), Err(Interrupted(libc::SIGTERM)));
+    assert!(!interrupt.held());
+}
+
+/// A body that panics under the block leaves the calling thread's mask as it was before the block.
+#[test]
+fn a_panic_under_the_block_sets_the_mask_back() {
+    let before = mask_holds(libc::SIGHUP);
+    let unwound = std::panic::catch_unwind(|| super::blocked(|| panic!("the body panics")));
+    assert!(unwound.is_err());
+    assert_eq!(mask_holds(libc::SIGHUP), before);
+    assert!(!before, "the test thread starts with SIGHUP unblocked");
+}
+
+/// A wait whose cutoff has passed reads the leader's state once and returns at once, whatever budget a
+/// fresh clock would grant, so a budget counted from an earlier reading adds no time back.
+#[test]
+fn a_wait_to_a_passed_cutoff_returns_at_once() {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .spawn()
+        .expect("the child starts");
+    let cutoff = Instant::now().checked_sub(Duration::from_secs(1));
+    let start = Instant::now();
+    let state = super::leader_left_by(child.id(), cutoff, PAUSE, &|| false);
+    let took = start.elapsed();
+    child.kill().expect("the child is killed");
+    child.wait().expect("the child is reaped");
+    assert_eq!(state.expect("the state reads"), super::Leader::Running);
+    assert!(took < Duration::from_secs(1), "{took:?}");
+}
+
+/// A wait to a passed cutoff calls its step once and returns that step's `None` without consulting its
+/// `ended` predicate.
+#[test]
+fn a_wait_to_a_passed_cutoff_calls_its_step_once() {
+    let calls = std::cell::Cell::new(0);
+    let cutoff = Instant::now().checked_sub(Duration::from_secs(1));
+    let ended = || -> bool { panic!("the predicate is consulted past the cutoff") };
+    let got: std::io::Result<Option<()>> = super::polled_until(cutoff, PAUSE, &ended, || {
+        calls.set(calls.get() + 1);
+        Ok(None)
+    });
+    assert!(matches!(got, Ok(None)), "{got:?}");
+    assert_eq!(calls.get(), 1);
 }

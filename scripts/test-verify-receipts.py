@@ -788,7 +788,7 @@ class VerifyReceipts(unittest.TestCase):
         self.assertNotRegex(self_checks, r"(?m)^ {8}(?:if|shell):")
         self.assertNotIn("continue-on-error", job)
         self.assertIn("        run: |\n", self_checks)
-        for command in ("python3 scripts/test-weaken-orderings.py", "python3 scripts/weaken-orderings.py check"):
+        for command in ("bash scripts/tool.sh weaken-orderings check",):
             self.assertIn(f"\n          {command}\n", self_checks.split("        run: |\n", 1)[-1])
         self.assertIn("python3 scripts/test-hardware-lane.py --ci", WORKFLOW)
         self.assertIn("fetch-depth: 0", WORKFLOW.split("  lane-script:")[0])

@@ -3,6 +3,7 @@
 //! the declared side of its anchors, and each constant of a declared strength is bound. The sources are
 //! read as text with comments removed and literals emptied; a call is found by its callee's spelling.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -57,10 +58,30 @@ fn count_is(count: usize, wanted: Option<&Value>) -> bool {
     }
 }
 
+/// `contains` is Python's `needle in container` for JSON values: an array's member by equality, an
+/// object's key, or a substring of a text.
+///
+/// # Errors
+///
+/// [`Error::Type`] for a number, a boolean or null as the container, an array or an object as the needle
+/// of an object, and a needle other than a text in a text.
 fn contains(container: &Value, needle: &Value) -> Result<bool, Error> {
-    match container {
-        Value::Array(items) => Ok(items.iter().any(|item| equal(item, needle))),
-        _ => Err(Error::Type("the transcribed files are no array".into())),
+    match (container, needle) {
+        (Value::Array(items), _) => Ok(items.iter().any(|item| equal(item, needle))),
+        (Value::Object(_), Value::Array(_) | Value::Object(_)) => {
+            Err(Error::Type("a transcribed file is unhashable".into()))
+        }
+        (Value::Object(object), Value::String(key)) => Ok(object.get_text(key).is_some()),
+        (Value::Object(_), _) => Ok(false),
+        (Value::String(text), Value::String(part)) => {
+            let (text, part): (Vec<u32>, Vec<u32>) =
+                (text.code_points().collect(), part.code_points().collect());
+            Ok(part.is_empty() || text.windows(part.len()).any(|window| window == part))
+        }
+        (Value::String(_), _) => Err(Error::Type(
+            "'in <string>' requires string as left operand".into(),
+        )),
+        _ => Err(Error::Type("the transcribed files are not iterable".into())),
     }
 }
 
@@ -118,7 +139,7 @@ fn strengths(
     let Some(listed_strengths) = lookup(declared, "strengths")? else {
         return Ok((found, drift));
     };
-    for strength in listed(listed_strengths, "the declared strengths")? {
+    for strength in listed(listed_strengths, "the declared strengths")?.iter() {
         let file = member(strength, "file")?;
         let path = package_path(package, string(file, "a strength's file")?);
         let source = sources.normalized(&path)?;
@@ -311,9 +332,9 @@ fn anchor_drift(
     for relation in ["before", "after"] {
         let anchors = match lookup(site, relation)? {
             Some(anchors) => listed(anchors, "a site's anchors")?,
-            None => &[],
+            None => Cow::Borrowed(&[][..]),
         };
-        for anchor in anchors {
+        for anchor in anchors.iter() {
             if matches!(anchor, Value::Array(_) | Value::Object(_)) {
                 return Err(Error::Type("an anchor is unhashable".into()));
             }
@@ -376,10 +397,10 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
     let package = string(member(declared, "package")?, "the declared package")?;
     let bindings = match lookup(declared, "bindings")? {
         Some(bindings) => listed(bindings, "the declared bindings")?,
-        None => &[],
+        None => Cow::Borrowed(&[][..]),
     };
     let mut ids = Vec::new();
-    for entry in bindings {
+    for entry in bindings.iter() {
         let id = member(entry, "id")?;
         if matches!(id, Value::Array(_) | Value::Object(_)) {
             return Err(Error::Type("a binding's id is unhashable".into()));
@@ -396,7 +417,7 @@ pub fn transcription_drift(declared: &Value, root: &Path) -> Result<Vec<String>,
         .keys()
         .map(|path| (path.clone(), BTreeSet::new()))
         .collect();
-    for entry in bindings {
+    for entry in bindings.iter() {
         let id = member(entry, "id")?;
         let kind_value = member(entry, "kind")?;
         let known = match kind_value {

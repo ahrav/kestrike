@@ -1,5 +1,6 @@
 //! This module reads input files for the GenMC judge and provides access to JSON values.
 
+use std::borrow::Cow;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::ffi::OsStrExt;
@@ -105,19 +106,23 @@ pub(crate) fn openable(path: &Path) -> Result<&Path, Error> {
     }
 }
 
-pub(crate) fn listed<'v>(value: &'v Value, what: &str) -> Result<&'v [Value], Error> {
-    match value {
-        Value::Array(items) => Ok(items),
-        _ => Err(Error::Type(format!("{what} is no array"))),
-    }
-}
-
-/// The strings of the array `value`, which `what` names in an error.
+/// The members a Python iteration over the JSON value `value` gives, as [`crate::python::iterated`] says;
+/// `what` names `value` in an error.
 ///
 /// # Errors
 ///
-/// `texts` returns [`Error::Type`] for a value that is no array and for an item that is no string or
-/// holds a lone surrogate.
+/// `listed` returns [`Error::Type`] for a number, a boolean or null, which Python cannot iterate.
+pub(crate) fn listed<'v>(value: &'v Value, what: &str) -> Result<Cow<'v, [Value]>, Error> {
+    crate::python::iterated(value).ok_or_else(|| Error::Type(format!("{what} is not iterable")))
+}
+
+/// The strings of the members [`listed`] gives for `value`, which `what` names in an error: an array's
+/// elements, an object's keys or a text's code points.
+///
+/// # Errors
+///
+/// `texts` returns [`Error::Type`] for a number, a boolean or null, and for a member that is no string
+/// or holds a lone surrogate.
 pub(crate) fn texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
     listed(value, what)?
         .iter()

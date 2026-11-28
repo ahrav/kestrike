@@ -1855,7 +1855,7 @@ pull request that cites a mutation report, follow
   `ASAN_OPTIONS=detect_leaks=0`, as `scripts/rust-lane.sh asan` sets them.
 - A change to a site that `verification/orderings/expected.json` catalogs,
   or to a test one of its rows names, reruns those rows with the `run`
-  command of `scripts/weaken-orderings.py` on an aarch64 host. The pull
+  command of `bash scripts/tool.sh weaken-orderings` on an aarch64 host. The pull
   request cites the run's report: its revision, the tool pins and host,
   each result's command, exit, output digest and result, and each row's
   agreement. A decided row records the revision of the run that set it.

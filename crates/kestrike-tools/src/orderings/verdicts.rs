@@ -16,7 +16,7 @@ use crate::genmc::refusal::{
     Error, lines, member, open_file, parse_json, read_replaced, read_strict, replaced, strict,
 };
 use crate::json::{Integer, Object, Text, Value};
-use crate::python::{ascii_digits, decimal, int, str_of};
+use crate::python::{ascii_digits, decimal, int, str_of, truthy};
 
 static LOOM_PASS: LazyLock<Regex> =
     LazyLock::new(|| compiled(r"(?m)^test result: ok\. 1 passed; 0 failed; 0 ignored;"));
@@ -216,9 +216,10 @@ fn checked_command(
 
 /// The verdict of one GenMC case, `case` of the declaration `declared`, from the files its lane left in
 /// `evidence`. The caller selects a case declared `positive`: the first attempt judges the case's own
-/// declaration, and its acceptance is `Survived`. `kill` is the failure text and the kernel file of the
-/// case family; with both nonempty, a second attempt judges the case as a violation at the `check!` of
-/// that file that carries the failure, and its acceptance is `Killed`. `code` is
+/// declaration, and its acceptance is `Survived`. `kill` is the entry's failure, a JSON value, and the
+/// kernel file of the case family; with a failure Python reads as true and a nonempty kernel, a second
+/// attempt judges the case as a violation at the `check!` of that file that carries the failure as its
+/// one check, and its acceptance is `Killed`. `code` is
 /// [`case_exit`] of the same directory and case; this function checks that the exit file is present and
 /// judges with `code`. A lane that passed its own deadline is the caller's to refuse before this call.
 ///
@@ -233,7 +234,7 @@ pub fn genmc_result(
     root: &Path,
     declared: &Value,
     case: &str,
-    kill: Option<(&str, &str)>,
+    kill: Option<(&Value, &str)>,
     evidence: &Path,
     planted: bool,
     code: Option<&Integer>,
@@ -288,7 +289,7 @@ pub fn genmc_result(
     let own = member(member(declared, "cases")?, case)?;
     let mut attempts = vec![(Verdict::Survived, own.clone())];
     if let Some((failure, kernel)) =
-        kill.filter(|(failure, kernel)| !failure.is_empty() && !kernel.is_empty())
+        kill.filter(|(failure, kernel)| truthy(failure) && !kernel.is_empty())
     {
         let Value::Object(own) = own else {
             return Err(Error::Type("a case declaration is no object".to_owned()));
@@ -296,7 +297,7 @@ pub fn genmc_result(
         let mut killing = own.clone();
         killing.insert("expect", Value::String("violation".into()));
         killing.insert("file", Value::String(kernel.into()));
-        killing.insert("checks", Value::Array(vec![Value::String(failure.into())]));
+        killing.insert("checks", Value::Array(vec![failure.clone()]));
         attempts.push((Verdict::Killed, Value::Object(killing)));
     }
     let mut reasons = Vec::new();
@@ -321,4 +322,4 @@ pub fn genmc_result(
 
 #[cfg(test)]
 #[path = "verdicts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

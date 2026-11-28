@@ -544,3 +544,50 @@ fn a_case_is_judged_by_the_lines_its_rules_read() {
         )
     );
 }
+
+/// A declared intrinsics list that Python can sort but that holds members other than texts is an
+/// intrinsics mismatch, its reason naming the members in Python's sorted order and repr; a list Python
+/// cannot sort ends the judgment with a type error.
+#[test]
+fn declared_intrinsics_python_can_sort_are_a_mismatch_and_others_a_type_error() {
+    let declared = declaration();
+    let positive = case(&declared, "join-production");
+    let judge = |intrinsics: &str| {
+        judged(
+            "join-production",
+            &with(&positive, "intrinsics", intrinsics),
+            POSITIVE,
+            0,
+            POSITIVE_GRAPH,
+            &[],
+        )
+    };
+    for (intrinsics, shown) in [
+        ("[7]", "[7]"),
+        ("[2.5, true, 1]", "[True, 1, 2.5]"),
+        ("[null]", "[None]"),
+        (r#"[{"a": 1}]"#, "[{'a': 1}]"),
+        ("[[2], [1, 3]]", "[[1, 3], [2]]"),
+    ] {
+        assert_eq!(
+            refusal(judge(intrinsics)),
+            (
+                2,
+                format!("join-production's bitcode calls [], declared {shown}"),
+                "tool failure"
+            ),
+            "{intrinsics}"
+        );
+    }
+    for intrinsics in [
+        r#"["a", 7]"#,
+        "[null, null]",
+        r#"[{}, {}]"#,
+        r#"[[1], ["a"]]"#,
+    ] {
+        assert!(
+            matches!(judge(intrinsics), Err(Error::Type(_))),
+            "{intrinsics}"
+        );
+    }
+}

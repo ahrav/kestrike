@@ -1015,20 +1015,19 @@ enum Member<'v> {
     Text(Text),
 }
 
+/// `members` is the members [`crate::python::iterated`] gives for `value`, an array's borrowed; `what`
+/// names `value` in a refusal of a number, a boolean or null.
 fn members<'v>(value: &'v Value, what: &str) -> Result<Vec<Member<'v>>, ReferenceError> {
-    match value {
-        Value::Array(items) => Ok(items.iter().map(Member::Value).collect()),
-        Value::Object(object) => Ok(object
-            .iter()
-            .map(|(key, _)| Member::Text(key.clone()))
-            .collect()),
-        Value::String(text) => Ok(text
-            .code_points()
-            .map(|code| {
-                Member::Text(Text::from_code_points([code]).expect("a code point of a text"))
+    match crate::python::iterated(value) {
+        Some(std::borrow::Cow::Borrowed(items)) => Ok(items.iter().map(Member::Value).collect()),
+        Some(std::borrow::Cow::Owned(texts)) => Ok(texts
+            .into_iter()
+            .filter_map(|text| match text {
+                Value::String(text) => Some(Member::Text(text)),
+                _ => None,
             })
             .collect()),
-        _ => Err(shape(format!("{what} is no array"))),
+        None => Err(shape(format!("{what} is no array"))),
     }
 }
 

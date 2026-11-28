@@ -1,4 +1,4 @@
-//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`],
+//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`line`], [`indented`],
 //! [`indented_in_order`] and [`indented_by`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits,
 //! which adds, steps down by one and sums without passing that bound.
 //!
@@ -807,6 +807,13 @@ pub fn text(value: &Value) -> String {
     written(value, Layout::COMPACT)
 }
 
+/// `line` uses the layout of Python's `json.dumps(value)`: members in document order, `, ` between items,
+/// `: ` after a key, non-ASCII code points as `\uXXXX` escapes, non-finite floats as `NaN`, `Infinity`
+/// and `-Infinity`, and no newline.
+pub fn line(value: &Value) -> String {
+    written(value, Layout::LINE)
+}
+
 /// `indented` uses the layout of Python's `json.dumps(value, indent=2, sort_keys=True)`: object keys sorted
 /// by code point, each member and item on its own line, two spaces per level, `: ` after a key, and `[]` and
 /// `{}` for empty containers.
@@ -877,11 +884,13 @@ impl fmt::Display for NonFinite {
 
 impl std::error::Error for NonFinite {}
 
-/// How a writer lays a value out: `depth` is `None` in the compact layout and the nesting depth of the
-/// value in an indented one, `sort_keys` sorts object keys, and `finite_only` refuses non-finite floats.
+/// How a writer lays a value out: `depth` is `None` in the layouts of one line and the nesting depth of
+/// the value in an indented one, `spaced` puts a space after each `,` and `:` of a line, `sort_keys` sorts
+/// object keys, and `finite_only` refuses non-finite floats.
 #[derive(Clone, Copy)]
 struct Layout {
     depth: Option<usize>,
+    spaced: bool,
     sort_keys: bool,
     finite_only: bool,
 }
@@ -889,16 +898,25 @@ struct Layout {
 impl Layout {
     const COMPACT: Self = Self {
         depth: None,
+        spaced: false,
+        sort_keys: false,
+        finite_only: false,
+    };
+    const LINE: Self = Self {
+        depth: None,
+        spaced: true,
         sort_keys: false,
         finite_only: false,
     };
     const SORTED: Self = Self {
         depth: Some(0),
+        spaced: false,
         sort_keys: true,
         finite_only: true,
     };
     const IN_ORDER: Self = Self {
         depth: Some(0),
+        spaced: false,
         sort_keys: false,
         finite_only: false,
     };
@@ -942,7 +960,11 @@ fn write_member(
     inner: Layout,
 ) -> Result<(), NonFinite> {
     write_string(key, out);
-    out.push_str(if inner.depth.is_some() { ": " } else { ":" });
+    out.push_str(if inner.depth.is_some() || inner.spaced {
+        ": "
+    } else {
+        ":"
+    });
     write(member, out, inner)
 }
 
@@ -962,6 +984,9 @@ fn write_items<T>(
     for (at, item) in items.iter().enumerate() {
         if at > 0 {
             out.push(',');
+            if inner.spaced {
+                out.push(' ');
+            }
         }
         if let Some(depth) = inner.depth {
             line(out, depth);

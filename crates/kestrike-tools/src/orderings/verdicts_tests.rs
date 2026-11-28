@@ -19,7 +19,7 @@ const RUN_TEST: &str =
 const FILL_MODEL: &str = "crates/kestrike/src/storage/fill_model.rs";
 
 /// The files the GenMC lane writes for one case.
-struct Lane<'a> {
+pub(crate) struct Lane<'a> {
     text: &'a str,
     graph: &'a str,
     code: &'a str,
@@ -31,7 +31,7 @@ struct Lane<'a> {
 }
 
 impl<'a> Lane<'a> {
-    fn new(text: &'a str, graph: &'a str, code: &'a str) -> Self {
+    pub(crate) fn new(text: &'a str, graph: &'a str, code: &'a str) -> Self {
         Self {
             text,
             graph,
@@ -44,7 +44,7 @@ impl<'a> Lane<'a> {
         }
     }
 
-    fn write(&self, evidence: &Path, declared: &Value) {
+    pub(crate) fn write(&self, evidence: &Path, declared: &Value) {
         let file = |name: &str, text: &str| {
             fs::write(evidence.join(name), text).expect("the lane's file writes");
         };
@@ -153,11 +153,12 @@ fn judged_over(
         fs::remove_file(scratch.0.join(name)).expect("the file is removed");
     }
     let code = case_exit(&scratch.0, CASE);
+    let kill = kill.map(|(failure, kernel)| (Value::String(failure.into()), kernel));
     let outcome: Outcome = genmc_result(
         &root(),
         declared,
         CASE,
-        kill,
+        kill.as_ref().map(|(failure, kernel)| (failure, *kernel)),
         &scratch.0,
         true,
         code.as_ref(),
@@ -413,7 +414,7 @@ fn a_lane_without_a_file_or_an_exit_code_gives_no_verdict() {
         &root(),
         &declared,
         CASE,
-        Some(("", KERNEL)),
+        Some((&Value::String("".into()), KERNEL)),
         &scratch.0,
         false,
         Some(&Integer::from(0_u64)),
@@ -442,7 +443,7 @@ fn each_file_the_lane_leaves_is_needed_for_a_verdict() {
             &root(),
             &declared,
             CASE,
-            Some((DEPARTURE, KERNEL)),
+            Some((&Value::String(DEPARTURE.into()), KERNEL)),
             &scratch.0,
             true,
             Some(&Integer::from(0_u64)),
@@ -721,7 +722,7 @@ fn a_genmc_command_check_quotes_its_key_and_value_errors() {
             &root(),
             declared,
             CASE,
-            Some((DEPARTURE, KERNEL)),
+            Some((&Value::String(DEPARTURE.into()), KERNEL)),
             &scratch.0,
             true,
             code.as_ref(),
@@ -782,4 +783,44 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored;\n", 0, RUN_FAILURE), passed)
     for (row, found, wanted) in rows {
         assert_eq!(found, wanted, "{row}");
     }
+}
+
+/// The kill attempt takes the entry's failure as its JSON value: a number Python reads as true is the one
+/// check of the attempt, read as the text `7` and shown as Python's repr of the number in the reason,
+/// and a number Python reads as false makes no attempt.
+#[test]
+fn a_genmc_failure_that_is_no_text_is_the_kill_attempt_s_check_as_it_stands() {
+    let declared = declaration();
+    let (killing, killing_graph) = named_violation(DEPARTURE);
+    let scratch = Scratch::new("genmc-number");
+    Lane::new(&killing, &killing_graph, "42").write(&scratch.0, &declared);
+    let code = case_exit(&scratch.0, CASE);
+    let judge = |failure: &str| {
+        let failure = crate::json::parse(failure).expect("parses");
+        genmc_result(
+            &root(),
+            &declared,
+            CASE,
+            Some((&failure, KERNEL)),
+            &scratch.0,
+            true,
+            code.as_ref(),
+        )
+        .expect("the evidence is judged")
+    };
+    let seven = judge("7");
+    assert_eq!(seven.verdict(), Verdict::NoVerdict);
+    assert!(
+        seven.reason().contains("the check 7 appears 0 times in "),
+        "{}",
+        seven.reason()
+    );
+    let zero = judge("0");
+    assert_eq!(zero.verdict(), Verdict::NoVerdict);
+    assert!(!zero.reason().contains("the check"), "{}", zero.reason());
+    assert!(
+        !zero.reason().contains(';'),
+        "one attempt: {}",
+        zero.reason()
+    );
 }

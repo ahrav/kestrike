@@ -73,8 +73,7 @@ jobs:
           python3 scripts/run-receipt-selftests.py
           python3 scripts/test-judge-rc11.py
           python3 scripts/test-judge-genmc.py
-          python3 scripts/test-weaken-orderings.py
-          python3 scripts/weaken-orderings.py check
+          bash scripts/tool.sh weaken-orderings check
           python3 scripts/test-judge-verus.py
           python3 scripts/test-judge-kani.py
           python3 scripts/test-judge-tlc.py

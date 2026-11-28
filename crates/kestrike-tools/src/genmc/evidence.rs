@@ -198,7 +198,8 @@ pub fn check_command(
     let options = member(expected, "options")?;
     if !ran_declared(argv, record, options, &graph, &manifest)? {
         let mut joined = Vec::new();
-        for item in listed(options, "the declared options")? {
+        let declared = listed(options, "the declared options")?;
+        for item in declared.iter() {
             let Value::String(item) = item else {
                 return Err(Error::Type("a declared option is no string".to_owned()));
             };
