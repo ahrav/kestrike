@@ -6,7 +6,7 @@ use super::{Evidence, Readings, evidence};
 use crate::paths::tests::Scratch;
 use crate::red_green::reasons::tests::{leg, options};
 use crate::red_green::reasons::{NO_EVIDENCE, base_reason, head_reason};
-use crate::text::Text;
+use crate::text::{Text, text};
 
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
 const EXPECT: &str = "a poll counts that completion as delivered";
@@ -28,6 +28,11 @@ fn receipt(scratch: &Scratch) -> PathBuf {
         "local-1-1-2-base",
         "local-1-1-1-base.x",
         "local-1-1-1-base.",
+        "local-1-1-1-head.2/local-1-1-1-base",
+        "local-1-1-1-base2",
+        "local-9-9-1-base",
+        "local-1-1-1-base.10",
+        "local-1-1-1-base.11",
     ] {
         DirBuilder::new()
             .mode(0o700)
@@ -42,9 +47,36 @@ fn receipt(scratch: &Scratch) -> PathBuf {
         "local-1-1-2-base",
         "local-1-1-1-base.x",
         "local-1-1-1-base.",
+        "local-1-1-1-head.2/local-1-1-1-base",
+        "local-1-1-1-base2",
+        "local-9-9-1-base",
+        "local-1-1-1-base.10",
+        "local-1-1-1-base.11",
     ] {
         fs::write(receipt.join(name).join("artifact.json"), "{}\n").expect("written");
     }
+    fs::create_dir(receipt.join("local-1-1-1-base.9")).expect("made");
+    fs::write(
+        receipt.join("local-1-1-1-base.9/attempt-1.stdout"),
+        "other\n",
+    )
+    .expect("written");
+    symlink(
+        "../local-1-1-1-base/artifact.json",
+        receipt.join("local-1-1-1-base.9/artifact.json"),
+    )
+    .expect("linked");
+    symlink(
+        "../local-1-1-1-head.2/attempt-1.stderr",
+        receipt.join("local-1-1-1-base.10/attempt-1.stderr"),
+    )
+    .expect("linked");
+    symlink(
+        "attempt-1.stderr",
+        receipt.join("local-1-1-1-base.11/attempt-1.stderr"),
+    )
+    .expect("linked");
+    symlink("loop", receipt.join("loop")).expect("linked");
     fs::create_dir(receipt.join("local-1-1-1-base.3/artifact.json")).expect("made");
     fs::write(receipt.join("local-1-1-1-head.2/attempt-1.stderr"), "").expect("written");
     fs::create_dir(receipt.join("local-1-1-1-base.5")).expect("made");
@@ -101,7 +133,9 @@ enum Expected {
 }
 
 /// A leg's evidence counts only as `artifact.json` directly in its own directory of this run's receipt,
-/// read through links. Only regular attempt output files contribute to a leg's readings.
+/// read through links. Only regular attempt output files contribute to a leg's readings, each read at
+/// the target of a link. An announcement that holds a NUL, or a surrogate that encodes to no byte, names
+/// no artifact.
 #[test]
 fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
     let scratch = Scratch::new("red-green-evidence");
@@ -227,6 +261,76 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
             "1",
             Expected::Absent,
         ),
+        (
+            "an own-named directory below another leg's",
+            "base",
+            Some(at("local-1-1-1-head.2/local-1-1-1-base")),
+            "1",
+            Expected::Absent,
+        ),
+        (
+            "digits without a dot",
+            "base",
+            Some(at("local-1-1-1-base2")),
+            "1",
+            Expected::Absent,
+        ),
+        (
+            "another run's name",
+            "base",
+            Some(at("local-9-9-1-base")),
+            "1",
+            Expected::Absent,
+        ),
+        (
+            "an artifact that links to another directory of the leg",
+            "base",
+            Some(at("local-1-1-1-base.9")),
+            "1",
+            Expected::Read("local-1-1-1-base", &["stdout"]),
+        ),
+        (
+            "an attempt output that links to a regular file",
+            "base",
+            Some(at("local-1-1-1-base.10")),
+            "1",
+            Expected::Read("local-1-1-1-base.10", &["stdout", "stderr"]),
+        ),
+        (
+            "an attempt output that links to itself",
+            "base",
+            Some(at("local-1-1-1-base.11")),
+            "1",
+            Expected::Read("local-1-1-1-base.11", &["stdout"]),
+        ),
+        (
+            "a looping link before ..",
+            "base",
+            Some(receipt.join("loop/../local-1-1-1-base/artifact.json")),
+            "1",
+            Expected::Read("local-1-1-1-base", &["stdout"]),
+        ),
+        (
+            "a looping link before a repeated separator",
+            "base",
+            Some(receipt.join("loop//../local-1-1-1-base/artifact.json")),
+            "1",
+            Expected::Absent,
+        ),
+        (
+            "a NUL in a component that .. removes",
+            "base",
+            Some(receipt.join("x\0/../local-1-1-1-base/artifact.json")),
+            "1",
+            Expected::Absent,
+        ),
+        (
+            "a NUL in a kept component",
+            "base",
+            Some(receipt.join("local-1-1-1-base/artifact.json\0")),
+            "1",
+            Expected::Absent,
+        ),
         ("no announcement", "base", None, "1", Expected::Absent),
     ];
     let locked = receipt.join("local-1-1-1-base.8/attempt-1.stderr");
@@ -254,13 +358,33 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
                     panic!("{name}: {found:?}");
                 };
                 let named = Text::from_os(path.as_os_str());
-                let opening = crate::text::text!(named, ": ");
+                let opening = text!(named, ": ");
                 assert!(error.starts_with(&opening), "{name}: {error:?}");
             }
             Expected::Read(directory, streams) => {
                 assert_eq!(found, read(at(directory), streams), "{name}");
             }
         }
+    }
+    let clean = Text::from_os(receipt.as_os_str());
+    let through = |component: u32| {
+        let component = Text::from_code_points([component]).expect("a code point");
+        text!(&clean, "/", component, "/../local-1-1-1-base/artifact.json")
+    };
+    for (name, announced, expected) in [
+        (
+            "a component that .. removes",
+            through(u32::from('x')),
+            read(at("local-1-1-1-base"), &["stdout"]),
+        ),
+        (
+            "a surrogate that encodes to no byte",
+            through(0xd800),
+            Evidence::Absent,
+        ),
+    ] {
+        let found = evidence(&receipt, &Text::from("1"), "base", Some(&announced));
+        assert_eq!(found.expect("the path resolves"), expected, "{name}");
     }
     let artifact = at("local-1-1-1-base");
     let options = options(TEST, EXPECT);
@@ -287,4 +411,31 @@ fn a_leg_counts_only_its_own_readable_artifact_and_a_reported_verdict() {
         let refused = Text::from(format!("the head leg passed but {NO_EVIDENCE}: {green}"));
         assert_eq!(head, (!complete).then_some(refused), "{streams:?}");
     }
+}
+
+/// An `artifact.json` that is a FIFO is read as its writer wrote it; with no writer the read waits for
+/// one.
+#[test]
+fn an_artifact_that_is_a_fifo_reads_what_its_writer_wrote() {
+    let scratch = Scratch::new("red-green-evidence");
+    let receipt = scratch.0.join("local-1-1");
+    let leg = receipt.join("local-1-1-1-base");
+    fs::create_dir_all(&leg).expect("the leg is made");
+    fs::write(leg.join("attempt-1.stdout"), EXPECT).expect("written");
+    let artifact = leg.join("artifact.json");
+    mkfifo(&artifact);
+    let writer = {
+        let artifact = artifact.clone();
+        std::thread::spawn(move || fs::write(artifact, "{}\n"))
+    };
+    let announced = Text::from_os(artifact.as_os_str());
+    let found = evidence(&receipt, &Text::from("1"), "base", Some(&announced));
+    writer
+        .join()
+        .expect("the writer ends")
+        .expect("the FIFO takes the bytes");
+    assert_eq!(
+        found.expect("the path resolves"),
+        read(artifact, &["stdout"])
+    );
 }

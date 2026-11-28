@@ -20,11 +20,6 @@ pub const DEFAULT_WATCHDOG: f64 = 1500.0;
 /// The longest wait in seconds the platform's timed lock takes, `threading.TIMEOUT_MAX` on 64-bit Linux.
 pub const TIMEOUT_MAX: f64 = 9_223_372_036.0;
 
-/// The code points that end a line in Python's `str.splitlines()`.
-const LINE_BREAKS: [char; 10] = [
-    '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}', '\u{2029}',
-];
-
 const fn value(names: &'static [&'static str], required: bool) -> Opt {
     Opt {
         names,
@@ -150,12 +145,16 @@ pub fn check_given(options: &Options) -> Result<(), Text> {
     Ok(())
 }
 
+/// `check_expect` refuses an expected text of white space alone and one that is part of the test ID,
+/// which libtest's own lines around a failure hold. It refuses a text that holds a NUL, the mark that
+/// stands for a framing line in the searched output, as an empty one; a command-line argument holds
+/// none.
 pub fn check_expect(options: &Options) -> Result<(), Text> {
     let (expect, test) = (&options.expect, &options.test);
-    if expect.strip().is_empty() {
+    if expect.strip().is_empty() || expect.as_bytes().contains(&0) {
         return Err(Text::from("--expect is empty"));
     }
-    if super::holds(test.as_bytes(), expect.as_bytes()) {
+    if test.contains(expect) {
         return Err(text!("--expect ", expect.repr(), " is part of the test ID"));
     }
     Ok(())
@@ -173,12 +172,12 @@ pub fn check_watchdog(watchdog: f64) -> Result<(), Text> {
 }
 
 /// The runner prints the receipt directory path in a single-line UTF-8 announcement, so the entire path
-/// must be single-line UTF-8 text.
+/// must be UTF-8 text that holds none of the code points at which `str.splitlines()` ends a line.
 pub fn check_receipt_directory(parent: &Path) -> Result<(), Text> {
     let shown = Text::from_os(parent.as_os_str());
     let broken = shown
         .to_str()
-        .is_none_or(|valid| valid.contains(LINE_BREAKS));
+        .is_none_or(|valid| valid.chars().any(|c| text::is_line_break(u32::from(c))));
     if broken {
         return Err(text!(
             "the receipt directory ",
@@ -191,7 +190,13 @@ pub fn check_receipt_directory(parent: &Path) -> Result<(), Text> {
 
 /// `repeat` builds a shell command to rerun the tool from the repository root. It joins each flag and
 /// value with `=`, so a value that starts with `-` reads back as that value. The parent of `receipt`
-/// stands as `--artifacts` where the run named one.
+/// stands as `--artifacts` where the run named a nonempty one: `.` for a receipt of one relative
+/// component and the root for the root.
+///
+/// `repeat` writes the values it is given. The command repeats the run where the caller passes the full
+/// commit IDs the legs ran as `base` and `head`, the run's receipt directory under the resolved
+/// `--artifacts` directory as `receipt`, and an `options.cargo` that is absolute wherever it holds a
+/// slash.
 pub fn repeat(options: &Options, base: &Text, head: &Text, receipt: &Path) -> Text {
     let flag = |name: &str, value: &Text| text!("--", name, "=", value);
     let mut words: Vec<Text> = ["bash", "scripts/tool.sh", TOOL].map(Text::from).to_vec();
@@ -209,8 +214,16 @@ pub fn repeat(options: &Options, base: &Text, head: &Text, receipt: &Path) -> Te
     if options.release {
         words.push(Text::from("--release"));
     }
-    if options.artifacts.is_some() {
-        let parent = receipt.parent().unwrap_or(Path::new("."));
+    if options
+        .artifacts
+        .as_ref()
+        .is_some_and(|given| !given.is_empty())
+    {
+        let parent = match receipt.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            None if receipt.has_root() => receipt,
+            _ => Path::new("."),
+        };
         words.push(flag("artifacts", &Text::from_os(parent.as_os_str())));
     }
     if options.cargo != "cargo" {

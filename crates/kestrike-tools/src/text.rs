@@ -84,7 +84,7 @@ pub fn words(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Whether `str.splitlines()` ends a line at the code point.
-fn is_line_break(code: u32) -> bool {
+pub(crate) fn is_line_break(code: u32) -> bool {
     matches!(code, 0xa..=0xd | 0x1c..=0x1e | 0x85 | 0x2028 | 0x2029)
 }
 
@@ -346,6 +346,16 @@ impl Text {
     /// `starts_with` holds when the code points of `prefix` begin the text, as `str.startswith` holds.
     pub fn starts_with(&self, prefix: &Self) -> bool {
         self.0.starts_with(&prefix.0)
+    }
+
+    /// `contains` holds when the code points of `needle` stand side by side in the text, as Python's `in`
+    /// holds between two strings; an empty `needle` stands in every text.
+    pub fn contains(&self, needle: &Self) -> bool {
+        needle.0.is_empty()
+            || self
+                .0
+                .windows(needle.0.len())
+                .any(|window| window == needle.0)
     }
 
     /// `ends_with` holds when the code points of `suffix` end the text, as `str.endswith` holds.

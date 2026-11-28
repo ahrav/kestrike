@@ -2,6 +2,8 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 
 use super::{expect_streams, unframed};
+use crate::red_green::options::Options;
+use crate::red_green::reasons::tests::options;
 use crate::text::Text;
 
 const TEST: &str = "storage::device::table_tests::a_poll_reports_each_completion_once";
@@ -55,6 +57,9 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
             format!("\u{1c}{TEST}x"),
             format!("test {TEST}x ... ok"),
             "FAILED here".to_owned(),
+            "left: OK, right: FAILED".to_owned(),
+            "error: failures:".to_owned(),
+            "x running 1 test".to_owned(),
             "note: test did not panic as expected".to_owned(),
             "thread 'other' panicked at src/a.rs:9:".to_owned(),
             format!("\u{3000}\u{3000}{TEST}x"),
@@ -106,6 +111,35 @@ fn unframed_replaces_each_framing_and_backtrace_line_with_a_nul() {
         framed,
         bytes(b"\0\n---- t\xfe stdout ----\n"),
         "a test ID outside UTF-8 frames its own lines"
+    );
+    let any = unframed(b"test t\xff ... \xff lost\n", &test);
+    assert_eq!(
+        any,
+        Text::from("\0\n"),
+        "a byte outside UTF-8 stands under `.*`"
+    );
+    let dotted = unframed(
+        b"---- a.b stdout ----\n---- axb stdout ----\n",
+        &Text::from("a.b"),
+    );
+    assert_eq!(
+        dotted,
+        Text::from("\0\n---- axb stdout ----\n"),
+        "a dot of the test ID stands for itself"
+    );
+}
+
+/// A test ID as long as the longest argument Linux passes frames its own lines.
+#[test]
+fn a_test_id_of_120_000_bytes_frames_its_lines() {
+    let long = "m".repeat(120_000);
+    let output = format!("---- {long} stdout ----\n{EXPECT}\ntest {long} ... FAILED\n");
+    let found = unframed(output.as_bytes(), &Text::from(long.as_str()));
+    assert_eq!(found, Text::from(format!("\0\n{EXPECT}\n\0\n")));
+    let outputs = vec![("stdout", output.into_bytes()), ("stderr", Vec::new())];
+    assert_eq!(
+        expect_streams(&outputs, &options(&long, EXPECT)),
+        ["stdout"]
     );
 }
 
@@ -174,13 +208,16 @@ fn expect_streams_lists_the_streams_whose_kept_lines_hold_the_text() {
             b"\xff",
             &["stdout"],
         ),
+        ("an empty text", stdout("x"), b"", &["stdout", "stderr"]),
     ];
     for (name, outputs, expect, expected) in rows {
         assert_eq!(
             expect_streams(
                 &outputs,
-                &Text::from_os(OsStr::from_bytes(expect)),
-                &Text::from(TEST)
+                &Options {
+                    expect: Text::from_os(OsStr::from_bytes(expect)),
+                    ..options(TEST, "")
+                }
             ),
             expected,
             "{name}"
