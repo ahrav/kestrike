@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use kestrike_tools::plants::{
-    Halt, Logged, Outcome, Run, Step, conclude, logged, prepare, publish, score,
+    Halt, Logged, Outcome, Run, Stopped, conclude, logged, prepare, publish, score,
 };
 use kestrike_tools::process::{INTERRUPT, Interrupt, install_handlers};
 
@@ -96,7 +96,7 @@ fn spawn_window() {
         work: &place,
     };
     match logged(&started, &INTERRUPT) {
-        Err(Step::Halt(halt)) => assert_eq!(halt, Halt::Interrupted(libc::SIGTERM)),
+        Err(Stopped::Halt(halt)) => assert_eq!(halt, Halt::Interrupted(libc::SIGTERM)),
         other => panic!("the start ends the run, not {other:?}"),
     }
     let terminated = std::fs::read_to_string(place.join("terminated")).expect("the child ended");

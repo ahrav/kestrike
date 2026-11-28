@@ -7,19 +7,21 @@
 //! `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true` into a target and build directory of its own, and removes
 //! that directory after the build; the removal runs whole.
 
+use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
-use std::fs::{DirBuilder, OpenOptions};
-use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
-use super::child::{Halt, Logged, Step, logged};
+use super::child::{Logged, logged};
+use super::ending::{Halt, Step, Stopped};
 use super::entry::Entry;
 use super::git::{self, Done};
 use super::judgment::{Ask, Sweep, judge};
 use super::output::{Pins, archive_pins, first_object};
 use super::record::Plant;
-use super::run::{Run, remove};
+use super::run::{Run, open_lock, remove};
 use super::seed::Manifest;
 use super::status::profile_runs;
 use super::suspects::Suspect;
@@ -59,7 +61,7 @@ impl Run<'_> {
         args: &[OsString],
         cwd: Option<&Path>,
         env: Option<&crate::environ::Environ>,
-    ) -> Result<(i32, String), Step> {
+    ) -> Result<(i32, String), Stopped> {
         let what = text!("campaign ", Text::from_os(&args[0])).to_string();
         let argv = self.campaign(args);
         let started = Logged {
@@ -75,7 +77,7 @@ impl Run<'_> {
     }
 
     /// `json` is the JSON object the first line of `campaign ARGS` prints.
-    fn json(&self, log: &Path, args: &[OsString]) -> Result<Object, Step> {
+    fn json(&self, log: &Path, args: &[OsString]) -> Result<Object, Stopped> {
         let (code, out) = self.command(log, args, None, None)?;
         let name = args[0].to_string_lossy().into_owned();
         if code != 0 {
@@ -87,7 +89,13 @@ impl Run<'_> {
     /// `archive` builds the archive of `tree`, `what`, at `place/archive` and returns it with its pins.
     /// The run's `Cargo.lock` goes into the tree first, and the target directory goes after the build,
     /// whatever its ending.
-    fn archive(&self, place: &Path, tree: &Path, what: &str) -> Result<(PathBuf, Pins), Step> {
+    fn archive(
+        &self,
+        place: &Path,
+        tree: &Path,
+        what: &str,
+        unread: &Cell<bool>,
+    ) -> Result<(PathBuf, Pins), Step> {
         let target = place.join("target");
         let env = self.cargo_env(
             &target,
@@ -116,45 +124,47 @@ impl Run<'_> {
                 " keeps no regular Cargo.lock equal to the run's"
             ))
         };
-        let opened = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-            .open(&kept);
-        let mut file = match opened {
+        let file = match open_lock(&kept) {
             Ok(file) => file,
-            Err(error)
-                if matches!(
-                    error.raw_os_error(),
-                    Some(libc::ELOOP | libc::ENOENT | libc::ENOTDIR)
-                ) =>
-            {
-                return Err(unequal().into());
+            Err(error) => {
+                return Err(match fs::symlink_metadata(&kept) {
+                    Ok(status) if status.is_file() => {
+                        unread.set(true);
+                        NoVerdict::unreadable(&kept, &error, self.work())
+                    }
+                    _ => unequal(),
+                }
+                .into());
             }
-            Err(error) => return Err(NoVerdict::unreadable(&kept, &error, self.work()).into()),
         };
-        if !file.metadata().is_ok_and(|status| status.is_file()) {
-            return Err(unequal().into());
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| NoVerdict::unreadable(&kept, &error, self.work()))?;
-        if bytes != self.inputs.lock() {
-            return Err(unequal().into());
+        match self.lock_bytes(file) {
+            Ok(Some(bytes)) if bytes == self.inputs.lock() => {}
+            Ok(_) => return Err(unequal().into()),
+            Err(error) => {
+                unread.set(true);
+                return Err(NoVerdict::unreadable(&kept, &error, self.work()).into());
+            }
         }
         Ok((output, pins))
     }
 
-    /// `base_archive` is the unpatched head's archive and pins, built at the first call; a build that
-    /// fails fails every call.
+    /// `base_archive` caches the unpatched head's archive and pins on success. It caches a `NoVerdict`
+    /// from `Step::Git`, or from `Step::NoVerdict` when `unread` is false; an `unread` failure returns
+    /// uncached, so the next call builds again.
     fn base_archive(&mut self) -> Result<Result<(PathBuf, Pins), NoVerdict>, Halt> {
         if self.base.is_none() {
             let place = self.work().join("base");
+            let unread = Cell::new(false);
             let built = self
-                .tree(&place)
-                .and_then(|tree| self.archive(&place, &tree, "the unpatched head"));
+                .tree(&place, |why| {
+                    unread.set(true);
+                    NoVerdict::plain(why)
+                })
+                .and_then(|tree| self.archive(&place, &tree, "the unpatched head", &unread));
             self.base = Some(match built {
                 Ok(base) => Ok(base),
                 Err(Step::Halt(halt)) => return Err(halt),
+                Err(Step::NoVerdict(ending)) if unread.get() => return Ok(Err(ending)),
                 Err(Step::NoVerdict(ending)) => Err(ending),
                 Err(Step::Git(failed)) => {
                     let log = self.keep_git_error(&place, &failed);
@@ -173,7 +183,7 @@ impl Run<'_> {
     /// `sweep` sweeps the plant's profiles until each one's `next` reaches `--runs`, for at most
     /// `--rounds` sweeps, and returns the last sweep's exit and status; a sweep that exits 1 ends the
     /// loop.
-    fn sweep(&self, plant: &Plant, archive: &Path, place: &Path) -> Result<(i32, Object), Step> {
+    fn sweep(&self, plant: &Plant, archive: &Path, place: &Path) -> Result<(i32, Object), Stopped> {
         let options = self.inputs.options();
         let root = place.join("root");
         let expected = plant.expected();
@@ -260,7 +270,7 @@ impl Run<'_> {
         };
         entry.set_commit(&parsed("HEAD")?);
         entry.set_tree(&parsed("HEAD^{tree}")?);
-        let (archive, pins) = self.archive(&place, tree, "the planted tree")?;
+        let (archive, pins) = self.archive(&place, tree, "the planted tree", &Cell::new(false))?;
         if !entry.archived(&pins) {
             return Ok(());
         }
@@ -280,6 +290,9 @@ impl Run<'_> {
     }
 }
 
+/// The reason an ask gives once the run has ended.
+const ENDED: &str = "the run has ended";
+
 /// The children the judgment asks of a run. Once one of them ends the run, every later ask returns
 /// its error with no child started.
 struct Asking<'r, 'a> {
@@ -291,18 +304,12 @@ struct Asking<'r, 'a> {
 
 impl Asking<'_, '_> {
     fn halt(&mut self, halt: Halt) -> Text {
-        let shown = match &halt {
-            Halt::Interrupted(signal) => text!("interrupted by signal ", *signal),
-            Halt::Failed(reason) => reason.clone(),
-        };
         self.halted.get_or_insert(halt);
-        shown
+        Text::from(ENDED)
     }
 
     fn halted(&self) -> Option<Text> {
-        self.halted
-            .as_ref()
-            .map(|_| Text::from("the run has ended"))
+        self.halted.as_ref().map(|_| Text::from(ENDED))
     }
 }
 
@@ -323,9 +330,8 @@ impl Ask for Asking<'_, '_> {
             .command(&self.place.join("confirm"), &args, None, None)
         {
             Ok(done) => Ok(done),
-            Err(Step::NoVerdict(ending)) => Err(ending),
-            Err(Step::Halt(halt)) => Err(NoVerdict::plain(self.halt(halt))),
-            Err(Step::Git(_)) => unreachable!("`campaign confirm` runs no Git step"),
+            Err(Stopped::NoVerdict(ending)) => Err(ending),
+            Err(Stopped::Halt(halt)) => Err(NoVerdict::plain(self.halt(halt))),
         }
     }
 
@@ -363,7 +369,11 @@ impl Ask for Asking<'_, '_> {
             .write(true)
             .create_new(true)
             .open(&written)
-            .and_then(|mut file| file.write_all(manifest.pinned(&pins).as_bytes()))
+            .and_then(|mut file| {
+                let pinned = manifest.pinned(&pins);
+                crate::fixtures::fits(pinned.as_bytes().len())?;
+                file.write_all(pinned.as_bytes())
+            })
             .map_err(|error| shown(error, &written))?;
         let args = [
             os(&"sim"),
@@ -377,9 +387,8 @@ impl Ask for Asking<'_, '_> {
         ];
         match self.run.command(&check.join("run"), &args, None, None) {
             Ok(done) => Ok(done),
-            Err(Step::NoVerdict(ending)) => Err(ending.reason().clone()),
-            Err(Step::Halt(halt)) => Err(self.halt(halt)),
-            Err(Step::Git(_)) => unreachable!("`campaign sim run` runs no Git step"),
+            Err(Stopped::NoVerdict(ending)) => Err(ending.reason().clone()),
+            Err(Stopped::Halt(halt)) => Err(self.halt(halt)),
         }
     }
 }

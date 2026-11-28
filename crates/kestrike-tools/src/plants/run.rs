@@ -10,14 +10,15 @@
 //! it ends. The run trusts its work directory, which the checks made under ancestors only its user or
 //! root can write, and reads and writes its files by name.
 
-use std::ffi::OsStr;
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::ffi::{CStr, CString, OsStr};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::child::{GitFailed, Halt, Step};
+use super::ending::{GitFailed, Halt, Step};
 use super::entry::{Entry, Finished};
 use super::git::{self, CallError, Done};
 use super::output::Pins;
@@ -49,7 +50,9 @@ pub struct Run<'a> {
 pub type Remained = (PathBuf, Option<i32>);
 
 /// `remove` removes `path` and everything under it, going past each entry it cannot remove; a link at
-/// `path` stays.
+/// `path` stays. The walk opens each directory relative to its parent's descriptor with `O_NOFOLLOW`
+/// and unlinks a link inside the tree itself. After `remove` opens the parent of `path`, each `openat`
+/// and `unlinkat` call resolves a single name relative to a directory descriptor.
 pub fn remove(path: &Path) {
     let Ok(status) = fs::symlink_metadata(path) else {
         return;
@@ -57,16 +60,88 @@ pub fn remove(path: &Path) {
     if !status.is_dir() {
         return;
     }
-    if let Ok(entries) = fs::read_dir(path) {
-        for entry in entries.flatten() {
-            let inner = entry.path();
-            match entry.file_type() {
-                Ok(kind) if kind.is_dir() => remove(&inner),
-                _ => drop(fs::remove_file(&inner)),
-            }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let (Ok(parent), Ok(name)) = (File::open(parent), CString::new(name.as_bytes())) else {
+        return;
+    };
+    remove_at(&parent, &name, true);
+}
+
+/// `remove_at` removes the directory `name` of the open directory `parent` with its entries. If
+/// `openat` fails and `root` is false, `remove_at` attempts to unlink `name` as a non-directory entry.
+/// The caller continues with the remaining siblings.
+fn remove_at(parent: &File, name: &CStr, root: bool) {
+    let flags =
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC;
+    // SAFETY: `parent` is an open descriptor and `name` a NUL-terminated string, both live for the call.
+    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if descriptor < 0 {
+        if !root {
+            // SAFETY: `parent` is open and `name` points to a live NUL-terminated string.
+            unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+        }
+        return;
+    }
+    // SAFETY: `descriptor` is a new open descriptor that this call alone owns.
+    let directory = unsafe { File::from_raw_fd(descriptor) };
+    for inner in entries(&directory) {
+        remove_at(&directory, &inner, false);
+    }
+    drop(directory);
+    // SAFETY: dropping `directory` leaves `parent` open. `name` points to a live NUL-terminated string
+    // throughout `unlinkat`.
+    unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+}
+
+/// `entries` lists the names in the open directory `directory`, `.` and `..` left out; a failed
+/// listing lists the names read before it.
+fn entries(directory: &File) -> Vec<CString> {
+    // SAFETY: `directory` keeps the descriptor open, and `F_DUPFD_CLOEXEC` takes an integer minimum
+    // descriptor as its third argument.
+    let copy = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if copy < 0 {
+        return Vec::new();
+    }
+    // SAFETY: `copy` is an open descriptor of a directory that `fdopendir` takes over on success.
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        // SAFETY: `fdopendir` failed, so `copy` is still this call's to close, once.
+        unsafe { libc::close(copy) };
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` is an open directory stream that this loop alone reads.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `readdir` returned a live entry whose `d_name` is NUL-terminated; the name is copied
+        // before the next `readdir`.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
         }
     }
-    let _ = fs::remove_dir(path);
+    // SAFETY: `stream` is open and closed here once, which closes `copy`.
+    unsafe { libc::closedir(stream) };
+    names
+}
+
+/// `open_lock` rejects a symbolic link in the final path component and opens a FIFO for reading even
+/// when no writer is present.
+pub(super) fn open_lock(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
 }
 
 /// `exists` holds for a path that stands, a dangling link included.
@@ -173,9 +248,16 @@ impl<'a> Run<'a> {
 
     /// `tree` adds a detached worktree of the head at `place/tree`, with `place` and its missing ancestors
     /// made private. The add runs whole: a signal recorded during it ends the run after it.
-    pub(super) fn tree(&mut self, place: &Path) -> Result<PathBuf, Step> {
+    /// `prepared` maps `make_private` errors to `NoVerdict`. For Git errors, `tree` propagates
+    /// `CallError::Failed` and `CallError::Interrupted` directly and passes all other error messages to
+    /// `prepared`.
+    pub(super) fn tree(
+        &mut self,
+        place: &Path,
+        prepared: impl Fn(String) -> NoVerdict,
+    ) -> Result<PathBuf, Step> {
         let tree = place.join("tree");
-        make_private(place).map_err(|error| NoVerdict::failed(error.to_string()))?;
+        make_private(place).map_err(|error| prepared(error.to_string()))?;
         self.trees.push(tree.clone());
         let args = [
             OsStr::new("worktree"),
@@ -187,8 +269,13 @@ impl<'a> Run<'a> {
         self.interrupt.check()?;
         let added = git::text(self.inputs.env(), self.inputs.top(), &args);
         self.interrupt.check()?;
-        let _ = added.and_then(Done::checked)?;
-        Ok(tree)
+        match added.and_then(Done::checked) {
+            Ok(_) => Ok(tree),
+            Err(error @ (CallError::Failed { .. } | CallError::Interrupted(_))) => {
+                Err(error.into())
+            }
+            Err(other) => Err(prepared(other.to_string()).into()),
+        }
     }
 
     /// `listing` is the output of `git worktree list --porcelain` in the checkout, and its exit; with
@@ -267,7 +354,10 @@ impl<'a> Run<'a> {
             .write(true)
             .create_new(true)
             .open(&path)
-            .and_then(|mut lock| lock.write_all(self.inputs.lock()));
+            .and_then(|mut lock| {
+                crate::fixtures::fits(self.inputs.lock().len())?;
+                lock.write_all(self.inputs.lock())
+            });
         match written {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -286,18 +376,26 @@ impl<'a> Run<'a> {
     /// through one descriptor that follows no link and waits for no writer, at most one byte past the
     /// run's lockfile.
     pub(super) fn holds_lock(&self, tree: &Path) -> bool {
-        let lock = self.inputs.lock();
-        let Ok(file) = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-            .open(tree.join("Cargo.lock"))
-        else {
-            return false;
-        };
-        let regular = file.metadata().is_ok_and(|status| status.is_file());
+        open_lock(&tree.join("Cargo.lock"))
+            .and_then(|file| self.lock_bytes(file))
+            .is_ok_and(|read| read.as_deref() == Some(self.inputs.lock()))
+    }
+
+    /// The extra byte lets a caller detect trailing data after a matching lockfile prefix while keeping
+    /// memory use bounded.
+    ///
+    /// # Errors
+    ///
+    /// `lock_bytes` propagates errors from `file.metadata()` and `read_to_end`.
+    pub(super) fn lock_bytes(&self, file: File) -> io::Result<Option<Vec<u8>>> {
+        if !file.metadata()?.is_file() {
+            return Ok(None);
+        }
+        let bound =
+            u64::try_from(self.inputs.lock().len()).map_or(u64::MAX, |len| len.saturating_add(1));
         let mut read = Vec::new();
-        let bound = u64::try_from(lock.len()).map_or(u64::MAX, |len| len.saturating_add(1));
-        regular && file.take(bound).read_to_end(&mut read).is_ok() && read == lock
+        file.take(bound).read_to_end(&mut read)?;
+        Ok(Some(read))
     }
 
     /// `keep_git_error` appends a failed Git step's error output to `place/git.err`, going past a write
@@ -313,7 +411,15 @@ impl<'a> Run<'a> {
                 ":\n",
                 failed.stderr
             );
-            let _ = err.write_all(kept.as_bytes());
+            let held = err.metadata().map(|status| status.len());
+            let fits = held.and_then(|held| {
+                let held =
+                    usize::try_from(held).map_err(|_| io::Error::from_raw_os_error(libc::EFBIG))?;
+                crate::fixtures::fits(held.saturating_add(kept.as_bytes().len()))
+            });
+            if fits.is_ok() {
+                let _ = err.write_all(kept.as_bytes());
+            }
         }
         self.in_work(&log).to_path_buf()
     }
@@ -341,10 +447,19 @@ impl<'a> Run<'a> {
     }
 }
 
-/// `said` writes `line` to `err`, which a failed write leaves as it is.
-fn said(err: &mut impl Write, line: &Text) {
-    let _ = writeln!(err, "{line}");
-    let _ = err.flush();
+pub(crate) fn said(err: &mut impl Write, line: &Text) -> io::Result<()> {
+    writeln!(err, "{line}")?;
+    err.flush()
+}
+
+/// A failed progress write ends the run.
+fn progress(err: &mut impl Write, line: &Text) -> Result<(), Halt> {
+    said(err, line).map_err(|error| {
+        Halt::Failed(text!(
+            "a progress line cannot be written: ",
+            super::files::strerror(&error)
+        ))
+    })
 }
 
 /// `proof_line` is the line a plant prints once its proof reruns end: its result, or its exits.
@@ -386,7 +501,7 @@ impl Run<'_> {
             };
             self.interrupt.check()?;
             if let Some(verdict) = entry.verdict() {
-                said(err, &text!(plant.id(), ": ", verdict.as_str()));
+                progress(err, &text!(plant.id(), ": ", verdict.as_str()))?;
             }
             entries.push((plant, entry, tree));
         }
@@ -416,7 +531,7 @@ impl Run<'_> {
                 }
             };
             self.interrupt.check()?;
-            said(err, &proof_line(plant, entry, exits));
+            progress(err, &proof_line(plant, entry, exits))?;
         }
         let remained = self.release_proof()?;
         let held: Vec<Text> = remained
@@ -441,7 +556,7 @@ impl Run<'_> {
             let done = entry
                 .finish(self.work())
                 .expect("every plant has its result once the second phase ends");
-            said(err, &text!(done.id(), ": ", done.verdict().as_str()));
+            progress(err, &text!(done.id(), ": ", done.verdict().as_str()))?;
             finished.push(done);
         }
         Ok(finished)

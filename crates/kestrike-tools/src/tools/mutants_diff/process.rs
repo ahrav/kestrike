@@ -15,7 +15,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use crate::process::{GRACE, Interrupted, exited_within, handled_set};
+use crate::process::{GRACE, Interrupted, child_defaults, exited_within, handled_set};
 pub use crate::process::{INTERRUPT, Interrupt, SIGNALS, install_handlers};
 pub(super) use crate::process::{capture, exit_code};
 
@@ -105,21 +105,7 @@ fn lead_new_session(command: &mut Command) {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            for signal in SIGNALS {
-                let mut current: libc::sigaction = std::mem::zeroed();
-                if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if current.sa_sigaction != libc::SIG_IGN && current.sa_sigaction != libc::SIG_DFL {
-                    current.sa_sigaction = libc::SIG_DFL;
-                    if libc::sigaction(signal, &current, std::ptr::null_mut()) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-            }
-            if libc::sigprocmask(libc::SIG_UNBLOCK, &handled, std::ptr::null_mut()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
+            child_defaults(&handled)?;
             let (death, unused): (libc::c_ulong, libc::c_ulong) =
                 (libc::SIGTERM as libc::c_ulong, 0);
             if libc::prctl(libc::PR_SET_PDEATHSIG, death, unused, unused, unused) != 0 {

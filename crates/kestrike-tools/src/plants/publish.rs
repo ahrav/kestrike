@@ -66,15 +66,13 @@ impl Run<'_> {
     }
 }
 
-/// `umask` reads the process's umask, setting it back at once.
-fn umask() -> u32 {
-    // SAFETY: `umask` takes and returns a mode and cannot fail; the second call restores the first's
-    // value.
-    unsafe {
-        let mask = libc::umask(0);
-        libc::umask(mask);
-        mask
-    }
+fn umask() -> io::Result<u32> {
+    let status = fs::read_to_string("/proc/self/status")?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Umask:"))
+        .and_then(|mask| u32::from_str_radix(mask.trim(), 8).ok())
+        .ok_or_else(|| io::Error::other("/proc/self/status names no umask"))
 }
 
 /// `staging` creates a new staging file beside `target`.
@@ -123,8 +121,9 @@ fn staging_with(
 /// path.
 pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
     let (staged, mut file) = staging(target).map_err(|error| PathError::new(target, error))?;
-    let written = file
-        .set_permissions(fs::Permissions::from_mode(0o666 & !umask()))
+    let written = crate::fixtures::fits(written.len())
+        .and_then(|()| umask())
+        .and_then(|mask| file.set_permissions(fs::Permissions::from_mode(0o666 & !mask)))
         .and_then(|()| file.write_all(written.as_bytes()));
     let closed = crate::fixtures::close(file);
     let done = written
@@ -160,14 +159,17 @@ pub fn conclude<E: std::fmt::Display>(
     announce(head, entries, out)
 }
 
-/// `announce` prints the score's lines on `out`, the sentence and `ID: RESULT (REASON)` a plant, and
-/// returns the run's exit: the run's last step, after the score's write, which reads no signal record.
-pub fn announce(head: &str, entries: &[Finished], out: &mut impl Write) -> u8 {
-    for line in score::lines(head, entries) {
-        let _ = writeln!(out, "{line}");
+pub const UNANNOUNCED: u8 = 120;
+
+fn announce(head: &str, entries: &[Finished], out: &mut impl Write) -> u8 {
+    let printed = score::lines(head, entries)
+        .iter()
+        .try_for_each(|line| writeln!(out, "{line}"))
+        .and_then(|()| out.flush());
+    match printed {
+        Ok(()) => score::exit_code(entries),
+        Err(_) => UNANNOUNCED,
     }
-    let _ = out.flush();
-    score::exit_code(entries)
 }
 
 #[cfg(test)]

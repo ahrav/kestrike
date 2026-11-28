@@ -96,25 +96,65 @@ pub(crate) fn handled_set() -> libc::sigset_t {
 /// and the threads and children started from that thread start with none of the three blocked. A signal
 /// ignored at the start stays ignored, so a run under `nohup` outlives its terminal.
 ///
+/// After blocking [`SIGNALS`], the calling thread attempts to unblock them whether registration
+/// succeeds or fails.
+///
 /// # Errors
 ///
 /// Reading a disposition, installing a handler or changing the signal mask fails.
 pub fn install_handlers() -> io::Result<()> {
-    for signal in SIGNALS {
+    let handled = handled_set();
+    mask(libc::SIG_BLOCK, &handled)?;
+    let installed = SIGNALS.into_iter().try_for_each(|signal| {
         if ignored(signal)? {
-            continue;
+            return Ok(());
         }
         // SAFETY: the action only calls `Interrupt::record`, one atomic compare-exchange on a static,
         // which is async-signal-safe.
-        unsafe { signal_hook::low_level::register(signal, move || INTERRUPT.record(signal)) }?;
-    }
-    let handled = handled_set();
-    // SAFETY: `handled` is an initialized signal set that outlives the call, and a null old set makes
+        unsafe { signal_hook::low_level::register(signal, move || INTERRUPT.record(signal)) }
+            .map(drop)
+    });
+    let unblocked = mask(libc::SIG_UNBLOCK, &handled);
+    installed.and(unblocked)
+}
+
+fn mask(how: libc::c_int, set: &libc::sigset_t) -> io::Result<()> {
+    // SAFETY: `set` is an initialized signal set that outlives the call, and a null old set makes
     // `pthread_sigmask` write nothing back.
-    let status =
-        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &handled, std::ptr::null_mut()) };
+    let status = unsafe { libc::pthread_sigmask(how, set, std::ptr::null_mut()) };
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status));
+    }
+    Ok(())
+}
+
+/// `child_defaults` resets caught signals in [`SIGNALS`] to `SIG_DFL` and unblocks the signals in
+/// `handled`; it calls only async-signal-safe functions, so a `pre_exec` hook may call it.
+///
+/// # Errors
+///
+/// A `sigaction` or `sigprocmask` call fails.
+pub(crate) fn child_defaults(handled: &libc::sigset_t) -> io::Result<()> {
+    for signal in SIGNALS {
+        // SAFETY: zero is a valid value of `current`; the query writes the disposition into it, and
+        // the update reads it with `sa_sigaction` set to `SIG_DFL`. `sigaction` is async-signal-safe.
+        unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if current.sa_sigaction != libc::SIG_IGN && current.sa_sigaction != libc::SIG_DFL {
+                current.sa_sigaction = libc::SIG_DFL;
+                if libc::sigaction(signal, &current, std::ptr::null_mut()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+        }
+    }
+    // SAFETY: `handled` is an initialized signal set, and a null old set makes `sigprocmask` write
+    // nothing back; the call is async-signal-safe.
+    if unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, handled, std::ptr::null_mut()) } != 0 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
@@ -217,11 +257,7 @@ pub(crate) fn captured(
         if status.is_none() {
             match child.try_wait() {
                 Ok(exited) => status = exited,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = exited_within(&mut child, GRACE, None);
-                    return Ok(Err(error));
-                }
+                Err(error) => return Ok(Err(error)),
             }
         }
         if let Some(status) = status
