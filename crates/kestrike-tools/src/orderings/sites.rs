@@ -301,7 +301,7 @@ pub(super) fn opener(scanned: &str, offset: usize) -> Option<usize> {
 
 /// The offset of the `{` that opens the body of an item whose header continues at `index`, or `None` when
 /// a `;` outside brackets ends it as a declaration.
-fn body_open(text: &str, index: usize) -> Option<usize> {
+pub(super) fn body_open(text: &str, index: usize) -> Option<usize> {
     let mut depth = 0_isize;
     for (position, &byte) in text.as_bytes().iter().enumerate().skip(index) {
         match byte {

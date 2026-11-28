@@ -164,8 +164,8 @@ The first command writes the claim to a new file that `mktemp` creates in `chaos
 and, only when the validator exits 0, replaces the claim entry itself with it
 (`mv -T`); a directory at `chaos/READINESS.md` makes the render fail. A render that finds a problem prints its findings, exits
 nonzero and leaves the committed claim as it was. The second command prints nothing for a current
-claim. The pre-push hook runs it as [the pre-push checks](ci.md#pre-push-checks)
-describe.
+claim. The pre-push hook's tool `pre-push-checks` runs it as
+[the pre-push checks](ci.md#pre-push-checks) describe.
 
 A `row-changed-after-run` or `stale-receipt` finding stays after a new render: a
 receipt names a ledger row, an evidence file, a judge or a harness file that changed
@@ -581,5 +581,5 @@ this by R23's first arm: the diff holds no file of a shipped crate's non-test bu
 and no manifest, lockfile, build script or Cargo configuration. A diff where
 `git diff --name-only BASE...HEAD` lists only files under `chaos/` and `docs/`,
 `AGENTS.md`, and files under `scripts/` that no crate's build reads, such as
-`scripts/pre-push-checks.py` and `scripts/test-agent-hooks.py`, meets that arm by
+`scripts/chaos-receipt-replay.py` and `scripts/test-chaos-receipt-replay.py`, meets that arm by
 its paths alone, with no build.

@@ -9,111 +9,22 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, Read};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::io;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
+use crate::process::{GRACE, Interrupted, child_defaults, exited_within, handled_set};
+pub use crate::process::{INTERRUPT, Interrupt, SIGNALS, install_handlers};
+pub(super) use crate::process::{capture, exit_code};
 
 use super::stop::{Fault, Stop};
 
-pub const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
-/// Each of the two waits for the group leader after SIGTERM and after SIGKILL, and the wait for a plain
-/// child after SIGKILL.
-const GRACE: Duration = Duration::from_secs(10);
-/// The longest pause between two checks of a child and of the interrupt while the run waits; the pause
-/// starts at [`FIRST_PAUSE`] and doubles up to this bound.
-const POLL: Duration = Duration::from_millis(20);
-const FIRST_PAUSE: Duration = Duration::from_micros(500);
-
-/// The first handled signal, or 0 while none has arrived.
-#[derive(Debug, Default)]
-pub struct Interrupt(AtomicI32);
-
-/// The handlers [`install_handlers`] installs record into this value.
-pub static INTERRUPT: Interrupt = Interrupt::new();
-
-impl Interrupt {
-    pub const fn new() -> Self {
-        Self(AtomicI32::new(0))
+impl From<Interrupted> for Stop {
+    fn from(Interrupted(signal): Interrupted) -> Self {
+        Self::interrupted(signal)
     }
-
-    /// `record` keeps `signal` unless a signal is already recorded. It makes no allocation and takes no
-    /// lock, so a signal handler may call it.
-    pub fn record(&self, signal: i32) {
-        let _ = self
-            .0
-            .compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
-    }
-
-    pub fn recorded(&self) -> Option<i32> {
-        Some(self.0.load(Ordering::SeqCst)).filter(|&signal| signal != 0)
-    }
-
-    /// `check` is the stop of a recorded signal.
-    pub(super) fn check(&self) -> Result<(), Stop> {
-        self.recorded()
-            .map_or(Ok(()), |signal| Err(Stop::interrupted(signal)))
-    }
-}
-
-/// `ignored` holds when the signal's disposition is to ignore it.
-fn ignored(signal: i32) -> io::Result<bool> {
-    // SAFETY: `sigaction` is a plain C struct for which all-zero bytes are a valid value. A null new
-    // action makes `sigaction` only write the current disposition into `current`, which outlives the call.
-    let (status, current) = unsafe {
-        let mut current: libc::sigaction = std::mem::zeroed();
-        let status = libc::sigaction(signal, std::ptr::null(), &mut current);
-        (status, current)
-    };
-    if status != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(current.sa_sigaction == libc::SIG_IGN)
-}
-
-/// `handled_set` is the signal set that holds each of [`SIGNALS`].
-fn handled_set() -> libc::sigset_t {
-    // SAFETY: `sigemptyset` initializes the set that `set` points to, and `sigaddset` adds a valid signal
-    // number to that initialized set; neither can fail on these arguments.
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for signal in SIGNALS {
-            libc::sigaddset(&mut set, signal);
-        }
-        set
-    }
-}
-
-/// `install_handlers` makes each of [`SIGNALS`] that is not ignored record into [`INTERRUPT`], then
-/// unblocks the three in the calling thread, so a run started with one of them blocked still receives it
-/// and the threads and children started from that thread start with none of the three blocked. A signal
-/// ignored at the start stays ignored, so a run under `nohup` outlives its terminal.
-///
-/// # Errors
-///
-/// Reading a disposition, installing a handler or changing the signal mask fails.
-pub fn install_handlers() -> io::Result<()> {
-    for signal in SIGNALS {
-        if ignored(signal)? {
-            continue;
-        }
-        // SAFETY: the action only calls `Interrupt::record`, one atomic compare-exchange on a static,
-        // which is async-signal-safe.
-        unsafe { signal_hook::low_level::register(signal, move || INTERRUPT.record(signal)) }?;
-    }
-    let handled = handled_set();
-    // SAFETY: `handled` is an initialized signal set that outlives the call, and a null old set makes
-    // `pthread_sigmask` write nothing back.
-    let status =
-        unsafe { libc::pthread_sigmask(libc::SIG_UNBLOCK, &handled, std::ptr::null_mut()) };
-    if status != 0 {
-        return Err(io::Error::from_raw_os_error(status));
-    }
-    Ok(())
 }
 
 /// `ignore_signals` sets each of [`SIGNALS`] to be ignored, so the children started after it inherit that
@@ -136,40 +47,6 @@ pub fn ignore_signals() -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-/// `exit_code` is the child's exit status, or the negated number of the signal that ended it.
-pub(super) fn exit_code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .or_else(|| status.signal().map(|signal| -signal))
-        .expect("an exited child has a code or a signal")
-}
-
-/// `exited_within` waits up to `limit` for the child to exit and returns its status, polling it with a
-/// pause that grows to [`POLL`]; an `interrupt` that holds a signal ends the wait early with `Ok(None)`.
-///
-/// # Errors
-///
-/// The wait fails.
-fn exited_within(
-    child: &mut Child,
-    limit: Duration,
-    interrupt: Option<&Interrupt>,
-) -> io::Result<Option<ExitStatus>> {
-    let start = Instant::now();
-    let mut pause = FIRST_PAUSE;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        let waited = start.elapsed();
-        if waited >= limit || interrupt.is_some_and(|interrupt| interrupt.recorded().is_some()) {
-            return Ok(None);
-        }
-        thread::sleep(pause.min(limit - waited));
-        pause = (pause * 2).min(POLL);
-    }
 }
 
 /// `signal_group` sends `signal` to the process group `group` and returns false when no member is left.
@@ -219,30 +96,16 @@ fn lead_new_session(command: &mut Command) {
     // SAFETY: `getpid` takes no argument and cannot fail.
     let parent = unsafe { libc::getpid() };
     let handled = handled_set();
-    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, `sigaction`,
-    // `sigprocmask`, `prctl`, `getppid` and `_exit`, which are async-signal-safe. It reads `handled`, its
-    // own copy of an initialized set, and writes only `current`, a local all-zero `sigaction` (a valid
-    // value) that each `sigaction` call overwrites.
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `setsid`, then
+    // `child_defaults`, whose contract states that it calls only async-signal-safe functions
+    // (`sigaction` and `sigprocmask`), then `prctl`, `getppid` and `_exit`, which are async-signal-safe.
+    // It reads `handled`, its own copy of an initialized set.
     unsafe {
         command.pre_exec(move || {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            for signal in SIGNALS {
-                let mut current: libc::sigaction = std::mem::zeroed();
-                if libc::sigaction(signal, std::ptr::null(), &mut current) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                if current.sa_sigaction != libc::SIG_IGN && current.sa_sigaction != libc::SIG_DFL {
-                    current.sa_sigaction = libc::SIG_DFL;
-                    if libc::sigaction(signal, &current, std::ptr::null_mut()) != 0 {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-            }
-            if libc::sigprocmask(libc::SIG_UNBLOCK, &handled, std::ptr::null_mut()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
+            child_defaults(&handled)?;
             let (death, unused): (libc::c_ulong, libc::c_ulong) =
                 (libc::SIGTERM as libc::c_ulong, 0);
             if libc::prctl(libc::PR_SET_PDEATHSIG, death, unused, unused, unused) != 0 {
@@ -297,98 +160,16 @@ pub fn supervise(
     let mut child = command
         .spawn()
         .map_err(|error| Stop::failed(&Fault::os(&error, Some(program))))?;
-    let ended = interrupt.check().and_then(|()| {
+    let ended = interrupt.check().map_err(Stop::from).and_then(|()| {
         match exited_within(&mut child, Duration::MAX, Some(interrupt)) {
             Ok(Some(status)) => Ok(exit_code(status)),
             Ok(None) => interrupt
                 .check()
+                .map_err(Stop::from)
                 .map(|()| unreachable!("a wait ends early only on a signal")),
             Err(error) => Err(Stop::failed(&Fault::os(&error, None))),
         }
     });
     stop_group(&mut child).map_err(|fault| Stop::failed(&fault))?;
     ended
-}
-
-fn drain(
-    stream: Option<impl Read + Send + 'static>,
-) -> io::Result<JoinHandle<io::Result<Vec<u8>>>> {
-    thread::Builder::new().spawn(move || {
-        let mut bytes = Vec::new();
-        if let Some(mut stream) = stream {
-            stream.read_to_end(&mut bytes)?;
-        }
-        Ok(bytes)
-    })
-}
-
-fn joined(reader: JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
-    reader.join().expect("a reader thread returns its bytes")
-}
-
-/// `capture` runs `command` with standard input inherited and returns its output once the child has
-/// exited and both of its output pipes have closed. A signal recorded in `interrupt` before then kills a
-/// child that still runs with SIGKILL, waits up to [`GRACE`] for it and returns the interruption, leaving
-/// a pipe that a descendant holds to its reader.
-///
-/// # Errors
-///
-/// The outer error is a recorded signal; the inner one a start, a reader thread, a read or a wait that
-/// fails.
-pub(super) fn capture(
-    command: &mut Command,
-    interrupt: &Interrupt,
-) -> Result<io::Result<Output>, Stop> {
-    let spawned = command
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(error) => return Ok(Err(error)),
-    };
-    let readers = drain(child.stdout.take()).and_then(|out| Ok((out, drain(child.stderr.take())?)));
-    let (out, err) = match readers {
-        Ok(readers) => readers,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = exited_within(&mut child, GRACE, None);
-            return Ok(Err(error));
-        }
-    };
-    let mut status = None;
-    let mut pause = FIRST_PAUSE;
-    loop {
-        if status.is_none() {
-            match child.try_wait() {
-                Ok(exited) => status = exited,
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = exited_within(&mut child, GRACE, None);
-                    return Ok(Err(error));
-                }
-            }
-        }
-        if let Some(status) = status
-            && out.is_finished()
-            && err.is_finished()
-        {
-            let output = joined(out).and_then(|stdout| Ok((stdout, joined(err)?)));
-            return Ok(output.map(|(stdout, stderr)| Output {
-                status,
-                stdout,
-                stderr,
-            }));
-        }
-        if let Err(stop) = interrupt.check() {
-            if status.is_none() {
-                let _ = child.kill();
-                let _ = exited_within(&mut child, GRACE, None);
-            }
-            return Err(stop);
-        }
-        thread::sleep(pause);
-        pause = (pause * 2).min(POLL);
-    }
 }

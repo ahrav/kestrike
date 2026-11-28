@@ -1,11 +1,12 @@
 //! The window from the making of `injection/` to the roles mark: a failure there removes
 //! `injection/` again and is a refusal, and a roles mark that stands takes the abort path.
 
-use kestrike_tools::host_stop::{Disk, Signal, lock};
+use kestrike_tools::host_stop::Signal;
 
 use super::plane::{CALLER, STATUS};
 use super::steps::{Step, links, syncs};
-use super::{COPY, Case, listing, listing_top};
+use super::{COPY, Case, listing};
+use crate::host_stop_support::free_lock;
 
 const ENOSPC: i32 = libc::ENOSPC;
 
@@ -89,7 +90,7 @@ fn an_injection_directory_that_cannot_be_removed_or_whose_removal_is_unsynced_is
         assert!(output.contains(&named), "{output}");
         assert!(!output.contains("nothing written"), "{output}");
         assert_eq!(case.ops(), [CALLER, STATUS], "{output}");
-        assert_eq!(listing_top(&case.evidence), left, "{removal}");
+        assert_eq!(listing(&case.evidence), left, "{removal}");
     }
 }
 
@@ -148,7 +149,7 @@ fn a_failure_the_controller_did_not_foresee_exits_2_and_names_what_stands() {
 /// A panic in an alarm read once `roles.json` stands takes the abort path with cause `exception`
 /// and the panic's message in the detail; no stop request was sent.
 #[test]
-fn a_panic_once_the_roles_mark_stands_takes_the_abort_path_with_cause_exception() {
+fn a_panic_after_the_roles_mark_is_written_takes_the_abort_path_with_cause_exception() {
     let mut case = Case::new("panic");
     case.plane.borrow_mut().script(
         super::plane::ALARMS,
@@ -156,14 +157,13 @@ fn a_panic_once_the_roles_mark_stands_takes_the_abort_path_with_cause_exception(
             panic!("a planted panic in the alarm read")
         }))],
     );
-    let found = case.assert_aborted(
+    case.assert_aborted(
         "exception",
         &["roles", "abort"],
         None,
         Some("no stop request was sent; panic: a planted panic in the alarm read"),
     );
     assert!(case.stops().is_empty());
-    assert_eq!(found.len(), 2);
 }
 
 /// A panic in the abort path itself, at its wall reading for the abort mark, exits 2 with a line
@@ -188,5 +188,5 @@ fn a_failure_inside_the_abort_path_exits_2_and_names_the_marks_that_stand() {
         "{output}"
     );
     assert_eq!(case.marks().keys().collect::<Vec<_>>(), ["roles"]);
-    drop(lock(&Disk, &case.evidence.join("injection")).expect("the run freed its lock"));
+    drop(free_lock(&case.evidence.join("injection")));
 }

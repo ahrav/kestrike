@@ -57,6 +57,8 @@ pub(crate) type After = Box<dyn FnMut(&mut State, &str)>;
 pub(crate) type Slept = Box<dyn FnMut(&mut State)>;
 /// Runs at each wall reading.
 pub(crate) type Reading = Rc<dyn Fn(&State)>;
+/// Runs at each monotonic reading, before the reading is taken.
+pub(crate) type Ticking = Rc<dyn Fn(&mut State)>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct Instance {
@@ -103,6 +105,8 @@ pub(crate) struct State {
     pub(crate) fault: Option<FaultPlan>,
     pub(crate) after: Option<After>,
     pub(crate) reading: Option<Reading>,
+    /// Runs at each monotonic reading.
+    pub(crate) ticking: Option<Ticking>,
     pub(crate) log: Vec<Logged>,
     pub(crate) envs: Vec<Vec<(OsString, OsString)>>,
     pub(crate) deadline: Option<f64>,
@@ -172,6 +176,7 @@ impl State {
             fault: None,
             after: None,
             reading: None,
+            ticking: None,
             log: Vec::new(),
             envs: Vec::new(),
             deadline: None,
@@ -293,7 +298,11 @@ impl Seam for Plane {
     }
 
     fn monotonic(&self) -> f64 {
-        self.0.borrow().t + MONOTONIC
+        let mut state = self.0.borrow_mut();
+        if let Some(ticking) = state.ticking.clone() {
+            ticking(&mut state);
+        }
+        state.t + MONOTONIC
     }
 
     fn sleep(&mut self, record: &mut Record<'_>, length: Duration) -> Result<(), Interrupted> {

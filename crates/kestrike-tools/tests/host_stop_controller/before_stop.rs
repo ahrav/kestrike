@@ -133,7 +133,8 @@ fn row(state: &mut State, name: &str, field: &str, new: Option<Value>) {
     state.row(name, field, new);
 }
 
-/// Applies `change` to each metric alarm row of the first alarm reply.
+/// Applies `change` once to the first alarm reply, with its other members and its list of metric
+/// alarm rows.
 fn reshape(state: &mut State, change: fn(&mut Object, &mut Vec<Value>)) {
     state.shape(
         ALARMS,
@@ -468,7 +469,7 @@ fn step_then(case: &mut Case, step: f64, delay: f64) {
     );
 }
 
-/// Advances the true time by `seconds` at the link of the stop mark.
+/// Applies `change` to the plane's state at the link of the stop mark.
 fn at_stop_link(case: &mut Case, change: fn(&mut State)) {
     case.plant(Box::new(move |state, step| {
         if links(step, "stop.json") {

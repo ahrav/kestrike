@@ -11,17 +11,22 @@
 //! directory. The child is given the first variable of each name, the one [`crate::environ::get`] reads,
 //! and a name holding `=` after its first byte stops the call before Git starts. Git inherits every
 //! descriptor of this process that is open without close-on-exec, beside the three streams.
+//!
+//! [`text_until`] is the text call that reads a signal record: a signal recorded before the call starts
+//! no Git, and one recorded while Git runs kills Git with SIGKILL and waits up to ten seconds for it;
+//! both return [`CallError::Interrupted`].
 
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 
 use crate::environ::Environ;
 use crate::git::fed;
+use crate::process::{Interrupt, Interrupted, captured, exit_code};
 use crate::text::{Text, newlines};
 
 /// The options every call passes before `-C DIR`.
@@ -60,6 +65,9 @@ pub enum CallError {
     NotUtf8 { step: Text },
     /// A checked call that exited with a code other than 0; `stderr` is its error output.
     Failed { step: Text, code: i32, stderr: Text },
+    /// A signal recorded before Git ended: before the call, when no Git started, or while Git ran, when
+    /// Git was killed.
+    Interrupted(Interrupted),
 }
 
 impl fmt::Display for CallError {
@@ -69,6 +77,7 @@ impl fmt::Display for CallError {
             Self::Io { step, error } => write!(f, "`git {step}`: {error}"),
             Self::NotUtf8 { step } => write!(f, "`git {step}` wrote output that is no UTF-8"),
             Self::Failed { step, code, .. } => write!(f, "`git {step}` exited {code}"),
+            Self::Interrupted(Interrupted(signal)) => write!(f, "interrupted by signal {signal}"),
         }
     }
 }
@@ -109,6 +118,11 @@ fn command(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Command, CallEr
         .env_clear()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // SAFETY: the hook runs in the forked child before `exec` and calls only `signal`, which is
+    // async-signal-safe.
+    unsafe {
+        command.pre_exec(crate::process::file_size_signal_default);
+    }
     let mut given: Vec<&OsStr> = Vec::with_capacity(env.len());
     for (name, value) in env {
         if name.as_bytes().iter().skip(1).any(|&byte| byte == b'=') {
@@ -130,15 +144,6 @@ fn step(args: &[&OsStr]) -> Text {
         .map_or_else(Text::new, |first| Text::from_os(first))
 }
 
-/// `code` is the exit code, or the negated number of the signal that ended the call.
-fn code(status: ExitStatus) -> i32 {
-    match (status.code(), status.signal()) {
-        (Some(code), _) => code,
-        (None, Some(signal)) => -signal,
-        (None, None) => unreachable!("a waited child exited or a signal ended it"),
-    }
-}
-
 /// `text` runs `git FIXED -C dir ARGS` in `env` with the caller's standard input and returns its exit
 /// code and both streams as text.
 ///
@@ -155,16 +160,47 @@ pub fn text(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Done<String>, 
         Ok(output) => output,
         Err(error) => return Err(CallError::Io { step, error }),
     };
+    decoded(step, output)
+}
+
+/// `decoded` reads a finished text call's streams.
+fn decoded(step: Text, output: std::process::Output) -> Result<Done<String>, CallError> {
     let decode = |bytes: Vec<u8>| String::from_utf8(bytes).map(newlines);
     let (Ok(stdout), Ok(stderr)) = (decode(output.stdout), decode(output.stderr)) else {
         return Err(CallError::NotUtf8 { step });
     };
     Ok(Done {
         step,
-        code: code(output.status),
+        code: exit_code(output.status),
         stdout,
         stderr,
     })
+}
+
+/// `text_until` runs `git FIXED -C dir ARGS` as [`text`] does, reading `interrupt` before it starts Git
+/// and while Git runs. A signal recorded before the call starts no Git; one recorded while Git runs
+/// kills Git with SIGKILL and waits up to ten seconds for it.
+///
+/// # Errors
+///
+/// As [`text`], and [`CallError::Interrupted`] for a signal recorded before Git ended. A wait that
+/// fails leaves Git as [`crate::process::capture`] states.
+pub fn text_until(
+    env: &Environ,
+    dir: &Path,
+    args: &[&OsStr],
+    interrupt: &Interrupt,
+) -> Result<Done<String>, CallError> {
+    interrupt.check().map_err(CallError::Interrupted)?;
+    let child = command(env, dir, args)?
+        .stdin(Stdio::inherit())
+        .spawn()
+        .map_err(CallError::Start)?;
+    let step = step(args);
+    match captured(child, interrupt).map_err(CallError::Interrupted)? {
+        Ok(output) => decoded(step, output),
+        Err(error) => Err(CallError::Io { step, error }),
+    }
 }
 
 /// `bytes` runs `git FIXED -C dir ARGS` in `env`, writes `input` to its standard input and returns its
@@ -191,7 +227,7 @@ pub fn bytes(
     };
     Ok(Done {
         step,
-        code: code(output.status),
+        code: exit_code(output.status),
         stdout: output.stdout,
         stderr: output.stderr,
     })

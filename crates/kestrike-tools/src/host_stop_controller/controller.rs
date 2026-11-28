@@ -2,11 +2,13 @@
 //! deadline's check, the alarms' quiet read, the check before the stop request, the pause between
 //! polls and a mark's write.
 //!
-//! The deadline and every window's end are monotonic readings. A call reads the record before it
-//! starts, ahead of every bound it checks, and once it returns, so a signal that stands then ends
-//! the step before the call or before its reply or failure is used. It checks the deadline before
-//! it starts and once it returns. A mark's write holds the record from before
-//! its first file step to its end.
+//! The deadline and each `until` a step takes are monotonic readings; the package's windows, the
+//! snapshot's times, the request's time and each mark's time are wall readings in POSIX seconds. A
+//! call reads the record before it starts, ahead of every bound it checks, and once it returns, so a
+//! signal that stands then ends the step before the call or before its reply or failure is used. It
+//! checks the deadline before it starts and once it returns. A mark's write reads the record, then
+//! holds it from before its first file step to its end, and reads it again at its end when the
+//! write succeeds; a write that fails keeps its failure and leaves a signal stored.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -57,6 +59,14 @@ impl Preflight {
     pub(crate) fn package(&self) -> &Object {
         &self.package
     }
+}
+
+/// Which call [`Controller::aws`] makes: a read, with the CLI's retries on, or the stop request, with
+/// them off, which counts as sent and keeps its times, its answer and its failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    Read,
+    Stop,
 }
 
 /// One run under one operator file and GD-2's admitted entry. `written` lists each mark that
@@ -149,22 +159,24 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         }
     }
 
-    /// One call of `argv` with `--region`, cut at [`CALL_SECONDS`], at the deadline and at `until`.
-    /// The deadline is checked before the call and after it returns or fails. The record is read
-    /// first, before the deadline's check, so a signal that stands then ends the step with no call
-    /// made, and
-    /// again when the call returns, so a signal raised then comes before its reply or failure. With
-    /// `mutating`, the call counts as sent from its launch, and its monotonic times, its answer and
-    /// its failure are kept; a second mutating call is a failure the controller names.
+    /// One call of `argv` with `--region`, whose timeout is the least of [`CALL_SECONDS`], the time
+    /// left before the deadline when one is set and the time left before `until`, a monotonic
+    /// reading, when one is given. The deadline is checked before the call and after it returns or
+    /// fails. The record is read first, before the deadline's check, so a signal that stands then
+    /// ends the step with no call made, and again when the call returns, so a signal raised then
+    /// comes before its reply or failure. The stop request ([`Kind::Stop`]) reads its launch time and
+    /// the record once more and then counts as sent: from there a launch that starts no child counts
+    /// as sent too. It reads its return time and the record again before its answer or its failure
+    /// is kept; a second stop request is a failure the controller names.
     pub(crate) fn aws(
         &mut self,
         argv: &[&str],
-        retry: bool,
         until: Option<f64>,
-        mutating: bool,
+        kind: Kind,
     ) -> Result<Object, Halt> {
+        let mutating = kind == Kind::Stop;
         if mutating && self.sent {
-            return Err(order("a second stop request was asked for"));
+            return Err(Halt::order("a second stop request was asked for"));
         }
         self.cx.record.read()?;
         self.within_deadline()?;
@@ -179,8 +191,10 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             )))));
         }
         if mutating {
+            let launched = self.monotonic();
+            self.cx.record.read()?;
             self.sent = true;
-            self.launched = Some(self.monotonic());
+            self.launched = Some(launched);
         }
         let region = self
             .operator
@@ -191,14 +205,15 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         full.extend(["--region", region]);
         let call = Call {
             argv: &full,
-            retry,
-            cut: Duration::from_secs_f64(timeout),
+            retry: !mutating,
+            cut: at_least(timeout),
             env: self.cx.env,
         };
         let answer = reply(&mut *self.cx.seam, self.cx.record, &call);
-        let raised = self.cx.record.read();
+        let mut raised = self.cx.record.read();
         if mutating {
             self.returned = Some(self.monotonic());
+            raised = raised.and_then(|()| self.cx.record.read());
         }
         match (answer, raised) {
             (_, Err(raised)) | (Err(CallError::Interrupted(raised)), Ok(())) => {
@@ -233,11 +248,11 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             "--instance-ids",
         ];
         argv.extend(instances.iter().map(ascii));
-        let reply = self.aws(&argv, true, until, false)?;
+        let reply = self.aws(&argv, until, Kind::Read)?;
         read_statuses(&reply, instances).map_err(Halt::Failed)
     }
 
-    pub(crate) fn record(
+    pub(crate) fn instance_record(
         &mut self,
         instance: &Text,
         until: Option<f64>,
@@ -248,11 +263,12 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             "--instance-ids",
             ascii(instance),
         ];
-        let reply = self.aws(&argv, true, until, false)?;
+        let reply = self.aws(&argv, until, Kind::Read)?;
         read_record(&reply, instance).map_err(Halt::Failed)
     }
 
-    /// The guardrail alarms' read, the names asked in GD-2's order, cut at `until`.
+    /// The guardrail alarms' read, the names asked in GD-2's order, cut at `until`, a monotonic
+    /// reading.
     ///
     /// # Errors
     ///
@@ -272,7 +288,7 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             "--alarm-names",
         ];
         argv.extend(names.iter().map(ascii));
-        let reply = self.aws(&argv, true, until, false)?;
+        let reply = self.aws(&argv, until, Kind::Read)?;
         read_alarms(&reply, &names).map_err(Halt::Failed)
     }
 
@@ -288,7 +304,7 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
             sentence.push_text(&reason);
             Halt::refused(sentence)
         };
-        let reply = match self.aws(&["sts", "get-caller-identity"], true, None, false) {
+        let reply = match self.aws(&["sts", "get-caller-identity"], None, Kind::Read) {
             Err(Halt::Failed(failed)) => return Err(unknown(failed.sentence())),
             other => other?,
         };
@@ -390,9 +406,18 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
     /// more than [`SKEW_SECONDS`], too little time for the observation and one poll, or a reading at
     /// or before the snapshot's cut, outside the run window or less than [`SKEW_SECONDS`] before the
     /// approval's lapse.
+    ///
+    /// # Errors
+    ///
+    /// [`Halt::Aborted`] with cause `reach` or `deadline` as above; [`Halt::Fault`] when no preflight
+    /// or deadline is set; [`Halt::Refused`] when the approval's lapse reads no ISO time.
+    ///
+    /// # Panics
+    ///
+    /// A preflight whose package holds no baseline or run window with numeric ends.
     pub fn ready(&mut self) -> Result<f64, Halt> {
         let (Some(preflight), Some(deadline)) = (self.preflight.as_ref(), self.deadline) else {
-            return Err(order(
+            return Err(Halt::order(
                 "a stop request is checked before the run's preflight",
             ));
         };
@@ -425,8 +450,7 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         let lapse = iso_time(
             &Value::String(not_after.clone()),
             &Text::from("approval not_after"),
-        )
-        .map_err(Halt::from)?;
+        )?;
         let baseline_end = window(&preflight.package, "baseline").1;
         let window = window(&preflight.package, "run");
         let reading = Number::from(now);
@@ -449,37 +473,47 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
         Ok(now)
     }
 
-    /// Sleeps one poll period, or less to reach `until` or the deadline.
+    /// Sleeps one poll period, or less to reach `until`, a monotonic reading, or the deadline.
+    ///
+    /// # Errors
+    ///
+    /// [`Halt::Interrupted`] for a signal the sleep raises; [`Halt::Fault`] when no deadline is set.
     pub fn pause(&mut self, until: f64) -> Result<(), Halt> {
         let Some(deadline) = self.deadline else {
-            return Err(order("a poll pauses with no deadline set"));
+            return Err(Halt::order("a poll pauses with no deadline set"));
         };
         let length = (POLL_SECONDS as f64)
             .min(until.min(deadline) - self.monotonic())
             .max(0.0);
-        let mut slept = Duration::from_secs_f64(length);
-        if slept.as_secs_f64() < length {
-            slept += Duration::from_nanos(1);
-        }
-        self.cx.seam.sleep(self.cx.record, slept)?;
+        self.cx.seam.sleep(self.cx.record, at_least(length))?;
         Ok(())
     }
 
     /// Writes the mark `name` once, its value checked first against the judge's layout (`roles`
     /// excepted, which its builder checked) and its bytes against the mark size limit, with a signal
     /// held to the write's end. A mark that stands with its durability unknown counts as written.
+    ///
+    /// # Errors
+    ///
+    /// [`Halt::Interrupted`] for a signal the read before the hold or the release raises;
+    /// [`Halt::Fault`] for a value or bytes a check refuses, no injection directory set, or a write
+    /// that fails, and an order fault for a `name` other than the run's four marks, `roles`,
+    /// `stop`, `stopped` and `abort`.
     pub fn mark(&mut self, name: &'static str, value: &Value) -> Result<(), Halt> {
+        if !matches!(name, "roles" | "stop" | "stopped" | "abort") {
+            return Err(Halt::order(&format!("{name} is no mark of a run")));
+        }
         let what = Text::from(format!("injection/{name}.json"));
         if name != "roles" {
             let (schema, _) = layout(&format!("injection/{name}.json"))
-                .unwrap_or_else(|| panic!("the judge's layout holds injection/{name}.json"));
+                .expect("the judge's layout holds each mark of a run");
             conform(value, schema, &what, &Names::new())
                 .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
         }
         let data = encoded(value, &what, self.cx.mark_limit)
             .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
         let Some(injection) = self.injection.clone() else {
-            return Err(order(&format!(
+            return Err(Halt::order(&format!(
                 "the mark {name} has no injection directory to stand in"
             )));
         };
@@ -505,8 +539,15 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
     }
 }
 
-fn order(sentence: &str) -> Halt {
-    Halt::Fault(Fault::Order(sentence.to_owned()))
+/// `seconds` as a `Duration` whose reading back as seconds is no less than `seconds`, and at most a
+/// nanosecond longer than the nearest `Duration`. A cut or a pause of the length a caller chose
+/// then reads, once it has run whole, at or past the reading it ran toward.
+fn at_least(seconds: f64) -> Duration {
+    let mut length = Duration::from_secs_f64(seconds);
+    if length.as_secs_f64() < seconds {
+        length += Duration::from_nanos(1);
+    }
+    length
 }
 
 fn deadline_abort(detail: String) -> Halt {

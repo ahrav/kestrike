@@ -349,6 +349,11 @@ impl PathError {
     pub fn error(&self) -> &io::Error {
         &self.error
     }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn into_error(self) -> io::Error {
+        self.error
+    }
 }
 
 impl fmt::Display for PathError {

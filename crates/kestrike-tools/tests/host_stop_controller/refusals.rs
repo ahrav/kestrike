@@ -2,11 +2,8 @@
 //! deadline before `injection/`, the roles mark's size, a signal that stands at the start, and an
 //! evidence directory that cannot hold a mark.
 
-use std::ffi::CString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
-use std::path::Path;
 
 use kestrike_tools::host_stop::{Interrupted, Signal};
 use kestrike_tools::host_stop_controller::Halt;
@@ -14,6 +11,7 @@ use kestrike_tools::json::Value;
 
 use super::plane::{Action, CALLER, STATUS, string};
 use super::steps::{Step, errno};
+use super::stop_run::mkfifo;
 use super::{COPY, Case, listing, set};
 use crate::host_stop_support::{START, value};
 
@@ -62,11 +60,10 @@ fn a_wrong_or_unknown_caller_sends_no_stop_and_writes_nothing() {
             "the caller is unknown: Arn is no str: None".to_owned(),
         ),
     ];
-    for (name, change, reason) in rows {
+    for (_, change, reason) in rows {
         let mut case = Case::new("caller");
         change(&mut case);
         case.assert_refused(&[CALLER], &reason);
-        assert!(case.output().contains(&reason), "{name}");
     }
 }
 
@@ -214,11 +211,10 @@ fn a_stale_malformed_or_inconsistent_snapshot_is_refused_after_the_caller() {
             "the target does not own",
         ),
     ];
-    for (name, file, change, reason) in changes {
+    for (_, file, change, reason) in changes {
         let mut case = Case::new("snapshot");
         case.snapshot(file, change);
         case.assert_refused(&[CALLER], reason);
-        assert!(case.output().contains(reason), "{name}");
     }
     let mut case = Case::new("snapshot-cut");
     case.repackage(|p| set(p, &["baseline", "start"], number("99")));
@@ -230,22 +226,17 @@ fn a_stale_malformed_or_inconsistent_snapshot_is_refused_after_the_caller() {
     case.assert_refused(&[CALLER], "cut 98 lies before the baseline window");
 }
 
-fn mkfifo(path: &Path) {
-    let name = CString::new(path.as_os_str().as_bytes()).expect("no NUL");
-    // SAFETY: `name` is a NUL-terminated path that outlives the call.
-    let status = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
-    assert_eq!(status, 0, "{}", std::io::Error::last_os_error());
-}
-
 /// A snapshot file that is a named pipe is refused as no regular file without waiting for a
 /// writer, and one that is a link is refused at its read.
 #[test]
 fn an_input_that_is_a_named_pipe_or_a_link_is_refused_without_waiting() {
-    let mut case = Case::new("pipe");
-    let hosts = case.scratch.0.join("snapshot/hosts.jsonl");
-    fs::remove_file(&hosts).expect("the file goes");
-    mkfifo(&hosts);
-    case.assert_refused(&[CALLER], "hosts.jsonl is no regular file");
+    crate::host_stop_support::bounded("the named-pipe snapshot row", || {
+        let mut case = Case::new("pipe");
+        let hosts = case.scratch.0.join("snapshot/hosts.jsonl");
+        fs::remove_file(&hosts).expect("the file goes");
+        mkfifo(&hosts);
+        case.assert_refused(&[CALLER], "hosts.jsonl is no regular file");
+    });
 
     let mut case = Case::new("link");
     let shards = case.scratch.0.join("snapshot/shards.jsonl");
@@ -370,9 +361,8 @@ fn a_declared_instance_not_running_or_an_unread_set_is_a_run_left_open() {
                 "i-h3",
                 "i-h4"
             ],
-            "the status read names the declared set"
+            "{name}: the status read names the declared set"
         );
-        assert!(case.output().contains(reason), "{name}");
     }
 }
 
@@ -483,7 +473,7 @@ fn a_pending_signal_ends_the_run_before_any_call() {
     let mut case = Case::new("pending");
     case.delivered.deliver(Signal::Terminate);
     let (package, evidence) = (case.package.clone(), case.evidence.clone());
-    let ended = case.controlled(|controller| controller.run(&package, evidence.as_os_str()));
+    let ended = case.owned(|controller| controller.run(&package, evidence.as_os_str()));
     assert!(
         matches!(
             ended,

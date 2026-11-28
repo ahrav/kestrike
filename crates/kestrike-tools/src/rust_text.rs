@@ -8,8 +8,15 @@ use regex::Regex;
 
 use crate::classes::{SPACE, WORD, compiled, is_digit, is_word};
 
-pub static IGNORE: LazyLock<Regex> =
-    LazyLock::new(|| compiled(r"#\[ignore\b[^\]]*\]|#\[cfg_attr\([^\]]*\bignore\b[^\]]*\]"));
+pub static IGNORE: LazyLock<Regex> = LazyLock::new(|| {
+    // `edge` matches a Python `\W` separator beside `ignore` within the attribute, a character outside
+    // [`WORD`] and other than `]`, which ends the attribute.
+    let edge = format!(r"[^\]{WORD}]");
+    let after = format!(r"ignore(?:\]|{edge}[^\]]*\])");
+    compiled(&format!(
+        r"#\[{after}|#\[cfg_attr\((?:[^\]]*{edge})?{after}"
+    ))
+});
 
 pub static FUNCTION: LazyLock<Regex> = LazyLock::new(|| {
     compiled(&format!(

@@ -2,20 +2,21 @@
 //! file and prints the line of a run that ends before `roles.json` stands.
 //!
 //! Once `injection/` is made the run holds its lock to the run's end. A failure before `roles.json`
-//! stands removes `injection/` again and is a refusal; once it stands, every end but the
-//! observation's is the abort path, which writes `abort.json`, then `stopped.json` when the stop
-//! was shown, reads the target's status once when a stop request may have left, and prints GD-2's
-//! restoration steps.
+//! counts as written removes `injection/` again and is a refusal; once it counts as written, every
+//! end of steps 3 to 7 but the observation's enters the abort path, which attempts `abort.json`,
+//! then `stopped.json` when the stop was shown and the abort mark counts as written, reads the
+//! target's status once when a stop request may have left, and prints GD-2's restoration steps. A
+//! panic between the roles mark's link and its write's return leaves `roles.json` standing and
+//! uncounted, so that run ends in the refusal that names `injection/` as possibly standing.
 
 use std::ffi::OsStr;
-use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use super::context::{Command, Context, Stream, beside, list_repr, pure, seconds};
-use super::controller::{Controller, Preflight, ascii, window};
-use super::fault::{Aborted, Fault, Halt};
+use super::controller::{Controller, Kind, Preflight, ascii, window};
+use super::fault::{Fault, Halt};
 use crate::gameday::{FleetBounds, TBD, exact, roles_reach, shown};
 use crate::host_stop::{
     DETAIL_MAX, Files, LockError, Number, ProbeError, Run, SKEW_SECONDS, Seam, USER_SHUTDOWN,
@@ -25,13 +26,20 @@ use crate::host_stop::{
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
-use crate::text::Text;
+use crate::text::{Text, text};
 
 const TOOL: &str = "host-stop-controller: ";
 
 /// Runs `command` on `cx` and returns the exit code: 0 for a run that ends with the restoration
 /// pending, 1 for an abort, 2 for a refusal, a signal before any mark, or an unforeseen failure that
-/// reaches the entry, whose line names the marks that stand. A panic counts as an unforeseen failure.
+/// reaches the entry, whose line names the marks that stand. A panic counts as an unforeseen failure,
+/// a panic inside the abort path itself included. The entry leaves the record unarmed and unheld,
+/// with a stored signal still stored.
+///
+/// The library installs no signal handler. A process calls
+/// [`install`](crate::host_stop::install) before it reads its arguments and passes in `cx` an unarmed,
+/// unheld record over the same [`Delivered`](crate::host_stop::Delivered) the handlers store into. A
+/// panic the entry catches has already passed the process's panic hook, which the process owns.
 pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -> u8 {
     let Command::Run {
         operator,
@@ -39,18 +47,18 @@ pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -
         evidence,
     } = command;
     let mut written = Vec::new();
-    let ended = catch_unwind(AssertUnwindSafe(|| {
+    let ended = caught(|| {
         let limit = cx.file_limit;
         let catalog = read_json(cx.catalog, &Text::from("the game-day catalog"), limit)?;
         let gd2 = gd2_of(&catalog)?;
         let operator = read_operator(operator, &gd2, limit)?;
         Controller::new(&mut *cx, &mut written, &operator, gd2).run(package, evidence)
-    }));
+    });
     cx.record.disarm();
+    cx.record.end_hold();
     let halt = match ended {
-        Ok(Ok(code)) => return code,
-        Ok(Err(halt)) => halt,
-        Err(payload) => Halt::Fault(Fault::panic(&*payload)),
+        Ok(code) => return code,
+        Err(halt) => halt,
     };
     let mut line = Text::from(TOOL);
     let unforeseen = |line: &mut Text, text: Text| {
@@ -82,94 +90,71 @@ pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -
     2
 }
 
-fn aborted_text(aborted: &Aborted) -> Text {
-    let mut text = Text::from("Aborted: ");
-    text.push_text(aborted.detail());
-    text
-}
-
-trait Piece {
-    fn put(&self, out: &mut Text);
-}
-
-impl Piece for str {
-    fn put(&self, out: &mut Text) {
-        out.push_str(self);
-    }
-}
-
-impl Piece for String {
-    fn put(&self, out: &mut Text) {
-        out.push_str(self);
-    }
-}
-
-impl Piece for Text {
-    fn put(&self, out: &mut Text) {
-        out.push_text(self);
-    }
-}
-
-impl<T: Piece + ?Sized> Piece for &T {
-    fn put(&self, out: &mut Text) {
-        (**self).put(out);
-    }
-}
-
-/// `refused!(a, b, ...)` is the refusal whose sentence is its pieces in order.
-macro_rules! refused {
-    ($($piece:expr),+ $(,)?) => {{
-        let mut sentence = Text::new();
-        $(Piece::put(&$piece, &mut sentence);)+
-        Halt::refused(sentence)
-    }};
-}
-
-fn shown_path(path: &Path) -> Text {
-    Text::from_os(path.as_os_str())
+/// `step`'s result, a panic folded into [`Halt::Fault`]. The panic's payload is dropped under a
+/// catch of its own, and a panic of that drop is forgotten, so a payload whose destructor panics
+/// ends here as the first panic's fault.
+fn caught<T>(step: impl FnOnce() -> Result<T, Halt>) -> Result<T, Halt> {
+    catch_unwind(AssertUnwindSafe(step)).unwrap_or_else(|payload| {
+        let fault = Fault::panic(&*payload);
+        if let Err(second) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+            std::mem::forget(second);
+        }
+        Err(Halt::Fault(fault))
+    })
 }
 
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
-    /// The run's seven steps; returns the exit code of a run that writes `roles.json`, and the
-    /// refusal, the signal or the failure of one that ends before it stands.
-    pub fn run(&mut self, package: &Path, evidence: &OsStr) -> Result<u8, Halt> {
+    /// The run's seven steps on a controller that has made no step; returns the exit code of a run
+    /// whose `roles.json` counts as written, and the refusal, the signal or the failure of one that
+    /// ends before it counts. The run's first read of the record ends a hold an earlier run left. A
+    /// panic before `injection/` is made, and one in the abort path outside its catches of a mark's
+    /// write and of the status read, unwinds out of `run` and may leave the record armed or held;
+    /// [`entry`] disarms it and ends the hold.
+    ///
+    /// # Errors
+    ///
+    /// [`Halt::Fault`] for a controller whose list of written marks is not empty.
+    pub fn run(mut self, package: &Path, evidence: &OsStr) -> Result<u8, Halt> {
+        if !self.written.is_empty() {
+            return Err(Halt::order("a run starts with marks written"));
+        }
         self.cx.record.arm();
         let read = self.before_injection(package, evidence);
+        let read = self.raised(read);
         self.cx.record.disarm();
         let (root, run, roles) = read?;
         let injection = beside(&root, "injection");
         self.cx.record.hold();
         if let Err(error) = self.cx.files.mkdir(&injection) {
             self.cx.record.end_hold();
-            return Err(refused!(
-                shown_path(&injection),
+            return Err(Halt::refused(text!(
+                Text::from_os(injection.as_os_str()),
                 " cannot be made: ",
                 &strerror(&error),
-            ));
+            )));
         }
         self.injection = Some(injection.clone());
         let mut held = None;
-        let ended = catch_unwind(AssertUnwindSafe(|| {
+        let ended = caught(|| {
             held = Some(
                 lock(self.cx.files, &injection)
                     .map_err(|error| Fault::Refusal(lock_sentence(&injection, &error)))?,
             );
             self.inject(&root, &run, &roles)
-        }));
+        });
         self.cx.record.disarm();
         self.cx.record.end_hold();
         let (cause, guardrail, detail) = match ended {
-            Ok(Ok(code)) => return Ok(code),
-            Ok(Err(Halt::Aborted(aborted))) => (
+            Ok(code) => return Ok(code),
+            Err(Halt::Aborted(aborted)) => (
                 aborted.cause(),
                 aborted.guardrail().cloned(),
                 aborted.detail().clone(),
             ),
-            Ok(Err(Halt::Interrupted(raised))) => {
+            Err(Halt::Interrupted(raised)) => {
                 ("signal", None, Text::from(format!("signal {raised}")))
             }
-            Ok(Err(halt)) => ("exception", None, halt_text(halt)),
-            Err(payload) => ("exception", None, Fault::panic(&*payload).text()),
+            Err(halt) => ("exception", None, halt_text(halt)),
         };
         if self.written.contains(&"roles") {
             let code = self.abort(cause, guardrail, &detail);
@@ -179,7 +164,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         drop(held);
         let mut what = detail;
         what.push_str(" before roles.json stood; ");
-        what.push_text(&shown_path(&injection));
+        what.push_text(&Text::from_os(injection.as_os_str()));
         let removed = self
             .cx
             .files
@@ -198,7 +183,20 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 },
                 may_stand: true,
             }),
-            Ok(()) => Err(refused!(what, " is removed")),
+            Ok(()) => Err(Halt::refused(text!(what, " is removed"))),
+        }
+    }
+
+    /// `ended`, or the signal a read of the record raises at the end of an armed span whose last
+    /// read came before it: a refusal, a cause of the abort or the span's end then gives way to the
+    /// signal, and a failure or a panic keeps its own end.
+    fn raised<T>(&mut self, ended: Result<T, Halt>) -> Result<T, Halt> {
+        match ended {
+            Ok(_) | Err(Halt::Refused { .. } | Halt::Aborted(_)) => {
+                self.cx.record.read()?;
+                ended
+            }
+            other => other,
         }
     }
 
@@ -209,7 +207,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         package: &Path,
         evidence: &OsStr,
     ) -> Result<(std::path::PathBuf, Run, Value), Halt> {
-        self.cx.record.read()?;
+        self.cx.record.release()?;
         let at = self.monotonic();
         let start = self.wall();
         self.deadline = Some(at + seconds(self.operator.deadline_seconds()));
@@ -219,42 +217,52 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         }));
         if !met {
             let shown = owed.map_or_else(|| "None".to_owned(), repr);
-            return Err(refused!(format!(
+            return Err(Halt::refused(text!(format!(
                 "GD-2's prerequisites are not all met, so the catalog blocks its execution: {shown}"
-            )));
+            ))));
         }
         let limit = self.cx.file_limit;
         let raw = read_bytes(package, &Text::from("the package"), limit)?;
         let Some(bounds) = FleetBounds::new(self.cx.top, limit) else {
-            return Err(refused!("the tree's top has a path no file can have"));
+            return Err(Halt::refused(text!(
+                "the tree's top has a path no file can have"
+            )));
         };
         let run = check_run(&raw, self.operator, Number::from(start), &bounds)?;
         self.instance = Some(run.instance().clone());
         let root = pure(evidence.as_bytes());
-        let directory = fs::metadata(&root).is_ok_and(|found| found.is_dir())
-            && !fs::symlink_metadata(&root).is_ok_and(|found| found.file_type().is_symlink());
-        if evidence.is_empty() || !directory {
-            return Err(refused!(Text::from_os(evidence).repr(), " is no directory",));
+        let directory = !evidence.is_empty()
+            && self
+                .cx
+                .files
+                .lstat(&root)
+                .is_ok_and(|found| found.file_type().is_dir());
+        if !directory {
+            return Err(Halt::refused(text!(
+                Text::from_os(evidence).repr(),
+                " is no directory",
+            )));
         }
         let injection = beside(&root, "injection");
         if self.cx.files.lstat(&injection).is_ok() {
-            return Err(refused!(
-                shown_path(&injection),
+            return Err(Halt::refused(text!(
+                Text::from_os(injection.as_os_str()),
                 " exists: a run's marks are written once",
-            ));
+            )));
         }
         probe(self.cx.files, &root).map_err(|error| probe_refusal(&root, &error))?;
         let copy = beside(&root, "package.json");
-        if read_bytes(&copy, &shown_path(&copy), limit)? != raw {
-            return Err(refused!(
-                shown_path(&copy),
+        if read_bytes(&copy, &Text::from_os(copy.as_os_str()), limit)? != raw {
+            return Err(Halt::refused(text!(
+                Text::from_os(copy.as_os_str()),
                 " holds other bytes than --package, so the judge would refuse the run's evidence",
-            ));
+            )));
         }
         match self.before_roles(&run, (start, at)) {
-            Err(Halt::Aborted(aborted)) => {
-                Err(refused!(aborted.detail(), " before injection/ was made",))
-            }
+            Err(Halt::Aborted(aborted)) => Err(Halt::refused(text!(
+                aborted.detail(),
+                " before injection/ was made",
+            ))),
             Ok(roles) => Ok((root, run, roles)),
             Err(other) => Err(other),
         }
@@ -284,24 +292,23 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         ));
         let states = match self.statuses(self.operator.instances(), None) {
             Err(Halt::Failed(failed)) => {
-                return Err(refused!(
+                return Err(Halt::refused(text!(
                     "the declared instances' status is unknown: ",
                     failed.sentence(),
-                ));
+                )));
             }
             other => other?,
         };
-        let mut open: Vec<&Text> = states
+        let open: Vec<&Text> = states
             .iter()
             .filter(|(_, status)| *status.state() != "running")
             .map(|(instance, _)| instance)
             .collect();
-        open.sort();
         if !open.is_empty() {
-            return Err(refused!(format!(
+            return Err(Halt::refused(text!(format!(
                 "declared instances {} are not running: a run is left open",
                 list_repr(open)
-            )));
+            ))));
         }
         let roles = build_roles(
             run.package(),
@@ -327,6 +334,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     fn inject(&mut self, root: &Path, run: &Run, roles: &Value) -> Result<u8, Halt> {
         self.cx.record.arm();
         let observed = self.observed(root, run, roles);
+        let observed = self.raised(observed);
         self.cx.record.disarm();
         let stopped = observed?;
         self.mark("stopped", &stopped)?;
@@ -370,6 +378,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         self.mark("stop", &request)?;
         self.stop(request_at + effect / 2.0)?;
         let stopped = self.await_stop(&request, request_at + effect)?;
+        self.cx.record.read()?;
         self.shown = Some(stopped.clone());
         let end = self.monotonic() + seconds(self.operator.observe_seconds());
         loop {
@@ -383,8 +392,9 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     }
 
     /// Reads the alarms and checks the stop may leave again once `stop.json` stands, then sends the
-    /// stop request once, cut at `until`. A request that never left aborts with cause
-    /// `stop-not-shown`; one that may have left keeps its failure for the polls to decide.
+    /// stop request once, cut at `until`. A request that never left, one refused before its launch
+    /// for no time left, aborts with cause `stop-not-shown`; one that counts as sent keeps its
+    /// failure for the polls to decide.
     fn stop(&mut self, until: f64) -> Result<(), Halt> {
         self.quiet(None)?;
         self.ready()?;
@@ -393,7 +403,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             .clone()
             .expect("the preflight read the target");
         let argv = ["ec2", "stop-instances", "--instance-ids", ascii(&instance)];
-        match self.aws(&argv, false, Some(until), true) {
+        match self.aws(&argv, Some(until), Kind::Stop) {
             Ok(_) => Ok(()),
             Err(Halt::Failed(failed)) if !self.sent => {
                 let mut detail = Text::from("the stop request never left: ");
@@ -414,15 +424,33 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
 
     /// `stopped.json`'s value once a status read dated from the request to the run window's end
     /// reads `stopped` and the target's record then shows this request, both by `until`; else the
-    /// abort with cause `stop-not-shown`, naming the last read. The first poll runs at once.
+    /// abort with cause `stop-not-shown`, naming the last read. The first poll runs at once. The
+    /// request's time and the run window's end are wall readings; `until` is a monotonic reading.
+    ///
+    /// # Errors
+    ///
+    /// [`Halt::Aborted`] with cause `stop-not-shown` as above, `guardrail` from an alarm read, or
+    /// `deadline` from any call of the polls; [`Halt::Interrupted`] for a signal; [`Halt::Fault`]
+    /// with an order fault when no preflight or no target is set, before any call, or when a poll
+    /// pauses with no deadline set. A target comes from the run's first step alone, so a
+    /// controller that has not taken that step reaches the order fault.
+    ///
+    /// # Panics
+    ///
+    /// A `request` that is no object with a numeric `time`, or a preflight package with no run window
+    /// whose `start` and `end` are numbers.
     pub fn await_stop(&mut self, request: &Value, until: f64) -> Result<Value, Halt> {
         let Some(preflight) = self.preflight.as_ref() else {
-            return Err(Halt::Fault(Fault::Order(
-                "the stop is awaited before the run's preflight".to_owned(),
-            )));
+            return Err(Halt::order(
+                "the stop is awaited before the run's preflight",
+            ));
+        };
+        let Some(instance) = self.instance.clone() else {
+            return Err(Halt::order(
+                "the stop is awaited before the run's target is read",
+            ));
         };
         let run_end = window(preflight.package(), "run").1;
-        let instance = self.instance.clone().unwrap_or_default();
         let requested = member(member_object_of(request), "time");
         let requested = Number::of(requested).expect("the request's time is a number");
         let mut seen = Text::from("no status read was made");
@@ -466,7 +494,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 ));
                 continue;
             }
-            let record = match self.record(&instance, Some(until)) {
+            let record = match self.instance_record(&instance, Some(until)) {
                 Err(Halt::Failed(failed)) => {
                     seen = Text::from("the target reads stopped and its record is unread: ");
                     seen.push_text(&failed.sentence());
@@ -535,26 +563,25 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// have left, and GD-2's restoration steps. It makes no call that changes an instance; returns 1.
     fn abort(&mut self, cause: &'static str, guardrail: Option<Text>, detail: &Text) -> u8 {
         self.deadline = None;
-        let mut text = Text::from(if !self.sent {
-            "no stop request was sent"
+        let mut text = if !self.sent {
+            Text::from("no stop request was sent")
         } else if self.answered {
-            "the stop request was sent and answered"
+            Text::from("the stop request was sent and answered")
         } else {
-            "a stop request may have left and its outcome is unknown"
-        });
-        if self.sent
-            && !self.answered
-            && let Some(failure) = &self.stop_failure
-        {
-            text.push_str(": ");
-            text.push_text(failure);
-        }
+            let mut text = Text::from("a stop request may have left and its outcome is unknown");
+            if let Some(failure) = &self.stop_failure {
+                text.push_str(": ");
+                text.push_text(failure);
+            }
+            text
+        };
         if !detail.is_empty() {
             text.push_str("; ");
             text.push_text(detail);
         }
         let steps = self.gd2.steps();
         let tail = steps_tail(steps);
+        let time = self.wall();
         let kept = DETAIL_MAX.saturating_sub(tail.chars().count());
         let mut cut = Text::from_code_points(text.code_points().take(kept))
             .expect("the code points of a text form a text");
@@ -565,7 +592,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             "guardrail",
             guardrail.clone().map_or(Value::Null, Value::String),
         );
-        mark.insert("time", Value::Float(self.wall()));
+        mark.insert("time", Value::Float(time));
         mark.insert("detail", Value::String(cut.clone()));
         let mark = Value::Object(mark);
         self.abort_mark("abort", &mark);
@@ -586,21 +613,20 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         self.cx.say(Stream::Out, &line);
         if self.sent {
             let instance = self.instance.clone().expect("a request names the target");
-            let read = catch_unwind(AssertUnwindSafe(|| {
-                self.statuses(std::slice::from_ref(&instance), None)
-            }));
-            let line = match read {
-                Ok(Ok(states)) => {
-                    let status = states.get(&instance).expect("the statuses name the target");
-                    Text::from(format!(
-                        "{TOOL}the target reads {}",
-                        repr(&status.to_value())
-                    ))
-                }
-                Ok(Err(halt)) => state_unknown(halt_text(halt)),
-                Err(payload) => state_unknown(Fault::panic(&*payload).text()),
-            };
-            self.cx.say(Stream::Out, &line);
+            let read = caught(|| {
+                let states = self.statuses(std::slice::from_ref(&instance), None)?;
+                let status = states.get(&instance).expect("the statuses name the target");
+                let line = Text::from(format!(
+                    "{TOOL}the target reads {}",
+                    repr(&status.to_value())
+                ));
+                self.cx.say(Stream::Out, &line);
+                Ok(())
+            });
+            if let Err(halt) = read {
+                let line = text!(TOOL, "the target's state is unknown: ", halt_text(halt));
+                self.cx.say(Stream::Out, &line);
+            }
         }
         self.cx.say(
             Stream::Out,
@@ -612,13 +638,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
 
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// Writes the mark `name` in the abort path, and prints on standard error a line that says it
-    /// stands with its durability unknown or is unwritten when the write fails or panics.
+    /// stands with its durability unknown or is unwritten when the write fails or panics. A write
+    /// that panics inside its hold leaves the record unheld.
     fn abort_mark(&mut self, name: &'static str, value: &Value) {
-        let failed = match catch_unwind(AssertUnwindSafe(|| self.mark(name, value))) {
-            Ok(Ok(())) => return,
-            Ok(Err(halt)) => halt_text(halt),
-            Err(payload) => Fault::panic(&*payload).text(),
+        let wrote = caught(|| self.mark(name, value));
+        self.cx.record.end_hold();
+        let Err(halt) = wrote else {
+            return;
         };
+        let failed = halt_text(halt);
         let standing = if self.written.contains(&name) {
             "stands with its durability unknown"
         } else {
@@ -630,25 +658,19 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     }
 }
 
-fn state_unknown(text: Text) -> Text {
-    let mut line = Text::from(format!("{TOOL}the target's state is unknown: "));
-    line.push_text(&text);
-    line
-}
-
 /// The `<class>: <message>` text of a step's end that the abort path reports.
 fn halt_text(halt: Halt) -> Text {
     match halt {
         Halt::Refused { sentence, .. } => Fault::Refusal(sentence).text(),
-        Halt::Aborted(aborted) => aborted_text(&aborted),
+        Halt::Aborted(aborted) => text!("Aborted: ", aborted.detail()),
         Halt::Interrupted(raised) => Text::from(format!("Interrupted: {raised}")),
-        Halt::Failed(failed) => Fault::Call(failed).text(),
+        Halt::Failed(failed) => text!("CallFailed: ", failed.sentence()),
         Halt::Fault(fault) => fault.text(),
     }
 }
 
 fn lock_sentence(directory: &Path, error: &LockError) -> Text {
-    let mut sentence = shown_path(directory);
+    let mut sentence = Text::from_os(directory.as_os_str());
     match error {
         LockError::Open(error) => {
             sentence.push_str(&format!(" cannot be opened: {}", strerror(error)));
@@ -663,17 +685,17 @@ fn lock_sentence(directory: &Path, error: &LockError) -> Text {
 
 fn probe_refusal(root: &Path, error: &ProbeError) -> Halt {
     match error {
-        ProbeError::Unnamed(error) => refused!(
-            shown_path(root),
+        ProbeError::Unnamed(error) => Halt::refused(text!(
+            Text::from_os(root.as_os_str()),
             " takes no unnamed file, so no mark can be written there: ",
             &strerror(error),
-        ),
-        ProbeError::Unresolved(resolved) => refused!(
-            shown_path(resolved),
+        )),
+        ProbeError::Unresolved(resolved) => Halt::refused(text!(
+            Text::from_os(resolved.as_os_str()),
             " does not resolve, so no unnamed file in ",
-            shown_path(root),
+            Text::from_os(root.as_os_str()),
             " can be linked to a mark's name",
-        ),
+        )),
     }
 }
 

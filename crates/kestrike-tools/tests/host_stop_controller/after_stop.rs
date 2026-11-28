@@ -17,7 +17,7 @@ use super::plane::{ALARMS, Action, CALLER, MONOTONIC, RECORD, STATUS, State};
 use super::steps::{Step, errno, links};
 use super::stop_run::{int, operator_seconds, time};
 use super::{CHILD, COPY, Case, child, guardrails, listing, set, tail, text_of};
-use crate::host_stop_support::{START, Scratch, TARGET};
+use crate::host_stop_support::{START, Scratch, TARGET, free_lock};
 
 const ALL: [&str; 4] = ["roles", "stop", "stopped", "abort"];
 const STOPPING: [&str; 3] = ["roles", "stop", "abort"];
@@ -115,8 +115,8 @@ fn an_alarm_that_fired_and_recovered_between_two_reads() {
 
 /// The observation's final alarm read, the last call of a run, answers quiet but past the deadline:
 /// the run aborts with cause `deadline`, and no call but the abort's status read starts after it.
-/// The fault is planted on the first alarm read that starts 240 s after the run's first status read
-/// once the target reads stopped.
+/// The fault is planted on the first alarm read that starts 240 s after the confirming record read
+/// returns.
 #[test]
 fn an_alarm_read_that_answers_past_the_deadline_aborts_the_run() {
     let mut case = Case::new("final-late");
@@ -124,12 +124,12 @@ fn an_alarm_read_that_answers_past_the_deadline_aborts_the_run() {
     operate(&mut case, "observe_seconds", 240);
     case.plane.borrow_mut().fault = Some(Box::new(|state, op| {
         let stopped = state.instances[TARGET].state == "stopped";
-        let first = state
+        let shown = state
             .log
             .iter()
-            .find(|l| l.op == STATUS && l.time.is_some())
+            .find(|l| l.op == RECORD)
             .and_then(|l| l.time);
-        let at_end = first.is_some_and(|first| stopped && state.t >= first + 240.0 - 1e-6);
+        let at_end = shown.is_some_and(|shown| stopped && state.t >= shown + 240.0 - 1e-6);
         (op == ALARMS && at_end).then_some(Action::Late)
     }));
     let found = check(&mut case, "deadline", None, &ALL);
@@ -140,6 +140,13 @@ fn an_alarm_read_that_answers_past_the_deadline_aborts_the_run() {
     );
     let ops = case.ops();
     assert_eq!(ops[case.fault_index() + 1..], [STATUS]);
+    let log = case.log();
+    let shown = log.iter().find(|l| l.op == RECORD).and_then(|l| l.time);
+    let planted = &log[case.fault_index()];
+    assert!(
+        planted.start >= shown.expect("the record read") + 240.0 - 1e-6,
+        "{planted:?}"
+    );
 }
 
 /// An observation that outlasts the deadline: the stop shows late, so a poll starts within 30 s of
@@ -269,7 +276,7 @@ fn the_run_holds_the_lock_of_injection_to_its_end() {
         matches!(refusals[0], Some(LockError::Taken(_))),
         "{refusals:?}"
     );
-    drop(lock(&Disk, &case.evidence.join("injection")).expect("the run freed its lock"));
+    drop(free_lock(&case.evidence.join("injection")));
     let missing = lock(&Disk, &case.evidence.join("no-such-directory"));
     assert!(matches!(missing, Err(LockError::Open(_))), "{missing:?}");
 }
@@ -587,6 +594,10 @@ fn a_step_of_the_wall_clock_moves_no_bound() {
     let names: Vec<&String> = marks.keys().collect();
     assert_eq!(names, ["abort", "roles", "stop"]);
     assert_eq!(text_of(&marks["abort"], "cause"), "stop-not-shown");
+    assert!(
+        time(&marks["abort"]) < time(&marks["stop"]),
+        "the abort mark takes the stepped wall reading"
+    );
     let sent = case.stops()[0].start;
     let log = case.log();
     let last = log[..log.len() - 1]

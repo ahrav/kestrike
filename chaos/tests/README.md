@@ -134,9 +134,8 @@ and `crates/campaign-supervisor/src/protocol/summary.rs`, and the count relation
 `crates/campaign-supervisor/src/campaign/seeds.rs`, the gate of `required.rs` is armed at
 `REQUIRED_PASSES` covered passes and reads a counter absent from `reached` as unreached, as the
 judge does, the `no_pass` floor that `chaos/project.yaml` prints and the judges hold is
-`NO_PASS_RUNS` of `seeds.rs`, the receipts of the committed witness `reach-live-1125b` and control
-`reach-control-1125b`, read by run id, are held and broken on the planted pair, and the recorded run's
-`run.json` lies at a path the pre-push hook guards as a run record. It starts no sweep and runs
+`NO_PASS_RUNS` of `seeds.rs`, and the receipts of the committed witness `reach-live-1125b` and control
+`reach-control-1125b`, read by run id, are held and broken on the planted pair. It starts no sweep and runs
 in no CI suite.
 `test_judges.py` runs it in a process of its own, started as `python3 -I`. The pre-push hook runs `test_judges.py` on a
 push that changes a path at or under `chaos/harness/`, `chaos/judges/`, `chaos/tests/`,

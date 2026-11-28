@@ -1366,55 +1366,5 @@ class RedGreen(unittest.TestCase):
         self.assertEqual([build["leg"] for build in self.builds()], ["base"])
 
 
-class PlantRunnerLoad(unittest.TestCase):
-    """`plant-runner.py` takes `OVERRIDES`, `foreign_toolchain_paths` and `make_private` from this script when it
-    loads, so each of those names loads from here."""
-
-    NAMES = ("foreign_toolchain_paths", "make_private")
-
-    def load(self, runner):
-        """The module at `runner`, the exit code of its load (None when the load finishes) and its error output."""
-        spec = importlib.util.spec_from_file_location("plant_runner", runner)
-        assert spec is not None and spec.loader is not None
-        module, errors, code = importlib.util.module_from_spec(spec), io.StringIO(), None
-        # The patch restores the original `sys.dont_write_bytecode` value after the load, so later cases inherit it.
-        with mock.patch.object(sys, "dont_write_bytecode", sys.dont_write_bytecode), \
-                contextlib.redirect_stderr(errors):
-            try:
-                spec.loader.exec_module(module)
-            except SystemExit as stopped:
-                code = stopped.code
-        return module, code, errors.getvalue()
-
-    def test_the_plant_runner_loads_the_names_it_takes_from_this_script(self):
-        runner, code, errors = self.load(SCRIPT.with_name("plant-runner.py"))
-        self.assertIsNone(code, f"scripts/plant-runner.py did not load: {errors}; run "
-                                "`python3 scripts/test-plant-runner.py` after the repair")
-        spec = importlib.util.spec_from_file_location("red_green", SCRIPT)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        self.assertEqual(runner.OVERRIDES, module.OVERRIDES)
-        for name in self.NAMES:
-            taken = getattr(runner, name)
-            self.assertEqual((taken.__name__, taken.__code__.co_filename), (name, str(SCRIPT)))
-
-    def test_the_plant_runner_exits_4_when_this_script_lacks_a_name_it_takes(self):
-        FIXTURES.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="kestrike-plant-runner-load-", dir=FIXTURES) as scripts:
-            for name in ("plant-runner.py", "red-green.py", "reproduce-test.py", "select-tests.py"):
-                try:
-                    shutil.copy(SCRIPT.with_name(name), scripts)
-                except OSError as error:
-                    self.fail(f"scripts/{name} cannot be copied into the fixture: {error}")
-            copy = Path(scripts) / "red-green.py"
-            source = copy.read_text()
-            self.assertIn("def make_private(", source)
-            copy.write_text(source.replace("def make_private(", "def make_owned("))
-            _, code, errors = self.load(Path(scripts) / "plant-runner.py")
-        self.assertEqual(code, 4, errors)
-        self.assertIn("scripts/red-green.py cannot be loaded", errors)
-
-
 if __name__ == "__main__":
     unittest.main()

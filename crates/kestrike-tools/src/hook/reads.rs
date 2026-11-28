@@ -1,10 +1,11 @@
 //! The Git reads of one ref line, each in the push's environment, and the two pure functions they feed:
 //! the remote-tracking refs a destination selects, and the ignore spans of Rust source.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::process::Output;
 
 use crate::environ::Environ;
-use crate::git::{blob_bytes, git, merge_base, output};
+use crate::git::{self as library, GitError};
 use crate::rust_text::{FUNCTION, IGNORE};
 use crate::text::Text;
 
@@ -14,6 +15,43 @@ use super::{Check, Failure, argument};
 
 pub(super) const ZERO: &str = "0000000000000000000000000000000000000000";
 
+/// A probe the caller runs once each Git read of the plan returns; `Err` carries the exit code of the
+/// push, which ends as [`Failure::Cancelled`].
+pub type Probe = fn() -> Result<(), u8>;
+
+/// `Reads` is the environment of a plan's Git reads and the probe that runs once each read returns.
+#[derive(Clone, Copy)]
+pub(super) struct Reads<'a> {
+    pub(super) environ: &'a Environ,
+    pub(super) probe: Probe,
+}
+
+/// `probed` runs the probe of `reads` after `read` returned, and then gives `read`'s result, so a probe
+/// that reports `Err` ends the plan before the result is used and before any later read starts.
+fn probed<T>(reads: Reads<'_>, read: Result<T, GitError>) -> Result<T, Failure> {
+    (reads.probe)().map_err(Failure::Cancelled)?;
+    Ok(read?)
+}
+
+/// `git` is the library's read of Git's UTF-8 output, followed by the probe.
+pub(super) fn git<S: AsRef<OsStr>>(reads: Reads<'_>, args: &[S]) -> Result<String, Failure> {
+    probed(reads, library::git(reads.environ, args))
+}
+
+/// `output` is the library's run of Git that returns its output whatever its status, followed by the
+/// probe.
+fn output<S: AsRef<OsStr>>(reads: Reads<'_>, args: &[S]) -> Result<Output, Failure> {
+    probed(reads, library::output(reads.environ, args))
+}
+
+/// `blob_bytes` is the library's batch read of objects, followed by the probe.
+pub(super) fn blob_bytes(
+    reads: Reads<'_>,
+    names: &[String],
+) -> Result<Vec<Option<Vec<u8>>>, Failure> {
+    probed(reads, library::blob_bytes(reads.environ, names))
+}
+
 /// `revision` is `commit` followed by `suffix`, as one Git argument.
 fn revision(commit: &Text, suffix: &str) -> OsString {
     let mut revision = argument(commit);
@@ -21,37 +59,38 @@ fn revision(commit: &Text, suffix: &str) -> OsString {
     revision
 }
 
-/// `holds` holds when `git cat-file -e` of `path` at `commit` passes; a lookup that fails for any reason,
-/// an object the clone lacks included, reads as `path` absent.
-fn holds(environ: &Environ, commit: &Text, path: &str) -> Result<bool, Failure> {
+/// `holds` holds when `git cat-file -e` of `path` at `commit` passes; a lookup that runs and exits
+/// nonzero, for an object the clone lacks among other reasons, reads as `path` absent, and Git that cannot
+/// start or a recorded signal ends the plan.
+fn holds(reads: Reads<'_>, commit: &Text, path: &str) -> Result<bool, Failure> {
     let spec = revision(commit, &format!(":{path}"));
     Ok(
-        output(environ, &[OsString::from("cat-file"), "-e".into(), spec])?
+        output(reads, &[OsString::from("cat-file"), "-e".into(), spec])?
             .status
             .success(),
     )
 }
 
 /// `holds_check` holds when the tree of `commit` holds the file `check` asks for.
-pub(super) fn holds_check(environ: &Environ, commit: &Text, check: Check) -> Result<bool, Failure> {
+pub(super) fn holds_check(reads: Reads<'_>, commit: &Text, check: Check) -> Result<bool, Failure> {
     let path = check
         .row()
         .held
         .expect("a check whose presence the plan reads names the file it asks for");
-    holds(environ, commit, path)
+    holds(reads, commit, path)
 }
 
 /// `comparison_base` returns the commit a tip's changes are read against: `remote` when this clone holds it
 /// as a commit, else the merge base of `origin/main` and `local`, and `None` when the clone has no
 /// `origin/main` or it shares no history with `local`.
 pub(super) fn comparison_base(
-    environ: &Environ,
+    reads: Reads<'_>,
     local: &Text,
     remote: &Text,
 ) -> Result<Option<Text>, Failure> {
     if remote.to_str() != Some(ZERO) {
         let held = output(
-            environ,
+            reads,
             &[
                 OsString::from("cat-file"),
                 "-e".into(),
@@ -63,7 +102,7 @@ pub(super) fn comparison_base(
         }
     }
     let listed = git(
-        environ,
+        reads,
         &[
             "for-each-ref",
             "--format=%(refname)",
@@ -73,14 +112,20 @@ pub(super) fn comparison_base(
     if listed.is_empty() {
         return Ok(None);
     }
-    Ok(merge_base(environ, OsString::from("origin/main"), argument(local))?.map(Text::from))
+    let base = library::merge_base(
+        reads.environ,
+        OsString::from("origin/main"),
+        argument(local),
+    );
+    Ok(probed(reads, base)?.map(Text::from))
 }
 
-/// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it fails for any
-/// reason, an object the clone lacks included; the callers read `None` as an absent file.
-fn shown_file(environ: &Environ, commit: &Text, path: &str) -> Result<Option<Vec<u8>>, Failure> {
+/// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it runs and exits
+/// nonzero, for an object the clone lacks among other reasons; the callers read `None` as an absent file.
+/// Git that cannot start or a recorded signal ends the plan.
+fn shown_file(reads: Reads<'_>, commit: &Text, path: &str) -> Result<Option<Vec<u8>>, Failure> {
     let shown = output(
-        environ,
+        reads,
         &[
             OsString::from("show"),
             revision(commit, &format!(":{path}")),
@@ -89,11 +134,12 @@ fn shown_file(environ: &Environ, commit: &Text, path: &str) -> Result<Option<Vec
     Ok(shown.status.success().then_some(shown.stdout))
 }
 
-/// `sources` returns the paths the Verus inventory at `commit` names: none for an absent inventory, and
-/// `None` for one that cannot be read, on which reconciliation runs and reports the defect.
-pub(super) fn sources(environ: &Environ, commit: &Text) -> Result<Option<Members>, Failure> {
+/// `sources` returns the paths the Verus inventory at `commit` names: none for an inventory `git show`
+/// cannot print, which reads as absent, and `None` for bytes [`verus_sources`] cannot iterate, on which
+/// reconciliation runs and reports the defect.
+pub(super) fn sources(reads: Reads<'_>, commit: &Text) -> Result<Option<Members>, Failure> {
     Ok(
-        match shown_file(environ, commit, "verification/verus/inventory.json")? {
+        match shown_file(reads, commit, "verification/verus/inventory.json")? {
             None => Some(Members::default()),
             Some(bytes) => verus_sources(&bytes),
         },
@@ -102,11 +148,12 @@ pub(super) fn sources(environ: &Environ, commit: &Text) -> Result<Option<Members
 
 /// `links` returns the paths whose change needs the links check at `commit`. A commit that holds the check
 /// without the registry returns the registry alone, so a push that removes the registry runs the check,
-/// which refuses that tree; a commit with neither returns none. A registry that cannot be read returns
-/// `None`, on which the check runs and reports the defect.
-pub(super) fn links(environ: &Environ, commit: &Text) -> Result<Option<Members>, Failure> {
-    let Some(bytes) = shown_file(environ, commit, LINKS_REGISTRY)? else {
-        return Ok(Some(if holds_check(environ, commit, Check::Links)? {
+/// which refuses that tree; a commit with neither returns none. A registry `git show` cannot print reads as
+/// absent, and bytes [`link_inputs`] cannot iterate return `None`, on which the check runs and reports the
+/// defect.
+pub(super) fn links(reads: Reads<'_>, commit: &Text) -> Result<Option<Members>, Failure> {
+    let Some(bytes) = shown_file(reads, commit, LINKS_REGISTRY)? else {
+        return Ok(Some(if holds_check(reads, commit, Check::Links)? {
             [LINKS_REGISTRY].into_iter().collect()
         } else {
             Members::default()
@@ -191,7 +238,7 @@ pub(super) fn spans<'t>(
 /// batch name cannot carry, holds without a read. Each file is read with every byte sequence outside UTF-8
 /// replaced by U+FFFD, and an absent file or an object other than a blob reads as an empty text.
 pub(super) fn changes_ignore(
-    environ: &Environ,
+    reads: Reads<'_>,
     base: &Text,
     local: &Text,
     paths: &[String],
@@ -211,7 +258,7 @@ pub(super) fn changes_ignore(
         .iter()
         .flat_map(|path| [base, local].map(|commit| format!("{commit}:{path}")))
         .collect();
-    let texts: Vec<String> = blob_bytes(environ, &names)?
+    let texts: Vec<String> = blob_bytes(reads, &names)?
         .into_iter()
         .map(|bytes| {
             String::from_utf8(bytes.unwrap_or_default())
