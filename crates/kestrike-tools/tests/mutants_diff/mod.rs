@@ -576,6 +576,75 @@ fn a_worktree_that_remains_after_removal_makes_the_run_incomplete() {
     assert_eq!(registered(&fx), 2);
 }
 
+/// `tree_entries` lists every path under `root` relative to it, sorted.
+fn tree_entries(root: &std::path::Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory).expect("the directory lists") {
+            let path = entry.expect("an entry reads").path();
+            let relative = path.strip_prefix(root).expect("under the root");
+            found.push(relative.to_string_lossy().into_owned());
+            if fs::symlink_metadata(&path).is_ok_and(|status| status.is_dir()) {
+                pending.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The removal of a worktree goes past each entry it cannot remove: with two directories of mode 0500
+/// that each hold a file, and entries that list before, between and after them, every other entry of
+/// the worktree goes and the run is incomplete with the worktree that remains. Root removes the files
+/// of a directory of mode 0500, so the case does not apply to uid 0.
+#[test]
+fn the_removal_of_a_worktree_goes_past_each_entry_it_cannot_remove() {
+    // SAFETY: `geteuid` takes no argument and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let fx = Fixture::new("locked-dirs");
+    fx.plan(&Plan {
+        locked: true,
+        ..Plan::caught(&one_mutant("2:1: m"))
+    });
+    let out = fx.start().env(fx.git_wrapper("fail-remove")).run();
+    assert_eq!(out.code, 1, "{}", out.all());
+    let report = fx.report(Some(&out));
+    assert!(!complete(&report));
+    let found = reason(&report).unwrap_or_default();
+    assert!(found.starts_with("the worktree "), "{found}");
+    let run = only(fx.reports())
+        .parent()
+        .expect("a report stands in its run directory")
+        .to_path_buf();
+    let trees: Vec<std::path::PathBuf> = fs::read_dir(&run)
+        .expect("the run directory lists")
+        .map(|entry| entry.expect("an entry reads").path())
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("worktree-"))
+        })
+        .collect();
+    let [tree] = trees.as_slice() else {
+        panic!("one worktree remains: {trees:?}");
+    };
+    let left = tree_entries(tree);
+    for name in ["a-locked", "z-locked"] {
+        fs::set_permissions(
+            tree.join(name),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("the directory is made writable again");
+    }
+    assert_eq!(
+        left,
+        ["a-locked", "a-locked/kept", "z-locked", "z-locked/kept"],
+        "every entry the removal can remove is gone"
+    );
+}
+
 #[test]
 fn a_worktree_that_remains_under_a_path_with_a_line_break_makes_the_run_incomplete() {
     let fx = Fixture::new("line-break");

@@ -120,6 +120,9 @@ pub struct Plan {
     pub hold: bool,
     pub stray: bool,
     pub drop_git: bool,
+    /// The tool's run leaves two directories of mode 0500 in the worktree, each holding a file, among
+    /// other entries.
+    pub locked: bool,
     pub no_outcomes: bool,
     pub raw_listing: Option<Vec<u8>>,
     pub raw_outcomes: Option<String>,
@@ -213,6 +216,7 @@ impl Plan {
             (self.hold, "hold"),
             (self.stray, "stray"),
             (self.drop_git, "drop_git"),
+            (self.locked, "locked"),
             (self.no_outcomes, "no_outcomes"),
         ] {
             if flag {

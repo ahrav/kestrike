@@ -114,6 +114,11 @@ if [ "$listing" = yes ]; then
 fi
 code=$(cat "$plan/exit")
 if [ -e "$plan/drop_git" ]; then rm .git; fi
+if [ -e "$plan/locked" ]; then
+  for name in a-locked z-locked; do mkdir "$name" && : > "$name/kept" && chmod 0500 "$name"; done
+  for name in b-entry m-entry y-entry; do : > "$name"; done
+  mkdir c-dir && : > c-dir/file
+fi
 if [ -e "$plan/stray" ]; then
   sleep "$sleeper" &
   printf '%s' "$!" > "$state/grandchild.pid"

@@ -21,6 +21,7 @@ use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
+use crate::plants::remove;
 use crate::python::{hexdigest, say};
 use crate::stream::emit;
 use crate::text::{Text, text};
@@ -407,7 +408,8 @@ impl Run {
     ///
     /// A stopped `worktree add` leaves its `initializing` lock, which the second `--force` overrides. Git
     /// refuses a directory without a valid `.git` file and drops the registration once the directory is
-    /// gone, so a removal that failed is repeated after the directory's removal. The listing prints a
+    /// gone, so a removal that failed is repeated after the directory's removal, which goes past each
+    /// entry it cannot remove and leaves a link at the tree's path. The listing prints a
     /// path's bytes as they are, so the whole record is matched in the listing's bytes.
     fn remove_worktree(&self, tree: &Path) -> Result<Option<Text>, Stop> {
         let prepared = &self.prepared;
@@ -421,15 +423,13 @@ impl Run {
                 .envs(prepared.git_env.iter().cloned());
             command
         };
-        let mut remove: Vec<&OsStr> =
+        let mut unregister: Vec<&OsStr> =
             os_args(&["worktree", "remove", "--force", "--force"]).collect();
-        remove.push(tree.as_os_str());
-        let mut removed = output(&mut git(&remove))?;
-        if !fs::symlink_metadata(tree).is_ok_and(|status| status.is_symlink()) {
-            let _ = fs::remove_dir_all(tree);
-        }
+        unregister.push(tree.as_os_str());
+        let mut removed = output(&mut git(&unregister))?;
+        remove(tree);
         if !removed.status.success() {
-            removed = output(&mut git(&remove))?;
+            removed = output(&mut git(&unregister))?;
         }
         let listing: Vec<&OsStr> = os_args(&["worktree", "list", "--porcelain"]).collect();
         let listed = output(&mut git(&listing))?;
