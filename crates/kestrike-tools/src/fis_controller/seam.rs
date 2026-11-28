@@ -1,6 +1,7 @@
 //! The seam a phase takes: the call, the clocks with their sleep, and the lane's case. A phase reaches
 //! the system through one [`Seam`] value and its [`Case`], so a test passes its own plane, clock and
-//! case.
+//! case. Each effect is one method of [`Seam`] with its own types, so an effect is added as a method
+//! beside the others.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -17,9 +18,12 @@ pub trait Seam {
     type Clocks: Clocks;
     type Case: Case;
 
-    /// Makes one AWS call of `words`, the arguments after the command, the service and the operation
-    /// first, within `limit`, and returns its decoded reply, or none for a call that ended without
-    /// one: a failed start, a nonzero exit, an output that is no JSON value, or the limit reached.
+    /// Makes one AWS call within `limit` and returns its decoded reply, or none for a call that ended
+    /// without one: a failed start, a nonzero exit, an output that is no JSON value, or the limit
+    /// reached. `words` are every argument after the command, the service and the operation first
+    /// and `--region <region> --output json` last, as the phase composes them; the seam holds the
+    /// command and sets `AWS_MAX_ATTEMPTS=1` in the environment of a call whose words begin
+    /// `fis start-experiment`.
     ///
     /// # Errors
     ///

@@ -6,9 +6,11 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::time::Duration;
 
-use kestrike_tools::fis_controller::{Case as _, Failure, Launch, Seam};
+use kestrike_tools::fis_controller::{self, Case as _, Failure, Launch, Seam};
+use kestrike_tools::hardware_host::{Clocks, System};
 use kestrike_tools::host_stop::{Delivered, Interrupted, Record, Signal};
 
+use crate::fis_support::calls::Reply;
 use crate::fis_support::case::Case;
 use crate::fis_support::clock::{Clock, nanoseconds};
 use crate::fis_support::delivered;
@@ -109,5 +111,160 @@ fn a_start_hands_out_the_cases_held_in_order() {
     one.end(4);
     assert_eq!(started.ended().expect("the check runs"), Some(4));
     assert!(plane.start(&launch).is_err(), "no case is left");
-    assert_eq!(plane.starts, [vec!["lane", "run"], vec!["lane", "run"]]);
+    let words: Vec<Vec<String>> = plane
+        .starts
+        .log
+        .iter()
+        .map(|started| started.words.clone())
+        .collect();
+    assert_eq!(words, [vec!["lane", "run"], vec!["lane", "run"]]);
+    assert!(
+        plane
+            .starts
+            .log
+            .iter()
+            .all(|started| !started.reserved && started.environment.is_empty())
+    );
+}
+
+/// A kill ends the case with `-9` at once: a later end never replaces it, and a signal raised
+/// during the kill's wait leaves the case ended, as a child sent SIGKILL is.
+#[test]
+fn a_killed_case_stays_killed() {
+    let clock = Clock::at(100.0);
+    let (mut case, handle) = Case::new(clock.clone());
+    handle.end_at(101.0, 0);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    assert_eq!(case.kill(&mut record), Ok(-9));
+    assert_eq!(case.wait(&mut record, Duration::from_secs(5)), Ok(Some(-9)));
+    assert_eq!(
+        case.ended().expect("the check runs"),
+        Some(-9),
+        "a later end changes nothing"
+    );
+
+    let store = crate::fis_support::delivered();
+    store.deliver(Signal::Terminate);
+    let (mut case, _) = Case::new(clock);
+    let mut record = Record::new(store);
+    record.arm();
+    assert_eq!(
+        case.kill(&mut record),
+        Err(Failure::Interrupted(Interrupted(Signal::Terminate)))
+    );
+    assert_eq!(
+        case.ended().expect("the check runs"),
+        Some(-9),
+        "the interrupted kill stands"
+    );
+}
+
+/// SIGTERM ends a case the test set to close on it, after the delay; a case that ended gets no
+/// signal at all.
+#[test]
+fn sigterm_closes_a_case_set_to_close_and_an_ended_case_gets_no_signal() {
+    let clock = Clock::at(100.0);
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let (mut case, handle) = Case::new(clock.clone());
+    handle.close_on_sigterm(2.0, 0);
+    assert_eq!(
+        case.ended().expect("the check runs"),
+        None,
+        "no SIGTERM, no close"
+    );
+    case.terminate().expect("the signal is sent");
+    assert_eq!(case.wait(&mut record, Duration::from_secs(5)), Ok(Some(0)));
+    assert_eq!(clock.now(), nanoseconds(102.0));
+    case.terminate().expect("nothing is sent");
+    assert_eq!(case.kill(&mut record), Ok(0));
+    assert_eq!(
+        handle.signals(),
+        ["SIGTERM"],
+        "an ended case gets no signal"
+    );
+}
+
+/// A call under an armed record with a signal stored raises before it is logged or takes a reply;
+/// the control with no signal logs the call and takes its reply.
+#[test]
+fn a_call_under_a_stored_signal_raises_before_it_is_made() {
+    for signalled in [true, false] {
+        let store = delivered();
+        if signalled {
+            store.deliver(Signal::Interrupt);
+        }
+        let clock = Clock::at(100.0);
+        let reply = Reply {
+            operation: "fis get-experiment",
+            value: None,
+            takes: Duration::ZERO,
+        };
+        let mut plane = Plane::new(clock, vec![reply]);
+        let mut record = Record::new(store);
+        record.arm();
+        let words: Vec<OsString> = ["fis", "get-experiment"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let called = plane.call(&mut record, &words, Duration::from_secs(1));
+        assert_eq!(called.is_err(), signalled);
+        assert_eq!(
+            plane.calls.log.len(),
+            usize::from(!signalled),
+            "signalled {signalled}"
+        );
+    }
+}
+
+/// What a clock of a phase does, run over the fake clock and the system's: readings never go back,
+/// an unarmed sleep runs at least its length and leaves a stored signal stored, and an armed record
+/// with a signal stored ends the sleep with it and disarms.
+fn clocks_contract(clocks: &mut impl Clocks) {
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let length = Duration::from_millis(20);
+    let before = clocks.monotonic_ns().expect("the clock reads");
+    delivered.deliver(Signal::Hangup);
+    clocks
+        .sleep(&mut record, length)
+        .expect("an unarmed sleep runs its length");
+    let after = clocks.monotonic_ns().expect("the clock reads");
+    assert!(after >= before + 20_000_000, "{before} to {after}");
+    assert_eq!(
+        delivered.stored(),
+        Some(Signal::Hangup),
+        "the signal stays stored"
+    );
+    record.arm();
+    assert_eq!(
+        clocks.sleep(&mut record, length),
+        Err(Interrupted(Signal::Hangup))
+    );
+    assert!(!record.is_armed(), "the raise disarms the record");
+    assert!(clocks.monotonic_ns().expect("the clock reads") >= after);
+}
+
+#[test]
+fn the_fake_clock_keeps_the_contract_the_system_s_clock_keeps() {
+    clocks_contract(&mut System);
+    clocks_contract(&mut Clock::at(100.0));
+}
+
+/// What a case of a phase does, run over the fake case: a running case is not ended, a wait within
+/// a bound it outlives returns none, and a kill ends it with `-9` that a check then reads. The case
+/// a later phase starts for real runs the same function over a real child.
+fn case_contract(mut case: impl fis_controller::Case) {
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    assert_eq!(case.ended().expect("the check runs"), None);
+    assert_eq!(case.wait(&mut record, Duration::from_millis(20)), Ok(None));
+    assert_eq!(case.kill(&mut record), Ok(-9));
+    assert_eq!(case.ended().expect("the check runs"), Some(-9));
+}
+
+#[test]
+fn the_fake_case_keeps_the_case_contract() {
+    case_contract(Case::new(Clock::at(100.0)).0);
 }

@@ -1,7 +1,7 @@
 //! The deadline rules on the fake clock: a window, a poll's sleep and a call's limit with and without
 //! a run deadline, a deadline already past, a signal in a sleep, the conversions between a reading,
 //! seconds and a length, and a loop of polls that ends at its deadline. Each value and each count of
-//! readings is the script's on the same clock.
+//! readings is the rule's on a clock that starts at 100 s.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -40,7 +40,7 @@ fn a_window_is_one_reading_plus_its_length_cut_at_the_run_s_deadline() {
 }
 
 /// A poll sleeps its length, cut at the earliest of the deadlines given and the run's, never under
-/// zero, with one reading for each deadline that is set.
+/// zero, with one reading for each deadline that is set; a NaN deadline leaves the poll whole.
 #[test]
 fn a_poll_sleeps_to_the_earliest_deadline_with_one_reading_for_each() {
     let delivered = Delivered::new();
@@ -60,6 +60,7 @@ fn a_poll_sleeps_to_the_earliest_deadline_with_one_reading_for_each() {
         (100.0, None, &[Some(95.0)][..], 0.0, 1),
         (100.0, None, &[Some(100.0)][..], 0.0, 1),
         (2.0, Some(99.0), &[Some(150.0)][..], 0.0, 2),
+        (2.0, None, &[Some(f64::NAN)][..], 2.0, 1),
     ] {
         let mut clock = Clock::at(100.0);
         let mut record = Record::new(&delivered);
@@ -75,7 +76,10 @@ fn a_poll_sleeps_to_the_earliest_deadline_with_one_reading_for_each() {
     }
 }
 
-/// The words the script's call passes the AWS command after the command itself.
+/// The operation of the calls of these rows.
+const GET: &str = "fis get-experiment";
+
+/// The words of a call after the AWS command.
 fn words() -> Vec<OsString> {
     [
         "fis",
@@ -115,6 +119,7 @@ fn a_call_is_cut_at_the_earliest_deadline_and_none_is_made_at_or_past_it() {
         let mut plane = Plane::new(
             clock.clone(),
             vec![Reply {
+                operation: GET,
                 value: Some(ok.clone()),
                 takes: Duration::ZERO,
             }],
@@ -187,47 +192,88 @@ fn a_signal_in_a_poll_ends_it_while_armed_and_waits_while_unarmed() {
 }
 
 /// A failed reading ends a poll and a call before any sleep or call, with the reading's system
-/// error; a poll or a call with no deadline to read sleeps or calls.
+/// error. Control: the same deadline on a clock that reads gives a sleep and a call of the 10 s left.
 #[test]
 fn a_failed_reading_ends_the_step_before_it_sleeps_or_calls() {
     let delivered = Delivered::new();
     let mut record = Record::new(&delivered);
-    for deadline in [Some(110.0), None] {
+    for failing in [true, false] {
         let mut clock = Clock::at(100.0);
-        clock.fail();
-        let napped = rules(2.0, 60.0, None).nap(&mut clock, &mut record, &[deadline]);
+        if failing {
+            clock.fail();
+        }
         let mut plane = Plane::new(
             clock.clone(),
             vec![Reply {
+                operation: GET,
                 value: None,
                 takes: Duration::ZERO,
             }],
         );
         let called = call(
             &mut plane,
-            &rules(2.0, 60.0, None),
+            &rules(20.0, 60.0, None),
             &mut record,
             &words(),
-            deadline,
+            Some(110.0),
         );
-        match deadline {
-            Some(_) => {
-                let Err(Failure::System(error)) = napped else {
-                    panic!("{napped:?} is a system error");
-                };
-                assert_eq!(error.to_string(), "[Errno 5] Input/output error");
-                assert!(clock.sleeps().is_empty(), "no sleep follows");
-                assert!(matches!(called, Err(Failure::System(_))), "{called:?}");
-                assert!(plane.calls.log.is_empty(), "no call follows");
-            }
-            None => {
-                assert_eq!(napped, Ok(()));
-                assert_eq!(clock.sleeps(), [Duration::from_secs(2)]);
-                assert_eq!(called, Ok(None));
-                assert_eq!(plane.calls.log.len(), 1, "the control calls");
-            }
+        let napped = rules(20.0, 60.0, None).nap(&mut clock, &mut record, &[Some(110.0)]);
+        if failing {
+            let Err(Failure::System(error)) = napped else {
+                panic!("{napped:?} is a system error");
+            };
+            assert_eq!(error.to_string(), "[Errno 5] Input/output error");
+            assert!(clock.sleeps().is_empty(), "no sleep follows");
+            assert!(matches!(called, Err(Failure::System(_))), "{called:?}");
+            assert!(plane.calls.log.is_empty(), "no call follows");
+        } else {
+            assert_eq!(napped, Ok(()));
+            assert_eq!(clock.sleeps(), [Duration::from_secs(10)]);
+            assert_eq!(called, Ok(None));
+            assert_eq!(plane.calls.log.len(), 1, "the control calls");
+            assert_eq!(plane.calls.log[0].limit, duration(10.0));
         }
     }
+}
+
+/// A second call toward the same deadline gets what the first left of the window: no retry
+/// restarts it. A signal delivered during an armed call ends it there.
+#[test]
+fn a_retry_keeps_its_window_and_a_signal_ends_an_armed_call() {
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let clock = Clock::at(100.0);
+    let reply = |takes| Reply {
+        operation: GET,
+        value: None,
+        takes,
+    };
+    let mut plane = Plane::new(
+        clock.clone(),
+        vec![reply(Duration::from_secs(3)), reply(Duration::ZERO)],
+    );
+    let deadlines = rules(2.0, 60.0, None);
+    for _ in 0..2 {
+        call(&mut plane, &deadlines, &mut record, &words(), Some(110.0)).expect("the call ends");
+    }
+    let limits: Vec<Duration> = plane.calls.log.iter().map(|called| called.limit).collect();
+    assert_eq!(limits, [duration(10.0), duration(7.0)]);
+
+    let store = crate::fis_support::delivered();
+    let clock = Clock::at(100.0);
+    clock.signal_at(101.0, Signal::Terminate, store);
+    let mut plane = Plane::new(clock.clone(), vec![reply(Duration::from_secs(5))]);
+    let mut record = Record::new(store);
+    record.arm();
+    assert_eq!(
+        call(&mut plane, &deadlines, &mut record, &words(), None),
+        Err(Failure::Interrupted(Interrupted(Signal::Terminate)))
+    );
+    assert_eq!(
+        clock.now(),
+        nanoseconds(101.0),
+        "the call ends at the signal"
+    );
 }
 
 /// A reading converts whole seconds exactly and divides any other count of nanoseconds by 1e9; a
@@ -327,6 +373,7 @@ fn a_loop_of_polls_ends_at_its_deadline_once_readings_move_the_clock() {
 fn a_reply_longer_than_its_limit_is_no_reply() {
     let delivered = Delivered::new();
     let reply = |takes| Reply {
+        operation: GET,
         value: Some(Value::Bool(true)),
         takes,
     };

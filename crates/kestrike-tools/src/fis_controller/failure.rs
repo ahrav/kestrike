@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
-use crate::hardware_host::ObserverError;
+use crate::hardware_host::{Observer, ObserverError};
 use crate::host_stop::Interrupted;
 use crate::plants::files::strerror;
 use crate::text::Text;
@@ -93,11 +93,22 @@ impl From<Interrupted> for Failure {
     }
 }
 
+/// [`Failure::from`] of an observer log's failure, with a failed open of the log naming the log's
+/// path.
+pub fn observed(error: ObserverError, observer: &Observer) -> Failure {
+    match (&error, observer.path()) {
+        (ObserverError::Open(cause), Some(path)) => {
+            Failure::System(SystemError::of(cause, &[path]))
+        }
+        _ => Failure::from(error),
+    }
+}
+
 /// An observer log's failure by its kind: a signal is [`Failure::Interrupted`]; a log or an event of
 /// another shape, and a field nested past what a read takes, are [`Failure::Unreadable`]; a lock
 /// another holder kept past the limit is the system error of its refused attempt, worded as the
 /// observer's error names the wait; every other failure is the system error it carries, which names
-/// no file.
+/// no file; [`observed`] names the log for a failed open.
 impl From<ObserverError> for Failure {
     fn from(error: ObserverError) -> Self {
         match error {

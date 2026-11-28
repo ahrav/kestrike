@@ -1,6 +1,6 @@
 //! The marks: each mark's bytes, the ordinal it records in `effect_window`, the event it appends,
 //! and a mark whose append or write fails; and [`event`] over a log of three roles. Each row's
-//! values are the script's on the same log.
+//! values are the mark's on the same log.
 
 use std::ffi::OsStr;
 use std::fs;
@@ -135,6 +135,12 @@ fn marked(scratch: &Scratch, name: &str, arranged: &Arranged) -> (Marked, usize)
         Failure::Unreadable(_) => "unreadable".to_owned(),
         other => panic!("{other:?} is no failure of a mark"),
     });
+    if !arranged.logged {
+        assert!(
+            !log.exists(),
+            "{name}: with no log the append makes nothing"
+        );
+    }
     let events = read_events(&log.join("e1.jsonl"));
     let marked = Marked {
         error,
@@ -273,7 +279,7 @@ fn each_mark_appends_its_event_then_records_and_writes_its_ordinal() {
 /// `effect_window` changes; an end with no window fails after its event was appended; and a write
 /// that fails returns its system error with the ordinal recorded.
 #[test]
-fn a_mark_that_fails_leaves_the_section_as_the_script_leaves_it() {
+fn a_mark_that_fails_leaves_the_section_as_its_steps_left_it() {
     let scratch = Scratch::new("marks-failing");
     let blocked = |which, prior, window| Arranged {
         blocked: true,
@@ -402,7 +408,7 @@ fn found(
     (got, clock.readings())
 }
 
-/// Each query finds the script's event: the first of its name past the ordinal, of the lane's
+/// Each query finds its event: the first of its name past the ordinal, of the lane's
 /// profile and role, an event of another role or profile passed over; a boolean ordinal counts as 0
 /// or 1 and a fraction compares by its value; each query reads the log anew, with one reading of the
 /// clock.
@@ -484,4 +490,106 @@ fn an_event_of_another_shape_before_the_one_found_is_refused() {
     let other = [r#"{"name": "x", "ordinal": null}"#, LOG[1]];
     let (got, _) = found(&scratch, "null-ordinal", &other, &[("timeout", 0, "r")]);
     assert_eq!(got, ["2"]);
+}
+
+/// An append that fails changes nothing of the section: a signal stored under an armed record ends
+/// it in the wait for a lock another holder keeps, and a regular file in place of the log's directory fails its
+/// making. Control: the same mark with neither appends and records its window.
+#[test]
+fn a_failed_append_leaves_the_section_and_the_mark_as_they_were() {
+    let scratch = Scratch::new("marks-append");
+    for arm in ["signal", "file", "control"] {
+        let directory = scratch.path().join(format!("append-{arm}"));
+        fs::create_dir(&directory).expect("the directory is made");
+        let log = directory.join("obs");
+        if arm == "file" {
+            fs::write(&log, "x").expect("the file is written");
+        }
+        let observer = observer(log.join("deeper").as_os_str(), OsStr::new("e1"), text("p"));
+        let marks = Marks::new(&directory.join("art"), OsStr::new("e1")).expect("resolves");
+        let store = crate::fis_support::delivered();
+        let mut record = Record::new(store);
+        record.arm();
+        let mut clock = Clock::at(100.0);
+        let held = (arm == "signal").then(|| {
+            store.deliver(kestrike_tools::host_stop::Signal::Terminate);
+            fs::create_dir_all(log.join("deeper")).expect("the directory is made");
+            let holder = fs::File::create(log.join("deeper/e1.jsonl")).expect("the log is made");
+            holder.lock().expect("the lock is held");
+            holder
+        });
+        let mut section = section();
+        let marked = marks.start(
+            &Disk,
+            &observer,
+            &mut clock,
+            &mut record,
+            &mut section,
+            &text("EXP1"),
+        );
+        match arm {
+            "signal" => assert!(matches!(marked, Err(Failure::Interrupted(_))), "{marked:?}"),
+            "file" => assert!(matches!(marked, Err(Failure::System(_))), "{marked:?}"),
+            _ => assert_eq!(marked, Ok(Integer::from(1u64))),
+        }
+        assert_eq!(section.contains("effect_window"), arm == "control", "{arm}");
+        assert_eq!(marks.started().exists(), arm == "control", "{arm}");
+        drop(held);
+    }
+}
+
+/// The marks stand under the artifacts directory with its links resolved, and a link at a mark's
+/// own name stays a link: the start's write refuses it with `ELOOP`, its window recorded.
+#[test]
+fn the_marks_stand_under_the_resolved_directory_and_a_link_at_a_mark_is_refused() {
+    let scratch = Scratch::new("marks-resolved");
+    let real = scratch.path().join("real");
+    fs::create_dir(&real).expect("the directory is made");
+    let via = scratch.path().join("via");
+    std::os::unix::fs::symlink(&real, &via).expect("linked");
+    let marks = Marks::new(&via, OsStr::new("e1")).expect("resolves");
+    assert_eq!(marks.started(), real.join("fis-e1.started"));
+    assert_eq!(marks.ended(), real.join("fis-e1.ended"));
+    assert_eq!(marks.abandoned(), real.join("fis-e1.abandoned"));
+    std::os::unix::fs::symlink(real.join("elsewhere"), marks.started()).expect("linked");
+    let observer = observer(
+        scratch.path().join("obs").as_os_str(),
+        OsStr::new("e1"),
+        text("p"),
+    );
+    let delivered = Delivered::new();
+    let mut record = Record::new(&delivered);
+    let mut section = section();
+    let marked = marks.start(
+        &Disk,
+        &observer,
+        &mut Clock::at(100.0),
+        &mut record,
+        &mut section,
+        &text("EXP1"),
+    );
+    let Err(Failure::System(error)) = marked else {
+        panic!("{marked:?} is a system error");
+    };
+    assert_eq!(
+        scratch.norm(&error.to_string()),
+        "[Errno 40] Too many levels of symbolic links: '<d>/real/fis-e1.started'"
+    );
+    assert_eq!(
+        section
+            .get("effect_window")
+            .map(json::line_sorted)
+            .as_deref(),
+        Some(r#"{"start_ordinal": 1}"#)
+    );
+    assert!(
+        fs::symlink_metadata(marks.started())
+            .expect("lstat")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        !real.join("elsewhere").exists(),
+        "the link's target is not made"
+    );
 }

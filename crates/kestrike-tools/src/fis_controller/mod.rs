@@ -28,8 +28,8 @@ mod section;
 mod whole;
 
 pub use deadline::{Deadlines, call, duration, now, seconds};
-pub use failure::{Failure, SystemError};
-pub use marker::{Marker, Moment, Progress};
+pub use failure::{Failure, SystemError, observed};
+pub use marker::{Marker, Moment, Progress, Unremoved};
 pub use marks::{FAULT_END, FAULT_START, Marks, OBSERVER_SECONDS, ROLE, event, observer};
 pub use seam::{Case, Launch, Seam};
 pub use section::{NVME_IO_TIMEOUT, Opening, Owned, Section, Status, Verdict, kernel_timeout};

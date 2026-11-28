@@ -1,11 +1,10 @@
-//! The two cases of the script's self-test that this library holds, under their names, on the
-//! library's write and on the fake clock.
+//! The write's whole-or-nothing case and the poll's cut case, on the library's write and on the
+//! fake clock.
 
 use std::fs;
 use std::time::Duration;
 
-use kestrike_tools::fis_controller::{Deadlines, duration, write_file};
-use kestrike_tools::hardware_host::Clocks;
+use kestrike_tools::fis_controller::{self, Deadlines, duration, write_file};
 use kestrike_tools::host_stop::{Delivered, Record};
 
 use crate::fis_support::clock::Clock;
@@ -58,7 +57,7 @@ fn a_polling_sleep_is_cut_at_the_deadline_it_polls_toward() {
     let mut record = Record::new(&delivered);
     let mut clock = Clock::at(1000.0);
     let mut deadlines = Deadlines::new(100.0, 10.0).expect("the seconds are admitted");
-    let now = |clock: &Clock| clock.monotonic_ns().expect("the clock reads") as f64 / 1e9;
+    let now = |clock: &Clock| fis_controller::now(clock).expect("the clock reads");
     let window = now(&clock) + 0.2;
     deadlines
         .nap(&mut clock, &mut record, &[Some(window)])

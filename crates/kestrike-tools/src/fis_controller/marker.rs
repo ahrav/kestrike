@@ -20,11 +20,10 @@ use std::path::{Path, PathBuf};
 
 use super::failure::{Failure, SystemError};
 use super::section::Section;
-use super::whole::{exists, is_symlink, parent, sync, write_file};
+use super::whole::{episode_file, exists, is_symlink, parent, sync, write_file};
 use crate::hardware_host::boot_id;
 use crate::host_stop::Files;
 use crate::json::{self, Object, Value};
-use crate::paths;
 use crate::python::{str_of, truthy};
 use crate::text::{Text, text};
 
@@ -70,11 +69,7 @@ impl Marker {
     /// identity at `boot`. The episode is joined as a path, so a caller passes an episode of one file
     /// name component.
     pub fn new(custody: &OsStr, episode: &OsStr, profile: Text, role: Text, boot: PathBuf) -> Self {
-        let mut name = b"fis-".to_vec();
-        name.extend_from_slice(episode.as_bytes());
-        name.extend_from_slice(b".json");
-        let pure = paths::pure_bytes(&paths::join(custody.as_bytes(), &name));
-        let path = PathBuf::from(OsStr::from_bytes(&pure));
+        let path = episode_file(custody.as_bytes(), episode, ".json");
         Self {
             shown: Text::from_os(path.as_os_str()),
             path,
@@ -102,7 +97,7 @@ impl Marker {
     ///
     /// [`Failure::Unreadable`] where `unconfirmed_experiments` is a number, a boolean or null that is
     /// truthy, or an experiment to name is no text.
-    pub fn text(
+    fn text(
         &self,
         section: &Section,
         progress: &Progress,
@@ -111,8 +106,8 @@ impl Marker {
         moment: Moment,
         boot: Option<Text>,
     ) -> Result<String, Failure> {
-        let doubts = doubts(section, progress, note, request, moment)?;
         let in_doubt = fault_in_doubt(section);
+        let doubts = doubts(section, progress, note, request, moment, in_doubt)?;
         let mut record = Object::new();
         record.insert("pgid", Value::Null);
         record.insert("boot", boot.map_or(Value::Null, Value::String));
@@ -164,19 +159,44 @@ impl Marker {
     ///
     /// # Errors
     ///
-    /// The system error of the check, the unlink or the sync, with the section unchanged.
-    pub fn remove(&self, files: &impl Files, section: &mut Section) -> Result<(), SystemError> {
-        if !exists(files, &self.path)? && !is_symlink(files, &self.path)? {
+    /// [`Unremoved::Check`] for a check of the name that fails other than by an absence, before any
+    /// removal; [`Unremoved::Removal`] for a failed unlink, and for a failed sync after the unlink
+    /// stood. The section is unchanged in each case.
+    pub fn remove(&self, files: &impl Files, section: &mut Section) -> Result<(), Unremoved> {
+        let present = exists(files, &self.path)
+            .and_then(|exists| Ok(exists || is_symlink(files, &self.path)?));
+        if !present.map_err(Unremoved::Check)? {
             return Ok(());
         }
-        fs::remove_file(&self.path).map_err(|error| SystemError::of(&error, &[&self.path]))?;
-        sync(files, &parent(&self.path))?;
+        fs::remove_file(&self.path)
+            .map_err(|error| Unremoved::Removal(SystemError::of(&error, &[&self.path])))?;
+        sync(files, &parent(&self.path)).map_err(Unremoved::Removal)?;
         section
             .remove("quarantine")
             .expect("quarantine is no key the rules own");
         Ok(())
     }
 }
+
+/// Why [`Marker::remove`] left the section as it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unremoved {
+    /// The check of what stands at the name failed; nothing was removed.
+    Check(SystemError),
+    /// The unlink failed, or the directory's sync after it did, so the removal may not survive a
+    /// crash.
+    Removal(SystemError),
+}
+
+impl std::fmt::Display for Unremoved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Check(error) | Self::Removal(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for Unremoved {}
 
 /// Whether the fault is in doubt: `fault_end_unconfirmed` truthy, or no `custody_unknown`.
 fn fault_in_doubt(section: &Section) -> bool {
@@ -190,19 +210,26 @@ fn doubts(
     note: &str,
     request: Option<&Text>,
     moment: Moment,
+    in_doubt: bool,
 ) -> Result<Vec<Text>, Failure> {
     let named = experiments(section, progress)?;
     let start_token = shown(section, "start_token");
-    let tag = match request {
-        Some(request) if !request.is_empty() => Value::String(request.clone()),
-        _ => match section.get("template_unconfirmed") {
-            Some(value) if truthy(value) => value.clone(),
-            _ => progress
+    let tag = request
+        .filter(|request| !request.is_empty())
+        .cloned()
+        .map(Value::String)
+        .or_else(|| {
+            section
+                .get("template_unconfirmed")
+                .filter(|value| truthy(value))
+                .cloned()
+        })
+        .unwrap_or_else(|| {
+            progress
                 .lost_creation
                 .clone()
-                .map_or(Value::Null, Value::String),
-        },
-    };
+                .map_or(Value::Null, Value::String)
+        });
     let tag = str_of(&tag);
     let template = ["template_id", "template_retained"]
         .iter()
@@ -219,7 +246,6 @@ fn doubts(
         &start_token
     );
     let mut doubts = Vec::new();
-    let in_doubt = fault_in_doubt(section);
     if in_doubt && moment == Moment::Final {
         let lost = progress
             .lost_creation

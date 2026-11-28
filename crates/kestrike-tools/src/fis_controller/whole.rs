@@ -15,9 +15,9 @@
 //!
 //! A reader of the name therefore sees the previous version or the new one whole. Every path is taken
 //! in Python's pure form: empty and `.` components dropped, `..` kept. The file and directory syncs, the
-//! directory's opens, `mkdir`, `lstat` and `exists` go through [`Files`]; the remove, the create and the
-//! rename are calls of the system by the path's name. The module trusts the directories its caller
-//! names and checks no owner.
+//! directory's opens, `mkdir`, `lstat` and `exists` go through [`Files`]; the remove, the create, the
+//! rename and the `stat` that classifies a failed existence check are calls of the system by the
+//! path's name. The module trusts the directories its caller names and checks no owner.
 
 use std::cell::Cell;
 use std::ffi::OsStr;
@@ -195,12 +195,12 @@ pub(super) fn absent(error: &io::Error) -> bool {
 }
 
 /// Whether `path` exists once links are followed. Where [`Files::exists`] reads no entry, the
-/// `lstat` of the path decides: an error of another kind than [`absent`] names is returned.
+/// path's `stat` classifies why: an error of another kind than [`absent`] names is returned.
 pub(super) fn exists(files: &impl Files, path: &Path) -> Result<bool, SystemError> {
     if files.exists(path) {
         return Ok(true);
     }
-    match files.lstat(path) {
+    match fs::metadata(path) {
         Err(error) if !absent(&error) => Err(SystemError::of(&error, &[path])),
         _ => Ok(false),
     }
@@ -228,6 +228,17 @@ pub(super) fn pure(path: &Path) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(&paths::pure_bytes(
         path.as_os_str().as_bytes(),
     )))
+}
+
+/// The file `fis-<episode><suffix>` under `directory`, joined as Python's `Path` joins and in its pure
+/// form.
+pub(super) fn episode_file(directory: &[u8], episode: &OsStr, suffix: &str) -> PathBuf {
+    let mut name = b"fis-".to_vec();
+    name.extend_from_slice(episode.as_bytes());
+    name.extend_from_slice(suffix.as_bytes());
+    PathBuf::from(OsStr::from_bytes(&paths::pure_bytes(&paths::join(
+        directory, &name,
+    ))))
 }
 
 /// The parent of a pure path as Python gives it: the path less its last component, `.` for a

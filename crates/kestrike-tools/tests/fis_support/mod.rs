@@ -1,6 +1,6 @@
 //! What the FIS controller's cases share: a scratch directory per case, a listing of a directory, the
 //! file steps of [`steps`], the clock of [`clock`], and the plane of [`plane`] with its calls of
-//! [`calls`] and its case of [`case`].
+//! [`calls`], its starts of [`starts`] and its case of [`case`].
 
 #![cfg(target_os = "linux")]
 
@@ -8,6 +8,7 @@ pub(crate) mod calls;
 pub(crate) mod case;
 pub(crate) mod clock;
 pub(crate) mod plane;
+pub(crate) mod starts;
 pub(crate) mod steps;
 
 use std::fs::{self, DirBuilder};

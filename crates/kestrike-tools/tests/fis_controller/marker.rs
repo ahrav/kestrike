@@ -1,13 +1,15 @@
 //! The custody marker: its line for the arming, for each doubt of a final marker and for a case in
 //! doubt alone, a write that fails, and its removal in each state the marker can be in. Each line,
-//! each section's `quarantine` and each directory's entries are the script's on the same episode.
+//! each section's `quarantine` and each directory's entries are those the marker's rules give.
 
 use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
-use kestrike_tools::fis_controller::{Failure, Marker, Moment, Opening, Progress, Section};
+use kestrike_tools::fis_controller::{
+    Failure, Marker, Moment, Opening, Progress, Section, Unremoved,
+};
 use kestrike_tools::host_stop::Disk;
 use kestrike_tools::json::{Integer, Text, Value};
 
@@ -17,7 +19,7 @@ use crate::fis_support::{Scratch, listing};
 const BOOT: &str = "0123abcd-0123-4567-89ab-0123456789ab";
 const AFTER: &str = "after the episode";
 
-/// Each marker's line as the script writes it, by row.
+/// Each marker's line, by row.
 const LINES: &[(&str, &str)] = &[
     (
         "armed",
@@ -334,11 +336,11 @@ fn boot(scratch: &Scratch, booted: bool) -> PathBuf {
     path
 }
 
-/// Each marker's line is the script's: the arming names the start by its token and the template by
+/// Each marker's line names its doubts: the arming names the start by its token and the template by
 /// its request tag; a final marker names each doubt apart, the fault's own as its last; a case in
 /// doubt alone is not durable; and the section's `quarantine` names the marker once it stands.
 #[test]
-fn each_marker_holds_the_line_the_script_writes() {
+fn each_marker_names_its_doubts_in_its_line() {
     let scratch = Scratch::new("marker-lines");
     for (name, line) in LINES {
         let Row {
@@ -488,141 +490,119 @@ fn left(released: bool, quarantine: impl Into<String>, names: &[&str]) -> Left {
     )
 }
 
-/// What a row's removal left: whether the host stays released, the section's `quarantine` as the
-/// episode records it, and the directory's entries.
-fn removal(
-    scratch: &Scratch,
-    name: &str,
-    prepare: impl FnOnce(&Path, &Path),
-    files: &Steps,
-) -> Left {
-    let directory = scratch.path().join(format!("remove-{name}"));
-    fs::create_dir(&directory).expect("the directory is made");
-    let marker = marker(&directory, directory.join("boot_id"));
-    prepare(&directory, marker.path());
+/// The removal's outcome for the episode: a removal's error leaves the section as it was, which this
+/// asserts, and the episode then records that the marker stays. Returns that outcome and the
+/// directories opened to be synced.
+fn removal(directory: &Path, marker: &Marker, files: &Steps, scratch: &Scratch) -> (Left, usize) {
     let mut section = section(&[]);
     section
         .insert("quarantine", Value::String(marker.shown().clone()))
         .expect("quarantine is the caller's");
     let released = match marker.remove(files, &mut section) {
         Ok(()) => true,
-        Err(error) => {
+        Err(Unremoved::Removal(error)) => {
+            assert_eq!(
+                section.get("quarantine"),
+                Some(&Value::String(marker.shown().clone())),
+                "a failed removal leaves the section as it was"
+            );
             let stays = format!("{} stays: {error}", marker.shown());
             section
                 .insert("quarantine", Value::String(text(&stays)))
                 .expect("quarantine is the caller's");
             false
         }
+        Err(Unremoved::Check(error)) => panic!("the check fails: {error}"),
     };
     let quarantine = match section.get("quarantine") {
         Some(Value::String(text)) => scratch.norm(&text.to_string()),
         None => "<absent>".to_owned(),
         other => panic!("{other:?} is a quarantine"),
     };
-    (released, quarantine, listing(&directory))
+    let opened = files.opened.borrow().len();
+    ((released, quarantine, listing(directory)), opened)
 }
 
-const DURABLE: &str = "{\"boot\": \"0123abcd-0123-4567-89ab-0123456789ab\", \"custody\": \"x\", \"durable\": true, \
-                       \"episode\": \"e1\", \"pgid\": null, \"profile\": \"p\", \"role\": \"r\"}\n";
 const BOOTED: &str = "{\"boot\": \"0123abcd-0123-4567-89ab-0123456789ab\", \"custody\": \"x\", \"episode\": \
                       \"e1\", \"pgid\": null, \"profile\": \"p\", \"role\": \"r\"}\n";
 
-/// The removal in each state the marker can be in: an absent marker is no step and keeps
-/// `quarantine`; an armed, a durable and a boot-scoped marker, a link to a file and a link to nothing
-/// are unlinked, the link's target kept, and `quarantine` dropped; a partial file of a killed write
-/// stays beside them; a directory at the name fails the unlink and a failed sync of the directory
-/// returns after the unlink, each with `quarantine` untouched for the episode to record.
+/// What a removal row plants under the marker's directory before the removal.
+type Plant = fn(&Path, &Path);
+
+/// The removal in each state the marker can be in: an absent marker is no step, with no directory
+/// synced, and keeps `quarantine`; an armed, a final durable and a boot-scoped marker, a link to a
+/// file and a link to nothing are unlinked, the directory synced once, the link's target kept, and
+/// `quarantine` dropped; a partial file of a killed write stays beside them; a directory at the name
+/// fails the unlink, and a failed sync of the directory returns after the unlink stood, each with
+/// the section untouched for the episode to record that the marker stays.
 #[test]
-fn a_marker_is_removed_in_each_state_as_the_script_removes_it() {
+fn a_marker_is_removed_in_each_state_it_can_stand_in() {
     let scratch = Scratch::new("marker-removal");
-    let plain = Steps::default();
-    let durable = |_: &Path, path: &Path| fs::write(path, DURABLE).expect("the marker is written");
+    let armed: Plant = |_, path| fs::write(path, format!("{}\n", line("armed"))).expect("written");
+    let durable: Plant =
+        |_, path| fs::write(path, format!("{}\n", line("final-fault"))).expect("written");
+    let booted: Plant = |_, path| fs::write(path, BOOTED).expect("written");
+    let linked: Plant = |directory, path| {
+        fs::write(directory.join("elsewhere"), "kept").expect("written");
+        symlink(directory.join("elsewhere"), path).expect("linked");
+    };
+    let dangling: Plant =
+        |directory, path| symlink(directory.join("nowhere"), path).expect("linked");
+    let partial: Plant = |directory, path| {
+        fs::write(path, format!("{}\n", line("final-fault"))).expect("written");
+        fs::write(directory.join("fis-e1.json.partial"), "{").expect("written");
+    };
+    let partial_alone: Plant =
+        |directory, _| fs::write(directory.join("fis-e1.json.partial"), "{").expect("written");
+    let blocked: Plant = |_, path| {
+        fs::create_dir(path).expect("made");
+        fs::write(path.join("inner"), "x").expect("written");
+    };
+    let nothing: Plant = |_, _| {};
     let shown = |name: &str| format!("<d>/remove-{name}/fis-e1.json");
-    let partial =
-        |directory: &Path| fs::write(directory.join("fis-e1.json.partial"), "{").expect("written");
-    let rows: Vec<(&str, Left, Left)> = vec![
+    let rows: [(&str, Plant, bool, Left, usize); 10] = [
         (
             "absent",
-            removal(&scratch, "absent", |_, _| {}, &plain),
+            nothing,
+            false,
             left(true, shown("absent"), &[]),
+            0,
         ),
-        (
-            "armed",
-            removal(&scratch, "armed", durable, &plain),
-            left(true, "<absent>", &[]),
-        ),
+        ("armed", armed, false, left(true, "<absent>", &[]), 1),
         (
             "final-durable",
-            removal(&scratch, "final-durable", durable, &plain),
+            durable,
+            false,
             left(true, "<absent>", &[]),
+            1,
         ),
-        (
-            "final-boot",
-            removal(
-                &scratch,
-                "final-boot",
-                |_, path| fs::write(path, BOOTED).expect("written"),
-                &plain,
-            ),
-            left(true, "<absent>", &[]),
-        ),
+        ("final-boot", booted, false, left(true, "<absent>", &[]), 1),
         (
             "link",
-            removal(
-                &scratch,
-                "link",
-                |directory, path| {
-                    fs::write(directory.join("elsewhere"), "kept").expect("written");
-                    symlink(directory.join("elsewhere"), path).expect("linked");
-                },
-                &plain,
-            ),
+            linked,
+            false,
             left(true, "<absent>", &["elsewhere"]),
+            1,
         ),
-        (
-            "dangling",
-            removal(
-                &scratch,
-                "dangling",
-                |directory, path| symlink(directory.join("nowhere"), path).expect("linked"),
-                &plain,
-            ),
-            left(true, "<absent>", &[]),
-        ),
+        ("dangling", dangling, false, left(true, "<absent>", &[]), 1),
         (
             "partial",
-            removal(
-                &scratch,
-                "partial",
-                |directory, path| {
-                    durable(directory, path);
-                    partial(directory);
-                },
-                &plain,
-            ),
+            partial,
+            false,
             left(true, "<absent>", &["fis-e1.json.partial"]),
+            1,
         ),
         (
             "partial-alone",
-            removal(
-                &scratch,
-                "partial-alone",
-                |directory, _| partial(directory),
-                &plain,
-            ),
+            partial_alone,
+            false,
             left(true, shown("partial-alone"), &["fis-e1.json.partial"]),
+            0,
         ),
         (
             "directory",
-            removal(
-                &scratch,
-                "directory",
-                |_, path| {
-                    fs::create_dir(path).expect("made");
-                    fs::write(path.join("inner"), "x").expect("written");
-                },
-                &plain,
-            ),
+            blocked,
+            false,
             left(
                 false,
                 format!(
@@ -632,26 +612,73 @@ fn a_marker_is_removed_in_each_state_as_the_script_removes_it() {
                 ),
                 &["fis-e1.json/"],
             ),
+            0,
         ),
         (
             "sync",
-            removal(
-                &scratch,
-                "sync",
-                durable,
-                &Steps {
-                    directory_sync: Some(scratch.path().join("remove-sync")),
-                    ..Steps::default()
-                },
-            ),
+            durable,
+            true,
             left(
                 false,
                 format!("{} stays: [Errno 5] Input/output error", shown("sync")),
                 &[],
             ),
+            1,
         ),
     ];
-    for (name, got, want) in rows {
+    for (name, plant, failing_sync, want, opened) in rows {
+        let directory = scratch.path().join(format!("remove-{name}"));
+        fs::create_dir(&directory).expect("the directory is made");
+        let marker = marker(&directory, directory.join("boot_id"));
+        plant(&directory, marker.path());
+        let files = Steps {
+            directory_sync: failing_sync.then(|| directory.clone()),
+            ..Steps::default()
+        };
+        let (got, synced) = removal(&directory, &marker, &files, &scratch);
         assert_eq!(got, want, "{name}");
+        assert_eq!(synced, opened, "{name}: the directories synced");
     }
+}
+
+/// A check of the name that fails other than by an absence is the check's error, before any
+/// removal: the marker stays and the section is unchanged. Control: the same marker with the check
+/// succeeding is removed.
+#[test]
+fn a_failed_check_of_the_marker_removes_nothing() {
+    let scratch = Scratch::new("marker-check");
+    for failing in [true, false] {
+        let directory = scratch.path().join(format!("check-{failing}"));
+        fs::create_dir(&directory).expect("the directory is made");
+        let marker = marker(&directory, directory.join("boot_id"));
+        let files = Steps {
+            lstat: failing.then(|| marker.path().to_path_buf()),
+            ..Steps::default()
+        };
+        symlink(directory.join("nowhere"), marker.path()).expect("linked");
+        let mut section = section(&[("quarantine", Value::String(marker.shown().clone()))]);
+        let removed = marker.remove(&files, &mut section);
+        if failing {
+            let Err(Unremoved::Check(error)) = removed else {
+                panic!("{removed:?} is the check's error");
+            };
+            assert_eq!(
+                scratch.norm(&error.to_string()),
+                "[Errno 13] Permission denied: '<d>/check-true/fis-e1.json'"
+            );
+            assert!(section.contains("quarantine"), "the section is unchanged");
+            assert_eq!(listing(&directory), ["fis-e1.json@"], "the marker stays");
+        } else {
+            assert_eq!(removed, Ok(()));
+            assert!(listing(&directory).is_empty(), "the control removes it");
+        }
+    }
+}
+
+/// The line `LINES` records for the row `name`.
+fn line(name: &str) -> &'static str {
+    LINES
+        .iter()
+        .find_map(|(row, line)| (*row == name).then_some(*line))
+        .unwrap_or_else(|| panic!("{name} is a row of LINES"))
 }

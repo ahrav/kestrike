@@ -13,9 +13,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::failure::{Failure, SystemError};
+use super::failure::{Failure, SystemError, observed};
 use super::section::Section;
-use super::whole::write_file;
+use super::whole::{episode_file, write_file};
 use crate::hardware_host::{Clocks, Observer};
 use crate::host_stop::{Files, Record};
 use crate::json::{Integer, Object, Value};
@@ -66,13 +66,7 @@ impl Marks {
     /// cannot be read, links nested too deep, or a link loop.
     pub fn new(artifacts: &Path, episode: &OsStr) -> Result<Self, SystemError> {
         let resolved = paths::resolve(artifacts).map_err(|error| SystemError::of(&error, &[]))?;
-        let mark = |suffix: &str| {
-            let mut name = b"fis-".to_vec();
-            name.extend_from_slice(episode.as_bytes());
-            name.extend_from_slice(suffix.as_bytes());
-            let joined = paths::join(resolved.as_os_str().as_bytes(), &name);
-            PathBuf::from(OsStr::from_bytes(&paths::pure_bytes(&joined)))
-        };
+        let mark = |suffix| episode_file(resolved.as_os_str().as_bytes(), episode, suffix);
         Ok(Self {
             started: mark(".started"),
             ended: mark(".ended"),
@@ -108,14 +102,14 @@ impl Marks {
         record: &mut Record<'_>,
         section: &mut Section,
         experiment: &Text,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Integer, Failure> {
         let ordinal = append(observer, clocks, record, FAULT_START, experiment)?;
         let mut window = Object::new();
-        window.insert("start_ordinal", ordinal.clone());
+        window.insert("start_ordinal", Value::Integer(ordinal.clone()));
         section
             .insert("effect_window", Value::Object(window))
             .expect("effect_window is no key the rules own");
-        write_file(files, &self.started, &python::str_of(&ordinal).to_string())?;
+        write_file(files, &self.started, &ordinal.to_string())?;
         Ok(ordinal)
     }
 
@@ -136,15 +130,15 @@ impl Marks {
         record: &mut Record<'_>,
         section: &mut Section,
         experiment: &Text,
-    ) -> Result<Value, Failure> {
+    ) -> Result<Integer, Failure> {
         let ordinal = append(observer, clocks, record, FAULT_END, experiment)?;
         let Some(Value::Object(window)) = section.get_mut("effect_window") else {
             return Err(Failure::Unreadable(Text::from(
                 "the section records no effect window to end",
             )));
         };
-        window.insert("end_ordinal", ordinal.clone());
-        write_file(files, &self.ended, &python::str_of(&ordinal).to_string())?;
+        window.insert("end_ordinal", Value::Integer(ordinal.clone()));
+        write_file(files, &self.ended, &ordinal.to_string())?;
         Ok(ordinal)
     }
 
@@ -158,25 +152,31 @@ impl Marks {
     }
 }
 
-/// Appends one event of `kind` with `experiment` and returns its `ordinal`.
+/// Appends one event of `kind` with `experiment` and returns its `ordinal`, the integer the append
+/// assigns.
 fn append(
     observer: &Observer,
     clocks: &mut impl Clocks,
     record: &mut Record<'_>,
     kind: &str,
     experiment: &Text,
-) -> Result<Value, Failure> {
+) -> Result<Integer, Failure> {
     let mut fields = Object::new();
     fields.insert("experiment", Value::String(experiment.clone()));
-    let Some(event) = observer.append(clocks, record, kind, fields)? else {
+    let appended = observer
+        .append(clocks, record, kind, fields)
+        .map_err(|error| observed(error, observer))?;
+    let Some(event) = appended else {
         return Err(Failure::Unreadable(Text::from(
             "the episode has no observer log, so a mark has no ordinal",
         )));
     };
-    event
-        .get("ordinal")
-        .cloned()
-        .ok_or_else(|| Failure::Unreadable(Text::from("the appended event holds no ordinal")))
+    match event.get("ordinal") {
+        Some(Value::Integer(ordinal)) => Ok(ordinal.clone()),
+        _ => Err(Failure::Unreadable(Text::from(
+            "the appended event holds no integer ordinal",
+        ))),
+    }
 }
 
 /// The first event of one read of the log whose `name` is `name`, whose `ordinal` is past `after`, and
@@ -197,7 +197,10 @@ pub fn event(
     profile: &Text,
     role: &Text,
 ) -> Result<Option<Object>, Failure> {
-    for event in observer.events(clocks, record)? {
+    let events = observer
+        .events(clocks, record)
+        .map_err(|error| observed(error, observer))?;
+    for event in events {
         let Value::Object(event) = event else {
             return Err(Failure::Unreadable(Text::from(format!(
                 "an observer event is no object: {}",

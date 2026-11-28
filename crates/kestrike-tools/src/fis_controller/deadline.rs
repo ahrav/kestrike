@@ -58,10 +58,6 @@ impl Deadlines {
         })
     }
 
-    pub fn poll(&self) -> f64 {
-        self.poll
-    }
-
     pub fn call(&self) -> f64 {
         self.call
     }

@@ -191,7 +191,7 @@ impl Section {
     /// While `first_failure` is null, records `reason` as `first_failure` with `verdict`, and `status`
     /// where one is given; a standing failure stays as it is.
     pub fn fail(&mut self, verdict: Verdict, reason: Text, status: Option<Status>) {
-        if self.members.get("first_failure") != Some(&Value::Null) {
+        if !self.no_failure() {
             return;
         }
         self.members.insert("first_failure", Value::String(reason));
@@ -203,26 +203,17 @@ impl Section {
 
     /// A failure another principal's experiment may have caused. A `DISPROVEN` verdict becomes
     /// `INCONCLUSIVE`: its reason moves to `diagnostic`, and `first_failure` takes the diagnostic that
-    /// stood before when that was a nonempty text, else `reason`. Under any other verdict it is
+    /// stood before when that was truthy, else `reason`. Under any other verdict it is
     /// [`Section::fail`] with `INCONCLUSIVE` and no status.
     pub fn contaminate(&mut self, reason: Text) {
         if !self.verdict_is(Verdict::Disproven) {
             return self.fail(Verdict::Inconclusive, reason, None);
         }
-        let earlier = self.members.get("diagnostic").cloned();
-        let standing = self
-            .members
-            .get("first_failure")
-            .cloned()
-            .unwrap_or(Value::Null);
-        self.members.insert("diagnostic", standing);
-        let first = match earlier {
-            Some(earlier) if python::truthy(&earlier) => earlier,
+        let first = match self.members.get("diagnostic") {
+            Some(earlier) if python::truthy(earlier) => earlier.clone(),
             _ => Value::String(reason),
         };
-        self.members.insert("first_failure", first);
-        self.members
-            .insert("verdict", text(Verdict::Inconclusive.as_str()));
+        self.replace(Verdict::Inconclusive, first);
     }
 
     /// A case that failed or died after the fault started. With no failure standing, or no
@@ -230,22 +221,29 @@ impl Section {
     /// `INCONCLUSIVE` failure moves to `diagnostic` and `reason` stands as a `DISPROVEN` one; an
     /// `INVALID` or `DISPROVEN` failure stays as it is.
     pub fn disprove(&mut self, reason: Text) {
-        if self.members.get("first_failure") == Some(&Value::Null)
-            || !self.contains("effect_window")
-        {
+        if self.no_failure() || !self.contains("effect_window") {
             return self.fail(Verdict::Disproven, reason, None);
         }
         if self.verdict_is(Verdict::Inconclusive) {
-            let standing = self
-                .members
-                .get("first_failure")
-                .cloned()
-                .unwrap_or(Value::Null);
-            self.members.insert("diagnostic", standing);
-            self.members.insert("first_failure", Value::String(reason));
-            self.members
-                .insert("verdict", text(Verdict::Disproven.as_str()));
+            self.replace(Verdict::Disproven, Value::String(reason));
         }
+    }
+
+    /// Whether `first_failure` is null.
+    fn no_failure(&self) -> bool {
+        self.members.get("first_failure") == Some(&Value::Null)
+    }
+
+    /// Moves the standing `first_failure` to `diagnostic`, then records `first` under `verdict`.
+    fn replace(&mut self, verdict: Verdict, first: Value) {
+        let standing = self
+            .members
+            .get("first_failure")
+            .cloned()
+            .unwrap_or(Value::Null);
+        self.members.insert("diagnostic", standing);
+        self.members.insert("first_failure", first);
+        self.members.insert("verdict", text(verdict.as_str()));
     }
 
     fn verdict_is(&self, verdict: Verdict) -> bool {

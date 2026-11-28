@@ -175,12 +175,12 @@ fn shown(section: &Section, key: &str) -> String {
         .map_or_else(|| "'<absent>'".to_owned(), repr)
 }
 
-/// Each rule records, replaces and keeps the failure as the script's rule does on the same section:
+/// Each rule records, replaces and keeps the failure by its own condition:
 /// `fail` only while none stands, `contaminate` turning a `DISPROVEN` into `INCONCLUSIVE` with an
 /// earlier nonempty diagnostic back in its place, and `disprove` replacing an `INCONCLUSIVE` once a
 /// fault's window stands.
 #[test]
-fn each_verdict_under_each_rule_records_what_the_script_records() {
+fn each_verdict_under_each_rule_records_the_rule_s_outcome() {
     let mut checked = 0;
     for row in ROWS.lines() {
         let cells: Vec<&str> = row.split('|').collect();
@@ -221,10 +221,10 @@ fn each_verdict_under_each_rule_records_what_the_script_records() {
     assert_eq!(checked, 64, "every reachable row is checked");
 }
 
-/// The receipt before any phase holds what the script's constructor composes, written as the script
-/// writes a receipt, with the kernel's timeout stripped and its line ends read as `\n`.
+/// The receipt before any phase holds the opening members and the three timeouts, written with sorted
+/// keys and an indent of two, the kernel's timeout stripped and its line ends read as `\n`.
 #[test]
-fn the_section_before_any_phase_is_the_script_s_receipt() {
+fn the_section_before_any_phase_holds_its_opening_members() {
     let scratch = Scratch::new("opening");
     let kernel = scratch.path().join("io_timeout");
     for (bytes, timeout) in [

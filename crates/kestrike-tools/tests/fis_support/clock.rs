@@ -4,8 +4,9 @@
 //! A reading returns the clock's time and then moves it by the step. With no step, a reading at a
 //! deadline stays at that deadline, so a loop that leaves only on a reading past its deadline needs a
 //! step to end. A sleep, a call and a wait each move the clock through [`Clock::pass`], which reads
-//! the signal record before and after the time passes, and delivers a signal the case set for a time
-//! inside that span when the clock reaches it.
+//! the signal record before and after the time passes. A signal the case set for a time is delivered
+//! once the clock reaches that time, by a reading's step or inside a pass, where the record is read
+//! at that time.
 
 use std::cell::{Cell, RefCell};
 use std::io;
@@ -73,6 +74,21 @@ impl Clock {
         self.0.sleeps.borrow().clone()
     }
 
+    /// Delivers the signal set for a time the clock has reached.
+    fn deliver_due(&self) {
+        if let Some((at, signal, delivered)) = self.0.signal.get()
+            && at <= self.now()
+        {
+            self.0.signal.set(None);
+            delivered.deliver(signal);
+        }
+    }
+
+    /// Whether `other` reads and moves this clock's time.
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
     /// Moves the clock by `length`: reads the record, delivers a signal set inside the span when the
     /// clock reaches its time and reads the record there, then moves the rest and reads it again.
     ///
@@ -106,6 +122,7 @@ impl Clocks for Clock {
         }
         let now = self.now();
         self.0.now.set(now.saturating_add(self.0.step.get()));
+        self.deliver_due();
         Ok(now)
     }
 

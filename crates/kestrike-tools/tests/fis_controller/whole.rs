@@ -1,13 +1,13 @@
 //! The whole-file write: each state of the name, a failure at each of steps 3 to 6 and at step 8, and
 //! the directories a write makes and syncs. Each row's error text, the file's text and the
-//! directory's entries after the write are the script's on the same arrangement.
+//! directory's entries after the write are the write's steps' on each arrangement.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
-use kestrike_tools::fis_controller::{write_file, write_file_by};
+use kestrike_tools::fis_controller::{create_partial, write_file, write_file_by};
 use kestrike_tools::host_stop::Disk;
 
 use crate::fis_support::steps::Steps;
@@ -146,6 +146,7 @@ fn a_write_that_fails_leaves_the_previous_version_and_no_partial_file() {
     fs::write(&target, "old").expect("the file is written");
     let files = Steps {
         file_sync: true,
+        probe: Some(directory.join("f.json.partial")),
         ..Steps::default()
     };
     let got = outcome(&scratch, &directory, &target, written(&files, &target));
@@ -156,6 +157,11 @@ fn a_write_that_fails_leaves_the_previous_version_and_no_partial_file() {
             Some("old"),
             &["f.json"]
         )
+    );
+    assert_eq!(
+        *files.probed.borrow(),
+        Some(true),
+        "the partial file stood when its sync failed, and the failure removed it"
     );
 
     let (directory, target) = place(&scratch, "step6");
@@ -177,18 +183,75 @@ fn a_write_that_fails_leaves_the_previous_version_and_no_partial_file() {
     );
 }
 
-/// Each step whose failure the rows pin is reached: with the same arrangement and no failure set,
-/// the steps the failing rows fail at succeed and the new text stands.
+/// Step 4 creates `<name>.partial` exclusively, refusing a link at its name, with mode 0644 under the
+/// process's umask, and the rename keeps that mode at the name.
 #[test]
-fn the_failing_rows_differ_from_a_write_that_succeeds_in_their_failure_alone() {
-    let scratch = Scratch::new("write-control");
-    let (directory, target) = place(&scratch, "control");
-    fs::write(&target, "old").expect("the file is written");
-    let created = |partial: &Path| kestrike_tools::fis_controller::create_partial(partial);
-    let result = write_file_by(&Steps::default(), created, &target, "new\n")
-        .map_err(|error| error.to_string());
-    let got = outcome(&scratch, &directory, &target, result);
-    assert_eq!(got, expected(None, Some("new\n"), &["f.json"]));
+fn the_partial_file_is_made_exclusively_and_its_mode_stands_at_the_name() {
+    let scratch = Scratch::new("write-create");
+    let (directory, target) = place(&scratch, "create");
+    let partial = directory.join("f.json.partial");
+    fs::write(&partial, "junk").expect("the file is written");
+    let error = create_partial(&partial).expect_err("an existing file is refused");
+    assert_eq!(error.raw_os_error(), Some(libc::EEXIST));
+    fs::remove_file(&partial).expect("removed");
+    symlink(directory.join("nowhere"), &partial).expect("linked");
+    let error = create_partial(&partial).expect_err("a link is refused");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(libc::EEXIST),
+        "O_EXCL refuses a link at the name"
+    );
+    fs::remove_file(&partial).expect("removed");
+    let reference = directory.join("reference");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&reference)
+        .expect("the reference is made");
+    let mode = |path: &Path| fs::metadata(path).expect("stat").permissions().mode() & 0o7777;
+    drop(create_partial(&partial).expect("the partial file is made"));
+    assert_eq!(
+        mode(&partial),
+        mode(&reference),
+        "mode 0644 under the umask"
+    );
+    fs::remove_file(&partial).expect("removed");
+    write_file(&Disk, &target, "new\n").expect("the file is written");
+    assert_eq!(mode(&target), mode(&reference), "the rename keeps the mode");
+}
+
+/// A `mkdir` that fails because another maker's directory stands at the path goes on: the parent is
+/// synced and the file written. Control: the same `EEXIST` with no directory there fails the write
+/// with the `mkdir`'s error.
+#[test]
+fn a_directory_another_maker_made_first_is_taken() {
+    let scratch = Scratch::new("write-raced");
+    for made in [true, false] {
+        let base = scratch.path().join(format!("raced-{made}"));
+        fs::create_dir(&base).expect("the directory is made");
+        let target = base.join("sub/f.json");
+        let files = Steps {
+            mkdir: Some((base.join("sub"), made)),
+            ..Steps::default()
+        };
+        let result = written(&files, &target);
+        if made {
+            assert_eq!(result, Ok(()));
+            assert_eq!(
+                files.opened.borrow().first(),
+                Some(&base),
+                "the parent is synced"
+            );
+            assert_eq!(fs::read_to_string(&target).expect("reads"), "new\n");
+        } else {
+            let error = result.expect_err("the write fails");
+            assert_eq!(
+                scratch.norm(&error),
+                "[Errno 17] File exists: '<d>/raced-false/sub'"
+            );
+        }
+    }
 }
 
 /// A failed sync of the parent after the rename returns its error with the new file at the name: a
