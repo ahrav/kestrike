@@ -125,28 +125,52 @@ fn recorded_stop(
 const WAIT: Duration = Duration::from_secs(30);
 const PAUSE: Duration = Duration::from_millis(20);
 
-/// The state is the field after the last `)`, so a command name that holds `) Z (` reads as the state
-/// that follows it.
+/// The fields are read after the last `)`, so a command name that holds `) Z (` reads as the state that
+/// follows it; `Z` is an exited leader only with one thread left, and a stat line of a process that leads
+/// no group of its own is refused.
 #[test]
 fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
-    use super::state_of;
-    assert_eq!(state_of(b"12 (a) Z (b) S 1 12"), Some(b'S'));
-    assert_eq!(state_of(b"12 (sh) Z 1 12"), Some(b'Z'));
-    assert_eq!(state_of(b"12 (sh)"), None);
-    assert_eq!(state_of(b"12 sh S"), None);
+    use super::{Leader, parsed};
+    let line = |name: &str, state: &str, group: u32, threads: u32| {
+        let mut fields = vec![state.to_owned(), "1".to_owned(), group.to_string()];
+        fields.extend((3..17).map(|_| "0".to_owned()));
+        fields.push(threads.to_string());
+        fields.push("0\n".to_owned());
+        format!("12 ({name}) {}", fields.join(" ")).into_bytes()
+    };
+    assert_eq!(
+        parsed(&line("a) Z (b", "S", 12, 1), 12),
+        Ok(Leader::Running)
+    );
+    assert_eq!(parsed(&line("sh", "Z", 12, 1), 12), Ok(Leader::Exited));
+    assert_eq!(
+        parsed(&line("sh", "Z", 12, 2), 12),
+        Ok(Leader::Running),
+        "a leader whose main thread ended while another runs"
+    );
+    assert!(
+        parsed(&line("sh", "S", 7, 1), 12).is_err(),
+        "a member of another group"
+    );
+    assert!(parsed(b"12 (sh)", 12).is_err());
+    assert!(parsed(b"12 sh S", 12).is_err());
     let scratch = crate::paths::tests::Scratch::new("probe-name");
     let program = scratch.0.join("x) Z (y");
     std::os::unix::fs::symlink("/bin/sleep", &program).expect("the link is made");
-    let mut child = Command::new(&program)
-        .arg("600")
-        .spawn()
-        .expect("the copy runs");
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        Command::new(&program)
+            .arg("600")
+            .process_group(0)
+            .spawn()
+            .expect("the copy runs")
+    };
     let comm = std::fs::read_to_string(format!("/proc/{}/comm", child.id())).expect("comm reads");
     let state = super::leader(child.id()).expect("the state reads");
     child.kill().expect("the child is killed");
     child.wait().expect("the child is reaped");
     assert_eq!(comm, "x) Z (y\n");
-    assert_eq!(state, super::Leader::Running);
+    assert_eq!(state, Leader::Running);
 }
 
 /// A leader that exits reads as exited and stays unreaped: each signal of the stop is sent while the
@@ -156,7 +180,7 @@ fn an_exited_leader_stays_a_zombie_through_each_signal_and_the_reap_gives_its_co
     let mut child = group_leader("exit 7");
     let state = super::leader_left_within(child.id(), WAIT, PAUSE, &|| false);
     assert_eq!(state.expect("the state reads"), super::Leader::Exited);
-    let stop = super::GroupStop::new(WAIT, true, Some(WAIT), PAUSE);
+    let stop = super::GroupStop::new(WAIT, Some(WAIT), PAUSE).with_second_grace();
     let (sent, stopped) = recorded_stop(&mut child, &stop);
     assert_eq!(
         sent,
@@ -175,11 +199,11 @@ fn an_exited_leader_stays_a_zombie_through_each_signal_and_the_reap_gives_its_co
 /// has exited; without one, the closing SIGKILL alone. A check that holds ends a grace at once.
 #[test]
 fn a_leader_that_outlives_sigterm_is_killed_as_the_stop_s_values_say() {
-    let short = Duration::from_millis(100);
+    let long = Duration::from_secs(2);
     let mut child = ignoring_term();
     let (sent, stopped) = recorded_stop(
         &mut child,
-        &super::GroupStop::new(short, true, Some(WAIT), PAUSE),
+        &super::GroupStop::new(long, Some(WAIT), PAUSE).with_second_grace(),
     );
     assert_eq!(
         sent,
@@ -194,7 +218,7 @@ fn a_leader_that_outlives_sigterm_is_killed_as_the_stop_s_values_say() {
     );
     let mut child = ignoring_term();
     let ends = || true;
-    let stop = super::GroupStop::new(WAIT, false, None, PAUSE).ended_by(&ends);
+    let stop = super::GroupStop::new(WAIT, None, PAUSE).ended_by(&ends);
     let start = Instant::now();
     let (sent, stopped) = recorded_stop(&mut child, &stop);
     assert!(
@@ -222,8 +246,61 @@ fn a_leader_reaped_elsewhere_ends_the_stop_with_no_signal() {
     assert_eq!(reaped, pid, "the leader is reaped outside the stop");
     let (sent, stopped) = recorded_stop(
         &mut child,
-        &super::GroupStop::new(WAIT, true, Some(WAIT), PAUSE),
+        &super::GroupStop::new(WAIT, Some(WAIT), PAUSE).with_second_grace(),
     );
     assert_eq!(sent, []);
     assert_eq!(stopped, super::Stopped::ReapedElsewhere);
+}
+
+/// A signal that fails ends the stop with its error after SIGKILL to the group and to the child and the
+/// reap; a group with no member at SIGTERM goes on to the reap with no further signal; and a leader that
+/// outlives the reap's bound stays unreaped as `Running`.
+#[test]
+fn a_failed_signal_an_empty_group_and_a_reap_past_its_bound() {
+    let pid_of = |child: &std::process::Child| libc::pid_t::try_from(child.id()).expect("fits");
+    let mut child = ignoring_term();
+    let group = pid_of(&child);
+    let mut sent = Vec::new();
+    let mut failing = |at: libc::pid_t, signal: i32| {
+        sent.push(signal);
+        if signal == libc::SIGTERM {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        super::signal_group(at, signal)
+    };
+    let stop = super::GroupStop::new(WAIT, Some(WAIT), PAUSE);
+    let error = super::stop_with(&mut child, &stop, &mut failing).expect_err("the signal fails");
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+    assert_eq!(sent, [libc::SIGTERM, libc::SIGKILL]);
+    assert_eq!(
+        super::leader(child.id()).expect("the state reads"),
+        super::Leader::Reaped
+    );
+    assert!(
+        std::fs::metadata(format!("/proc/{group}")).is_err(),
+        "the child is reaped"
+    );
+
+    let mut child = group_leader("exit 3");
+    let state = super::leader_left_within(child.id(), WAIT, PAUSE, &|| false);
+    assert_eq!(state.expect("the state reads"), super::Leader::Exited);
+    let mut sent = Vec::new();
+    let mut empty = |_: libc::pid_t, signal: i32| {
+        sent.push(signal);
+        Ok(false)
+    };
+    let stopped = super::stop_with(&mut child, &stop, &mut empty).expect("the stop runs");
+    assert_eq!(sent, [libc::SIGTERM]);
+    assert!(matches!(stopped, super::Stopped::Reaped(status) if status.code() == Some(3)));
+
+    let mut child = ignoring_term();
+    let mut ignored = |_: libc::pid_t, _: i32| Ok(true);
+    let brief = Duration::from_millis(50);
+    let stop = super::GroupStop::new(brief, Some(brief), PAUSE);
+    let stopped = super::stop_with(&mut child, &stop, &mut ignored).expect("the stop runs");
+    let running = super::leader(child.id()).expect("the state reads");
+    child.kill().expect("the child is killed");
+    child.wait().expect("the child is reaped");
+    assert_eq!(stopped, super::Stopped::Running);
+    assert_eq!(running, super::Leader::Running);
 }

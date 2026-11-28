@@ -6,7 +6,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -21,9 +21,8 @@ use super::rundir::{self, OpenError, make_temp_dir};
 use super::stop::{COMPLETE, Fault, INCOMPLETE, REJECTED, Stop};
 use crate::args::Parsed;
 use crate::json::{self, Integer, Object, Value};
-use crate::ownership::{Opened, open_regular};
 use crate::plants::{publish, remove};
-use crate::process::{SIGCHLD_IGNORED, sigchld_ignored};
+use crate::process::refuse_ignored_sigchld;
 use crate::python::{hexdigest, say};
 use crate::stream::emit;
 use crate::text::{Text, text};
@@ -245,13 +244,11 @@ impl Run {
 
     /// `copy_lock` copies the invoking checkout's `Cargo.lock` into the worktree when it is a regular file
     /// and the worktree holds no entry at that path. The lock is opened once and its check and copy read
-    /// that open. Exclusive creation fails on any existing entry, a dangling link included, so the copy
+    /// that open, ahead of the target's creation. Exclusive creation fails on any existing entry, a dangling link included, so the copy
     /// never writes through a link.
     fn copy_lock(&self, tree: &Path) -> Result<(), Stop> {
         let source = self.prepared.top.join("Cargo.lock");
-        let opened = open_regular(&source)
-            .map_err(|error| Stop::failed(&Fault::os(error.error(), Some(source.as_os_str()))))?;
-        let Opened::File(mut lock) = opened else {
+        let Some(bytes) = read_regular(&source).map_err(|fault| Stop::failed(&fault))? else {
             return Ok(());
         };
         let target = tree.join("Cargo.lock");
@@ -264,8 +261,6 @@ impl Run {
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
             Err(error) => return Err(failed(&target)(error)),
         };
-        let mut bytes = Vec::new();
-        lock.read_to_end(&mut bytes).map_err(failed(&source))?;
         copy.write_all(&bytes).map_err(failed(&target))
     }
 
@@ -650,12 +645,8 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
             return if written.is_ok() { code } else { STREAM_FAILED };
         }
     };
-    match sigchld_ignored() {
-        Ok(false) => {}
-        Ok(true) => return Streams::default().refuse(&Stop::rejected(Text::from(SIGCHLD_IGNORED))),
-        Err(error) => {
-            return Streams::default().refuse(&Stop::rejected(Fault::os(&error, None).to_text()));
-        }
+    if let Err(refusal) = refuse_ignored_sigchld() {
+        return Streams::default().refuse(&Stop::rejected(Text::from(refusal)));
     }
     let prepared = match preflight(options) {
         Ok(prepared) => prepared,

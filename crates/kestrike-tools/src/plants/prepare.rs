@@ -23,7 +23,7 @@ use crate::args::Parsed;
 use crate::environ::{Environ, get, set};
 use crate::git::REPOSITORY_VARIABLES;
 use crate::paths;
-use crate::process::{SIGCHLD_IGNORED, sigchld_ignored};
+use crate::process::refuse_ignored_sigchld;
 use crate::text::{Text, strip_str};
 
 /// The checked inputs of a run, each read once.
@@ -165,11 +165,7 @@ fn checked(options: Options, env: Environ, here: io::Result<PathBuf>) -> Result<
     }
     let here = here
         .map_err(|error| Stop::failed(format!("the invoking directory cannot be read: {error}")))?;
-    match sigchld_ignored() {
-        Ok(false) => {}
-        Ok(true) => return Err(Stop::failed(SIGCHLD_IGNORED)),
-        Err(error) => return Err(Stop::failed(format!("SIGCHLD cannot be read: {error}"))),
-    }
+    refuse_ignored_sigchld().map_err(Stop::failed)?;
     let found = rev_parse(
         &env,
         &here,
