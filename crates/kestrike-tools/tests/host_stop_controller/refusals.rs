@@ -241,11 +241,13 @@ fn mkfifo(path: &Path) {
 /// writer, and one that is a link is refused at its read.
 #[test]
 fn an_input_that_is_a_named_pipe_or_a_link_is_refused_without_waiting() {
-    let mut case = Case::new("pipe");
-    let hosts = case.scratch.0.join("snapshot/hosts.jsonl");
-    fs::remove_file(&hosts).expect("the file goes");
-    mkfifo(&hosts);
-    case.assert_refused(&[CALLER], "hosts.jsonl is no regular file");
+    crate::host_stop_support::bounded("the named-pipe snapshot row", || {
+        let mut case = Case::new("pipe");
+        let hosts = case.scratch.0.join("snapshot/hosts.jsonl");
+        fs::remove_file(&hosts).expect("the file goes");
+        mkfifo(&hosts);
+        case.assert_refused(&[CALLER], "hosts.jsonl is no regular file");
+    });
 
     let mut case = Case::new("link");
     let shards = case.scratch.0.join("snapshot/shards.jsonl");

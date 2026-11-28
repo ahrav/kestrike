@@ -246,26 +246,28 @@ fn an_evidence_directory_that_does_not_hold_the_packages_bytes_is_refused_with_n
         ),
     ];
     for (name, change, reason) in rows {
-        let mut case = Case::new("copy");
-        let copied = case.evidence.join(COPY);
-        change(&copied, &case.package);
-        let bytes = |path: &std::path::Path| {
-            fs::symlink_metadata(path)
-                .is_ok_and(|meta| meta.is_file())
-                .then(|| fs::read(path).expect("the copy reads"))
-        };
-        let before = (listing(&case.evidence), bytes(&copied));
-        let code = case.run();
-        let output = case.output();
-        assert_eq!(code, 2, "{name}: {output}");
-        assert!(output.contains("refused: "), "{name}: {output}");
-        assert!(output.contains(reason), "{name}: {reason:?} in {output}");
-        assert_eq!(
-            case.ops(),
-            Vec::<String>::new(),
-            "{name}: no call beside a refused package"
-        );
-        assert_eq!((listing(&case.evidence), bytes(&copied)), before, "{name}");
+        crate::host_stop_support::bounded(name, move || {
+            let mut case = Case::new("copy");
+            let copied = case.evidence.join(COPY);
+            change(&copied, &case.package);
+            let bytes = |path: &std::path::Path| {
+                fs::symlink_metadata(path)
+                    .is_ok_and(|meta| meta.is_file())
+                    .then(|| fs::read(path).expect("the copy reads"))
+            };
+            let before = (listing(&case.evidence), bytes(&copied));
+            let code = case.run();
+            let output = case.output();
+            assert_eq!(code, 2, "{name}: {output}");
+            assert!(output.contains("refused: "), "{name}: {output}");
+            assert!(output.contains(reason), "{name}: {reason:?} in {output}");
+            assert_eq!(
+                case.ops(),
+                Vec::<String>::new(),
+                "{name}: no call beside a refused package"
+            );
+            assert_eq!((listing(&case.evidence), bytes(&copied)), before, "{name}");
+        });
     }
     let mut case = Case::new("copy-named");
     case.package = case.evidence.join(COPY);
@@ -681,6 +683,23 @@ fn a_stopped_read_at_the_run_windows_end_shows_no_stop() {
 /// The time of the record read that showed the stop, from the log.
 fn record_time(log: &[super::plane::Logged]) -> Option<f64> {
     log.iter().find(|l| l.op == RECORD).and_then(|l| l.time)
+}
+
+#[test]
+fn an_alarm_read_that_starts_exactly_at_the_observations_end_ends_it() {
+    let mut case = Case::new("observation-equal");
+    case.plane.borrow_mut().call_seconds = 0.25;
+    let observe = operator_seconds(&case, "observe_seconds");
+    let code = case.run();
+    assert_eq!(code, 0, "{}", case.output());
+    let log = case.log();
+    let end = record_time(&log).expect("the record read") + observe;
+    let last = log.last().expect("a call");
+    assert_eq!(last.op, ALARMS);
+    assert_eq!(last.start, end, "{last:?}");
+    assert!(!last.marks.iter().any(|m| m == "stopped"), "{last:?}");
+    let before = &log[log.len() - 2];
+    assert!(before.start < end, "{before:?}");
 }
 
 /// An alarm read that starts before the observation's end and answers after it does not end the
