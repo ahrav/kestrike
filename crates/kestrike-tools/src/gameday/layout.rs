@@ -27,6 +27,16 @@ pub const VERSION_FIELDS: [(&str, Schema); 5] = [
 /// attempts.
 pub const VERSION: Schema = Schema::Object(&VERSION_FIELDS);
 
+/// The schema of a line of `records/<shard>.jsonl`: the version's time, then its fields.
+pub(super) const RECORD: Schema = Schema::Object(&[
+    ("time", s(Scalar::Time)),
+    VERSION_FIELDS[0],
+    VERSION_FIELDS[1],
+    VERSION_FIELDS[2],
+    VERSION_FIELDS[3],
+    VERSION_FIELDS[4],
+]);
+
 /// The schema of a stop request: the instance, the time and the identity that asked. The stop mark is one
 /// request, and the stopped mark holds one as its `request`.
 pub const REQUEST: Schema = Schema::Object(&[

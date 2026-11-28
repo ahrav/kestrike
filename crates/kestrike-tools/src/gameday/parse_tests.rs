@@ -3,6 +3,7 @@
 //! the interpreter.
 
 use super::{decode, parsed};
+use crate::gameday::test_support::within_deadline;
 use crate::python::repr;
 use crate::text::Text;
 
@@ -196,4 +197,34 @@ fn a_long_mantissa_and_an_exponent_that_cancel_read_as_the_value_they_spell() {
         )),
         "decode('0.' + '0' * 65535 + '1e655360', 'f')"
     );
+}
+
+/// The read of an object finds a repeated key by one lookup per member, so an object of 200,000
+/// distinct members reads within the deadline, and a repeat of the first key after them is still the
+/// one refused.
+#[test]
+fn an_object_of_two_hundred_thousand_members_reads_within_the_deadline() {
+    let members: Vec<String> = (0..200_000).map(|n| format!("\"k{n}\": {n}")).collect();
+    let distinct = format!("{{{}}}", members.join(", "));
+    let repeated = format!("{{{}, \"k0\": 0}}", members.join(", "));
+    let (strict, unique, refused, named) =
+        within_deadline("the read of 200,000 members", move || {
+            let strict = match decode(&distinct, &Text::from("f")) {
+                Ok(crate::json::Value::Object(object)) => object.len(),
+                other => panic!("the members read as an object, not {other:?}"),
+            };
+            let unique = match crate::json::parse_unique(&distinct) {
+                Ok(crate::json::Value::Object(object)) => object.len(),
+                other => panic!("the members read as an object, not {other:?}"),
+            };
+            let refused = decode(&repeated, &Text::from("f")).expect_err("a repeat is refused");
+            let named = match crate::json::parse_unique(&repeated) {
+                Err(crate::json::UniqueError::Repeated(name)) => name.to_string(),
+                other => panic!("the repeat is refused by name, not {other:?}"),
+            };
+            (strict, unique, refused.message().to_string(), named)
+        });
+    assert_eq!((strict, unique), (200_000, 200_000));
+    assert_eq!(refused, "f is not strict JSON: an object repeats a key");
+    assert_eq!(named, "k0");
 }
