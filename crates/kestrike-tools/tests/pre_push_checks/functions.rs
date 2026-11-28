@@ -277,20 +277,78 @@ fn a_game_day_judge_input_runs_its_self_test_at_a_tip_that_holds_it() {
     }
 }
 
-/// Each input of the host stop controller's self-test runs it at a tip that holds it; at a tip without it
-/// only the controller and the self-test run it, and unrelated paths never do.
+/// The host stop controller's row runs its Rust cases by a `cargo test` filter, built into the launcher's
+/// target directory. A change at or under a directory of its Rust modules, its tool root or its cases
+/// runs them at any tip; each file the cases read from the tree runs them at a tip that holds them; the
+/// Python files the cases do not read, the game-day judge among them, and unrelated paths never do.
 #[test]
 fn a_host_stop_controller_input_runs_its_self_test_at_a_tip_that_holds_it() {
     assert_eq!(
         argv(Check::HostStop),
-        ["python3", "-I", "scripts/test-host-stop-controller.py"]
+        [
+            "cargo",
+            "test",
+            "--package",
+            "kestrike-tools",
+            "--test",
+            "tools",
+            "--",
+            "host_stop::",
+            "host_stop_checks::",
+            "host_stop_controller::",
+            "host_stop_support::",
+        ]
     );
+    let row = &kestrike_tools::hook::ORDER[Check::HostStop as usize];
+    assert!(row.tools_target);
+    assert_eq!(
+        row.held,
+        Some("crates/kestrike-tools/tests/host_stop_controller/mod.rs")
+    );
+    assert!(
+        kestrike_tools::hook::ORDER
+            .iter()
+            .all(|other| other.tools_target == (other.check == Check::HostStop))
+    );
+    let own = [
+        "crates/kestrike-tools/src/host_stop/launch.rs",
+        "crates/kestrike-tools/src/host_stop",
+        "crates/kestrike-tools/src/host_stop_controller/run.rs",
+        "crates/kestrike-tools/src/gameday/read.rs",
+        "crates/kestrike-tools/src/tools/host_stop_controller/mod.rs",
+        "crates/kestrike-tools/src/tools/host_stop_controller/help.txt",
+        "crates/kestrike-tools/tests/host_stop/launch.rs",
+        "crates/kestrike-tools/tests/host_stop_checks/run.rs",
+        "crates/kestrike-tools/tests/host_stop_controller/mod.rs",
+        "crates/kestrike-tools/tests/host_stop_support/mod.rs",
+    ];
     let inputs = [
-        "scripts/host-stop-controller.py",
-        "scripts/test-host-stop-controller.py",
         "scripts/host-stop-fixtures/operator.json",
         "scripts/host-stop-fixtures/snapshot/shards.jsonl",
         "scripts/gameday-fixtures/held/package.json",
+        "verification/readiness/gamedays.json",
+        "crates/kestrike/src/failover/zone_loop/directory.rs",
+        "crates/kestrike/src/failover/standbys.rs",
+    ];
+    let unheld = Held {
+        host_stop: false,
+        ..Held::default()
+    };
+    for path in own.iter().chain(&inputs) {
+        assert!(
+            selected(path, Held::default()).contains(&Check::HostStop),
+            "{path}"
+        );
+    }
+    for path in own {
+        assert_eq!(selected(path, unheld), [Check::HostStop], "{path}");
+    }
+    for path in inputs {
+        assert!(!selected(path, unheld).contains(&Check::HostStop), "{path}");
+    }
+    for path in [
+        "scripts/host-stop-controller.py",
+        "scripts/test-host-stop-controller.py",
         "scripts/gameday-judge.py",
         "scripts/readiness.py",
         "scripts/acceptance.py",
@@ -304,28 +362,12 @@ fn a_host_stop_controller_input_runs_its_self_test_at_a_tip_that_holds_it() {
         "scripts/hit-gate.py",
         "scripts/verify-receipts.py",
         "scripts/fis-profiles.json",
-        "verification/readiness/gamedays.json",
-    ];
-    let unheld = Held {
-        host_stop: false,
-        ..Held::default()
-    };
-    for path in inputs {
-        assert!(
-            selected(path, Held::default()).contains(&Check::HostStop),
-            "{path}"
-        );
-    }
-    for path in &inputs[2..] {
-        assert!(!selected(path, unheld).contains(&Check::HostStop), "{path}");
-    }
-    for path in &inputs[..2] {
-        assert_eq!(selected(path, unheld), [Check::HostStop], "{path}");
-    }
-    for path in [
         "verification/readiness/failover.json",
         "scripts/test-fis-controller.py",
-        "scripts/host-stop-controller.md",
+        "crates/kestrike-tools/src/host_stops.rs",
+        "crates/kestrike-tools/src/json.rs",
+        "crates/kestrike-tools/src/tools/host_stop_controllers.rs",
+        "crates/kestrike-tools/tests/host_stop_x/mod.rs",
         "docs/agents/ci.md",
     ] {
         assert!(
@@ -333,14 +375,51 @@ fn a_host_stop_controller_input_runs_its_self_test_at_a_tip_that_holds_it() {
             "{path}"
         );
     }
-    assert_eq!(
-        selected("scripts/host-stop-controller.py", Held::default()),
-        [Check::HostStop]
-    );
-    assert_eq!(
-        kestrike_tools::hook::ORDER[Check::HostStop as usize].check,
-        Check::HostStop
-    );
+    assert_eq!(row.check, Check::HostStop);
+}
+
+/// Each case directory of the host stop controller under `crates/kestrike-tools/tests/` has a filter
+/// of its own in the row's argument vector and selects the row, and each filter names such a
+/// directory, so a case directory added or renamed changes the row with it.
+#[test]
+fn each_host_stop_case_directory_has_its_filter_in_the_row() {
+    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut directories: Vec<String> = std::fs::read_dir(&tests)
+        .expect("tests/ lists")
+        .map(|entry| {
+            entry
+                .expect("tests/ lists")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with("host_stop"))
+        .collect();
+    directories.sort();
+    let argv = argv(Check::HostStop);
+    let at = argv
+        .iter()
+        .position(|word| *word == "--")
+        .expect("the filters follow --");
+    let mut filters: Vec<String> = argv[at + 1..]
+        .iter()
+        .map(|filter| {
+            filter
+                .strip_suffix("::")
+                .expect("a filter ends with ::")
+                .to_owned()
+        })
+        .collect();
+    filters.sort();
+    assert_eq!(filters, directories);
+    for directory in &directories {
+        let path = format!("crates/kestrike-tools/tests/{directory}/mod.rs");
+        let unheld = Held {
+            host_stop: false,
+            ..Held::default()
+        };
+        assert_eq!(selected(&path, unheld), [Check::HostStop], "{path}");
+    }
 }
 
 /// `matched` holds when a decoded value of the record `text` holds what may be an account number, and

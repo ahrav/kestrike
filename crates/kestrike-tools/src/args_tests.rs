@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 
-use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
+use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, Reads, any, unrecognized};
 use crate::text::Text;
 
 fn given(value: &Text) -> Result<(), String> {
@@ -356,4 +356,67 @@ fn a_repeated_option_keeps_every_occurrence_in_order() {
         repeated(&["--plant"]),
         refused("argument --plant: expected one argument")
     );
+}
+
+/// `parse_known` returns the leftover arguments in command-line order beside the values, and
+/// `parse` refuses the same leftovers with the text of [`unrecognized`] after the missing-option
+/// check.
+#[test]
+fn parse_known_keeps_the_leftovers_in_order_and_parse_refuses_them() {
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Refuse,
+        &OPTIONS,
+    );
+    let args: Vec<OsString> = ["x", "--base", "b", "--nope", "y", "--head=h", "-z"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let Parsed::Run((values, extras)) = reader.parse_known(&args) else {
+        panic!("the reader takes the values")
+    };
+    assert_eq!(values.get("--base"), Some(OsStr::new("b")));
+    assert_eq!(values.get("--head"), Some(OsStr::new("h")));
+    let expected: Vec<OsString> = ["x", "--nope", "y", "-z"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    assert_eq!(extras, expected);
+    assert_eq!(reader.parse(&args), refused(&unrecognized(&expected)));
+}
+
+/// `reads` sorts one argument as `parse` does: a value, an option of a row, an unknown option, or
+/// the refusal of an ambiguous prefix.
+#[test]
+fn reads_sorts_an_argument_as_parse_does() {
+    let reader = Reader::new(
+        "tool",
+        "usage: tool [options]",
+        "help\n",
+        Prefixes::Select,
+        &OPTIONS,
+    );
+    for (arg, expected) in [
+        ("--", Ok(Reads::End)),
+        ("x", Ok(Reads::Value)),
+        ("-", Ok(Reads::Value)),
+        ("-1", Ok(Reads::Value)),
+        ("-a b", Ok(Reads::Value)),
+        ("--base", Ok(Reads::Option)),
+        ("--ba=x", Ok(Reads::Option)),
+        ("-hx=y", Ok(Reads::Option)),
+        ("--nope", Ok(Reads::Unknown)),
+        (
+            "--=x",
+            Err(
+                "ambiguous option: --=x could match --help, --base, --head, --max-mutants, \
+                 --shard, --tests, --artifacts, --cargo"
+                    .to_owned(),
+            ),
+        ),
+    ] {
+        assert_eq!(reader.reads(OsStr::new(arg)), expected, "{arg}");
+    }
 }
