@@ -213,14 +213,15 @@ pub(crate) fn assembled(root: &str, names: &[&str]) -> String {
     }
 }
 
-/// The text of `path` with empty and `.` components dropped, `..` kept.
+/// The text of `path` in the form of [`pure_bytes`].
 pub(crate) fn pure(path: &str) -> String {
     String::from_utf8(pure_bytes(path.as_bytes()))
         .expect("UTF-8 split at `/` and joined again stays UTF-8")
 }
 
-/// `pure_bytes` applies the component rules of [`pure`] to a path's bytes and keeps each remaining
-/// component byte for byte.
+/// `pure_bytes` is `path` with empty and `.` components dropped and `..` kept, each remaining component
+/// byte for byte: exactly two leading slashes stay as `//`, one or three or more stand as `/`, and a
+/// relative path with no component left is `.`.
 pub(crate) fn pure_bytes(path: &[u8]) -> Vec<u8> {
     let root: &[u8] = if path.starts_with(b"//") && !path.starts_with(b"///") {
         b"//"

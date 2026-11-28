@@ -1,5 +1,5 @@
-//! The host reservation: an exclusive `flock` of `<directory>/fis.lock`, held for the holder's life and
-//! passed to a child the holder starts.
+//! The host reservation: an exclusive `flock` of `<directory>/fis.lock`, held while a descriptor of its
+//! open file description stays open, and passed to a child the holder starts.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -10,8 +10,10 @@ use std::path::Path;
 use std::process::{Child, Command};
 
 /// The reservation's descriptor, open with its lock until the value drops. A child started through
-/// [`Reservation::spawn_holding`] holds a copy of the descriptor, and with it the lock, until the child
-/// and every process that inherits that copy ends.
+/// [`Reservation::spawn_holding`] starts with a copy of the descriptor; the lock then lasts while any
+/// copy of the open file description stays open, in the child or in a process that inherits it, so a
+/// child that relies on the reservation keeps its copy open. An unlock through any copy frees the lock
+/// for every copy.
 #[derive(Debug)]
 #[must_use = "the reservation frees when the value drops and no child holds it"]
 pub struct Reservation {
@@ -21,6 +23,10 @@ pub struct Reservation {
 /// Opens `<directory>/fis.lock` for reading and writing, made with mode 0644 when absent and refused
 /// where a link stands at the name, and takes `flock(LOCK_EX | LOCK_NB)`. A `flock` that a signal
 /// interrupts runs again; every other failed attempt closes the file and gives none.
+///
+/// The reservation excludes the participants that take the same lock: a caller takes it before it
+/// reads the custody markers with [`held_custody`](super::held_custody) and holds it, itself or
+/// through a child, while the cases it admits run.
 ///
 /// # Errors
 ///
@@ -47,6 +53,7 @@ impl Reservation {
     /// Starts `command` with the reservation's descriptor left open in the child at the same number:
     /// the child clears the descriptor's close-on-exec flag after its fork and before its exec. The
     /// command is consumed, so no later start reuses the descriptor's number after the value drops.
+    /// Every other descriptor the parent holds without close-on-exec reaches the child as well.
     ///
     /// # Errors
     ///

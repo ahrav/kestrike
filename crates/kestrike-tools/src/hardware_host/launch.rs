@@ -4,12 +4,14 @@ use std::ffi::OsStr;
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::environ::{self, Environ};
 use crate::json::{Object, Value};
+use crate::paths;
 use crate::python::{self, hexdigest};
 use crate::text::{Text, newlines, strip_str};
 
@@ -78,16 +80,20 @@ pub fn git_revision(top: &Path, environ: &Environ) -> Result<String, RevisionErr
 /// `eni.ipv4`, each null when no line names it. The bytes decode with each undecodable sequence
 /// replaced and split at Python's line boundaries, and a line's key is the text before its first `=`.
 ///
-/// An empty path, a path that does not open, one that is no regular file once links are followed, and
-/// a failed read give none. The file opens without blocking, so a FIFO at the path gives none.
+/// The file opens once, by the path in the form of [`paths::pure_bytes`], without blocking and without
+/// taking a terminal as the controlling one, and the checks and the read go through that descriptor. An
+/// empty path, a path that does not open for any reason, one that is no regular file once links are
+/// followed, and a failed read give none, so a FIFO at the path gives none without waiting for a
+/// writer. The recorded `path` is the caller's spelling, each byte outside UTF-8 held as the surrogate
+/// U+DC00 plus the byte, the text Python reads under a UTF-8 filesystem encoding.
 pub fn mappings_facts(path: &OsStr) -> Option<Object> {
     if path.is_empty() {
         return None;
     }
     let mut file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(path)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(OsStr::from_bytes(&paths::pure_bytes(path.as_bytes())))
         .ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;

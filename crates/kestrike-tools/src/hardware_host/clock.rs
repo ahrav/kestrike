@@ -8,7 +8,7 @@ use crate::host_stop::{self, Interrupted, Record, Seam};
 /// The two clock readings and the sleep; [`System`] is the system's.
 pub trait Clocks {
     /// `CLOCK_MONOTONIC` in whole nanoseconds. The clock pauses during a suspend and never steps back,
-    /// and other processes of the host read the same clock.
+    /// and the processes of one time namespace read the same clock; a time namespace can offset it.
     ///
     /// # Errors
     ///
