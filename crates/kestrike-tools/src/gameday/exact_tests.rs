@@ -38,6 +38,23 @@ fn sums_and_differences_are_exact_across_the_whole_range() {
         "sh(e(0.1) + e(0.2))"
     );
     assert_eq!(&e("0.5") - &e("0.5"), e("0"), "e(0.5) - e(0.5) == 0");
+    #[rustfmt::skip]
+    let carried: &[(&str, Decimal, Decimal)] = &[
+        ("e(0.9) + e(0.1) == Fraction(1, 1)", &e("0.9") + &e("0.1"), e("1")),
+        ("e(0.99) + e(0.01) == Fraction(1, 1)", &e("0.99") + &e("0.01"), e("1")),
+        ("e(999.5) + e(0.5) == Fraction(1000, 1)", &e("999.5") + &e("0.5"), e("1000")),
+        ("e(5) - e(-5) == Fraction(10, 1)", &e("5") - &e("-5"), e("10")),
+        ("e(1e16) - e(9999999999999998.0) == Fraction(2, 1)", &e("1e16") - &e("9999999999999998.0"), e("2")),
+        ("e(100) - e(99.99) == Fraction(1, 100)", &e("100") - &e("99.99"), e("0.01")),
+    ];
+    for (expression, found, judged) in carried {
+        assert_eq!(found, judged, "{expression}");
+    }
+    assert_eq!(
+        (&e("400") - &e("100.5")).whole_quotient(&e("0.5"), 1_000_000),
+        Some(599),
+        "(e(400) - e(100.5)) / e(0.5) == Fraction(599, 1)"
+    );
 }
 
 #[test]

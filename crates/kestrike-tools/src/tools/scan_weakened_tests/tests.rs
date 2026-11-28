@@ -417,7 +417,7 @@ fn a_count_or_a_bound_text_that_changes_its_type_is_refused() {
     .expect_err("the type changes");
     assert_eq!(
         error.to_string(),
-        "scripts/test-inventory.json: the value at a\\n::x.seeds changes from an integer to a text"
+        "scripts/test-inventory.json: the value at a\n::x.seeds changes from an integer to a text"
     );
     let old = r#"{"seeds": true, "seconds": 2.0, "executions": 3, "bound": "depth: 4"}"#;
     let new = r#"{"seeds": 1, "seconds": 1, "executions": {"x": 1}, "bound": ["depth: 1"]}"#;
@@ -472,6 +472,29 @@ fn a_tree_record_of_another_form_is_refused() {
                 "git ls-tree at 0123456789ab: the record {} has another form",
                 crate::text::Text::from(record).repr()
             )
+        );
+    }
+}
+
+/// `git ls-tree -z` terminates every record with NUL, including the last.
+#[test]
+fn a_tree_listing_that_ends_inside_a_record_is_refused_and_an_empty_one_holds_no_record() {
+    let commit = "0123456789abcdef";
+    assert_eq!(
+        records(commit, "").expect("an empty listing reads"),
+        Vec::<(String, String)>::new()
+    );
+    for listed in [
+        "100644 blob 1111\ta.rs",
+        "100644 blob 1111\tz.rs\x00100644 blob 2222\ta.rs",
+        "100644 blob 1111\tz.rs\x00100644 blob",
+    ] {
+        let error = records(commit, listed).expect_err("the listing is refused");
+        assert!(matches!(error, Failure::Refused(_)), "{error:?}");
+        assert_eq!(
+            error.to_string(),
+            "git ls-tree at 0123456789ab: the listing ends inside a record",
+            "{listed:?}"
         );
     }
 }

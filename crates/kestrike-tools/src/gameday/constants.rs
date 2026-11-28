@@ -102,3 +102,22 @@ pub(super) const WRITTEN_EXPECTED: &str =
     "20bea5125462d542f16749914573e4dedf7c844746d10f0390268583b2b9f575";
 /// The mark of a text the readiness catalog leaves to be written, which blocks a run.
 pub const TBD: &str = "TBD - BLOCKS EXECUTION";
+/// The directories of the evidence layout.
+pub(super) const LAYOUT_DIRS: [&str; 2] = ["injection", "records"];
+/// The files a collector writes beside `records/`, which `coverage.json` spans with each `records/` file.
+pub(super) const COLLECTED: [&str; 5] = [
+    "activations.jsonl",
+    "witness.jsonl",
+    "origin.jsonl",
+    "provider.jsonl",
+    "blockers.jsonl",
+];
+/// The marks, in the layout's order, that the seal names where they stand when it is written: each file
+/// of `injection/` but the seal itself.
+pub(super) const MARKS: [&str; 5] = [
+    "injection/roles.json",
+    "injection/stop.json",
+    "injection/stopped.json",
+    "injection/abort.json",
+    "injection/restoration.json",
+];
