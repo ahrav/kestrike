@@ -36,6 +36,6 @@ pub use order::{ends_observation, later, ordered};
 pub use package::{FleetBounds, check_package};
 pub use parse::{decode, parsed};
 pub use reach::roles_reach;
-pub use read::{ReadError, read_file};
+pub use read::{ReadError, Syncer, read_file, read_file_with};
 pub use refusal::{Refusal, need};
 pub use schema::{Each, Names, Scalar, Schema, conform, encodable, finite};

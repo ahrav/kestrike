@@ -500,11 +500,22 @@ impl<'c, 'a, S: Seam, F: Files> Controller<'c, 'a, S, F> {
     ///
     /// A `name` other than `roles` that the judge's layout lacks as `injection/<name>.json`.
     pub fn mark(&mut self, name: &'static str, value: &Value) -> Result<(), Halt> {
+        self.mark_under(name, value, &Names::new())
+    }
+
+    /// Writes the mark `name` as [`Controller::mark`] does, its value checked against the judge's
+    /// layout under `names`.
+    pub(crate) fn mark_under(
+        &mut self,
+        name: &'static str,
+        value: &Value,
+        names: &Names,
+    ) -> Result<(), Halt> {
         let what = Text::from(format!("injection/{name}.json"));
         if name != "roles" {
             let (schema, _) = layout(&format!("injection/{name}.json"))
                 .unwrap_or_else(|| panic!("the judge's layout holds injection/{name}.json"));
-            conform(value, schema, &what, &Names::new())
+            conform(value, schema, &what, names)
                 .map_err(|refusal| Fault::Refusal(refusal.message().clone()))?;
         }
         let data = encoded(value, &what, self.cx.mark_limit)

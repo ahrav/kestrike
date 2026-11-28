@@ -39,7 +39,9 @@ pub(super) const TOOL: &str = "host-stop-controller: ";
 /// unheld record over the same [`Delivered`](crate::host_stop::Delivered) the handlers store into. A
 /// panic the entry catches has already passed the process's panic hook, which the process owns.
 pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -> u8 {
-    let (Command::Run { operator, .. } | Command::Restore { operator, .. }) = command;
+    let (Command::Run { operator, .. }
+    | Command::Restore { operator, .. }
+    | Command::Seal { operator, .. }) = command;
     let mut written = Vec::new();
     let ended = caught(|| {
         let limit = cx.file_limit;
@@ -54,6 +56,7 @@ pub fn entry<S: Seam, F: Files>(command: &Command, cx: &mut Context<'_, S, F>) -
             Command::Restore {
                 evidence, reviewed, ..
             } => controller.restore(evidence, reviewed.as_deref()),
+            Command::Seal { evidence, .. } => controller.seal(evidence),
         }
     });
     cx.record.disarm();

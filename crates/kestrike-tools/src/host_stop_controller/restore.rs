@@ -12,11 +12,13 @@ use std::path::Path;
 use super::context::{Stream, beside, pure, seconds};
 use super::controller::Controller;
 use super::fault::{Fault, Halt};
+use super::seal::run_end;
 use super::run::{TOOL, lock_sentence, probe_refusal, shown_path};
 use crate::host_stop::{
     Files, Number, Request, SKEW_SECONDS, Seam, check_reviewed, check_stopped, instance_id,
     launch_time, lock, probe, read_json, stands,
 };
+use crate::gameday::{ReadError, ends_observation, read_evidence};
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
@@ -24,7 +26,9 @@ use crate::text::Text;
 
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// `restore` returns 0 when it writes `restoration.json`, and 1 with no mark after a signal from
-    /// the caller check on, a poll that reaches its bound, or a failed write.
+    /// the caller check on, a poll that reaches its bound, or a failed write. Where
+    /// `injection/collected.json` stands, it first reads the evidence as the judge does, and exits 1
+    /// after writing a restoration that ends observation, which the seal does not name.
     ///
     /// # Errors
     ///
@@ -89,11 +93,11 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 "injection/roles.json names another package than the approval's",
             ));
         }
-        if self.stands_in(&injection, "collected.json")? {
-            return Err(refused(
-                "injection/collected.json stands, and this restore reads no sealed evidence",
-            ));
-        }
+        let sealed = if self.stands_in(&injection, "collected.json")? {
+            Some(self.sealed(&root)?)
+        } else {
+            None
+        };
         let now = Number::from(start);
         let stopped_at = if shown {
             let path = beside(&injection, "stopped.json");
@@ -157,7 +161,44 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             self.cx.say(Stream::Out, &line);
             return Ok(1);
         };
-        self.restoration(&instance, ready, reviewed_sha256)
+        let code = self.restoration(&instance, ready, reviewed_sha256)?;
+        if code != 0 {
+            return Ok(code);
+        }
+        if let Some(p) = sealed
+            && ends_observation(&p, Some(&ready.value()))
+        {
+            let end = repr(run_end(&p));
+            let line = format!(
+                "{TOOL}the restoration dates {ready}, less than the clock error after the run \
+                 window's end {end}, and the seal does not name it, so the judge refuses this \
+                 evidence while the mark stands"
+            );
+            self.cx.say(Stream::Out, &Text::from(line));
+            return Ok(1);
+        }
+        let mut line = Text::from(TOOL);
+        line.push_text(&instance);
+        line.push_str(" runs again with both status checks ok");
+        self.cx.say(Stream::Out, &line);
+        Ok(0)
+    }
+
+    /// The approved package of a sealed run: the evidence directory at `root` as the judge's
+    /// [`read_evidence`] admits it, with `package.json` of the approval's digest.
+    fn sealed(&mut self, root: &Path) -> Result<Object, Halt> {
+        let bounds = self.bounds()?;
+        let evidence = read_evidence(root, self.cx.file_limit, &bounds).map_err(|error| match error {
+            ReadError::Refused(refusal) => refusal.into(),
+            ReadError::Closed(text) => Halt::Fault(Fault::Os { code: None, text }),
+            ReadError::Nul => unreachable!("a pathname argument holds no NUL byte"),
+        })?;
+        if *self.operator.approval().package_sha256() != evidence.package_sha256() {
+            return Err(refused(
+                "package.json holds other bytes than the approval's package",
+            ));
+        }
+        Ok(evidence.package().clone())
     }
 
     fn poll(
@@ -280,13 +321,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             Err(Halt::Fault(Fault::Refusal(sentence))) => return Err(Halt::refused(sentence)),
             Err(other) => return Err(other),
         }
-        line.push_text(instance);
-        line.push_str(" runs again with both status checks ok");
-        self.cx.say(Stream::Out, &line);
         Ok(0)
     }
 
-    fn stands_in(&self, injection: &Path, name: &str) -> Result<bool, Halt> {
+    pub(super) fn stands_in(&self, injection: &Path, name: &str) -> Result<bool, Halt> {
         stands(self.cx.files, &beside(injection, name)).map_err(|error| {
             Halt::refused(Text::from(format!(
                 "injection/{name} cannot be looked up: {}",
@@ -296,21 +334,21 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     }
 }
 
-fn refused(sentence: &str) -> Halt {
+pub(super) fn refused(sentence: &str) -> Halt {
     Halt::refused(Text::from(sentence))
 }
 
-fn directory(path: &Path) -> bool {
+pub(super) fn directory(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|found| found.is_dir())
         && !fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_symlink())
 }
 
-fn names_package(roles: &Value, digest: &Text) -> bool {
+pub(super) fn names_package(roles: &Value, digest: &Text) -> bool {
     matches!(roles, Value::Object(roles)
         if matches!(roles.get("package_sha256"), Some(Value::String(named)) if named == digest))
 }
 
-fn errno_text(code: Option<i32>, text: &str) -> String {
+pub(super) fn errno_text(code: Option<i32>, text: &str) -> String {
     match code {
         Some(code) => format!("[Errno {code}] {text}"),
         None => text.to_owned(),

@@ -1,15 +1,18 @@
-//! The file steps under a mark's write, the evidence lock, the probe and the lookup, each a method of
-//! [`Files`] whose default makes the step's system call. A test implements [`Files`] to fail or observe
+//! The file steps under a mark's write, the evidence lock, the probe, the lookup and the seal's read
+//! of a file with its sync, each a method of [`Files`] whose default makes the step's system call. A test implements [`Files`] to fail or observe
 //! one step and keeps the defaults for the rest; [`Disk`] keeps every default. Every descriptor opens
 //! with `O_CLOEXEC`.
 
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+
+use crate::gameday::{ReadError, read_file_with};
+use crate::text::Text;
 
 /// Whether [`Files::open_directory`] follows a link at the path's last component.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,6 +101,25 @@ pub trait Files {
     /// `rmdir(2)`.
     fn rmdir(&self, path: &Path) -> io::Result<()> {
         fs::remove_dir(path)
+    }
+
+    /// The bytes of the regular file `name` in the open `directory`, at most `limit` of them, read as
+    /// [`read_file`](crate::gameday::read_file) reads them and then synced through [`Files::fsync`].
+    /// Every refusal names `what`.
+    ///
+    /// # Errors
+    ///
+    /// Each failure of [`read_file`](crate::gameday::read_file), a failed sync worded
+    /// `<what> cannot be read and synced: <reason>`.
+    fn read_synced(
+        &self,
+        name: &Path,
+        directory: &File,
+        what: &Text,
+        limit: u64,
+    ) -> Result<Vec<u8>, ReadError> {
+        let sync = |file: &File| self.fsync(file);
+        read_file_with(name, Some(directory.as_fd()), what, limit, Some(&sync))
     }
 }
 

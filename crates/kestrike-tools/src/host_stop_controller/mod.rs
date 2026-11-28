@@ -37,6 +37,7 @@ mod controller;
 mod fault;
 mod restore;
 mod run;
+mod seal;
 
 pub use context::{Command, Context};
 pub use controller::{Controller, Preflight};

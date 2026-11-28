@@ -26,6 +26,11 @@ pub enum Command {
         evidence: OsString,
         reviewed: Option<PathBuf>,
     },
+    /// `seal --operator F --evidence DIR`.
+    Seal {
+        operator: PathBuf,
+        evidence: OsString,
+    },
 }
 
 /// The system a command runs on. `env` is the environment read at the tool's start, under which
