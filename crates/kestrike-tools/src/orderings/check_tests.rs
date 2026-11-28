@@ -3807,7 +3807,7 @@ fn row_entries_gives_each_disposition_its_entries_and_its_result() {
         Value::Object({
             let mut survives = Object::new();
             survives.insert("reason", string("planted"));
-            survives.insert("passed", list(&[passed.clone()]));
+            survives.insert("passed", list(std::slice::from_ref(&passed)));
             survives
         }),
     );
