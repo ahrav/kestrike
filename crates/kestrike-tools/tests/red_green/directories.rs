@@ -85,6 +85,10 @@ fn an_uncreatable_receipt_directory_is_refused_by_name() {
         assert!(fx.builds().is_empty(), "{name}");
         fx.assert_checkout_unchanged();
     }
+    let done = fx.red_green(&Call::default());
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert!(done.stderr.contains("receipt: "), "{}", done.shown());
+    assert_eq!(fx.build_legs(), ["base", "head"]);
 }
 
 /// A run directory that stands already is refused by name and left as it is.
@@ -110,6 +114,13 @@ fn a_receipt_directory_that_exists_is_refused_and_left_unchanged() {
     assert!(!done.stderr.contains("receipt: "));
     assert_eq!(read(&existing.join("receipt.json")), "an earlier receipt\n");
     assert!(fx.builds().is_empty());
+    let done = fx.red_green(&Call {
+        env: Some(fx.with_env(&[(RUN_NAME, OsStr::new("local-1700000000-4243"))])),
+        ..Call::default()
+    });
+    assert_eq!(done.code, 0, "{}", done.shown());
+    assert!(done.stderr.contains("receipt: "), "{}", done.shown());
+    assert_eq!(fx.build_legs(), ["base", "head"]);
 }
 
 /// With `TMPDIR` a link to the fixture's temporary directory, the run makes its one temporary
