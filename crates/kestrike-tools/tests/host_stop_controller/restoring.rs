@@ -13,37 +13,11 @@ use kestrike_tools::json::{Object, Value};
 use kestrike_tools::python::hexdigest;
 
 use super::plane::{Action, Plane, STATUS, State, string};
-use super::sealing::copy_tree;
 use super::stop_run::time;
 use super::{Case, Output, listing, steps};
 use crate::host_stop_support::{TARGET, json, tree};
 
-/// `HOST_STOP_KEEP` specifies the parent directory for retained evidence.
-pub(crate) const KEEP: &str = "HOST_STOP_KEEP";
-
 impl Case {
-    /// When [`KEEP`] is set, `keep` copies the evidence tree to `$HOST_STOP_KEEP/<name>` and the
-    /// lines the case printed to `$HOST_STOP_KEEP/<name>.lines`. `keep` requests mode 0700 for each
-    /// directory it creates. If either destination path already exists, `keep` panics.
-    pub(crate) fn keep(&self, name: &str) {
-        self.keep_tree(&self.evidence, name);
-    }
-
-    /// `keep_tree` keeps the tree at `from` as [`Case::keep`] keeps the evidence tree.
-    pub(crate) fn keep_tree(&self, from: &Path, name: &str) {
-        let Some(root) = std::env::var_os(KEEP) else {
-            return;
-        };
-        let lines = Path::new(&root).join(format!("{name}.lines"));
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lines)
-            .and_then(|mut file| std::io::Write::write_all(&mut file, self.output().as_bytes()))
-            .unwrap_or_else(|error| panic!("{}: {error}", lines.display()));
-        copy_tree(from, &Path::new(&root).join(name), &[]);
-    }
-
     pub(crate) fn restore(&mut self, reviewed: Option<&Path>) -> u8 {
         let evidence = self.evidence.clone();
         let calls = self.log().len();
