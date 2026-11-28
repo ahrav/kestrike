@@ -1,0 +1,531 @@
+use std::ffi::OsStr;
+use std::fs::{self, DirBuilder};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
+use std::path::Path;
+
+use sha1::{Digest, Sha1};
+use sha2::Sha256;
+
+use super::tree_difference;
+use super::{
+    Entries, Entry, Malformed, base_entries, blob_id, carried_blob, named_entries, overlaid,
+};
+use crate::paths::tests::Scratch;
+use crate::text::Text;
+
+fn bytes(text: &[u8]) -> Text {
+    Text::from_os(OsStr::from_bytes(text))
+}
+
+fn entry(mode: &str, id: &str) -> Entry {
+    Entry {
+        mode: Text::from(mode),
+        id: Text::from(id),
+    }
+}
+
+fn entries(rows: &[(&[u8], &str, &str)]) -> Entries {
+    rows.iter()
+        .map(|(path, mode, id)| (bytes(path), entry(mode, id)))
+        .collect()
+}
+
+const FILES: [(&str, &[u8], u32); 3] = [
+    ("a.txt", b"a\n", 0o644),
+    ("bin/run", b"#!/bin/sh\n", 0o755),
+    ("src/lib.rs", b"pub fn f() {}\n", 0o644),
+];
+
+fn write(root: &Path, path: impl AsRef<Path>, data: &[u8], mode: u32) {
+    let full = root.join(path);
+    fs::create_dir_all(full.parent().expect("a path below the root")).expect("the parent is made");
+    fs::write(&full, data).expect("the file is written");
+    fs::set_permissions(&full, fs::Permissions::from_mode(mode)).expect("the mode is set");
+}
+
+fn layout(root: &Path) {
+    for (path, data, mode) in FILES {
+        write(root, path, data, mode);
+    }
+    symlink("a.txt", root.join("link")).expect("the link is made");
+}
+
+fn named(sha256: bool) -> Entries {
+    let id = |data: &[u8]| {
+        if sha256 {
+            blob_id::<Sha256>(data)
+        } else {
+            blob_id::<Sha1>(data)
+        }
+    };
+    let mut named = Entries::new();
+    for (path, data, mode) in FILES {
+        let mode = if mode & 0o100 != 0 {
+            "100755"
+        } else {
+            "100644"
+        };
+        named.insert(Text::from(path), entry(mode, &id(data)));
+    }
+    named.insert(Text::from("link"), entry("120000", &id(b"a.txt")));
+    named
+}
+
+fn mkfifo(path: &Path) {
+    let made = std::process::Command::new("mkfifo").arg(path).status();
+    assert!(made.expect("mkfifo starts").success(), "the FIFO is made");
+}
+
+fn relink(root: &Path, path: &str, target: &str) {
+    let full = root.join(path);
+    fs::remove_file(&full).expect("the entry is removed");
+    symlink(target, full).expect("the link is made");
+}
+
+fn same(named: Entries) -> Entries {
+    named
+}
+
+fn submodule(mut named: Entries) -> Entries {
+    named.insert(Text::from("sub"), entry("160000", &"0".repeat(40)));
+    named
+}
+
+type Setup = fn(&Path);
+type Named = fn(Entries) -> Entries;
+
+#[rustfmt::skip]
+const TREE_ROWS: &[(&str, Setup, Named, Option<&[u8]>)] = &[
+    ("the same tree", |_| {}, same, None),
+    ("a file the commit lacks", |r| write(r, "z.txt", b"z\n", 0o644), same, Some(b"z.txt")),
+    ("an empty directory", |r| fs::create_dir(r.join("e")).expect("made"), same, Some(b"e")),
+    ("a directory that cannot be listed", |r| {
+        write(r, "d/x", b"x\n", 0o644);
+        fs::set_permissions(r.join("d"), fs::Permissions::from_mode(0o000)).expect("locked");
+    }, |mut n| { n.insert(Text::from("d/x"), entry("100644", &blob_id::<Sha1>(b"x\n"))); n }, Some(b"d")),
+    ("a named file the tree lacks", |r| fs::remove_file(r.join("src/lib.rs")).expect("removed"), same, Some(b"src")),
+    ("a named link the tree lacks", |r| fs::remove_file(r.join("link")).expect("removed"), same, Some(b"link")),
+    ("a link the commit lacks", |r| symlink("a.txt", r.join("x")).expect("made"), same, Some(b"x")),
+    ("a file for a named link", |r| {
+        fs::remove_file(r.join("link")).expect("removed");
+        write(r, "link", b"a.txt", 0o644);
+    }, same, Some(b"link")),
+    ("a link for a named file", |r| relink(r, "a.txt", "src/lib.rs"), same, Some(b"a.txt")),
+    ("a directory for a named file", |r| {
+        fs::remove_file(r.join("src/lib.rs")).expect("removed");
+        fs::create_dir(r.join("src/lib.rs")).expect("made");
+    }, same, Some(b"src/lib.rs")),
+    ("an execute bit cleared", |r| {
+        fs::set_permissions(r.join("bin/run"), fs::Permissions::from_mode(0o644)).expect("set");
+    }, same, Some(b"bin/run")),
+    ("an execute bit set", |r| {
+        fs::set_permissions(r.join("a.txt"), fs::Permissions::from_mode(0o755)).expect("set");
+    }, same, Some(b"a.txt")),
+    ("a changed link target", |r| relink(r, "link", "b.txt"), same, Some(b"link")),
+    ("CRLF for LF", |r| write(r, "a.txt", b"a\r\n", 0o644), same, Some(b"a.txt")),
+    ("changed bytes of one size", |r| write(r, "a.txt", b"b\n", 0o644), same, Some(b"a.txt")),
+    ("a FIFO the commit lacks", |r| mkfifo(&r.join("f")), same, Some(b"f")),
+    ("a FIFO for a named file", |r| {
+        fs::remove_file(r.join("src/lib.rs")).expect("removed");
+        mkfifo(&r.join("src/lib.rs"));
+    }, same, Some(b"src/lib.rs")),
+    ("a name with a byte outside UTF-8", |r| write(r, OsStr::from_bytes(b"n\xff"), b"n\n", 0o644), same,
+     Some(b"n\xff")),
+    ("code point order before byte order", |r| {
+        write(r, OsStr::from_bytes(b"\xf0\x90\x80\x80"), b"1\n", 0o644);
+        write(r, OsStr::from_bytes(b"\xff"), b"2\n", 0o644);
+    }, same, Some(b"\xff")),
+    ("two differences", |r| {
+        write(r, "z.txt", b"z\n", 0o644);
+        write(r, "b.txt", b"b\n", 0o644);
+    }, same, Some(b"b.txt")),
+    ("a named mode outside the three", |_| {}, |mut n| {
+        let id = n[&Text::from("a.txt")].id.clone();
+        n.insert(Text::from("a.txt"), Entry { mode: Text::from("100664"), id });
+        n
+    }, Some(b"a.txt")),
+    ("a named submodule", |r| fs::create_dir(r.join("sub")).expect("made"), submodule, None),
+    ("a file below a named submodule", |r| write(r, "sub/x", b"x\n", 0o644), submodule, Some(b"sub/x")),
+    ("the worktree's .git", |r| write(r, ".git", b"gitdir: elsewhere\n", 0o644), same, None),
+    ("a .git below the top", |r| write(r, "src/.git", b"gitdir: elsewhere\n", 0o644), same, Some(b"src/.git")),
+    ("SHA-256 IDs", |_| {}, |_| named(true), None),
+    ("a SHA-256 ID that differs", |r| write(r, "a.txt", b"b\n", 0o644), |_| named(true), Some(b"a.txt")),
+];
+
+#[test]
+fn tree_difference_names_the_first_differing_path_of_each_kind() {
+    for (name, setup, adjust, expected) in TREE_ROWS {
+        let scratch = Scratch::new("red-green-tree");
+        let root = scratch.0.join("tree");
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .expect("the tree is made");
+        layout(&root);
+        setup(&root);
+        let found = tree_difference(&root, &adjust(named(false)));
+        if root.join("d").exists() {
+            fs::set_permissions(root.join("d"), fs::Permissions::from_mode(0o700))
+                .expect("unlocked");
+        }
+        let found = found.unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(found, expected.map(bytes), "{name}");
+    }
+}
+
+/// A file the walk lists that cannot be opened for reading is an error with its path.
+#[test]
+fn a_named_file_that_cannot_be_read_is_an_error_with_its_path() {
+    let scratch = Scratch::new("red-green-tree");
+    let root = scratch.0.join("tree");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("the tree is made");
+    layout(&root);
+    fs::set_permissions(root.join("a.txt"), fs::Permissions::from_mode(0o200)).expect("set");
+    let error = tree_difference(&root, &named(false)).expect_err("an unreadable file fails");
+    assert_eq!(error.path(), root.join("a.txt"));
+    assert_eq!(error.error().kind(), std::io::ErrorKind::PermissionDenied);
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The four SHA-1 test vectors of FIPS 180-2.
+#[test]
+fn sha1_gives_the_standard_vectors() {
+    let million = vec![b'a'; 1_000_000];
+    let rows: [(&[u8], &str); 4] = [
+        (b"abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+        (b"", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+        (
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+        ),
+        (&million, "34aa973cd4c4daa4f61eeb2bdbad27316534016f"),
+    ];
+    for (data, digest) in rows {
+        assert_eq!(hex(&Sha1::digest(data)), digest, "{} bytes", data.len());
+    }
+}
+
+/// Each ID was recorded once with Git 2.50.1's `git hash-object --no-filters`; the link target is hashed as
+/// its raw bytes, as Git stores a link.
+#[test]
+fn blob_id_gives_the_ids_git_hash_object_writes() {
+    let crlf = b"a\r\nb\r\n".repeat(20);
+    let rows: [(&str, &[u8], &str); 3] = [
+        (
+            "the empty blob",
+            b"",
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+        ),
+        (
+            "120 bytes of CRLF lines",
+            &crlf,
+            "a5cf05ecdc06b110632b754f7024528b61d7120b",
+        ),
+        (
+            "a link's target",
+            b"src/lib.rs",
+            "c7ca8e348707c577d55d8144a801b5108f6c26fd",
+        ),
+    ];
+    for (name, data, id) in rows {
+        assert_eq!(blob_id::<Sha1>(data), id, "{name}");
+    }
+}
+
+/// `git ls-tree -r -z --full-tree HEAD` of a scratch repository of object format SHA-256, recorded once
+/// with Git 2.50.1; the tree that commit names compares equal to it.
+#[test]
+fn a_sha256_repository_names_the_tree_its_files_hash_to() {
+    const LISTED: &[u8] =
+        b"100644 blob f8625e43f9e04f24291f77cdbe4c71b3c2a3b0003f60419b3ed06a058d766c8b\ta.txt\0\
+        100755 blob 1249034e3cf9007362d695b09b1fbdb4c578903bf10b665749b94743f8177ce1\tbin/run\0\
+        120000 blob 0efe919905516cae9a49c9b6d2728c6788da5c9133469312b2b5c053e78d1a6b\tlink\0";
+    let scratch = Scratch::new("red-green-tree");
+    let root = scratch.0.join("tree");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .expect("the tree is made");
+    write(&root, "a.txt", b"a\n", 0o644);
+    write(&root, "bin/run", b"#!/bin/sh\n", 0o755);
+    symlink("a.txt", root.join("link")).expect("the link is made");
+    let named = named_entries(LISTED).expect("the listing reads");
+    assert_eq!(
+        tree_difference(&root, &named).expect("the tree reads"),
+        None
+    );
+    write(&root, "a.txt", b"a\r\n", 0o644);
+    assert_eq!(
+        tree_difference(&root, &named).expect("the tree reads"),
+        Some(Text::from("a.txt"))
+    );
+}
+
+#[test]
+fn named_entries_maps_each_path_to_its_mode_and_id() {
+    let id = |digit: &str| digit.repeat(40);
+    let rows: Vec<(&str, Vec<u8>, Entries)> = vec![
+        (
+            "two records",
+            [
+                b"100644 blob ",
+                id("1").as_bytes(),
+                b"\ta.txt\x00100755 blob ",
+                id("2").as_bytes(),
+                b"\tbin/run\0",
+            ]
+            .concat(),
+            entries(&[
+                (b"a.txt", "100644", &id("1")),
+                (b"bin/run", "100755", &id("2")),
+            ]),
+        ),
+        (
+            "a path holding a tab",
+            [b"100644 blob ", id("3").as_bytes(), b"\ta\tb\0"].concat(),
+            entries(&[(b"a\tb", "100644", &id("3"))]),
+        ),
+        (
+            "a path with a byte outside UTF-8",
+            [b"100644 blob ", id("4").as_bytes(), b"\tn\xff\0"].concat(),
+            entries(&[(b"n\xff", "100644", &id("4"))]),
+        ),
+        (
+            "a link and a submodule",
+            [
+                b"120000 blob ",
+                id("5").as_bytes(),
+                b"\tl\x00160000 commit ",
+                id("6").as_bytes(),
+                b"\ts\0",
+            ]
+            .concat(),
+            entries(&[(b"l", "120000", &id("5")), (b"s", "160000", &id("6"))]),
+        ),
+        ("no output", Vec::new(), Entries::new()),
+        (
+            "a record without a final NUL",
+            [b"100644 blob ", id("7").as_bytes(), b"\tlast"].concat(),
+            entries(&[(b"last", "100644", &id("7"))]),
+        ),
+        (
+            "two records for one path",
+            [
+                b"100644 blob ",
+                id("8").as_bytes(),
+                b"\tp\x00100755 blob ",
+                id("9").as_bytes(),
+                b"\tp\0",
+            ]
+            .concat(),
+            entries(&[(b"p", "100755", &id("9"))]),
+        ),
+    ];
+    for (name, stdout, expected) in rows {
+        assert_eq!(named_entries(&stdout), Ok(expected), "{name}");
+    }
+}
+
+/// A record without a tab, with fewer than three fields before it or with more is malformed.
+#[test]
+fn a_record_of_another_form_is_malformed() {
+    for record in [
+        &b"100644 blob abc"[..],
+        b"100644 abc\tp",
+        b"100644 blob abc extra\tp",
+    ] {
+        let stdout = [
+            b"100644 blob ",
+            "1".repeat(40).as_bytes(),
+            b"\tok\0",
+            record,
+            b"\0",
+        ]
+        .concat();
+        assert_eq!(named_entries(&stdout), Err(Malformed(record.to_vec())));
+    }
+}
+
+const HEAD: &str = "abcdef0123456789abcdef0123456789abcdef01";
+
+#[test]
+fn carried_blob_takes_one_regular_file_at_the_path() {
+    let refused = |path: &str| {
+        Err(format!(
+            "the head abcdef012345 holds no regular file {path}"
+        ))
+    };
+    type Row<'a> = (&'a str, &'a [u8], Vec<u8>, Result<String, String>);
+    let rows: Vec<Row> = vec![
+        (
+            "a regular file",
+            b"t.rs",
+            [b"100644 blob ", "a".repeat(40).as_bytes(), b"\tt.rs\0"].concat(),
+            Ok("a".repeat(40)),
+        ),
+        (
+            "an executable file",
+            b"t.rs",
+            [b"100755 blob ", "b".repeat(40).as_bytes(), b"\tt.rs\0"].concat(),
+            Ok("b".repeat(40)),
+        ),
+        (
+            "a link",
+            b"t.rs",
+            [b"120000 blob ", "c".repeat(40).as_bytes(), b"\tt.rs\0"].concat(),
+            refused("'t.rs'"),
+        ),
+        (
+            "a directory",
+            b"d",
+            [b"040000 tree ", "d".repeat(40).as_bytes(), b"\td\0"].concat(),
+            refused("'d'"),
+        ),
+        ("no record", b"t.rs", Vec::new(), refused("'t.rs'")),
+        (
+            "another path",
+            b"t.rs",
+            [b"100644 blob ", "e".repeat(40).as_bytes(), b"\tu.rs\0"].concat(),
+            refused("'t.rs'"),
+        ),
+        (
+            "two records",
+            b"t.rs",
+            [
+                b"100644 blob ",
+                "f".repeat(40).as_bytes(),
+                b"\tt.rs\x00100644 blob ",
+                "0".repeat(40).as_bytes(),
+                b"\tt.rs\0",
+            ]
+            .concat(),
+            refused("'t.rs'"),
+        ),
+        (
+            "a path with a byte outside UTF-8",
+            b"n\xff",
+            [b"100644 blob ", "1".repeat(40).as_bytes(), b"\tn\xff\0"].concat(),
+            Ok("1".repeat(40)),
+        ),
+        (
+            "two fields",
+            b"t.rs",
+            [b"100644 ", "2".repeat(40).as_bytes(), b"\tt.rs\0"].concat(),
+            refused("'t.rs'"),
+        ),
+    ];
+    for (name, path, stdout, expected) in rows {
+        let found = carried_blob(HEAD, &bytes(path), &stdout);
+        let found = found
+            .map(|blob| blob.to_string())
+            .map_err(|reason| reason.to_string());
+        assert_eq!(found, expected, "{name}");
+    }
+}
+
+#[test]
+fn overlaid_holds_for_a_carried_path_and_the_paths_above_and_below_it() {
+    let rows: [(&str, &str, &[&str], bool); 7] = [
+        ("a carried path", "t/a.rs", &["t/a.rs"], true),
+        ("a path below a carried path", "t/a.rs/x", &["t/a.rs"], true),
+        (
+            "a file a carried path needs as a directory",
+            "t",
+            &["t/a.rs"],
+            true,
+        ),
+        ("a sibling", "t/b.rs", &["t/a.rs"], false),
+        (
+            "a shared prefix without a slash",
+            "t/a.rs.bak",
+            &["t/a.rs"],
+            false,
+        ),
+        (
+            "a carried path's prefix without a slash",
+            "t/a",
+            &["t/a.rs"],
+            false,
+        ),
+        ("no carried path", "t", &[], false),
+    ];
+    for (name, path, carry, expected) in rows {
+        let carry: Vec<Text> = carry.iter().map(|path| Text::from(*path)).collect();
+        assert_eq!(overlaid(&Text::from(path), &carry), expected, "{name}");
+    }
+}
+
+#[test]
+fn base_entries_lay_the_carried_paths_over_the_base() {
+    let id = |digit: &str| digit.repeat(40);
+    let base = entries(&[
+        (b"a", "100644", &id("1")),
+        (b"t", "100644", &id("2")),
+        (b"t2/x", "100644", &id("3")),
+        (b"u/v", "100755", &id("4")),
+    ]);
+    let head = entries(&[
+        (b"a", "100644", &id("5")),
+        (b"t/x.rs", "100755", &id("6")),
+        (b"u/v/w.rs", "100644", &id("7")),
+        (b"t2/x", "100644", &id("8")),
+    ]);
+    let rows: [(&str, &[&str], Entries); 4] = [
+        (
+            "one carried path that replaces a base file",
+            &["t/x.rs"],
+            entries(&[
+                (b"a", "100644", &id("1")),
+                (b"t2/x", "100644", &id("3")),
+                (b"u/v", "100755", &id("4")),
+                (b"t/x.rs", "100755", &id("6")),
+            ]),
+        ),
+        (
+            "a carried path below a base file",
+            &["u/v/w.rs"],
+            entries(&[
+                (b"a", "100644", &id("1")),
+                (b"t", "100644", &id("2")),
+                (b"t2/x", "100644", &id("3")),
+                (b"u/v/w.rs", "100644", &id("7")),
+            ]),
+        ),
+        (
+            "a carried path that replaces a base path",
+            &["t2/x"],
+            entries(&[
+                (b"a", "100644", &id("1")),
+                (b"t", "100644", &id("2")),
+                (b"u/v", "100755", &id("4")),
+                (b"t2/x", "100644", &id("8")),
+            ]),
+        ),
+        (
+            "a carried path twice",
+            &["t/x.rs", "t/x.rs"],
+            entries(&[
+                (b"a", "100644", &id("1")),
+                (b"t2/x", "100644", &id("3")),
+                (b"u/v", "100755", &id("4")),
+                (b"t/x.rs", "100755", &id("6")),
+            ]),
+        ),
+    ];
+    for (name, carry, expected) in rows {
+        let carry: Vec<Text> = carry.iter().map(|path| Text::from(*path)).collect();
+        assert_eq!(base_entries(&base, &head, &carry), Ok(expected), "{name}");
+    }
+    let missing = [Text::from("absent.rs")];
+    assert_eq!(
+        base_entries(&base, &head, &missing),
+        Err(Text::from("absent.rs"))
+    );
+}

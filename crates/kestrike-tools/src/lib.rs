@@ -25,6 +25,7 @@ pub mod paths;
 pub mod plants;
 pub mod production_text;
 pub mod python;
+pub mod red_green;
 pub mod rust_text;
 pub mod shell;
 pub mod stream;
