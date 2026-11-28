@@ -4,7 +4,7 @@
 
 use crate::json::{
     Integer, MAX_DEPTH, MAX_INTEGER_DIGITS, Text, UniqueError, Value, dump, indented,
-    indented_in_order, parse, parse_members, parse_unique, text,
+    indented_in_order, line, line_sorted, parse, parse_members, parse_unique, text, text_sorted,
 };
 
 fn round_trip(text: &str) -> String {
@@ -422,4 +422,27 @@ fn indented_in_order_keeps_members_in_document_order() {
     let python = "{\n  \"b\": [\n    1,\n    {}\n  ],\n  \"a\": {\n    \"y\": [],\n    \"x\": NaN\n  },\n  \
                   \"c\": \"\\u00e9\",\n  \"d\": Infinity\n}";
     assert_eq!(indented_in_order(&value), python);
+}
+
+/// The one-line layouts write what `json.dumps(value)`, `json.dumps(value, sort_keys=True)` and
+/// `json.dumps(value, separators=(",", ":"), sort_keys=True)` write for the same value: the separators,
+/// the key order at every depth, the escapes and a non-finite float.
+#[test]
+fn one_line_layouts_write_python_separators_and_key_order() {
+    let value = parse(
+        r#"{"b": [1, 2.5, {"z": null, "a": true}], "a": "\u00e9\u2028", "c": {}, "d": [], "n": NaN}"#,
+    )
+    .expect("JSON");
+    assert_eq!(
+        line(&value),
+        r#"{"b": [1, 2.5, {"z": null, "a": true}], "a": "\u00e9\u2028", "c": {}, "d": [], "n": NaN}"#
+    );
+    assert_eq!(
+        line_sorted(&value),
+        r#"{"a": "\u00e9\u2028", "b": [1, 2.5, {"a": true, "z": null}], "c": {}, "d": [], "n": NaN}"#
+    );
+    assert_eq!(
+        text_sorted(&value),
+        r#"{"a":"\u00e9\u2028","b":[1,2.5,{"a":true,"z":null}],"c":{},"d":[],"n":NaN}"#
+    );
 }

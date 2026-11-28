@@ -219,6 +219,28 @@ pub(crate) fn pure(path: &str) -> String {
     assembled(root, &names)
 }
 
+/// `pure_bytes` applies the component rules of [`pure`] to a path's bytes and keeps each remaining
+/// component byte for byte.
+pub(crate) fn pure_bytes(path: &[u8]) -> Vec<u8> {
+    let root: &[u8] = if path.starts_with(b"//") && !path.starts_with(b"///") {
+        b"//"
+    } else if path.starts_with(b"/") {
+        b"/"
+    } else {
+        b""
+    };
+    let names: Vec<&[u8]> = path
+        .split(|&byte| byte == b'/')
+        .filter(|name| !name.is_empty() && *name != b".")
+        .collect();
+    if names.is_empty() && root.is_empty() {
+        return b".".to_vec();
+    }
+    let mut pure = root.to_vec();
+    pure.extend_from_slice(&names.join(&b'/'));
+    pure
+}
+
 /// `name` joined to `base`; an absolute `name` replaces `base`.
 pub(crate) fn joined(base: &str, name: &str) -> String {
     if name.starts_with('/') {

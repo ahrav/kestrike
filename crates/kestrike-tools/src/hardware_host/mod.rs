@@ -1,0 +1,34 @@
+//! The host-side records of a hardware campaign: the observer log of an episode, the host reservation,
+//! the custody markers that quarantine the host, and the identity of a launch. The FIS controller
+//! starts `scripts/hardware-lane.py`, which writes the same log and markers.
+//!
+//! - [`Observer::append`] writes one JSON object per line under an exclusive `flock` and numbers each
+//!   event one past the count of nonblank lines it read under that lock, so two writers never give one
+//!   ordinal twice. [`Observer::events`] reads under a shared `flock`. Every open of the log refuses a
+//!   link at its name.
+//! - A lock is taken by nonblocking attempts. One reading of the monotonic clock before the first
+//!   attempt fixes the deadline; each attempt another holder refuses is followed by one reading, which
+//!   ends the wait at or past the deadline, and else by a sleep of [`POLL`] that reads the signal
+//!   record.
+//! - [`reserve_host`] takes `fis.lock` exclusively, and [`Reservation::spawn_holding`] passes its
+//!   descriptor to a child, which then holds the lock after the parent's value drops.
+//! - [`held_custody`] removes a marker only when it names another boot, or a group none of whose
+//!   processes still holds memory.
+//!
+//! Each function returns a value or a typed error and prints nothing. The clocks and the sleep are one
+//! [`Clocks`] value; `/proc` and the boot identity's path are arguments.
+//!
+//! The module trusts the directories and paths its caller names: it opens the observer directory, the
+//! custody directory and the mappings file by name with the caller's authority and checks no owner.
+
+mod clock;
+mod custody;
+mod launch;
+mod observer;
+mod reservation;
+
+pub use clock::{Clocks, System};
+pub use custody::{BOOT_ID, CustodyError, boot_id, held_custody};
+pub use launch::{RevisionError, git_revision, mappings_facts};
+pub use observer::{EventError, NODE, Observer, ObserverError, POLL};
+pub use reservation::{Reservation, reserve_host};
