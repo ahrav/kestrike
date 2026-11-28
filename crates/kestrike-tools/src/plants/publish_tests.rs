@@ -12,7 +12,7 @@ use crate::paths::tests::Scratch;
 use crate::plants::run::remove;
 
 fn umask() -> u32 {
-    let status = fs::read_to_string("/proc/self/status").expect("the status reads");
+    let status = fs::read_to_string("/proc/thread-self/status").expect("the status reads");
     let line = status
         .lines()
         .find(|line| line.starts_with("Umask:"))
@@ -52,6 +52,32 @@ fn a_score_replaces_a_link_and_takes_its_mode() {
         & 0o777;
     assert_eq!(mode, 0o666 & !umask());
     assert_eq!(staged(&scratch.0), 0);
+}
+
+#[test]
+fn a_score_takes_the_publishing_thread_s_mask() {
+    let scratch = Scratch::new("publish");
+    let target = scratch.0.join("score.json");
+    let mode = std::thread::spawn(move || {
+        // SAFETY: on success, `unshare(CLONE_FS)` gives the calling thread a private filesystem
+        // context.
+        let unshared = unsafe { libc::unshare(libc::CLONE_FS) };
+        assert_eq!(
+            unshared, 0,
+            "the thread takes a filesystem context of its own"
+        );
+        // SAFETY: `umask` sets the mask of the private context unshared above.
+        unsafe { libc::umask(0o077) };
+        publish(&target, "{}\n").expect("the score is written");
+        fs::symlink_metadata(&target)
+            .expect("stats")
+            .permissions()
+            .mode()
+            & 0o777
+    })
+    .join()
+    .expect("the thread ends");
+    assert_eq!(mode, 0o600);
 }
 
 /// A staging name that is taken, by a regular file or by a link, is left as it is, and the next name

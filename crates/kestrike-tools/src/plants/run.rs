@@ -123,9 +123,10 @@ fn entries(directory: &File) -> Vec<CString> {
         if entry.is_null() {
             break;
         }
-        // SAFETY: `readdir` returned a live entry whose `d_name` is NUL-terminated; the name is copied
-        // before the next `readdir`.
-        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        // SAFETY: `readdir` returned a live entry whose `d_name` is NUL-terminated. The raw place
+        // projection addresses the first byte of `d_name` even when the record holds fewer than 256
+        // bytes for the field.
+        let name = unsafe { CStr::from_ptr((&raw const (*entry).d_name).cast::<libc::c_char>()) };
         if name != c"." && name != c".." {
             names.push(name.to_owned());
         }
