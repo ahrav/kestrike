@@ -1,9 +1,8 @@
 //! The readers of the tool's listing and outcome file, and the judgment of a run from them.
 //!
 //! A mutant is caught only when the baseline passed and the outcome file records it caught; on any other
-//! baseline every listed mutant is not-run. A name in the outcome file compares as JSON values compare
-//! by value: strings by code point, numbers by their exact value whatever their form, `true` as 1 and
-//! `false` as 0, every `NaN` equal to every other, and `null` to `null`.
+//! baseline every listed mutant is not-run. A name in the outcome file is a JSON string, and two names
+//! are one name when their code points are equal.
 
 use crate::json::{self, Object, Value};
 use crate::python;
@@ -98,34 +97,6 @@ pub(super) fn read_listing(text: &str) -> Result<Vec<Listed>, String> {
     Ok(listed)
 }
 
-/// A name of the outcome file: a string, or the canonical form of a number or of `null`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Key {
-    String(Text),
-    Other(String),
-}
-
-impl Key {
-    /// `of` returns `None` for an array or an object, which no name can be.
-    fn of(value: &Value) -> Option<Self> {
-        Some(match value {
-            Value::String(text) => Self::String(text.clone()),
-            Value::Null => Self::Other("null".to_owned()),
-            Value::Bool(flag) => Self::Other(u8::from(*flag).to_string()),
-            Value::Integer(integer) => Self::Other(integer.to_string()),
-            Value::Float(value) if value.is_nan() => Self::Other("nan".to_owned()),
-            Value::Float(value) if value.is_infinite() => Self::Other(value.to_string()),
-            Value::Float(value) if value.fract() == 0.0 => {
-                let digits = format!("{:.0}", value.abs());
-                let negative = *value < 0.0 && digits != "0";
-                Self::Other(format!("{}{digits}", if negative { "-" } else { "" }))
-            }
-            Value::Float(value) => Self::Other(format!("{value:?}")),
-            Value::Array(_) | Value::Object(_) => return None,
-        })
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Baseline {
     Passed,
@@ -146,7 +117,7 @@ impl Baseline {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outcomes {
     baseline: Option<Baseline>,
-    pub(super) judged: Vec<(Key, Outcome, Object)>,
+    pub(super) judged: Vec<(Text, Outcome, Object)>,
 }
 
 impl Outcomes {
@@ -225,33 +196,25 @@ fn lowercase(text: &Text) -> Text {
     lowered
 }
 
-/// `records` returns the members of `outcomes`: an array's items; an empty object or an empty string has
-/// none; any other value has no records the reader takes.
-fn records(outcomes: &Value) -> Option<&[Value]> {
-    match outcomes {
-        Value::Array(records) => Some(records),
-        Value::Object(object) if object.is_empty() => Some(&[]),
-        Value::String(text) if text.is_empty() => Some(&[]),
-        _ => None,
-    }
-}
-
 /// `read_outcomes` returns the baseline verdict and each judged mutant's verdict and phase seconds of the
 /// tool's outcome file. A mutant whose summary is no verdict is seen but not judged.
 ///
-/// It returns `None` for bytes that are no UTF-8, no JSON document, or no object whose `outcomes` holds
-/// records; for a record that is no object with a `scenario`, a `summary` and a `phase_results` array of
+/// It returns `None` for bytes that are no UTF-8, no JSON document, or no object whose `outcomes` is an
+/// array; for a record that is no object with a `scenario`, a `summary` and a `phase_results` array of
 /// objects, each with a string `phase` and a `duration` [`seconds`] reads; for a mutant record without
-/// `{"Mutant": {"name": NAME}}`, with an array or object as its name or summary; and for a repeated
-/// baseline or name.
+/// `{"Mutant": {"name": NAME}}` where `NAME` is a string, or with an array or object as its summary; and
+/// for a repeated baseline or name.
 pub fn read_outcomes(bytes: &[u8]) -> Option<Outcomes> {
     let document = json::parse(std::str::from_utf8(bytes).ok()?).ok()?;
     let Value::Object(document) = document else {
         return None;
     };
     let mut read = Outcomes::empty();
-    let mut seen: Vec<Key> = Vec::new();
-    for record in records(document.get("outcomes")?)? {
+    let Value::Array(records) = document.get("outcomes")? else {
+        return None;
+    };
+    let mut seen: Vec<&Text> = Vec::new();
+    for record in records {
         let Value::Object(record) = record else {
             return None;
         };
@@ -275,11 +238,13 @@ pub fn read_outcomes(bytes: &[u8]) -> Option<Outcomes> {
         let Value::Object(mutant) = scenario.get("Mutant")? else {
             return None;
         };
-        let name = Key::of(mutant.get("name")?)?;
+        let Value::String(name) = mutant.get("name")? else {
+            return None;
+        };
         if seen.contains(&name) {
             return None;
         }
-        seen.push(name.clone());
+        seen.push(name);
         if matches!(summary, Value::Array(_) | Value::Object(_)) {
             return None;
         }
@@ -288,7 +253,7 @@ pub fn read_outcomes(bytes: &[u8]) -> Option<Outcomes> {
             .find(|(summary_word, _)| text_of(summary).is_some_and(|text| text == summary_word))
             .map(|&(_, verdict)| verdict);
         if let Some(verdict) = verdict {
-            read.judged.push((name, verdict, phases));
+            read.judged.push((name.clone(), verdict, phases));
         }
     }
     Some(read)
@@ -334,13 +299,8 @@ pub(super) fn judge(
 ) -> Judgment {
     let empty = Outcomes::empty();
     let read = outcomes.unwrap_or(&empty);
-    let is_listed =
-        |key: &Key| matches!(key, Key::String(name) if listed.iter().any(|m| m.name == *name));
-    let judged_name = |name: &Text| {
-        read.judged
-            .iter()
-            .find(|(key, _, _)| matches!(key, Key::String(judged) if judged == name))
-    };
+    let is_listed = |name: &Text| listed.iter().any(|m| m.name == *name);
+    let judged_name = |name: &Text| read.judged.iter().find(|(judged, _, _)| judged == name);
     let mut reason = reason;
     if reason.is_none() && !listed.is_empty() {
         reason = match (outcomes, read.baseline) {
@@ -355,7 +315,7 @@ pub(super) fn judge(
                 let unlisted = read
                     .judged
                     .iter()
-                    .filter(|(key, _, _)| !is_listed(key))
+                    .filter(|(name, _, _)| !is_listed(name))
                     .count();
                 (unjudged > 0 || unlisted > 0).then(|| {
                     Text::from(format!(

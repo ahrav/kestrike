@@ -34,11 +34,13 @@ fn phases(phases: &str) -> String {
     json::text(&Value::Object(phases.clone()))
 }
 
+/// `outcomes` is an array; an empty object, an empty text or any other value makes the file unreadable.
 #[test]
-fn outcomes_hold_an_array_an_empty_object_or_an_empty_string() {
+fn outcomes_is_an_array_and_no_other_value() {
     for (document, readable) in [
-        (r#"{"outcomes":{}}"#, true),
-        (r#"{"outcomes":""}"#, true),
+        (r#"{"outcomes":[]}"#, true),
+        (r#"{"outcomes":{}}"#, false),
+        (r#"{"outcomes":""}"#, false),
         (r#"{"outcomes":"x"}"#, false),
         (r#"{"outcomes":{"a":1}}"#, false),
         (r#"{"outcomes":null}"#, false),
@@ -52,9 +54,26 @@ fn outcomes_hold_an_array_an_empty_object_or_an_empty_string() {
     }
 }
 
+/// A name is a JSON string, so a number, a boolean or `null` as a name makes the file unreadable, and
+/// two strings are one name only when their code points are equal.
 #[test]
-fn names_compare_by_value_whatever_their_json_form() {
-    for (first, second) in [("1", "1.0"), ("true", "1"), ("NaN", "NaN"), ("0", "-0.0")] {
+fn a_name_is_a_string_and_names_compare_by_code_point() {
+    for name in ["1", "1.0", "true", "false", "null", "NaN", "-0.0", "[1]", r#"{"a":1}"#] {
+        let text = file(&[BASELINE.to_owned(), caught(r#""a""#), caught(name)]);
+        assert!(
+            read_outcomes(text.as_bytes()).is_none(),
+            "a name of {name}: None"
+        );
+    }
+    let text = file(&[BASELINE.to_owned(), caught(r#""1""#), caught(r#""1.0""#)]);
+    let read = read_outcomes(text.as_bytes()).expect("two names read");
+    let names: Vec<String> = read
+        .judged
+        .iter()
+        .map(|(name, _, _)| name.to_string())
+        .collect();
+    assert_eq!(names, ["1", "1.0"], "the strings '1' and '1.0' are two names");
+    for (first, second) in [(r#""a""#, r#""a""#), (r#""\u00e9""#, "\"\u{e9}\"")] {
         let text = file(&[BASELINE.to_owned(), caught(first), caught(second)]);
         assert!(
             read_outcomes(text.as_bytes()).is_none(),
@@ -67,17 +86,10 @@ fn names_compare_by_value_whatever_their_json_form() {
         read_outcomes(text.as_bytes()).is_none(),
         "an unjudged name repeated: None"
     );
-    for unreadable in [caught("[1]"), mutant(r#""a""#, "[1]", "[]")] {
-        let text = file(&[BASELINE.to_owned(), unreadable]);
-        assert!(
-            read_outcomes(text.as_bytes()).is_none(),
-            "an unhashable name or summary: None"
-        );
-    }
-    let text = file(&[BASELINE.to_owned(), caught("null")]);
+    let text = file(&[BASELINE.to_owned(), mutant(r#""a""#, "[1]", "[]")]);
     assert!(
-        read_outcomes(text.as_bytes()).is_some(),
-        "the name None is judged"
+        read_outcomes(text.as_bytes()).is_none(),
+        "an array as a summary: None"
     );
 }
 
