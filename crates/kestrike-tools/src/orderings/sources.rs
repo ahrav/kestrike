@@ -233,7 +233,7 @@ const WINDOW: usize = 40;
 /// last: `#[path` or `#![path` with no word character after `path`, or `#[cfg_attr(` with a `path` that
 /// no word character precedes, then white space and `=`, before the first `]`. A `cfg_attr` match ends
 /// at the `=` after the last such `path`.
-fn path_attributes(text: &str) -> Vec<(usize, usize)> {
+pub(super) fn path_attributes(text: &str) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
     let mut at = 0;
     while let Some(offset) = text[at..].find('#') {
@@ -1262,4 +1262,4 @@ pub fn references(
 
 #[cfg(test)]
 #[path = "sources_tests.rs"]
-mod tests;
+pub(crate) mod tests;

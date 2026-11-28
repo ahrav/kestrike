@@ -10,7 +10,7 @@
 //! A code point's encoding begins with a leading byte, which never occurs as a continuation byte, so a
 //! match of one text's bytes inside another's starts and ends at code points.
 //!
-//! On Linux, [`text!`] builds a reason from literal words, texts, paths and counts, and each value's
+//! [`text!`] builds a reason from literal words, texts, paths and counts, and each value's
 //! type writes itself through [`Piece`]; [`crate::json::Integer`] writes its digits.
 //!
 //! The whitespace rules are Python's: [`is_space`] holds for the characters `str.isspace()` takes, and
@@ -427,8 +427,7 @@ impl PartialEq<&str> for Text {
     }
 }
 
-/// The reason builder `text!` and the values it writes, which the Linux tools use.
-#[cfg(target_os = "linux")]
+/// The reason builder `text!` and the values it writes.
 mod pieces {
     use std::ffi::OsStr;
     use std::path::{Path, PathBuf};
@@ -507,7 +506,6 @@ mod pieces {
     pub(crate) use text;
 }
 
-#[cfg(target_os = "linux")]
 pub(crate) use pieces::{Piece, text};
 
 #[cfg(test)]

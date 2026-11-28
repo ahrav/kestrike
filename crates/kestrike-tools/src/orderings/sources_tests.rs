@@ -25,16 +25,16 @@ const GRACE_MODEL: &str =
 const MACRO_TOKENS: &str =
     "a module declaration inside a macro's tokens, which the scope rule cannot read";
 
-fn top() -> PathBuf {
+pub(crate) fn top() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-fn committed(path: &str) -> String {
+pub(crate) fn committed(path: &str) -> String {
     read_source(&top(), path).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
 /// The committed text of `path` with its one `old` replaced by `new`.
-fn planted(path: &str, old: &str, new: &str) -> String {
+pub(crate) fn planted(path: &str, old: &str, new: &str) -> String {
     let text = committed(path);
     assert_eq!(text.matches(old).count(), 1, "{old:?} in {path}");
     text.replacen(old, new, 1)
@@ -42,13 +42,13 @@ fn planted(path: &str, old: &str, new: &str) -> String {
 
 /// A planted text, or a read the reader refuses.
 #[derive(Clone)]
-enum Plant {
+pub(crate) enum Plant {
     Text(String),
     Refused,
 }
 
 /// A reader that gives each plant by path and the committed file otherwise.
-fn reader(plants: Vec<(&str, Plant)>) -> impl Fn(&str) -> io::Result<String> {
+pub(crate) fn reader(plants: Vec<(&str, Plant)>) -> impl Fn(&str) -> io::Result<String> {
     let plants: BTreeMap<String, Plant> = plants
         .into_iter()
         .map(|(path, plant)| (path.to_owned(), plant))
@@ -66,7 +66,7 @@ type SourceRow<'r> = (&'r str, Vec<(&'r str, Plant)>, &'r str, Option<String>);
 /// The bare files, the path attributes with their names, and the refusal sentences a reading adds.
 type Added = (Vec<String>, Vec<(String, Vec<String>)>, Vec<String>);
 
-fn text(plant: String) -> Plant {
+pub(crate) fn text(plant: String) -> Plant {
     Plant::Text(plant)
 }
 
@@ -88,7 +88,7 @@ fn copy_tree(from: &Path, to: &Path) {
 
 /// A copy of the kernel package under a planted checkout root with one more source, `src/planted.rs`: `text`,
 /// with `{up}` the path from the source to the root, or one that includes each of `extra` by `#[path]`.
-fn planted_package(extra: &[&str], text: Option<&str>) -> Scratch {
+pub(crate) fn planted_package(extra: &[&str], text: Option<&str>) -> Scratch {
     let scratch = Scratch::new("sources");
     let package = root_of(&scratch).join(PACKAGE);
     copy_tree(&top().join(PACKAGE), &package);
@@ -110,11 +110,11 @@ fn planted_package(extra: &[&str], text: Option<&str>) -> Scratch {
 
 /// The checkout root of a planted package: a directory of its own inside the scratch directory, so the
 /// root's parent, where an include outside the checkout resolves, holds nothing else.
-fn root_of(scratch: &Scratch) -> PathBuf {
+pub(crate) fn root_of(scratch: &Scratch) -> PathBuf {
     scratch.0.join("top")
 }
 
-fn package_of(scratch: &Scratch) -> PathBuf {
+pub(crate) fn package_of(scratch: &Scratch) -> PathBuf {
     root_of(scratch).join(PACKAGE)
 }
 
