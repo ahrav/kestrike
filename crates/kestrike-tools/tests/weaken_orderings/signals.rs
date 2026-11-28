@@ -103,8 +103,9 @@ fn report_files_take_the_umask_mode() {
     }
 }
 
-/// A planted test that sends the run SIGHUP as its own SIGTERM stops it leaves a second delivery recorded
-/// before the restore; the run still writes the plant back, leaves no staging file and ends by SIGINT.
+/// A planted test that outlives SIGTERM and sends the run SIGHUP as that SIGTERM arrives makes a second
+/// delivery, which alone can end the stop's 45 s grace before 30 s, since the test keeps running; the run
+/// then kills the test's group, writes the plant back, leaves no staging file and ends by SIGINT.
 #[test]
 fn a_second_signal_during_the_stop_of_a_planted_test_still_restores_the_plant() {
     let fixture = Fixture::new("second-signal");
@@ -117,8 +118,21 @@ fn a_second_signal_during_the_stop_of_a_planted_test_still_restores_the_plant() 
         plan(&[(&tests[1], &[("planted", "sleep-twice")])]),
     );
     fixture.wait_for(".sleeping");
+    let parent = std::fs::read_to_string(super::standins::suffixed(&fixture.plan, ".parent"))
+        .expect("the test wrote its parent");
+    assert_eq!(
+        parent,
+        child.id().to_string(),
+        "the run is the planted test's parent"
+    );
+    let started = Instant::now();
     child.signal(libc::SIGTERM);
     let status = child.wait(Duration::from_secs(120));
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "the second delivery ended the 45 s grace: {:?}",
+        started.elapsed()
+    );
     assert!(ended_by(status, libc::SIGINT), "{status:?}");
     assert!(
         fixture.exists(".stopped"),

@@ -6,9 +6,8 @@ use super::{fresh_write, regular_digest};
 use crate::paths::tests::Scratch;
 
 /// A fresh write is a new file, a link beside it named after the file and the staging suffix stays, it
-/// keeps the replaced file's
-/// mode and takes a time later than that file's, even one in the future; a link at the path is replaced
-/// and its target keeps its bytes.
+/// keeps the replaced file's mode and takes a time later than that file's, even one in the future; a link
+/// at the path is replaced and its target keeps its bytes.
 #[test]
 fn a_fresh_write_is_a_new_later_file_and_follows_no_link() {
     let scratch = Scratch::new("weaken-fresh");

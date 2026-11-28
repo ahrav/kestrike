@@ -124,18 +124,22 @@ fn a_run_whose_judging_scripts_differ_from_head_is_refused() {
         assert!(done.success());
     };
     git(&["add", "scripts/judge-rc11.py"]);
-    fs::write(&staged, &original).expect("written");
-    let ran = fixture.run_with(
-        &[RUN_FENCE],
-        Opts {
-            work: Some(fixture.work("staged")),
-            ..Opts::default()
-        },
-    );
+    for (state, restore) in [("staged", false), ("staged-then-restored", true)] {
+        if restore {
+            fs::write(&staged, &original).expect("written");
+        }
+        let ran = fixture.run_with(
+            &[RUN_FENCE],
+            Opts {
+                work: Some(fixture.work(state)),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(ran.code(), Some(2), "{state}: {}", ran.stderr);
+        assert!(ran.stderr.contains("differ from HEAD"), "{}", ran.stderr);
+        nothing_ran(&fixture, &ran);
+    }
     git(&["reset", "-q", "--", "scripts/judge-rc11.py"]);
-    assert_eq!(ran.code(), Some(2), "a staged change: {}", ran.stderr);
-    assert!(ran.stderr.contains("differ from HEAD"), "{}", ran.stderr);
-    nothing_ran(&fixture, &ran);
     let stray = fixture.repo.join("crates/kestrike-tools/src/stray.rs");
     fs::write(&stray, "").expect("written");
     let ran = fixture.run_with(

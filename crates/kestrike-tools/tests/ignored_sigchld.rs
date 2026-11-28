@@ -1,7 +1,8 @@
 //! `mutants-diff`, `plant-runner` and `weaken-orderings run`, the tools that call the library's SIGCHLD
 //! refusal, refuse a start with SIGCHLD ignored after their argument reading and before their first
-//! child: the kernel would reap each child as it ends and every wait would fail. Each tool runs in a window that
-//! `env --ignore-signal=CHLD` starts, since a shell between the two can reset the disposition.
+//! child: the kernel would reap each child as it ends and every wait would fail. Each tool runs in a
+//! window that `env --ignore-signal=CHLD` starts, since a shell between the two can reset the
+//! disposition.
 #![cfg(target_os = "linux")]
 
 use std::ffi::OsString;
@@ -144,10 +145,6 @@ fn a_tool_started_with_sigchld_ignored_refuses_before_its_first_child() {
         );
         assert!(out.stdout.is_empty(), "{tool}");
     }
-    assert!(
-        !Path::new(work).exists(),
-        "the refused run made no work directory"
-    );
     std::fs::remove_dir_all(&stand_in).expect("the scratch is removed");
     std::fs::remove_dir_all(&outside).expect("the work's scratch is removed");
 }

@@ -86,7 +86,8 @@ fn wait_for(path: &Path) {
 const ROLE: &str = "KESTRIKE_WEAKEN_EXECUTE_ROLE";
 
 /// A run whose handlers stand gets SIGTERM while its test runs; the test's group is stopped before the
-/// run ends, so no process of it stays, its worker that ignores SIGTERM included. The run is this test executable started again in that role.
+/// run ends, so no process of it stays, its worker that ignores SIGTERM included. The run is this test
+/// executable started again in that role.
 #[test]
 fn an_interrupted_command_leaves_no_process_behind() {
     if let Some(marker) = std::env::var_os(ROLE) {

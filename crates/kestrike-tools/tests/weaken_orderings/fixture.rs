@@ -408,6 +408,7 @@ impl Fixture {
             ".sleeping",
             ".stopped",
             ".failed",
+            ".parent",
         ] {
             let _ = fs::remove_file(suffixed(&self.plan, suffix));
         }
@@ -605,6 +606,10 @@ impl Running {
         let pid = libc::pid_t::try_from(self.0.id()).expect("a pid");
         // SAFETY: `kill` takes two integers; the child is unreaped, so its pid names it.
         assert_eq!(unsafe { libc::kill(pid, number) }, 0);
+    }
+
+    pub fn id(&self) -> u32 {
+        self.0.id()
     }
 
     /// `wait` reaps the run within `limit`, or kills it and fails the case.

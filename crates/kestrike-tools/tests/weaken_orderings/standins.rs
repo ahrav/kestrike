@@ -228,12 +228,8 @@ static STOPPED: OnceLock<CString> = OnceLock::new();
 static TWICE: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn stopped(_: libc::c_int) {
-    if TWICE.load(Ordering::SeqCst) {
-        // SAFETY: `getppid` and `kill` take plain values and are async-signal-safe.
-        unsafe { libc::kill(libc::getppid(), libc::SIGHUP) };
-    }
     if let Some(path) = STOPPED.get() {
-        // SAFETY: `open`, `close` and `_exit` are async-signal-safe, and the path outlives the call.
+        // SAFETY: `open`, `write` and `close` are async-signal-safe, and the path outlives the calls.
         unsafe {
             let fd = libc::open(
                 path.as_ptr(),
@@ -246,12 +242,22 @@ extern "C" fn stopped(_: libc::c_int) {
             }
         }
     }
-    // SAFETY: `_exit` ends the process without running any handler of this process.
-    unsafe { libc::_exit(143) };
+    if TWICE.load(Ordering::SeqCst) {
+        // SAFETY: `getppid` and `kill` take plain values and are async-signal-safe.
+        unsafe { libc::kill(libc::getppid(), libc::SIGHUP) };
+    } else {
+        // SAFETY: `_exit` ends the process without running any handler of this process.
+        unsafe { libc::_exit(143) };
+    }
 }
 
 fn sleep_until_stopped(plan: &Path, twice: bool) {
     TWICE.store(twice, Ordering::SeqCst);
+    if twice {
+        // SAFETY: `getppid` takes no argument and touches no memory of the caller.
+        let parent = unsafe { libc::getppid() };
+        write(&suffixed(plan, ".parent"), &parent.to_string());
+    }
     let path = CString::new(suffixed(plan, ".stopped").as_os_str().as_bytes()).expect("no NUL");
     let _ = STOPPED.set(path);
     // SAFETY: `stopped` is an `extern "C"` handler that calls only async-signal-safe functions.
