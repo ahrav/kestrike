@@ -62,6 +62,18 @@ impl Case {
         code
     }
 
+    /// Plants `action` on the first call `op` in place of that call's scripted action, whose later
+    /// entries stay, and marks that call as the fault.
+    pub(crate) fn fault_first(&self, op: &'static str, action: Action) {
+        let mut planted = Some(action);
+        self.plane.borrow_mut().fault =
+            Some(Box::new(
+                move |_, called| {
+                    if called == op { planted.take() } else { None }
+                },
+            ));
+    }
+
     pub(crate) fn floor(&self) -> f64 {
         let marks = self.marks();
         ["stop", "stopped", "abort"]

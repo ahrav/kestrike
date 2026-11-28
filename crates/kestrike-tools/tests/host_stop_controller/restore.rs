@@ -971,13 +971,7 @@ fn a_signal_before_or_during_the_poll_ends_restore_with_exit_1_and_no_mark() {
         let mut case = Case::new("restore-signal-poll");
         assert_eq!(case.run(), 0, "{}", case.output());
         case.start_target(3);
-        let mut planted = Some(delivering(&case, signal));
-        case.plane.borrow_mut().fault =
-            Some(Box::new(
-                move |_, called| {
-                    if called == op { planted.take() } else { None }
-                },
-            ));
+        case.fault_first(op, delivering(&case, signal));
         let (out, err) = (case.stdout().len(), case.stderr().len());
         assert_eq!(case.restore(None), 1, "{name}: {}", case.output());
         let line = format!(
@@ -1149,17 +1143,13 @@ fn a_ready_read_dated_before_restores_start_writes_no_restoration() {
     assert_eq!(case.run(), 0, "{}", case.output());
     case.start_target(0);
     shorten_bounds(&mut case, 10);
-    let mut planted = Some(Action::Hook(Box::new(|state: &mut State| {
-        state.step -= 3600.0;
-        Action::Answer
-    })));
-    case.plane.borrow_mut().fault = Some(Box::new(move |_, called| {
-        if called == CALLER {
-            planted.take()
-        } else {
-            None
-        }
-    }));
+    case.fault_first(
+        CALLER,
+        Action::Hook(Box::new(|state: &mut State| {
+            state.step -= 3600.0;
+            Action::Answer
+        })),
+    );
     let start = case.log().len();
     assert_eq!(case.restore(None), 1, "{}", case.output());
     assert_eq!(case.ops()[start..], [CALLER, STATUS, STATUS]);
@@ -1298,11 +1288,7 @@ fn restore_refuses_an_injection_that_takes_no_unnamed_file() {
     let mut case = Case::new("restore-probe");
     assert_eq!(case.run(), 0, "{}", case.output());
     case.start_target(0);
-    replace_mark(
-        &case.evidence.join("injection"),
-        "stop.json",
-        &string("not a request"),
-    );
+    fs::remove_file(case.evidence.join("injection/stop.json")).expect("stop.json is removed");
     case.fail_once(libc::EACCES, |step| matches!(step, Step::OpenUnnamed(_)));
     case.assert_restore_refused(
         None,
@@ -1392,10 +1378,13 @@ fn a_restoration_left_standing_by_a_failed_sync_and_removal_exits_1_and_is_refus
     });
     let (out, err) = (case.stdout().len(), case.stderr().len());
     assert_eq!(case.restore(None), 1, "{}", case.output());
-    let line = &case.stderr()[err..];
-    assert!(
-        line.starts_with("host-stop-controller: ") && line.contains("restoration.json"),
-        "{line}"
+    assert_eq!(
+        case.stderr()[err..],
+        *format!(
+            "host-stop-controller: {} stands, but it cannot be synced (Input/output error) and \
+             cannot be removed, so it may not survive a crash\n",
+            case.evidence.join("injection/restoration.json").display()
+        )
     );
     assert!(
         !case.stdout()[out..].contains("runs again"),
@@ -1417,21 +1406,27 @@ fn a_wall_step_during_the_poll_leaves_its_bound_on_the_monotonic_clock() {
     let mut case = Case::new("restore-wall-step");
     assert_eq!(case.run(), 0, "{}", case.output());
     shorten_bounds(&mut case, 20);
-    case.start_target(0);
-    let mut planted = Some(Action::Hook(Box::new(|state: &mut State| {
-        state.step += 3600.0;
-        Action::Answer
-    })));
-    case.plane.borrow_mut().fault = Some(Box::new(move |_, called| {
-        if called == STATUS {
-            planted.take()
-        } else {
-            None
+    match crate::host_stop_support::at_mut(&mut case.operator, &["instances"]) {
+        Value::Array(instances) => {
+            instances.swap(0, 1);
+            assert_ne!(instances[0], string(TARGET), "the target is not first");
         }
-    }));
+        other => panic!("{other:?} is the declared set"),
+    }
+    case.start_target(0);
+    case.fault_first(
+        STATUS,
+        Action::Hook(Box::new(|state: &mut State| {
+            state.step += 3600.0;
+            Action::Answer
+        })),
+    );
     let start = case.log().len();
     assert_eq!(case.restore(None), 0, "{}", case.output());
     assert_eq!(case.ops()[start..], [CALLER, STATUS, STATUS, RECORD]);
+    for logged in &case.log()[start + 1..] {
+        assert_eq!(named_instances(logged), [TARGET], "{logged:?}");
+    }
     assert!(case.marks().contains_key("restoration"));
 }
 
@@ -1494,6 +1489,14 @@ fn launch_text_rounds_a_half_millisecond_tie_to_even() {
         super::plane::launch_text(405.1875),
         "1970-01-01T00:06:45.188+00:00"
     );
+    assert_eq!(
+        super::plane::launch_text(404.9999),
+        "1970-01-01T00:06:45.000+00:00"
+    );
+    assert_eq!(
+        super::plane::launch_text(405.0),
+        "1970-01-01T00:06:45+00:00"
+    );
 }
 
 #[test]
@@ -1504,27 +1507,455 @@ fn restore_holds_the_evidence_lock_through_its_poll_and_its_mark() {
     let injection = case.evidence.join("injection");
     let probes = Rc::new(RefCell::new(Vec::new()));
     let (seen, dir) = (Rc::clone(&probes), injection.clone());
-    let mut planted = Some(Action::Hook(Box::new(move |_: &mut State| {
-        let taken = matches!(lock(&Disk, &dir), Err(LockError::Taken(_)));
-        seen.borrow_mut().push(("status", taken));
-        Action::Answer
-    })));
-    case.plane.borrow_mut().fault = Some(Box::new(move |_, called| {
-        if called == STATUS {
-            planted.take()
-        } else {
-            None
-        }
-    }));
-    let (seen, dir) = (Rc::clone(&probes), injection.clone());
-    case.plant(Box::new(move |_, step| {
-        if links(step, "restoration.json") {
+    case.fault_first(
+        STATUS,
+        Action::Hook(Box::new(move |_: &mut State| {
             let taken = matches!(lock(&Disk, &dir), Err(LockError::Taken(_)));
-            seen.borrow_mut().push(("link", taken));
-        }
+            seen.borrow_mut().push(("status", taken));
+            Action::Answer
+        })),
+    );
+    let (seen, dir) = (Rc::clone(&probes), injection.clone());
+    let mut linked = false;
+    case.plant(Box::new(move |_, step| {
+        let at = if links(step, "restoration.json") {
+            linked = true;
+            "link"
+        } else if linked && matches!(step, Step::FsyncDirectory(synced) if *synced == dir) {
+            "sync"
+        } else {
+            return None;
+        };
+        seen.borrow_mut().push((at, super::sealed::taken_now(&dir)));
         None
     }));
     assert_eq!(case.restore(None), 0, "{}", case.output());
-    assert_eq!(*probes.borrow(), [("status", true), ("link", true)]);
+    assert_eq!(
+        *probes.borrow(),
+        [("status", true), ("link", true), ("sync", true)]
+    );
     drop(free_lock(&injection));
+}
+
+/// The ids of instances among the arguments of `logged`.
+fn named_instances(logged: &super::plane::Logged) -> Vec<String> {
+    logged
+        .args
+        .iter()
+        .filter(|arg| arg.starts_with("i-"))
+        .cloned()
+        .collect()
+}
+
+/// A ready read whose wall reading compares neither at nor after restore's start, a NaN, leads to
+/// another poll with no record read; the next ready read, dated after the start, dates the
+/// restoration.
+#[test]
+fn a_ready_read_with_an_unordered_wall_reading_leads_to_another_poll() {
+    let mut case = Case::new("restore-nan-wall");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(1);
+    shorten_bounds(&mut case, 20);
+    let reads = Rc::new(std::cell::Cell::new(0));
+    let counted = Rc::clone(&reads);
+    case.plane.borrow_mut().after = Some(Box::new(move |state, op| {
+        if op == STATUS {
+            counted.set(counted.get() + 1);
+            state.step = if counted.get() == 2 { f64::NAN } else { 0.0 };
+        }
+    }));
+    let start = case.log().len();
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    assert_eq!(
+        case.ops()[start..],
+        [CALLER, STATUS, STATUS, STATUS, RECORD]
+    );
+    assert!(time(&case.marks()["restoration"]).is_finite());
+
+    let mut case = Case::new("restore-nan-walls");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    shorten_bounds(&mut case, 10);
+    case.plane.borrow_mut().after = Some(Box::new(|state, op| {
+        if op == STATUS {
+            state.step = f64::NAN;
+        }
+    }));
+    let (start, out) = (case.log().len(), case.stdout().len());
+    assert_eq!(
+        case.restore_at(&case.evidence.clone(), None),
+        1,
+        "{}",
+        case.output()
+    );
+    assert!(
+        !case.ops()[start..].iter().any(|op| op == RECORD),
+        "{:?}",
+        case.ops()
+    );
+    assert!(
+        case.stdout()[out..].contains(" at nan, before restore's start "),
+        "{}",
+        &case.stdout()[out..]
+    );
+    assert!(!case.marks().contains_key("restoration"));
+}
+
+/// The ready read is dated by the first wall reading after its status reply returns: a wall step
+/// at the monotonic reading that follows the reply, before the ready reading, dates the read at
+/// the stepped time, and a launch 5 s after that time dates the restoration there.
+#[test]
+fn the_ready_read_is_dated_by_the_wall_reading_after_its_reply() {
+    let mut case = Case::new("restore-ready-wall");
+    case.plane.borrow_mut().call_seconds = 0.25;
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let start = case.log().len();
+    let stepped = Rc::new(std::cell::Cell::new(None));
+    let seen = Rc::clone(&stepped);
+    case.plane.borrow_mut().ticking = Some(Rc::new(move |state: &mut State| {
+        let answered = state.log.len() > start
+            && state
+                .log
+                .last()
+                .is_some_and(|last| last.op == STATUS && last.time.is_some());
+        if answered && seen.get().is_none() {
+            state.step += 1.0;
+            seen.set(Some(state.wall()));
+            let launch = state.wall() + SKEW;
+            state
+                .instances
+                .get_mut(TARGET)
+                .expect("the target")
+                .launched = launch;
+        }
+    }));
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    assert_eq!(case.ops()[start..], [CALLER, STATUS, RECORD]);
+    let ready = stepped
+        .get()
+        .expect("the wall stepped after the status reply");
+    assert_eq!(time(&case.marks()["restoration"]), ready);
+    assert_eq!(case.log()[start + 1].wall, Some(ready));
+}
+
+/// A wall step back during the record read leaves the restoration at the ready reading the launch
+/// decides, and a ready status answered past its call's cut, inside restore's deadline, is used.
+#[test]
+fn a_wall_step_during_the_record_read_or_a_late_ready_reply_keeps_the_ready_time() {
+    let mut case = Case::new("restore-record-step");
+    case.plane.borrow_mut().call_seconds = 0.25;
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let ready = case.plane.borrow().wall() + 0.5;
+    case.plane
+        .borrow_mut()
+        .instances
+        .get_mut(TARGET)
+        .expect("the target")
+        .launched = ready + SKEW;
+    case.plane.borrow_mut().script(
+        RECORD,
+        vec![Action::Hook(Box::new(|state: &mut State| {
+            state.step -= 10.0;
+            Action::Answer
+        }))],
+    );
+    let start = case.log().len();
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    assert_eq!(case.ops()[start..], [CALLER, STATUS, RECORD]);
+    assert_eq!(time(&case.marks()["restoration"]), ready);
+
+    let mut case = Case::new("restore-late-ready");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    case.fault_first(
+        STATUS,
+        Action::Hook(Box::new(|state: &mut State| {
+            state.instances.get_mut(TARGET).expect("the target").checks = "ok".to_owned();
+            Action::Late
+        })),
+    );
+    let start = case.log().len();
+    assert_eq!(case.restore(None), 0, "{}", case.output());
+    assert_eq!(case.ops()[start..], [CALLER, STATUS, RECORD]);
+    let status = &case.log()[start + 1];
+    assert_eq!(status.time, Some(status.start + status.timeout + 0.5));
+    assert!(case.marks().contains_key("restoration"));
+}
+
+/// The last seen status and the deadline's detail a signal line or a bound line ends with.
+fn ready_seen() -> &'static str {
+    "the target reads {'state': 'running', 'instance': 'ok', 'system': 'ok'}"
+}
+
+/// A signal stored after the poll's last record read and pause, at the loop's monotonic reading
+/// that reaches the deadline, raises at the end read of the poll: restore exits 1 with the signal's
+/// line and the last status in place of the bound's line. Calls of a quarter second keep every time
+/// exact in binary, so the last pause ends at the deadline exactly.
+#[test]
+fn a_signal_at_the_end_of_an_exhausted_poll_ends_restore_with_the_signals_line() {
+    let mut case = Case::new("restore-signal-exhausted");
+    case.plane.borrow_mut().call_seconds = 0.25;
+    assert_eq!(case.run(), 0, "{}", case.output());
+    shorten_bounds(&mut case, 20);
+    {
+        let mut plane = case.plane.borrow_mut();
+        let target = plane.instances.get_mut(TARGET).expect("the target");
+        target.state = "running".to_owned();
+        target.checks = "impaired".to_owned();
+        plane.stopping = None;
+    }
+    let start = case.log().len();
+    let delivered = case.delivered;
+    at_reading(
+        &case,
+        move |state| {
+            state.log.get(start).is_some_and(|caller| {
+                caller.op == CALLER
+                    && caller
+                        .time
+                        .is_some_and(|returned| state.t >= returned + 20.0)
+            })
+        },
+        move |_| delivered.deliver(Signal::Terminate),
+    );
+    let (out, err) = (case.stdout().len(), case.stderr().len());
+    assert_eq!(case.restore(None), 1, "{}", case.output());
+    assert_eq!(
+        case.stdout()[out..],
+        *"host-stop-controller: signal SIGTERM: the restoration is unwritten: the target reads \
+          {'state': 'running', 'instance': 'impaired', 'system': 'ok'}\n"
+    );
+    assert_eq!(case.stderr()[err..], *"");
+    assert_eq!(
+        case.ops()[start..],
+        [CALLER, STATUS, STATUS, STATUS, STATUS]
+    );
+    assert!(!case.marks().contains_key("restoration"));
+}
+
+/// A record read cut at the deadline ends the poll with the deadline's cause; a signal stored at
+/// the monotonic reading after the cut call returns raises at the poll's end read, so restore exits
+/// 1 with the signal's line. With no signal the bound's line names the last status and the
+/// deadline that passed.
+#[test]
+fn a_signal_after_a_record_read_cut_at_the_deadline_ends_restore_with_the_signals_line() {
+    for signalled in [false, true] {
+        let mut case = Case::new("restore-signal-cut");
+        assert_eq!(case.run(), 0, "{}", case.output());
+        let period = POLL + case.plane.borrow().call_seconds;
+        let deadline = operator_seconds(&case, "deadline_seconds");
+        case.start_target((deadline / period).floor() as usize);
+        case.plane
+            .borrow_mut()
+            .script(RECORD, vec![Action::Delay(60.0)]);
+        if signalled {
+            let delivered = case.delivered;
+            at_reading(
+                &case,
+                |state| {
+                    state
+                        .log
+                        .last()
+                        .is_some_and(|last| last.op == RECORD && last.cut)
+                },
+                move |_| delivered.deliver(Signal::Terminate),
+            );
+        }
+        let (out, err) = (case.stdout().len(), case.stderr().len());
+        assert_eq!(case.restore(None), 1, "{}", case.output());
+        let record = case.log().last().cloned().expect("a call");
+        assert_eq!((record.op.as_str(), record.cut), (RECORD, true));
+        let expected = if signalled {
+            format!(
+                "host-stop-controller: signal SIGTERM: the restoration is unwritten: {}\n",
+                ready_seen()
+            )
+        } else {
+            format!(
+                "host-stop-controller: the restoration was not shown within {deadline} s, so it is \
+                 unrecorded and the evidence is not to be judged as it stands: {}; the deadline \
+                 of {deadline} s passed\n",
+                ready_seen(),
+                deadline = deadline as i64
+            )
+        };
+        assert_eq!(case.stdout()[out..], *expected, "signalled: {signalled}");
+        assert_eq!(case.stderr()[err..], *"");
+        assert!(!case.marks().contains_key("restoration"));
+    }
+}
+
+/// Each line of a signal before or during the poll names the status seen when it raised: none for
+/// the caller's read and the first status read, the ready status for the record read.
+#[test]
+fn a_signal_during_the_poll_names_the_status_seen_when_it_raised() {
+    for (op, seen) in [
+        (CALLER, "no status read was made"),
+        (STATUS, "no status read was made"),
+        (RECORD, ready_seen()),
+    ] {
+        let mut case = Case::new("restore-signal-seen");
+        assert_eq!(case.run(), 0, "{}", case.output());
+        case.start_target(0);
+        case.fault_first(op, delivering(&case, Signal::Terminate));
+        let (out, err) = (case.stdout().len(), case.stderr().len());
+        assert_eq!(case.restore(None), 1, "{op}: {}", case.output());
+        assert_eq!(
+            case.stdout()[out..],
+            *format!(
+                "host-stop-controller: signal SIGTERM: the restoration is unwritten: {seen}\n"
+            ),
+            "{op}"
+        );
+        assert_eq!(case.stderr()[err..], *"", "{op}");
+    }
+}
+
+/// `restore` clears a deadline an earlier step left on its controller before its caller check, and
+/// the record it was given stays unarmed and unheld once it returns.
+#[test]
+fn a_restore_on_a_controller_with_a_passed_deadline_writes_its_restoration() {
+    let mut case = Case::new("restore-passed-deadline");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let evidence = case.evidence.clone();
+    let start = case.log().len();
+    let mut record = kestrike_tools::host_stop::Record::new(case.delivered);
+    let restored = case.owned_on(&mut record, Vec::new(), |mut controller| {
+        controller.set_deadline(0.0);
+        controller.restore(evidence.as_os_str(), None)
+    });
+    assert!(matches!(restored, Ok(0)), "{restored:?}: {}", case.output());
+    assert!(!record.is_armed() && !record.is_held());
+    assert_eq!(case.ops()[start..], [CALLER, STATUS, RECORD]);
+    let caller = &case.log()[start];
+    assert_eq!((caller.timeout, caller.cut), (60.0, false), "{caller:?}");
+    assert!(case.marks().contains_key("restoration"));
+}
+
+/// Each mark's check that refuses a time after restore's start reads the one wall reading restore
+/// takes at its start: a wall step at the lock, before the checks, leaves a stopped report or a
+/// review dated between the two readings refused.
+#[test]
+fn restores_mark_checks_read_the_one_wall_reading_at_its_start() {
+    let mut case = Case::new("restore-start-reading");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let injection = case.evidence.join("injection");
+    let stopped = case.marks()["stopped"].clone();
+    let now = case.plane.borrow().wall();
+    replace_mark(
+        &injection,
+        "stopped.json",
+        &merged(&stopped, &[("time", Value::Float(now + 1.0))]),
+    );
+    let start = case.plants.borrow().len();
+    case.plant(Box::new(|state, step| {
+        if matches!(step, Step::TryLock) {
+            state.step += 2.0;
+        }
+        None
+    }));
+    case.assert_restore_refused(None, "after restore's start");
+    case.plants.borrow_mut().truncate(start);
+    case.plane.borrow_mut().step = 0.0;
+
+    let mut case = Case::new("restore-start-reading-abort");
+    let (path, review) = case.aborted_run();
+    let now = case.plane.borrow().wall();
+    write_json(
+        &path,
+        &merged(&review, &[("time", Value::Float(now + 1.0))]),
+    );
+    case.plant(Box::new(|state, step| {
+        if matches!(step, Step::TryLock) {
+            state.step += 2.0;
+        }
+        None
+    }));
+    case.assert_restore_refused(Some(&path), "after restore's start");
+}
+
+/// A restoration whose bytes fit the mark limit but pass the file limit is refused with the file
+/// limit, since every reader of a mark reads it under that limit; a `stop.json` past a lowered
+/// file limit is refused by its size before any call.
+#[test]
+fn restore_bounds_its_mark_and_its_reads_by_the_file_limit() {
+    let mut case = Case::new("restore-file-limit");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    case.start_target(0);
+    let evidence = case.evidence.clone();
+    let limit = 40;
+    case.file_limit = limit;
+    let mark = value(&format!(
+        r#"{{"instance": "{TARGET}", "state": "running", "time": 400.0, "reviewed_sha256": null}}"#
+    ));
+    assert!(case.mark_limit > limit);
+    let refused = case.controlled(|controller| {
+        controller.set_injection(&evidence.join("injection"));
+        controller.mark("restoration", &mark)
+    });
+    case.file_limit = kestrike_tools::gameday::FILE_LIMIT;
+    match refused {
+        Err(kestrike_tools::host_stop_controller::Halt::Fault(
+            kestrike_tools::host_stop_controller::Fault::Refusal(sentence),
+        )) => assert!(
+            sentence
+                .to_string()
+                .contains(&format!("more than the judge reads ({limit})")),
+            "{sentence}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(!case.marks().contains_key("restoration"));
+
+    let stop = fs::read(evidence.join("injection/stop.json")).expect("stop.json reads");
+    let size = stop.len() as u64;
+    let mut padded = stop.clone();
+    padded.extend(std::iter::repeat_n(b' ', 8));
+    fs::remove_file(evidence.join("injection/stop.json")).expect("removed");
+    fs::write(evidence.join("injection/stop.json"), &padded).expect("written");
+    case.file_limit = size + 4;
+    let calls = case.log().len();
+    let refused = case.controlled(|controller| controller.restore(evidence.as_os_str(), None));
+    case.file_limit = kestrike_tools::gameday::FILE_LIMIT;
+    match refused {
+        Err(kestrike_tools::host_stop_controller::Halt::Refused { sentence, .. }) => assert_eq!(
+            sentence.to_string(),
+            format!("injection/stop.json holds more than {} bytes", size + 4)
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(case.log().len(), calls, "no call");
+    assert!(!case.marks().contains_key("restoration"));
+}
+
+/// `mark` writes only the marks a command encodes from a value: the seal's name is an order fault
+/// with no file step, and no mark stands after it.
+#[test]
+fn mark_refuses_the_seals_name_with_an_order_fault() {
+    let mut case = Case::new("mark-collected");
+    assert_eq!(case.run(), 0, "{}", case.output());
+    let injection = case.evidence.join("injection");
+    let before = listing(&injection);
+    let seal = value(r#"{"time": 430.0, "files": {"coverage.json": "00"}}"#);
+    let written = case.controlled(|controller| {
+        controller.set_injection(&injection);
+        let ended = controller.mark("collected", &seal);
+        (ended, controller.written().to_vec())
+    });
+    assert!(
+        matches!(
+            written.0,
+            Err(kestrike_tools::host_stop_controller::Halt::Fault(
+                kestrike_tools::host_stop_controller::Fault::Order(_)
+            ))
+        ),
+        "{:?}",
+        written.0
+    );
+    assert_eq!(written.1, Vec::<&str>::new());
+    assert_eq!(listing(&injection), before);
 }

@@ -82,6 +82,7 @@ pub(crate) struct Logged {
     pub(crate) left: Option<f64>,
     pub(crate) marks: Vec<String>,
     pub(crate) time: Option<f64>,
+    /// The first wall reading after the call returned its reply.
     pub(crate) wall: Option<f64>,
     pub(crate) cut: bool,
     pub(crate) fault: bool,
@@ -121,6 +122,9 @@ pub(crate) struct State {
     /// the read raises, as a launch whose wait reads the record does.
     pub(crate) interrupt: bool,
     pub(crate) slept: Option<Slept>,
+    /// The index in `log` of the last call that returned a reply, until the next wall reading
+    /// dates it.
+    pub(crate) undated: Option<usize>,
 }
 
 pub(crate) type Shared = Rc<RefCell<State>>;
@@ -189,6 +193,7 @@ impl State {
             stopping: None,
             interrupt: false,
             slept: None,
+            undated: None,
         }
     }
 
@@ -290,12 +295,21 @@ impl Seam for Plane {
         answer
     }
 
+    /// The wall reading, which also dates the last call that returned a reply when no wall reading
+    /// has dated it yet.
     fn wall(&self) -> f64 {
-        let state = self.0.borrow();
-        if let Some(reading) = state.reading.clone() {
-            reading(&state);
+        let wall = {
+            let state = self.0.borrow();
+            if let Some(reading) = state.reading.clone() {
+                reading(&state);
+            }
+            state.wall()
+        };
+        let mut state = self.0.borrow_mut();
+        if let Some(at) = state.undated.take() {
+            state.log[at].wall = Some(wall);
         }
-        state.wall()
+        wall
     }
 
     fn monotonic(&self) -> f64 {
@@ -335,6 +349,7 @@ impl State {
         let op = format!("{} {}", argv[0], argv[1]);
         let args: Vec<String> = argv[2..n - 2].iter().map(|arg| (*arg).to_owned()).collect();
         let begin = self.t;
+        self.undated = None;
         self.envs.push(call.env.to_vec());
         let marks = self.standing();
         let stop_json = (op == STOP)
@@ -387,7 +402,9 @@ impl State {
             Action::Late => {
                 self.t = begin + timeout + 0.5;
                 self.log.last_mut().expect("logged").time = Some(self.t);
-                return self.apply(key, &args).map(|reply| text(&reply));
+                let reply = self.apply(key, &args)?;
+                self.undated = Some(self.log.len() - 1);
+                return Ok(text(&reply));
             }
             _ => {}
         }
@@ -415,8 +432,7 @@ impl State {
             after(self, key);
             self.after = Some(after);
         }
-        let wall = self.wall();
-        self.log.last_mut().expect("logged").wall = Some(wall);
+        self.undated = Some(self.log.len() - 1);
         Ok(text(&reply))
     }
 
@@ -592,16 +608,15 @@ pub(crate) fn calendar(seconds: i64, separator: char) -> String {
 }
 
 /// A `describe-instances` `LaunchTime`: whole seconds, a fraction of three digits when `seconds`
-/// holds one, and `+00:00`.
+/// holds one, its milliseconds rounded half to even with 1000 of them carried into the second, and
+/// `+00:00`.
 pub(crate) fn launch_text(seconds: f64) -> String {
-    let whole = calendar(seconds.floor() as i64, 'T');
-    let fraction = seconds - seconds.floor();
+    let floor = seconds.floor();
+    let fraction = seconds - floor;
     if fraction == 0.0 {
-        format!("{whole}+00:00")
-    } else {
-        format!(
-            "{whole}.{:03}+00:00",
-            (fraction * 1000.0).round_ties_even() as i64
-        )
+        return format!("{}+00:00", calendar(floor as i64, 'T'));
     }
+    let millis = (fraction * 1000.0).round_ties_even() as i64;
+    let whole = floor as i64 + millis / 1000;
+    format!("{}.{:03}+00:00", calendar(whole, 'T'), millis % 1000)
 }
