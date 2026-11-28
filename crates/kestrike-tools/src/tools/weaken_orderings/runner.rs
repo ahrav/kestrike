@@ -14,7 +14,6 @@ use super::halt::Halt;
 use super::pins::{Pins, TERM, lane_env, pin, set, workflow_pins};
 use crate::genmc::correspondence::check_correspondence;
 use crate::genmc::evidence::check_config;
-use crate::genmc::input::read_replaced;
 use crate::genmc::refusal::Error;
 use crate::genmc::transcription::check_transcription;
 use crate::genmc::{is_file, read_source};
@@ -24,9 +23,9 @@ use crate::orderings::sources::{kernel_texts, loom_site};
 use crate::orderings::verdicts::{LOOM_REBUILT, case_exit, genmc_result, loom_result};
 use crate::ownership::PathError;
 use crate::process::{Interrupt, captured};
-use crate::python::returncode;
+use crate::python::{hexdigest, returncode};
 use crate::shell::join;
-use crate::text::text;
+use crate::text::{newlines, text};
 
 /// The run of a test's command, `(exit code, seconds)`, as [`super::execute::execute`] gives it.
 pub(super) type Execute = fn(
@@ -448,8 +447,9 @@ impl Runner<'_> {
                 LOOM_DEADLINE,
                 &output,
             )?;
-            let text = read_replaced(&output)
-                .map_err(|error| Halt::failed(PathError::new(&output, error)))?;
+            let bytes =
+                fs::read(&output).map_err(|error| Halt::failed(PathError::new(&output, error)))?;
+            let text = newlines(String::from_utf8_lossy(&bytes).into_owned());
             if let Some(row) = row
                 && LOOM_REBUILT.is_match(&text)
             {
@@ -463,8 +463,7 @@ impl Runner<'_> {
             members.insert("exit", code_value(code));
             members.insert("seconds", float(seconds));
             members.insert("output", Value::String(text_of(&output)));
-            let digest =
-                sha256(&output).map_err(|error| Halt::failed(PathError::new(&output, error)))?;
+            let digest = hexdigest(&bytes);
             members.insert("digest", Value::String(Text::from(digest.as_str())));
             runs.insert(
                 key.clone(),
