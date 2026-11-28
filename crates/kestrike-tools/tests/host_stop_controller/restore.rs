@@ -50,7 +50,6 @@ fn restore_writes_restoration_once_the_target_runs_with_both_checks_ok() {
     case.start_target(last);
     let (launched, start) = (case.plane.borrow().t, case.log().len());
     assert_eq!(case.restore(None), 0, "{}", case.output());
-    case.keep("restore-clean");
     assert!(
         case.stdout().ends_with(&format!(
             "host-stop-controller: {TARGET} runs again with both status checks ok\n"
@@ -549,7 +548,6 @@ fn after_an_abort_restore_needs_the_reviewed_record_of_that_abort() {
     assert_eq!(found, (digest(&path), Number::from(aborted_at)));
     write_json(&path, &review);
     assert_eq!(case.restore(Some(&path)), 0, "{}", case.output());
-    case.keep("restore-reviewed");
     let reviewed_digest = digest(&path);
     assert!(case.stdout().contains(&format!(
         "host-stop-controller: reviewed record sha256 {reviewed_digest}\n"
@@ -884,7 +882,6 @@ fn a_restoration_reaches_a_stopped_report_dated_after_the_abort_mark() {
     let path = case.scratch.0.join("reviewed.json");
     write_json(&path, &case.review());
     assert_eq!(case.restore(Some(&path)), 0, "{}", case.output());
-    case.keep("restore-reaches");
     assert_eq!(time(&case.marks()["restoration"]), stopped_at);
 }
 

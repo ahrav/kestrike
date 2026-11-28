@@ -1,0 +1,10 @@
+{
+  "id": "contract-change-462",
+  "kind": "contract-change",
+  "pull_request": 462,
+  "changed": "The invariant of the obligation record gameday-judge-refuses-a-collection-changed-after-the-controllers-seal, in its LIMITS clause, and the record's reference. The clause that named scripts/test-host-stop-controller.py as exercising the controller's seal command outside any workflow job now names the host stop controller's Rust cases under crates/kestrike-tools/tests/, which the workspace job runs and which judge the seal through the tools library's copy of the game-day judge's loader, and says that no standing test runs scripts/gameday-judge.py on a seal the controller writes.",
+  "property_action": {
+    "action": "none",
+    "reason": "The property the record states is unchanged: the three cases it credits, their verdicts and their controls stand as they were. The change rewrites the LIMITS clause and the reference to name the tests that replace the deleted Python self-test, and states that the judge's Python form reads no seal the controller writes in a standing test."
+  }
+}
