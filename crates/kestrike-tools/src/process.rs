@@ -183,19 +183,8 @@ pub(crate) fn exited_within(
     limit: Duration,
     interrupt: Option<&Interrupt>,
 ) -> io::Result<Option<ExitStatus>> {
-    let start = Instant::now();
-    let mut pause = FIRST_PAUSE;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        let waited = start.elapsed();
-        if waited >= limit || interrupt.is_some_and(|interrupt| interrupt.recorded().is_some()) {
-            return Ok(None);
-        }
-        thread::sleep(pause.min(limit - waited));
-        pause = (pause * 2).min(POLL);
-    }
+    let recorded = || interrupt.is_some_and(|interrupt| interrupt.recorded().is_some());
+    polled(limit, POLL, &recorded, || child.try_wait())
 }
 
 /// The refusal of a tool started with SIGCHLD ignored: the kernel then reaps each child as it ends, so
