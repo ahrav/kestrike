@@ -75,6 +75,12 @@ fn a_name_is_a_string_and_names_compare_by_code_point() {
             "a name of {name}: None"
         );
     }
+    let unjudged = mutant("1", r#""Failure""#, "[]");
+    let text = file(&[BASELINE.to_owned(), caught(r#""a""#), unjudged]);
+    assert!(
+        read_outcomes(text.as_bytes()).is_none(),
+        "a number as the name of a record that earns no verdict: None"
+    );
     let text = file(&[BASELINE.to_owned(), caught(r#""1""#), caught(r#""1.0""#)]);
     let read = read_outcomes(text.as_bytes()).expect("two names read");
     let names: Vec<String> = read

@@ -335,6 +335,18 @@ fn a_run_of_more_than_4300_digits_refuses_and_4300_reads() {
 }
 
 #[test]
+fn a_run_with_a_digit_outside_nd_or_no_digit_is_refused() {
+    use crate::python::{DigitsError, int_digits};
+    assert_eq!(
+        int_digits("1\u{b2}").map(|_| ()),
+        Err(DigitsError::NotDecimal('\u{b2}'))
+    );
+    assert_eq!(int_digits("__").map(|_| ()), Err(DigitsError::Empty));
+    assert!(matches!(integer("1\u{b2}"), Err(Failure::Refused(_))));
+    assert!(matches!(integer("__"), Err(Failure::Refused(_))));
+}
+
+#[test]
 fn an_id_is_digits_by_the_decimal_and_other_digit_code_points() {
     let digits = |text: &str| is_digits(text.chars().map(u32::from));
     assert!(digits("1") && digits("\u{663}") && digits("\u{b2}") && digits("\u{2460}\u{1f10a}"));
