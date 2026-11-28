@@ -12,13 +12,13 @@ use std::path::Path;
 use super::context::{Stream, beside, pure, seconds};
 use super::controller::Controller;
 use super::fault::{Fault, Halt};
-use super::seal::run_end;
 use super::run::{TOOL, lock_sentence, probe_refusal, shown_path};
+use super::seal::run_end;
+use crate::gameday::{ReadError, ends_observation, read_evidence};
 use crate::host_stop::{
     Files, Number, Request, SKEW_SECONDS, Seam, check_reviewed, check_stopped, instance_id,
     launch_time, lock, probe, read_json, stands,
 };
-use crate::gameday::{ReadError, ends_observation, read_evidence};
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
@@ -188,11 +188,12 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// [`read_evidence`] admits it, with `package.json` of the approval's digest.
     fn sealed(&mut self, root: &Path) -> Result<Object, Halt> {
         let bounds = self.bounds()?;
-        let evidence = read_evidence(root, self.cx.file_limit, &bounds).map_err(|error| match error {
-            ReadError::Refused(refusal) => refusal.into(),
-            ReadError::Closed(text) => Halt::Fault(Fault::Os { code: None, text }),
-            ReadError::Nul => unreachable!("a pathname argument holds no NUL byte"),
-        })?;
+        let evidence =
+            read_evidence(root, self.cx.file_limit, &bounds).map_err(|error| match error {
+                ReadError::Refused(refusal) => refusal.into(),
+                ReadError::Closed(text) => Halt::Fault(Fault::Os { code: None, text }),
+                ReadError::Nul => unreachable!("a pathname argument holds no NUL byte"),
+            })?;
         if *self.operator.approval().package_sha256() != evidence.package_sha256() {
             return Err(refused(
                 "package.json holds other bytes than the approval's package",

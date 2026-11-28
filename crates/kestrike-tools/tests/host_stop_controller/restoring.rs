@@ -26,6 +26,11 @@ impl Case {
     /// lines the case printed to `$HOST_STOP_KEEP/<name>.lines`. `keep` requests mode 0700 for each
     /// directory it creates. If either destination path already exists, `keep` panics.
     pub(crate) fn keep(&self, name: &str) {
+        self.keep_tree(&self.evidence, name);
+    }
+
+    /// `keep_tree` keeps the tree at `from` as [`Case::keep`] keeps the evidence tree.
+    pub(crate) fn keep_tree(&self, from: &Path, name: &str) {
         let Some(root) = std::env::var_os(KEEP) else {
             return;
         };
@@ -41,8 +46,8 @@ impl Case {
             .mode(0o700)
             .create(&kept)
             .unwrap_or_else(|error| panic!("{}: {error}", kept.display()));
-        for relative in listing(&self.evidence) {
-            let (from, to) = (self.evidence.join(&relative), kept.join(&relative));
+        for relative in listing(from) {
+            let (from, to) = (from.join(&relative), kept.join(&relative));
             if fs::symlink_metadata(&from).is_ok_and(|found| found.is_dir()) {
                 DirBuilder::new()
                     .mode(0o700)

@@ -28,7 +28,7 @@ fn shorten_bounds(case: &mut Case, deadline: i64) {
     }
 }
 
-fn flip_first_guardrail() -> Action {
+pub(crate) fn flip_first_guardrail() -> Action {
     Action::Hook(Box::new(|state: &mut State| {
         state.flip("gd2-guardrail-1", "ALARM");
         Action::Answer

@@ -8,6 +8,7 @@
 //! pathname `DIR/injection`, and trusts the operator to keep that directory under that name until
 //! `seal` returns.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::File;
@@ -33,6 +34,9 @@ use crate::text::Text;
 const DIRECTORIES: [&str; 3] = ["", "records", "injection"];
 
 const SEAL: &str = "injection/collected.json";
+
+/// The bytes `seal` read by relative path, the names the package gives, and its list bounds.
+type Collected = (BTreeMap<Text, Vec<u8>>, Names, FleetBounds);
 
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// `seal` returns 0 when it writes `injection/collected.json`, and 1 when the write fails; for
@@ -80,7 +84,10 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             .collect();
         let mut digests = Object::new();
         for rel in &sealed {
-            digests.insert(rel.clone(), Value::String(Text::from(hexdigest(&files[rel]))));
+            digests.insert(
+                rel.clone(),
+                Value::String(Text::from(hexdigest(&files[rel]))),
+            );
         }
         let mut mark = Object::new();
         mark.insert("time", Value::Float(now));
@@ -107,7 +114,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         evidence: &OsStr,
         root: &Path,
         now: f64,
-    ) -> Result<(BTreeMap<Text, Vec<u8>>, Names, FleetBounds), Halt> {
+    ) -> Result<Collected, Halt> {
         let mut dirs: Vec<File> = Vec::new();
         for rel in DIRECTORIES {
             let opened = if rel.is_empty() {
@@ -142,7 +149,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Err(Halt::refused(sentence));
         }
         let end = run_end(&p);
-        if !(Number::of(end).expect("a numeric end") <= Number::from(now)) {
+        if Number::of(end).expect("a numeric end") > Number::from(now) {
             return Err(Halt::refused(Text::from(format!(
                 "the run window ends at {}, after the seal's time {}, so its collections may \
                  still grow",
@@ -173,17 +180,20 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         admitted.insert(Text::from(SEAL));
         admit(&p, &admitted)?;
         let roles = self.read_in(&dirs, "injection/roles.json")?;
-        if !names_package(&parsed(&roles, &Text::from("injection/roles.json"))?, approved) {
+        if !names_package(
+            &parsed(&roles, &Text::from("injection/roles.json"))?,
+            approved,
+        ) {
             return Err(refused(
                 "injection/roles.json names another package than the approval's",
             ));
         }
         files.insert(Text::from("injection/roles.json"), roles);
         for rel in stand {
-            if !files.contains_key(&rel) {
-                let shown = rel.to_str().expect("a listed name of the layout is UTF-8");
+            if let Entry::Vacant(slot) = files.entry(rel) {
+                let shown = slot.key().to_str().expect("a listed name of the layout is UTF-8");
                 let data = self.read_in(&dirs, shown)?;
-                files.insert(rel, data);
+                slot.insert(data);
             }
         }
         for at in [1, 2, 0] {
