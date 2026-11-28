@@ -192,9 +192,7 @@ pub(super) fn checked_object(value: &Value) -> &Object {
 
 /// The member `key` of the object that a passed schema check made `value` and gave that key.
 pub(super) fn checked_field<'a>(value: &'a Value, key: &str) -> &'a Value {
-    checked_object(value)
-        .get(key)
-        .unwrap_or_else(|| panic!("the checked object holds {key}"))
+    checked_member(checked_object(value), key)
 }
 
 /// The items of the list that a passed schema check made `value`.

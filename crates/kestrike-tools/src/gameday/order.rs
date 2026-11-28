@@ -3,11 +3,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::evidence::shards;
 use super::layout::VERSION_FIELDS;
-use super::package::number;
+use super::package::{number, shards};
 use super::refusal::{Refusal, need, said};
-use super::schema::{checked_field, checked_list, checked_object, checked_text};
+use super::schema::{checked_field, checked_list, checked_member, checked_object, checked_text};
 use crate::decimal::Decimal;
 use crate::json::{Integer, Object, Value};
 use crate::python::repr;
@@ -52,11 +51,8 @@ pub fn ends_observation(p: &Object, time: Option<&Value>) -> bool {
         return false;
     };
     let time = number(time);
-    let run = p.get("run").expect("the package names its run window");
-    let error = number(
-        p.get("clock_error_seconds")
-            .expect("the package names its clock error"),
-    );
+    let run = checked_member(p, "run");
+    let error = number(checked_member(p, "clock_error_seconds"));
     number(checked_field(run, "start")) <= time
         && &time - &error < number(checked_field(run, "end"))
 }
@@ -76,7 +72,7 @@ pub(super) fn check_order(
     p: &Object,
     files: &BTreeMap<Text, Value>,
 ) -> Result<BTreeMap<Text, Option<usize>>, Refusal> {
-    let package = |key: &str| p.get(key).expect("the package's schema holds the key");
+    let package = |key: &str| checked_member(p, key);
     let file = |rel: &str| files.get(&Text::from(rel));
     let required = |rel: &str| file(rel).expect("the layout requires the file");
     let error = number(package("clock_error_seconds"));
@@ -100,31 +96,7 @@ pub(super) fn check_order(
         let stopped = file("injection/stopped.json");
         check_restoration(package("target"), restoration, stop, stopped, abort, &end)?;
     }
-    let witness = checked_list(required("witness.jsonl"));
-    need(ordered(witness), || {
-        said!("witness.jsonl is not in send order")
-    })?;
-    for (at, row) in witness.iter().enumerate() {
-        let line = (at + 1).to_string();
-        let hit = *checked_field(row, "outcome") == Value::String(Text::from("hit"));
-        need(!hit || *checked_field(row, "sha256") != Value::Null, || {
-            said!(
-                "witness.jsonl line ",
-                line,
-                " is a hit with no digest (a hit needs one; another outcome may read null)"
-            )
-        })?;
-        let after = |stop: &Value| {
-            later(
-                checked_field(row, "time"),
-                checked_field(stop, "time"),
-                &error,
-            ) != Some(false)
-        };
-        need(stop.is_none_or(after), || {
-            said!("witness.jsonl line ", line, " precedes the stop")
-        })?;
-    }
+    check_witness(checked_list(required("witness.jsonl")), stop, &error)?;
     let sealed = checked_field(required("injection/collected.json"), "time");
     need(end <= number(sealed), || {
         said!(
@@ -242,6 +214,34 @@ fn check_restoration(
              mark"
         )
     })
+}
+
+fn check_witness(witness: &[Value], stop: Option<&Value>, error: &Decimal) -> Result<(), Refusal> {
+    need(ordered(witness), || {
+        said!("witness.jsonl is not in send order")
+    })?;
+    for (at, row) in witness.iter().enumerate() {
+        let line = || (at + 1).to_string();
+        let hit = *checked_text(checked_field(row, "outcome")) == "hit";
+        need(!hit || *checked_field(row, "sha256") != Value::Null, || {
+            said!(
+                "witness.jsonl line ",
+                line(),
+                " is a hit with no digest (a hit needs one; another outcome may read null)"
+            )
+        })?;
+        let after = |stop: &Value| {
+            later(
+                checked_field(row, "time"),
+                checked_field(stop, "time"),
+                error,
+            ) != Some(false)
+        };
+        need(stop.is_none_or(after), || {
+            said!("witness.jsonl line ", line(), " precedes the stop")
+        })?;
+    }
+    Ok(())
 }
 
 fn check_coverage(files: &BTreeMap<Text, Value>, sealed: &Value) -> Result<(), Refusal> {

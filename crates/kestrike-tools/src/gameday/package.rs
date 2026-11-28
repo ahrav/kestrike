@@ -12,7 +12,8 @@ use super::layout::PACKAGE_SCHEMA;
 use super::read::{ReadError, read_file};
 use super::refusal::{Refusal, need, said};
 use super::schema::{
-    Names, Scalar, Schema, checked_list, checked_object, checked_text, conform, sorted,
+    Names, Scalar, Schema, checked_list, checked_member, checked_object, checked_text, conform,
+    sorted,
 };
 use crate::classes::compiled;
 use crate::decimal::Decimal;
@@ -292,6 +293,13 @@ fn check_windows<'a>(field: &impl Fn(&str) -> &'a Value) -> Result<(), Refusal> 
 /// The exact value of a number the schema checked.
 pub(super) fn number(value: &Value) -> Decimal {
     exact(value).expect("the schema made the value a finite number")
+}
+
+/// The shard names of a package that passed [`check_package`], in the package's order.
+pub(super) fn shards(p: &Object) -> impl Iterator<Item = &Text> {
+    checked_list(checked_member(p, "shards"))
+        .iter()
+        .map(checked_text)
 }
 
 #[cfg(test)]

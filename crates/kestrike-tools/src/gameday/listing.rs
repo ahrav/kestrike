@@ -1,28 +1,26 @@
-//! [`open_dir`] refuses a symbolic link at the last component of its path, and [`entries`] refuses
+//! [`open_dir`] refuses a symbolic link named by the last component of its path, and [`entries`] refuses
 //! links, special files, and directories whose relative paths fall outside `LAYOUT_DIRS`.
 //!
-//! For an entry name, `/proc/self/fd/<descriptor>` anchors the lookup at the open directory.
+//! For an entry name, `/proc/self/fd/<descriptor>` anchors the lookup at the open directory. The
+//! listing opens the directory again through that path, so it needs `/proc` and read permission on
+//! the directory when it runs.
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::constants::LAYOUT_DIRS;
-use super::read::ReadError;
+use super::read::{ReadError, in_dir, opened};
 use super::refusal::{Refusal, need, said};
 use crate::plants::files::strerror;
 use crate::text::Text;
 
-/// An empty `name` identifies `dir` itself.
-fn in_dir(dir: BorrowedFd<'_>, name: &Path) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd())).join(name)
-}
-
-/// `open_dir` rejects a symbolic link at the final component of `path`. When `dir` is present,
-/// `open_dir` resolves relative paths from `dir`. An empty `path` fails with `ENOENT`.
+/// `open_dir` rejects a symbolic link named by the final component of `path`. A `path` that ends in
+/// `/` or `/.` puts the link before the final component, so the kernel follows it and requires its
+/// target to be a directory. When `dir` is present, `open_dir` resolves relative paths from `dir`.
+/// `open_dir` rejects an empty `path` regardless of `dir`.
 ///
 /// # Errors
 ///
@@ -33,13 +31,7 @@ pub fn open_dir(
     dir: Option<BorrowedFd<'_>>,
     what: &Text,
 ) -> Result<OwnedFd, ReadError> {
-    if path.as_os_str().as_bytes().contains(&0) {
-        return Err(ReadError::Nul);
-    }
-    let at = match dir {
-        Some(dir) if !path.as_os_str().is_empty() => in_dir(dir, path),
-        _ => path.to_path_buf(),
-    };
+    let at = opened(path, dir)?;
     OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)

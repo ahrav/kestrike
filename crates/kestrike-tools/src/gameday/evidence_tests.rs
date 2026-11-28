@@ -1,6 +1,8 @@
 //! `read_evidence` loads the held fixture with its digests and indices.
 
 use std::fs;
+use std::os::fd::AsFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
 
@@ -24,6 +26,7 @@ enum Op {
     Fifo(&'static str),
     Mkdir(&'static str),
     Unseal(&'static str),
+    Fill(&'static str, usize),
 }
 
 const REVIEWED: Op = Op::Replace(
@@ -36,18 +39,29 @@ fn bounds() -> FleetBounds {
     FleetBounds::new(&tree(), FILE_LIMIT).expect("the top holds no NUL")
 }
 
+fn listed(root: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+    for dir in ["", "injection", "records"] {
+        for entry in fs::read_dir(root.join(dir)).expect("the directory lists") {
+            let entry = entry.expect("the directory lists");
+            if entry.file_type().expect("the type reads").is_file() {
+                let name = Path::new(dir).join(entry.file_name());
+                names.push(name.to_str().expect("a fixture name is UTF-8").to_owned());
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
 fn copy() -> Scratch {
     let scratch = Scratch::new("gameday-evidence");
     let from = tree().join("scripts/gameday-fixtures/held");
-    for dir in ["", "injection", "records"] {
-        fs::create_dir_all(scratch.0.join(dir)).expect("the directory is made");
-        for entry in fs::read_dir(from.join(dir)).expect("the fixture lists") {
-            let entry = entry.expect("the fixture lists");
-            if entry.file_type().expect("the type reads").is_file() {
-                let to = scratch.0.join(dir).join(entry.file_name());
-                fs::copy(entry.path(), to).expect("the file copies");
-            }
-        }
+    for dir in ["injection", "records"] {
+        fs::create_dir(scratch.0.join(dir)).expect("the directory is made");
+    }
+    for name in listed(&from) {
+        fs::copy(from.join(&name), scratch.0.join(&name)).expect("the file copies");
     }
     scratch
 }
@@ -69,6 +83,14 @@ fn apply(root: &Path, op: Op) {
             assert!(made.expect("mkfifo starts").success(), "the fifo is made");
         }
         Op::Mkdir(rel) => fs::create_dir(root.join(rel)).expect("the directory is made"),
+        Op::Fill(rel, size) => {
+            let made = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join(rel));
+            let mut file = made.expect("the file is made");
+            std::io::Write::write_all(&mut file, &vec![b'x'; size]).expect("the file writes");
+        }
         Op::Unseal(rel) => {
             let seal = root.join("injection/collected.json");
             let text = fs::read_to_string(&seal).expect("the seal reads");
@@ -86,21 +108,11 @@ fn apply(root: &Path, op: Op) {
 /// `injection/collected.json`.
 fn reseal(root: &Path) {
     let rel = "injection/collected.json";
-    let mut names = Vec::new();
-    for dir in ["", "injection", "records"] {
-        for entry in fs::read_dir(root.join(dir)).expect("the copy lists") {
-            let entry = entry.expect("the copy lists");
-            let name = Path::new(dir).join(entry.file_name());
-            let name = name.to_str().expect("a fixture name is UTF-8").to_owned();
-            let kind = entry.file_type().expect("the type reads");
-            if kind.is_file() && name != "package.json" && name != rel {
-                names.push(name);
-            }
-        }
-    }
-    names.sort();
     let mut files = Object::new();
-    for name in names {
+    for name in listed(root) {
+        if name == "package.json" || name == rel {
+            continue;
+        }
         let digest = hexdigest(&fs::read(root.join(&name)).expect("the file reads"));
         files.insert(name, Value::String(Text::from(digest)));
     }
@@ -111,6 +123,10 @@ fn reseal(root: &Path) {
 }
 
 fn load(ops: &[Op], sealed: bool) -> Result<Evidence, ReadError> {
+    load_within(ops, sealed, FILE_LIMIT)
+}
+
+fn load_within(ops: &[Op], sealed: bool, limit: u64) -> Result<Evidence, ReadError> {
     let scratch = copy();
     let (unseal, change): (Vec<Op>, Vec<Op>) =
         ops.iter().partition(|op| matches!(op, Op::Unseal(_)));
@@ -123,7 +139,7 @@ fn load(ops: &[Op], sealed: bool) -> Result<Evidence, ReadError> {
     for op in unseal {
         apply(&scratch.0, op);
     }
-    read_evidence(&scratch.0, FILE_LIMIT, &bounds())
+    read_evidence(&scratch.0, limit, &bounds())
 }
 
 fn refusal(ops: &[Op], sealed: bool) -> String {
@@ -427,6 +443,11 @@ fn the_roles_read_anchors_at_a_version_within_the_clock_error_or_at_none() {
              \"vol-s1\",\n   \"attempts\": 2",
         ),
         Op::Replace("records/s5.jsonl", "{\"time\": 50,", "{\"time\": 300,"),
+        Op::Replace(
+            "records/s1.jsonl",
+            "{\"time\": 150, \"owner\": \"h2\", \"standby\": \"h4\",",
+            "{\"time\": 130, \"owner\": \"h2\", \"standby\": null,",
+        ),
     ];
     let evidence = load(&ops, true).expect("the copy loads");
     let anchors: Vec<(String, Option<usize>)> = evidence
@@ -476,15 +497,9 @@ fn an_empty_root_and_a_load_without_a_seal_are_refused() {
     }
     let root = tree().join("scripts/gameday-fixtures/held");
     let mut files = std::collections::BTreeMap::new();
-    for dir in ["", "injection", "records"] {
-        for entry in fs::read_dir(root.join(dir)).expect("the fixture lists") {
-            let entry = entry.expect("the fixture lists");
-            if entry.file_type().expect("the type reads").is_file() {
-                let name = Path::new(dir).join(entry.file_name());
-                let name = Text::from(name.to_str().expect("a fixture name is UTF-8"));
-                files.insert(name, fs::read(entry.path()).expect("the file reads"));
-            }
-        }
+    for name in listed(&root) {
+        let data = fs::read(root.join(&name)).expect("the file reads");
+        files.insert(Text::from(name.as_str()), data);
     }
     let loaded = load_evidence(&files, &bounds()).expect("the held bytes load");
     assert_eq!(
@@ -494,6 +509,9 @@ fn an_empty_root_and_a_load_without_a_seal_are_refused() {
     files.remove(&Text::from("injection/collected.json"));
     let refused = load_evidence(&files, &bounds()).expect_err("a load without the seal");
     assert_eq!(*refused.message(), "injection/collected.json is missing");
+    files.remove(&Text::from("package.json"));
+    let refused = load_evidence(&files, &bounds()).expect_err("a load without the package");
+    assert_eq!(*refused.message(), "package.json is missing");
 }
 
 #[test]
@@ -534,9 +552,11 @@ fn an_entry_whose_type_cannot_be_read_is_refused() {
         fs::set_permissions(&at, fs::Permissions::from_mode(0o444)).expect("the mode is set");
         let _mode = Mode(&at);
         if fs::symlink_metadata(at.join(first)).is_ok() {
-            eprintln!(
-                "skipped: this process reads an entry of a directory without search permission"
-            );
+            std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"skipped: this process reads an entry of a directory without search permission\n",
+            )
+            .expect("the notice writes");
             return;
         }
         match read_evidence(&scratch.0, FILE_LIMIT, &bounds()) {
@@ -577,4 +597,334 @@ fn a_restoration_of_another_instance_than_the_target_is_refused_without_a_stop()
         refusal(&ops, true),
         "injection/restoration.json names another instance than the stop request's"
     );
+}
+
+const STOP_OF_H2: Op = Op::Replace(
+    "injection/stop.json",
+    "\"instance\": \"i-h1\"",
+    "\"instance\": \"i-h2\"",
+);
+
+const ABORT_AT_200: Op = Op::Write(
+    "injection/abort.json",
+    "{\"cause\": \"deadline\", \"guardrail\": null, \"time\": 200, \"detail\": null}\n",
+);
+
+fn restoration_at(time: &'static str) -> Op {
+    Op::Replace("injection/restoration.json", "\"time\": 420,", time)
+}
+
+#[test]
+fn each_order_rule_reads_each_mark_it_names() {
+    let precedes = "injection/restoration.json precedes the stop request, the stopped report or the \
+                    abort mark";
+    let refused: [(&str, Vec<Op>, &str); 4] = [
+        (
+            "a restoration of the target after a stop of another instance",
+            vec![STOP_OF_H2],
+            "injection/restoration.json names another instance than the stop request's",
+        ),
+        (
+            "a restoration before the stop with no stopped report",
+            vec![
+                Op::Remove("injection/stopped.json"),
+                restoration_at("\"time\": 105,"),
+            ],
+            precedes,
+        ),
+        (
+            "a reviewed restoration before the abort mark",
+            vec![ABORT_AT_200, REVIEWED, restoration_at("\"time\": 150,")],
+            precedes,
+        ),
+        (
+            "an abort of cause guardrail with no guardrail",
+            vec![
+                Op::Write(
+                    "injection/abort.json",
+                    "{\"cause\": \"guardrail\", \"guardrail\": null, \"time\": 200, \"detail\": \
+                     null}\n",
+                ),
+                REVIEWED,
+            ],
+            "injection/abort.json guardrail is not a GD-2 guardrail text with cause guardrail and \
+             null otherwise",
+        ),
+    ];
+    for (row, ops, expected) in refused {
+        assert_eq!(refusal(&ops, true), expected, "{row}");
+    }
+    let loaded: [(&str, Vec<Op>); 4] = [
+        (
+            "a restoration of the stop's instance before a stopped report of another",
+            vec![
+                STOP_OF_H2,
+                Op::Replace(
+                    "injection/restoration.json",
+                    "\"instance\": \"i-h1\"",
+                    "\"instance\": \"i-h2\"",
+                ),
+                restoration_at("\"time\": 111,"),
+            ],
+        ),
+        (
+            "a reviewed restoration after the abort mark",
+            vec![ABORT_AT_200, REVIEWED],
+        ),
+        (
+            "a restoration before a stopped report at the run window's end",
+            vec![
+                Op::Replace("injection/stopped.json", "\"time\": 112,", "\"time\": 400,"),
+                restoration_at("\"time\": 300,"),
+            ],
+        ),
+        (
+            "witness rows of equal stamps",
+            vec![Op::Replace(
+                "witness.jsonl",
+                "\"time\": 141,",
+                "\"time\": 140,",
+            )],
+        ),
+    ];
+    for (row, ops) in loaded {
+        let outcome = load(&ops, true);
+        assert!(outcome.is_ok(), "{row}: {outcome:?}");
+    }
+}
+
+#[test]
+fn ends_observation_is_false_before_the_run_and_at_its_end_plus_the_error() {
+    let package = held("package.json");
+    for (error, time) in [("0", "99"), ("1", "401")] {
+        let p = object(&patched(&package, &[("clock_error_seconds", Some(error))])).clone();
+        assert!(
+            !ends_observation(&p, Some(&value(time))),
+            "{time} with {error}"
+        );
+    }
+    let error = crate::gameday::exact(&value("0.1")).expect("a number");
+    assert_eq!(
+        crate::gameday::later(&value("0.4"), &value("0.3"), &error),
+        None
+    );
+}
+
+#[test]
+fn a_simulation_loads_without_the_file_of_an_observation_outside_its_world() {
+    let ops = [
+        Op::Replace(
+            "package.json",
+            "\"kind\": \"staging\"",
+            "\"kind\": \"simulation\"",
+        ),
+        Op::Replace(
+            "package.json",
+            "\"outside\": {}",
+            "\"outside\": {\"origin\": \"no origin in this world\"}",
+        ),
+        Op::Remove("origin.jsonl"),
+        Op::Replace(
+            "coverage.json",
+            " \"origin.jsonl\": {\n  \"from\": 0,\n  \"to\": 400,\n  \"lines\": 27\n },\n",
+            "",
+        ),
+    ];
+    let evidence = load(&ops, true).expect("the simulation loads");
+    assert_eq!(evidence.file("origin.jsonl"), None);
+    assert_eq!(
+        evidence.file("provider.jsonl"),
+        Some(&held_lines("provider.jsonl"))
+    );
+}
+
+#[test]
+fn the_first_refusal_of_two_is_the_earlier_rule() {
+    let stop_at_90 = Op::Replace("injection/stop.json", "\"time\": 110,", "\"time\": 90,");
+    let outcome = load_within(&[Op::Fill("notes.txt", 2001)], false, 2000);
+    match outcome {
+        Err(ReadError::Refused(refusal)) => {
+            assert_eq!(*refusal.message(), "notes.txt is no file of the layout");
+        }
+        other => panic!("an unlisted file past the limit is refused, not {other:?}"),
+    }
+    let rows: [(&str, Vec<Op>, bool, &str); 3] = [
+        (
+            "the seal before the order",
+            vec![stop_at_90],
+            false,
+            "injection/stop.json differs from the bytes injection/collected.json seals: it holds \
+             SHA-256 0995733600fe6cf376f597f15dcc9a8497c8174ad36ad8d0b59d6c0c89cfbd3f, the seal \
+             4fd88bc07a91fc888696762333d98b38ded82da8bfcbe5eec181a135795eb236",
+        ),
+        (
+            "a shard's order before the stop",
+            vec![
+                Op::Replace("records/s4.jsonl", "{\"time\": 180,", "{\"time\": 40,"),
+                stop_at_90,
+            ],
+            true,
+            "records/s4.jsonl is not in commit order",
+        ),
+        (
+            "a record's schema before a mark's, in the layout's order",
+            vec![
+                Op::Replace(
+                    "records/s1.jsonl",
+                    "{\"time\": 125, \"owner\": \"h2\",",
+                    "{\"time\": 125, \"owner\": \"h9\",",
+                ),
+                Op::Replace(
+                    "injection/stopped.json",
+                    "\"time\": 112,",
+                    "\"time\": \"112\",",
+                ),
+            ],
+            true,
+            "records/s1.jsonl line 2 owner is no host of the layout: 'h9'",
+        ),
+    ];
+    for (row, ops, sealed, expected) in rows {
+        assert_eq!(refusal(&ops, sealed), expected, "{row}");
+    }
+    assert_eq!(
+        refusal(
+            &[Op::Replace(
+                "injection/stopped.json",
+                "\"time\": 112,",
+                "\"time\": \"112\","
+            )],
+            true
+        ),
+        "injection/stopped.json time is no time of the layout: '112'"
+    );
+}
+
+#[test]
+fn a_sealed_file_whose_line_ends_change_is_of_other_bytes() {
+    let ops = [Op::Replace(
+        "origin.jsonl",
+        "{\"time\": 2, \"key\": \"img/other-2\"}\n",
+        "{\"time\": 2, \"key\": \"img/other-2\"}\r\n",
+    )];
+    assert_eq!(
+        refusal(&ops, false),
+        "origin.jsonl differs from the bytes injection/collected.json seals: it holds SHA-256 \
+         b849a07e3537c283df0d1d18ffa024df41e27829b08e14330f0cc5b8a5f6a0fb, the seal \
+         65443fad683c3daa9659ca7c0a6d830ed26027f9b8f5c0202b1d777e88e55a5c"
+    );
+}
+
+#[test]
+fn a_missing_package_a_package_of_another_type_and_a_root_of_no_directory_are_refused() {
+    let rows: [(&[Op], &str); 2] = [
+        (&[Op::Remove("package.json")], "package.json is missing"),
+        (
+            &[
+                Op::Remove("package.json"),
+                Op::Write("package.json", "[]\n"),
+            ],
+            "package.json is no object",
+        ),
+    ];
+    for (ops, expected) in rows {
+        assert_eq!(refusal(ops, false), expected, "{ops:?}");
+    }
+    let nul = std::ffi::OsStr::from_bytes(b"held\0copy");
+    assert!(matches!(
+        read_evidence(Path::new(nul), FILE_LIMIT, &bounds()),
+        Err(ReadError::Nul)
+    ));
+    let file = tree().join("scripts/gameday-fixtures/held/package.json");
+    match read_evidence(&file, FILE_LIMIT, &bounds()) {
+        Err(ReadError::Refused(refusal)) => assert_eq!(
+            refusal.message().to_string(),
+            format!("{} is no directory: Not a directory", file.display())
+        ),
+        other => panic!("a file as the root is refused, not {other:?}"),
+    }
+    let open = fs::File::open(&file).expect("the package opens");
+    for (prefix, expected) in [
+        (
+            "",
+            "the evidence directory cannot be listed: Not a directory",
+        ),
+        ("x/", "x/ cannot be listed: Not a directory"),
+    ] {
+        let listed = crate::gameday::entries(open.as_fd(), &Text::from(prefix));
+        assert_eq!(
+            *listed.expect_err("a file lists no names").message(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_root_that_names_a_link_is_refused_in_each_spelling() {
+    let target = copy();
+    let place = Scratch::new("gameday-link");
+    let link = place.0.join("link");
+    symlink(&target.0, &link).expect("the link is made");
+    assert!(read_evidence(&target.0, FILE_LIMIT, &bounds()).is_ok());
+    for suffix in ["", "/", "/.", "//.", "/./"] {
+        let mut spelling = link.clone().into_os_string();
+        spelling.push(suffix);
+        match read_evidence(Path::new(&spelling), FILE_LIMIT, &bounds()) {
+            Err(ReadError::Refused(refusal)) => assert_eq!(
+                refusal.message().to_string(),
+                format!(
+                    "{} is no directory: Not a directory",
+                    spelling.to_string_lossy()
+                )
+            ),
+            other => panic!("{spelling:?} is refused, not {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_root_is_spelled_with_its_empty_and_dot_components_dropped() {
+    for (root, expected) in [
+        ("./x", "x"),
+        ("//x", "//x"),
+        ("///x", "/x"),
+        ("a/../b", "a/../b"),
+        (".", "."),
+        ("./", "."),
+        ("x/.", "x"),
+        ("a//b/", "a/b"),
+        ("x/./y", "x/y"),
+        ("/", "/"),
+        ("//", "//"),
+        ("///", "/"),
+        ("//./x", "//x"),
+    ] {
+        assert_eq!(
+            super::spelled(Path::new(root)).as_os_str().as_bytes(),
+            expected.as_bytes(),
+            "{root}"
+        );
+    }
+}
+
+#[test]
+fn each_file_is_read_through_the_directory_that_listed_it() {
+    let place = Scratch::new("gameday-deep");
+    let mut deep = place.0.clone();
+    while deep.as_os_str().len() < 4080 - 201 {
+        deep.push("d".repeat(200));
+        fs::create_dir(&deep).expect("the directory is made");
+    }
+    let last = 4080 - deep.as_os_str().len() - 1;
+    deep.push("e".repeat(last));
+    let held = copy();
+    fs::rename(&held.0, &deep).expect("the copy moves");
+    assert_eq!(deep.as_os_str().len(), 4080);
+    let evidence = read_evidence(&deep, FILE_LIMIT, &bounds());
+    let evidence = evidence.expect("the deep copy loads");
+    assert_eq!(
+        evidence.seal_sha256(),
+        "7979ade2516adcd9b854b9d5776bc492ecf487b60acfe02de21911b78bfc1e5c"
+    );
+    assert!(deep.join("injection/collected.json").as_os_str().len() > 4095);
 }

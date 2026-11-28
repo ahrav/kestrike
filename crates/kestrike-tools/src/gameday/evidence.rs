@@ -2,18 +2,20 @@
 //! checks the seal and the order of the records and marks.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::os::fd::AsFd;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use super::constants::{COLLECTED, MARKS, OBSERVATION_FILES};
 use super::layout::{LAYOUT, RECORD};
 use super::listing::{entries, open_dir};
 use super::order::check_order;
-use super::package::{FleetBounds, check_package};
+use super::package::{FleetBounds, check_package, shards};
 use super::parse::parsed;
 use super::read::{ReadError, read_file};
 use super::refusal::{Refusal, need, said};
-use super::schema::{Names, Schema, checked_list, checked_object, checked_text, conform};
+use super::schema::{Names, Schema, checked_list, checked_member, checked_object, conform};
 use super::seal::check_seal;
 use crate::json::{Object, Value};
 use crate::python::hexdigest;
@@ -38,8 +40,8 @@ impl Evidence {
         &self.package_sha256
     }
 
-    /// The parsed value of the layout's file `rel`; `None` for an optional file that is absent and for
-    /// `package.json`, which [`package`](Self::package) holds.
+    /// The lookup returns the parsed value for `rel` when the layout file is present, and `None`
+    /// otherwise.
     pub fn file(&self, rel: &str) -> Option<&Value> {
         self.files.get(&Text::from(rel))
     }
@@ -48,6 +50,7 @@ impl Evidence {
         &self.seal_sha256
     }
 
+    /// Each shard's anchor indexes a line in its record file; `None` means no line is the anchor.
     pub fn anchors(&self) -> &BTreeMap<Text, Option<usize>> {
         &self.anchors
     }
@@ -67,18 +70,12 @@ pub fn package_of(data: &[u8], bounds: &FleetBounds) -> Result<(Object, Names), 
 }
 
 fn absent(p: &Object) -> BTreeSet<Text> {
-    let outside = checked_object(p.get("outside").expect("the package names its outside"));
+    let outside = checked_object(checked_member(p, "outside"));
     OBSERVATION_FILES
         .iter()
         .filter(|(observation, _)| outside.get(observation).is_some())
         .map(|(_, file)| Text::from(*file))
         .collect()
-}
-
-pub(super) fn shards(p: &Object) -> impl Iterator<Item = &Text> {
-    checked_list(p.get("shards").expect("the package names its shards"))
-        .iter()
-        .map(checked_text)
 }
 
 /// # Panics
@@ -190,6 +187,27 @@ pub fn load_evidence(
     })
 }
 
+fn spelled(root: &Path) -> PathBuf {
+    let bytes = root.as_os_str().as_bytes();
+    let lead: &[u8] = if bytes.starts_with(b"//") && !bytes.starts_with(b"///") {
+        b"//"
+    } else if bytes.starts_with(b"/") {
+        b"/"
+    } else {
+        b""
+    };
+    let parts: Vec<&[u8]> = bytes
+        .split(|byte| *byte == b'/')
+        .filter(|part| !part.is_empty() && *part != b".")
+        .collect();
+    let mut spelling = lead.to_vec();
+    spelling.extend(parts.join(&b'/'));
+    if spelling.is_empty() {
+        spelling.push(b'.');
+    }
+    PathBuf::from(OsString::from_vec(spelling))
+}
+
 /// `read_evidence` lists the evidence directory at `root` and each of its layout directories, reads
 /// `package.json` first, uses its package to admit the listed paths, then reads the remaining files
 /// in relative-path order, each at most `limit` bytes, and passes all files, including
@@ -204,12 +222,17 @@ pub fn load_evidence(
 /// [`load_evidence`]. A failed close of a file read is the [`ReadError::Closed`] that [`read_file`]
 /// returns, passed on for the caller to word; a failed close of a directory's descriptor goes
 /// unreported.
+///
+/// A `root` with a NUL byte yields [`ReadError::Nul`].
 pub fn read_evidence(root: &Path, limit: u64, bounds: &FleetBounds) -> Result<Evidence, ReadError> {
     if root.as_os_str().is_empty() {
         return Err(Refusal::new(said!("no evidence directory is named")).into());
     }
-    let normal: PathBuf = root.components().collect();
-    let mut dirs = vec![open_dir(&normal, None, &Text::from_os(root.as_os_str()))?];
+    let mut dirs = vec![open_dir(
+        &spelled(root),
+        None,
+        &Text::from_os(root.as_os_str()),
+    )?];
     let mut place: BTreeMap<Text, (usize, Text)> = BTreeMap::new();
     for (rel, is_dir) in entries(dirs[0].as_fd(), &Text::new())? {
         if !is_dir {

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::constants::MARKS;
 use super::order::ends_observation;
 use super::refusal::{Refusal, need, said};
-use super::schema::{checked_field, checked_object, checked_text};
+use super::schema::{checked_field, checked_member, checked_object, checked_text};
 use crate::json::{Object, Value};
 use crate::python::{hexdigest, repr};
 use crate::text::Text;
@@ -73,10 +73,7 @@ pub(super) fn check_seal(
         let restoration = values.get(&rel).expect("a mark that stands is parsed");
         let at = checked_field(restoration, "time");
         need(!ends_observation(p, Some(at)), || {
-            let end = checked_field(
-                p.get("run").expect("the package names its run window"),
-                "end",
-            );
+            let end = checked_field(checked_member(p, "run"), "end");
             said!(
                 rel,
                 " stands unsealed and dates ",
