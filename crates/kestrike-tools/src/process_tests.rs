@@ -742,7 +742,8 @@ const BLOCKED_ROLE: &str = "KESTRIKE_PROCESS_BLOCKED_ROLE";
 
 /// `pending` holds where `signal` is pending for the calling thread or the process.
 fn pending(signal: i32) -> bool {
-    // SAFETY: all-zero bytes are a valid `sigset_t`, which `sigpending` overwrites; `set` outlives both calls.
+    // SAFETY: all-zero bytes are a valid `sigset_t`, which `sigpending` overwrites and `sigismember` then
+    // reads; `set` outlives both calls.
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         assert_eq!(libc::sigpending(&mut set), 0);
@@ -753,7 +754,7 @@ fn pending(signal: i32) -> bool {
 /// `mask_holds` holds where `signal` is blocked in the calling thread.
 fn mask_holds(signal: i32) -> bool {
     // SAFETY: a null new set makes `pthread_sigmask` only write the current mask into `set`, which all-zero
-    // bytes initialize and which outlives the calls.
+    // bytes initialize, `sigismember` then reads, and which outlives the calls.
     unsafe {
         let mut set: libc::sigset_t = std::mem::zeroed();
         assert_eq!(
@@ -784,7 +785,8 @@ fn a_blocked_signal_is_recorded_once_the_mask_is_set_back() {
             );
         }
         let inside = super::blocked(|| {
-            // SAFETY: `pthread_kill` sends a signal to the calling thread, which runs.
+            // SAFETY: `pthread_self` names the calling thread, which runs, and `pthread_kill` sends it a
+            // signal; neither touches memory of the caller.
             let sent = unsafe { libc::pthread_kill(libc::pthread_self(), libc::SIGHUP) };
             (
                 sent,
