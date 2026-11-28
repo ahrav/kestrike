@@ -55,8 +55,8 @@ fn a_score_replaces_a_link_and_takes_its_mode() {
 }
 
 /// A file published with a creation mode takes the permission bits of any file created there with that
-/// mode, as `elsewhere` is, whether the kernel applies the umask or the directory's default ACL, and
-/// replaces a link at its path while the link's target stays.
+/// mode, as `elsewhere` and `beside` are, whether the kernel applies the umask or the directory's default
+/// ACL, and replaces a link at its path while the link's target stays.
 #[test]
 fn a_file_published_with_a_creation_mode_takes_the_bits_of_a_file_created_beside_it() {
     let scratch = Scratch::new("publish-mode");
@@ -82,6 +82,24 @@ fn a_file_published_with_a_creation_mode_takes_the_bits_of_a_file_created_beside
         })
         .count();
     assert_eq!(leftover, 0);
+    let (narrow, beside) = (scratch.0.join("narrow.json"), scratch.0.join("beside"));
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o640)
+            .open(&beside)
+            .expect("the control is made");
+    }
+    publish_with(&narrow, "{}\n", Creation::Mode(0o640)).expect("the file is written");
+    let mode =
+        |path: &std::path::Path| fs::metadata(path).expect("stats").permissions().mode() & 0o777;
+    assert_eq!(
+        mode(&narrow),
+        mode(&beside),
+        "the mode, not 0666, is created"
+    );
 }
 
 #[test]
