@@ -277,9 +277,10 @@ const OTHER_DIGITS: [(u32, u32); 20] = [
     (0x1f100, 0x1f10a),
 ];
 
-/// `isdigit` holds for one or more code points, each a decimal digit (category `Nd`) or one of
-/// [`OTHER_DIGITS`], as Python's `str.isdigit()` does.
-pub fn isdigit(text: impl IntoIterator<Item = u32>) -> bool {
+/// `isdigit` holds for one or more code points, each a decimal digit (category `Nd` of the crate's
+/// Unicode 16.0 tables) or one of [`OTHER_DIGITS`]; it is Python 3.9's `str.isdigit()` with the digits
+/// that Unicode assigned after 13.0 added.
+pub(crate) fn isdigit(text: impl IntoIterator<Item = u32>) -> bool {
     let mut any = false;
     for code in text {
         let other = OTHER_DIGITS
@@ -296,7 +297,7 @@ pub fn isdigit(text: impl IntoIterator<Item = u32>) -> bool {
 /// The value of a decimal digit, a code point of category `Nd`. Those code points stand in runs of ten
 /// from zero to nine, and adjoining runs each start at zero, so the count of digits right before it
 /// gives its value modulo ten.
-pub fn digit_value(c: char) -> Option<u32> {
+pub(crate) fn digit_value(c: char) -> Option<u32> {
     if c.is_ascii_digit() {
         return c.to_digit(10);
     }
@@ -317,7 +318,7 @@ pub fn digit_value(c: char) -> Option<u32> {
 
 /// A run of digits that [`int_digits`] refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DigitsError {
+pub(crate) enum DigitsError {
     /// A text that holds no digit.
     Empty,
     /// A code point that is neither a decimal digit nor `_`.
@@ -326,14 +327,14 @@ pub enum DigitsError {
     TooMany(usize),
 }
 
-/// `int_digits` reads `digits`, decimal digits (category `Nd`) and underscores, as the nonnegative integer
-/// Python's `int` gives for its digits, each digit by [`digit_value`].
+/// `int_digits` drops each underscore of `digits` and reads the decimal digits (category `Nd`) that remain
+/// as the nonnegative integer Python's `int` gives for them, each digit by [`digit_value`].
 ///
 /// # Errors
 ///
 /// No digit, a code point that is neither a decimal digit nor `_`, or more than [`MAX_INTEGER_DIGITS`]
 /// digits.
-pub fn int_digits(digits: &str) -> Result<Integer, DigitsError> {
+pub(crate) fn int_digits(digits: &str) -> Result<Integer, DigitsError> {
     let mut ascii = String::with_capacity(digits.len());
     for c in digits.chars().filter(|&c| c != '_') {
         let value = digit_value(c).ok_or(DigitsError::NotDecimal(c))?;

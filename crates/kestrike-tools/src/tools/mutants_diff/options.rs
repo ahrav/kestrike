@@ -91,7 +91,7 @@ fn limit(value: &Text) -> Result<Integer, String> {
         return Err(refused());
     }
     let invalid = || format!("invalid positive value: {}", value.repr());
-    let digits = value.to_str().ok_or_else(invalid)?;
+    let digits = value.to_str().expect("a text of digits holds no surrogate");
     if !digits.chars().all(is_digit) {
         return Err(invalid());
     }

@@ -111,6 +111,8 @@ fn the_const_budget_pattern_matches_the_inputs_of_the_scan() {
                 &[("const PREEMPTION_BOUND: usize = 9", Some("9"))],
             ),
             ("const SEEDS: u64 = 0x40;", &[]),
+            ("const SEEDS: u64 = \u{b2};", &[]),
+            ("const SEEDS: u64 = 4\u{b2};", &[]),
             (
                 "const SEEDS: u64 = 48 /* x */ ;",
                 &[("const SEEDS: u64 = 48", Some("48"))],
