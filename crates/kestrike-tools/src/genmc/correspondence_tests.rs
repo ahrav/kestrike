@@ -2,7 +2,7 @@ use super::check_correspondence;
 use crate::genmc::case::tests::{declaration, root};
 use crate::genmc::refusal::Error;
 use crate::genmc::transcription::{check_transcription, transcription_drift};
-use crate::json::{Value, parse};
+use crate::json::{Text, Value, parse};
 
 fn edited(change: impl FnOnce(&mut Value)) -> Value {
     let mut declared = declaration();
@@ -230,5 +230,32 @@ fn a_site_whose_matching_count_is_zero_has_no_occurrence_to_read() {
     assert!(matches!(
         transcription_drift(&declared, &root()),
         Err(Error::Index(_))
+    ));
+}
+
+#[test]
+fn cases_are_judged_in_code_point_order_and_litmus_tests_need_an_object() {
+    let surrogate = Text::from_code_points([0xd800]).expect("a code point");
+    let declared = edited(|d| {
+        let Value::Object(object) = d else {
+            panic!("the declaration is an object");
+        };
+        let mut cases = crate::json::Object::new();
+        cases.insert(surrogate.clone(), json(r#"{"expect": "positive"}"#));
+        cases.insert("a", json(r#"{"expect": "positive"}"#));
+        object.insert("cases", Value::Object(cases));
+    });
+    assert_eq!(refusal(&declared), "a names no litmus list");
+    let scratch = crate::paths::tests::Scratch::new("litmus-shape");
+    std::fs::create_dir_all(scratch.0.join("verification/rc11")).expect("the directory is made");
+    std::fs::write(
+        scratch.0.join("verification/rc11/expected.json"),
+        r#"{"tests": []}"#,
+    )
+    .expect("the list writes");
+    let numbered = json(r#"{"cases": {"c": {"expect": "positive", "litmus": [1]}}}"#);
+    assert!(matches!(
+        check_correspondence(&scratch.0, &numbered),
+        Err(Error::Type(_))
     ));
 }

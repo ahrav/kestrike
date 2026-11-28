@@ -207,8 +207,8 @@ pub fn repr(value: &Value) -> String {
     }
 }
 
-/// For strings, `str_of` returns the text with each surrogate escaped as `\udXXX`; for other values, it
-/// returns [`repr`].
+/// `str_of` returns a string's own `Text`, and [`repr`] of any other value; `Display` of the `Text`
+/// escapes surrogates.
 pub fn str_of(value: &Value) -> Text {
     match value {
         Value::String(text) => text.clone(),

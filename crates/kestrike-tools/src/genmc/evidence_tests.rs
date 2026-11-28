@@ -246,7 +246,64 @@ fn a_command_path_counts_by_its_resolved_form() {
         .join("genmc-join-production.dot")
         .display()
         .to_string();
-    assert!(commanded(evidence, &bare).is_err());
+    let manifest = root().join("verification/genmc/packages/run-join-production/Cargo.toml");
+    let shown: Vec<String> = bare
+        .argv
+        .iter()
+        .map(|item| {
+            format!(
+                "'{}'",
+                item.replace(&evidence.display().to_string(), "<EV>")
+            )
+        })
+        .collect();
+    assert_eq!(
+        commanded(evidence, &bare),
+        Err(format!(
+            "join-production ran [{}], not genmc -rc11 --disable-estimation \
+             --dump-error-graph=<EV>/genmc-join-production.dot {}",
+            shown.join(", "),
+            manifest.display()
+        ))
+    );
+}
+
+#[test]
+fn a_refused_command_names_the_manifest_in_its_normal_form() {
+    let scratch = Scratch::new("check-command-manifest");
+    let evidence = &scratch.0;
+    let Value::Object(mut declared) = declaration() else {
+        panic!("the declaration is an object");
+    };
+    declared.insert(
+        "package",
+        Value::String("./verification//genmc/packages/kernels".into()),
+    );
+    let record = parse(r#"{"binary": {"path": "/g"}, "rustc": {"name": "n", "toolchain": "/t"}}"#)
+        .expect("JSON");
+    let result = check_command(
+        &root(),
+        "join-production",
+        &Value::Object(declared),
+        &record,
+        &["x".to_owned()],
+        &Object::new(),
+        evidence,
+    );
+    let Err(Error::Refusal(refusal)) = result else {
+        panic!("a refusal, not {result:?}");
+    };
+    let manifest = root().join("verification/genmc/packages/run-join-production/Cargo.toml");
+    assert_eq!(
+        refusal
+            .reason()
+            .replace(&evidence.display().to_string(), "<EV>"),
+        format!(
+            "join-production ran ['x'], not genmc -rc11 --disable-estimation \
+             --dump-error-graph=<EV>/genmc-join-production.dot {}",
+            manifest.display()
+        )
+    );
 }
 
 #[test]
