@@ -207,16 +207,61 @@ fn integer(digits: &str) -> Result<Integer, Error> {
     decimal(digits).map_err(Error::Value)
 }
 
-fn sorted_texts(value: &Value, what: &str) -> Result<Vec<Text>, Error> {
-    let mut texts = Vec::new();
+/// `sorted_values` is the members a Python iteration over `value` gives, `what` naming it, in the order
+/// Python's `sorted` gives them: texts by code point, numbers (a boolean as 0 or 1) by value, and arrays
+/// member by member.
+///
+/// # Errors
+///
+/// [`Error::Type`] for a value Python cannot iterate, as [`listed`] says, and for two or more members
+/// Python cannot order: an object, null, or members of two of the kinds above, here or inside arrays.
+fn sorted_values(value: &Value, what: &str) -> Result<Vec<Value>, Error> {
+    let mut sorted: Vec<Value> = Vec::new();
     for item in listed(value, what)?.iter() {
-        let Value::String(text) = item else {
-            return Err(Error::Type(format!("{what} is no string")));
-        };
-        texts.push(text.clone());
+        let mut at = sorted.len();
+        while at > 0 {
+            match python_less(item, &sorted[at - 1]) {
+                Some(true) => at -= 1,
+                Some(false) => break,
+                None => {
+                    return Err(Error::Type(format!(
+                        "{what} cannot be sorted: {} and {} have no order",
+                        repr(item),
+                        repr(&sorted[at - 1])
+                    )));
+                }
+            }
+        }
+        sorted.insert(at, item.clone());
     }
-    texts.sort();
-    Ok(texts)
+    Ok(sorted)
+}
+
+/// `number` is a JSON number or a boolean as Python's comparison reads it.
+fn number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        Value::Integer(integer) => integer.to_string().parse().ok(),
+        Value::Float(float) => Some(*float),
+        _ => None,
+    }
+}
+
+/// `python_less` is Python's `left < right` for JSON values, `None` where Python raises its type error.
+fn python_less(left: &Value, right: &Value) -> Option<bool> {
+    match (left, right) {
+        (Value::String(left), Value::String(right)) => Some(left < right),
+        (Value::Integer(left), Value::Integer(right)) => Some(left < right),
+        (Value::Array(left), Value::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                if left != right {
+                    return python_less(left, right);
+                }
+            }
+            Some(left.len() < right.len())
+        }
+        _ => Some(number(left)? < number(right)?),
+    }
 }
 
 /// The result of one complete case run whose text, exit and graph match `declared`, a case's
@@ -248,14 +293,13 @@ pub fn judge_case(
         )));
     }
     if let Some(wanted) = lookup(declared, "intrinsics")? {
-        let wanted = sorted_texts(wanted, "the declared intrinsics")?;
+        let wanted = sorted_values(wanted, "the declared intrinsics")?;
         let same = intrinsics.len() == wanted.len()
-            && intrinsics
-                .iter()
-                .zip(&wanted)
-                .all(|(called, wanted)| wanted.to_str() == Some(called.as_str()));
+            && intrinsics.iter().zip(&wanted).all(|(called, wanted)| {
+                matches!(wanted, Value::String(wanted) if wanted.to_str() == Some(called.as_str()))
+            });
         if !same {
-            let wanted = Value::Array(wanted.into_iter().map(Value::String).collect());
+            let wanted = Value::Array(wanted);
             return Err(tool_failure(format!(
                 "{name}'s bitcode calls {}, declared {}",
                 repr(&strings(intrinsics)),

@@ -132,12 +132,13 @@ pub(crate) fn listed<'v>(value: &'v Value, what: &str) -> Result<Cow<'v, [Value]
     }
 }
 
-/// The strings of the array `value`, which `what` names in an error.
+/// The strings of the members [`listed`] gives for `value`, which `what` names in an error: an array's
+/// elements, an object's keys or a text's code points.
 ///
 /// # Errors
 ///
-/// `texts` returns [`Error::Type`] for a value that is no array and for an item that is no string or
-/// holds a lone surrogate.
+/// `texts` returns [`Error::Type`] for a number, a boolean or null, and for a member that is no string
+/// or holds a lone surrogate.
 pub(crate) fn texts(value: &Value, what: &str) -> Result<Vec<String>, Error> {
     listed(value, what)?
         .iter()

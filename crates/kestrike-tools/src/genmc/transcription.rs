@@ -58,10 +58,30 @@ fn count_is(count: usize, wanted: Option<&Value>) -> bool {
     }
 }
 
+/// `contains` is Python's `needle in container` for JSON values: an array's member by equality, an
+/// object's key, or a substring of a text.
+///
+/// # Errors
+///
+/// [`Error::Type`] for a number, a boolean or null as the container, an array or an object as the needle
+/// of an object, and a needle other than a text in a text.
 fn contains(container: &Value, needle: &Value) -> Result<bool, Error> {
-    match container {
-        Value::Array(items) => Ok(items.iter().any(|item| equal(item, needle))),
-        _ => Err(Error::Type("the transcribed files are no array".into())),
+    match (container, needle) {
+        (Value::Array(items), _) => Ok(items.iter().any(|item| equal(item, needle))),
+        (Value::Object(_), Value::Array(_) | Value::Object(_)) => {
+            Err(Error::Type("a transcribed file is unhashable".into()))
+        }
+        (Value::Object(object), Value::String(key)) => Ok(object.get_text(key).is_some()),
+        (Value::Object(_), _) => Ok(false),
+        (Value::String(text), Value::String(part)) => {
+            let (text, part): (Vec<u32>, Vec<u32>) =
+                (text.code_points().collect(), part.code_points().collect());
+            Ok(part.is_empty() || text.windows(part.len()).any(|window| window == part))
+        }
+        (Value::String(_), _) => Err(Error::Type(
+            "'in <string>' requires string as left operand".into(),
+        )),
+        _ => Err(Error::Type("the transcribed files are not iterable".into())),
     }
 }
 

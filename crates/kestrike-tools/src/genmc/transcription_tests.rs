@@ -252,3 +252,48 @@ fn a_callee_is_found_as_literal_text_at_its_boundaries() {
         )]
     );
 }
+
+/// The production file of a binding is looked up in `transcribed` as Python's `in` looks: an object's keys
+/// stand for the files and a text holds each file it spells; a container without a bound file drifts, and
+/// a number is no container.
+#[test]
+fn the_transcribed_files_are_a_membership_as_python_reads_one() {
+    let declared = crate::genmc::case::tests::declaration();
+    let crate::json::Value::Object(object) = &declared else {
+        panic!("the declaration is an object");
+    };
+    let Some(crate::json::Value::Array(files)) = object.get("transcribed") else {
+        panic!("the declaration lists its transcribed files");
+    };
+    let names: Vec<String> = files
+        .iter()
+        .map(|file| crate::python::str_of(file).to_string())
+        .collect();
+    let keyed = |names: &[String]| {
+        let members: Vec<String> = names.iter().map(|name| format!("\"{name}\": 0")).collect();
+        format!("{{{}}}", members.join(", "))
+    };
+    let replaced = |transcribed: &str| {
+        let mut changed = declared.clone();
+        let crate::json::Value::Object(object) = &mut changed else {
+            panic!("the declaration is an object");
+        };
+        object.insert("transcribed", parse(transcribed).expect("JSON"));
+        changed
+    };
+    let checked = |transcribed: &str| super::check_transcription(&root(), &replaced(transcribed));
+    assert!(checked(&keyed(&names)).is_ok());
+    assert!(checked(&format!("\"{}\"", names.join(" "))).is_ok());
+    let missing = checked(&keyed(&names[1..]));
+    match missing {
+        Err(Error::Refusal(refusal)) => assert!(
+            refusal
+                .reason()
+                .contains("is not among the transcribed files"),
+            "{}",
+            refusal.reason()
+        ),
+        other => panic!("a drift, not {other:?}"),
+    }
+    assert!(matches!(checked("7"), Err(Error::Type(_))));
+}
