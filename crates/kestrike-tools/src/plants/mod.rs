@@ -66,7 +66,9 @@ pub use judgment::{Ask, Sweep, judge};
 pub use options::{FLOOR, Options};
 pub use output::{Pins, archive_pins, first_object, last_object};
 pub use prepare::{Inputs, Outcome, prepare};
-pub use publish::{Creation, UNANNOUNCED, conclude, publish, publish_with};
+pub use publish::{
+    Creation, Staging, UNANNOUNCED, conclude, publish, publish_staged, publish_with,
+};
 pub use record::{FIELDS, Plant, RECORD_BOUND};
 pub use rerun::{HelperVerdict, Rerun, judge_rerun};
 pub(crate) use run::said;

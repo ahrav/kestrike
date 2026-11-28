@@ -7,7 +7,9 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 
 use std::io::Write;
 
-use super::{Creation, UNANNOUNCED, conclude, publish, publish_with, staging_with};
+use super::{
+    Creation, Staging, UNANNOUNCED, conclude, publish, publish_staged, publish_with, staging_with,
+};
 use crate::paths::tests::Scratch;
 use crate::plants::run::{REMOVAL_DEPTH, remove, remove_with};
 
@@ -115,7 +117,7 @@ fn a_taken_staging_name_is_left_as_it_is() {
     fs::write(scratch.0.join(".score.json.aaaaaaaa"), "taken\n").expect("written");
     symlink(&elsewhere, scratch.0.join(".score.json.bbbbbbbb")).expect("linked");
     let mut names = b"abc".iter().copied();
-    let (path, mut file) = staging_with(&target, 0o600, |letters| {
+    let (path, mut file) = staging_with(&target, 0o600, "", |letters| {
         letters.fill(names.next().expect("three names are drawn at most"));
         Ok(())
     })
@@ -315,4 +317,55 @@ fn a_refused_write_of_the_score_s_lines_exits_120_and_keeps_the_score() {
     assert_eq!(code, UNANNOUNCED);
     assert_eq!(fs::read_to_string(&target).expect("reads"), "{}\n");
     assert!(err.is_empty());
+}
+
+/// A staging with a suffix, an exact mode and a time writes a new file under a name that ends in the
+/// suffix, gives the published file the mode as it stands, set-id bits included, and the time as its
+/// modification and access time, and replaces a link at the target while the link's target stays.
+#[test]
+fn a_staged_file_takes_its_suffix_its_exact_mode_and_its_time() {
+    use std::os::unix::fs::MetadataExt;
+    let scratch = Scratch::new("publish-staged");
+    let (target, elsewhere) = (scratch.0.join("f.rs"), scratch.0.join("elsewhere"));
+    fs::write(&elsewhere, "kept\n").expect("written");
+    symlink(&elsewhere, &target).expect("linked");
+    let later: i128 = 4_102_444_800_123_456_789;
+    let staging = Staging::new(Creation::Exact(0o2640))
+        .suffix(".weaken")
+        .modified(later);
+    publish_staged(&target, b"planted\n", staging).expect("the file is written");
+    let status = fs::symlink_metadata(&target).expect("stats");
+    assert!(status.is_file());
+    assert_eq!(status.permissions().mode() & 0o7777, 0o2640);
+    let at = |seconds: i64, nanoseconds: i64| {
+        i128::from(seconds) * 1_000_000_000 + i128::from(nanoseconds)
+    };
+    assert_eq!(at(status.mtime(), status.mtime_nsec()), later);
+    assert_eq!(at(status.atime(), status.atime_nsec()), later);
+    assert_eq!(fs::read_to_string(&target).expect("reads"), "planted\n");
+    assert_eq!(fs::read_to_string(&elsewhere).expect("reads"), "kept\n");
+    let mut names = b"ab".iter().copied();
+    fs::write(scratch.0.join(".g.rs.aaaaaaaa.weaken"), "taken\n").expect("written");
+    let (path, _) = staging_with(&scratch.0.join("g.rs"), 0o600, ".weaken", |letters| {
+        letters.fill(names.next().expect("two names are drawn at most"));
+        Ok(())
+    })
+    .expect("a free name is found");
+    assert_eq!(path, scratch.0.join(".g.rs.bbbbbbbb.weaken"));
+    let left: Vec<String> = fs::read_dir(&scratch.0)
+        .expect("lists")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.starts_with(".f.rs."))
+        .collect();
+    assert_eq!(
+        left,
+        Vec::<String>::new(),
+        "no staging file of the write stays"
+    );
 }

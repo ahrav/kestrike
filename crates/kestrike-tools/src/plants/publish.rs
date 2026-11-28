@@ -2,14 +2,18 @@
 //! `verification/plants/score.json` and renamed over it. [`publish_with`] writes another tool's file,
 //! such as `mutants-diff`'s `report.json`, the same way.
 //!
-//! The staging file is `.NAME.` and eight letters beside the target. The score's is created new with mode
-//! 0600 and then given mode 0666 less the umask the publishing thread reads; a file published with
-//! [`Creation::Mode`] is created new with that mode, which the kernel lessens by the umask, and reads no
-//! procfs. The rename replaces a link at the target's path, whose target stays. A write, close or rename
-//! that fails leads to an attempt to remove the staging file. The write makes no sync.
+//! The staging file is `.NAME.`, eight letters and the [`Staging`]'s suffix, empty for the score, beside
+//! the target. The score's is created new with mode 0600 and then given mode 0666 less the umask the
+//! publishing thread reads; a file published with [`Creation::Mode`] is created new with that mode, which
+//! the kernel lessens by the umask, and reads no procfs; one published with [`Creation::Exact`] is created
+//! new with mode 0600 and then given that mode as it stands. A [`Staging`] with a modification time gives
+//! the written file that time, as its access time too, through its descriptor. The rename replaces a link
+//! at the target's path, whose target stays. A write, close or rename that fails leads to an attempt to
+//! remove the staging file. The write makes no sync.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -84,18 +88,65 @@ pub enum Creation {
     Private,
     /// Created with this mode, which the kernel lessens by the umask at creation.
     Mode(u32),
+    /// Created with mode 0600 and then given this mode, the set-id and sticky bits included, whatever the
+    /// umask.
+    Exact(u32),
 }
 
-/// `staging` creates a new staging file beside `target` with the creation mode `mode`.
-fn staging(target: &Path, mode: u32) -> io::Result<(PathBuf, File)> {
-    staging_with(target, mode, random_letters)
+/// How [`publish_staged`] stages a file: its [`Creation`], the suffix of the staging file's name and the
+/// modification time it gives the file, in nanoseconds since the epoch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Staging<'a> {
+    creation: Creation,
+    suffix: &'a str,
+    modified: Option<i128>,
+}
+
+impl<'a> Staging<'a> {
+    /// A staging of `creation` with no suffix and the time of the write.
+    pub const fn new(creation: Creation) -> Self {
+        Self {
+            creation,
+            suffix: "",
+            modified: None,
+        }
+    }
+
+    /// The staging with `suffix` after the letters of the staging file's name; `suffix` holds no `/`.
+    #[must_use]
+    pub const fn suffix(mut self, suffix: &'a str) -> Self {
+        self.suffix = suffix;
+        self
+    }
+
+    /// The staging that gives the written file the modification and access time `nanoseconds` after the
+    /// epoch.
+    #[must_use]
+    pub const fn modified(mut self, nanoseconds: i128) -> Self {
+        self.modified = Some(nanoseconds);
+        self
+    }
+}
+
+/// `staging` creates a new staging file beside `target` with the creation mode `mode` and a name that
+/// ends in `suffix`.
+fn staging(target: &Path, mode: u32, suffix: &str) -> io::Result<(PathBuf, File)> {
+    staging_with(target, mode, suffix, random_letters)
+}
+
+/// `suffixed` is `path` with `suffix` after its last component's name.
+fn suffixed(path: &Path, suffix: &str) -> PathBuf {
+    let mut named = path.as_os_str().to_owned();
+    named.push(suffix);
+    PathBuf::from(named)
 }
 
 /// `staging_with` creates a new staging file beside `target`, drawing each name's eight letters from
-/// `letters`; a name that is taken is left as it is and another is drawn.
+/// `letters`, with `suffix` after them; a name that is taken is left as it is and another is drawn.
 fn staging_with(
     target: &Path,
     mode: u32,
+    suffix: &str,
     letters: impl FnMut(&mut [u8]) -> io::Result<()>,
 ) -> io::Result<(PathBuf, File)> {
     let parent = target.parent().unwrap_or(Path::new("."));
@@ -107,9 +158,11 @@ fn staging_with(
             .write(true)
             .create_new(true)
             .mode(mode)
-            .open(path)
+            .open(suffixed(path, suffix))
     };
-    fresh(&prefix, parent, letters, create).map_err(|error| match error {
+    let made =
+        fresh(&prefix, parent, letters, create).map(|(path, file)| (suffixed(&path, suffix), file));
+    made.map_err(|error| match error {
         TempDirError::Random(error) => error,
         TempDirError::Create(error) => error.into_error(),
         TempDirError::Exhausted => {
@@ -135,25 +188,66 @@ pub fn publish(target: &Path, written: &str) -> Result<(), PathError> {
 /// The staging file cannot be created, given its mode, written, closed or renamed, which names the
 /// target's path, or the umask cannot be read, which names the status file.
 pub fn publish_with(target: &Path, written: &str, creation: Creation) -> Result<(), PathError> {
+    publish_staged(target, written.as_bytes(), Staging::new(creation))
+}
+
+/// `times` gives the file open as `file` the access and modification time `nanoseconds` after the epoch.
+fn times(file: &File, nanoseconds: i128) -> io::Result<()> {
+    let seconds = libc::time_t::try_from(nanoseconds.div_euclid(1_000_000_000)).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "a time past the clock's range")
+    })?;
+    let rest = libc::c_long::try_from(nanoseconds.rem_euclid(1_000_000_000))
+        .expect("a remainder below a second fits c_long");
+    let stamp = libc::timespec {
+        tv_sec: seconds,
+        tv_nsec: rest,
+    };
+    let stamps = [stamp, stamp];
+    // SAFETY: `file` holds an open descriptor and `stamps` two initialized timespecs that outlive the call.
+    if unsafe { libc::futimens(file.as_raw_fd(), stamps.as_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// `publish_staged` replaces `target` with `written` through a staging file it creates beside it, as
+/// `staging` names, gives its mode and its modification time.
+///
+/// # Errors
+///
+/// The staging file cannot be created, given its mode or its time, written, closed or renamed, which
+/// names the target's path, or the umask cannot be read, which names the status file.
+pub fn publish_staged(
+    target: &Path,
+    written: &[u8],
+    staging: Staging<'_>,
+) -> Result<(), PathError> {
     let at_target = |error| PathError::new(target, error);
-    let created = match creation {
-        Creation::Private => 0o600,
+    let created = match staging.creation {
+        Creation::Private | Creation::Exact(_) => 0o600,
         Creation::Mode(mode) => mode,
     };
-    let (staged, mut file) = staging(target, created).map_err(at_target)?;
-    let moded = match creation {
+    let (staged, mut file) = self::staging(target, created, staging.suffix).map_err(at_target)?;
+    let moded = match staging.creation {
         Creation::Private => umask()
             .map_err(|error| PathError::new(Path::new(UMASK_STATUS), error))
             .and_then(|mask| {
                 file.set_permissions(fs::Permissions::from_mode(0o666 & !mask))
                     .map_err(at_target)
             }),
+        Creation::Exact(mode) => file
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(at_target),
         Creation::Mode(_) => Ok(()),
     };
     let written = crate::fixtures::fits(written.len())
         .map_err(at_target)
         .and(moded)
-        .and_then(|()| file.write_all(written.as_bytes()).map_err(at_target));
+        .and_then(|()| file.write_all(written).map_err(at_target))
+        .and_then(|()| match staging.modified {
+            Some(nanoseconds) => times(&file, nanoseconds).map_err(at_target),
+            None => Ok(()),
+        });
     let closed = crate::fixtures::close(file).map_err(at_target);
     let done = written
         .and(closed)
