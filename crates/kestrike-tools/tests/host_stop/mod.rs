@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::thread;
@@ -77,15 +78,30 @@ fn gone(pid: u32) -> bool {
 
 /// A newline marks a complete process ID record in `path`.
 fn starts(path: &Path) -> Vec<u32> {
-    let text = fs::read_to_string(path).unwrap_or_default();
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("{}: {error}", path.display()),
+    };
     let mut pids = Vec::new();
     for line in text.split_inclusive('\n') {
         let Some(digits) = line.strip_suffix('\n') else {
             break;
         };
+        let canonical = !digits.is_empty()
+            && !digits.starts_with('0')
+            && digits.bytes().all(|byte| byte.is_ascii_digit());
+        assert!(canonical, "{}: {digits:?} is a process id", path.display());
         pids.push(digits.parse().expect("a start line holds a process id"));
     }
     pids
+}
+
+fn no_marker(path: &Path) {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        other => panic!("{}: no start leaves no marker: {other:?}", path.display()),
+    }
 }
 
 fn first_start(path: &Path) -> u32 {
@@ -130,6 +146,7 @@ struct Observed {
     stall: Option<usize>,
     overreport: bool,
     pause: Option<(&'static str, usize, PathBuf)>,
+    unnamed: RefCell<Option<(u64, u64)>>,
 }
 
 impl Observed {
@@ -149,7 +166,7 @@ impl Observed {
     }
 
     /// `enter` logs the step and returns its planted failure, or pauses the writer at it.
-    fn enter(&self, step: &'static str, fds: Vec<RawFd>, path: Option<&Path>) -> io::Result<()> {
+    fn enter(&self, step: &'static str, fds: Vec<RawFd>, path: Option<&Path>) -> io::Result<usize> {
         let mut seen = self.seen.borrow_mut();
         seen.push(Seen {
             step,
@@ -173,7 +190,7 @@ impl Observed {
             .find(|fault| fault.step == step && fault.nth == nth)
         {
             Some(fault) => Err(io::Error::from_raw_os_error(fault.errno)),
-            None => Ok(()),
+            None => Ok(nth),
         }
     }
 }
@@ -190,13 +207,14 @@ impl Files for Observed {
         if let Some(seen) = self.seen.borrow_mut().last_mut() {
             seen.fds = vec![file.as_raw_fd()];
         }
+        let metadata = file.metadata()?;
+        *self.unnamed.borrow_mut() = Some((metadata.dev(), metadata.ino()));
         Ok(file)
     }
 
     fn write(&self, file: &File, bytes: &[u8]) -> io::Result<usize> {
-        self.enter("write", vec![file.as_raw_fd()], None)?;
-        let nth = self.steps().iter().filter(|step| **step == "write").count();
-        if self.stall.is_some_and(|from| nth >= from) {
+        let nth = self.enter("write", vec![file.as_raw_fd()], None)?;
+        if self.stall == Some(nth) {
             return Ok(0);
         }
         let taken = self
@@ -259,9 +277,21 @@ impl Files for Observed {
 /// [`ROLE`] and `place` in [`PLACE`], under `/bin/sh` running `prefix` before it replaces itself with
 /// the executable. The environment is the variables the window reads and nothing else.
 fn start_window(name: &str, window: &str, place: &Path, prefix: &str) -> Command {
+    start_window_with(name, window, place, prefix, &[])
+}
+
+fn start_window_with(
+    name: &str,
+    window: &str,
+    place: &Path,
+    prefix: &str,
+    signals: &[&str],
+) -> Command {
     let mut command = Command::new("/usr/bin/env");
     command
-        .args(["--default-signal=INT,TERM", "/bin/sh", "-c"])
+        .arg("--default-signal=INT,TERM,HUP")
+        .args(signals)
+        .args(["/bin/sh", "-c"])
         .arg(format!("{prefix} exec \"$0\" \"$@\""))
         .arg(std::env::current_exe().expect("the test executable is known"))
         .args(["--exact", name, "--nocapture", "--test-threads", "1"])

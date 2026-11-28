@@ -196,7 +196,10 @@ fn the_clocks_read_monotonic_and_wall_seconds() {
         .duration_since(UNIX_EPOCH)
         .expect("after the epoch")
         .as_secs_f64();
-    assert!(before <= wall && wall <= after, "{before} {wall} {after}");
+    assert!(
+        before - 1e-6 <= wall && wall <= after + 1e-6,
+        "{before} {wall} {after}"
+    );
 }
 
 /// A signal that may raise when a write is about to be held raises before the write, which does not

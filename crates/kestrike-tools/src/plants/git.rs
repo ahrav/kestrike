@@ -15,14 +15,14 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, Stdio};
 
-use crate::environ::Environ;
+use crate::environ::{self, Environ};
 use crate::git::fed;
+use crate::python::returncode as code;
 use crate::text::Text;
+use crate::text::newlines;
 
 /// The options every call passes before `-C DIR`.
 pub const FIXED: [&str; 9] = [
@@ -109,43 +109,14 @@ fn command(env: &Environ, dir: &Path, args: &[&OsStr]) -> Result<Command, CallEr
         .env_clear()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut given: Vec<&OsStr> = Vec::with_capacity(env.len());
-    for (name, value) in env {
-        if name.as_bytes().iter().skip(1).any(|&byte| byte == b'=') {
-            return Err(CallError::Start(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "illegal environment variable name",
-            )));
-        }
-        if !given.contains(&name.as_os_str()) {
-            given.push(name);
-            command.env(name, value);
-        }
-    }
+    environ::check(env).map_err(CallError::Start)?;
+    environ::give(&mut command, env);
     Ok(command)
 }
 
 fn step(args: &[&OsStr]) -> Text {
     args.first()
         .map_or_else(Text::new, |first| Text::from_os(first))
-}
-
-/// `code` is the exit code, or the negated number of the signal that ended the call.
-pub(crate) fn code(status: ExitStatus) -> i32 {
-    match (status.code(), status.signal()) {
-        (Some(code), _) => code,
-        (None, Some(signal)) => -signal,
-        (None, None) => unreachable!("a waited child exited or a signal ended it"),
-    }
-}
-
-/// `newlines` reads `\r\n` and `\r` as `\n`.
-pub(crate) fn newlines(text: String) -> String {
-    if text.contains('\r') {
-        text.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        text
-    }
 }
 
 /// `text` runs `git FIXED -C dir ARGS` in `env` with the caller's standard input and returns its exit

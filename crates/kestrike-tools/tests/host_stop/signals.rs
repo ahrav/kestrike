@@ -7,10 +7,10 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kestrike_tools::host_stop::{Call, DELIVERED, Record, Signal, install, launch};
+use kestrike_tools::host_stop::{Call, DELIVERED, Interrupted, Record, Signal, install, launch};
 
 use super::launch::Standin;
-use super::{MARKER_LIMIT, PLACE, ROLE, passed, start_window};
+use super::{MARKER_LIMIT, PLACE, ROLE, passed, start_window, start_window_with};
 
 const CASE: &str =
     "host_stop::signals::a_real_sigterm_reaches_the_record_and_an_ignored_hangup_stays_ignored";
@@ -146,5 +146,75 @@ fn a_real_sigterm_reaches_the_record_and_an_ignored_hangup_stays_ignored() {
         .output()
         .expect("the window starts");
     passed("install", &output);
+    assert!(scratch.0.join("done").exists(), "the window ran its checks");
+}
+
+const EACH_CASE: &str =
+    "host_stop::signals::each_handled_signal_reaches_the_record_and_a_blocked_one_waits_for_it";
+
+fn stored_within(limit: Duration) -> Option<Signal> {
+    let start = Instant::now();
+    while DELIVERED.stored().is_none() && start.elapsed() < limit {
+        thread::sleep(Duration::from_millis(5));
+    }
+    DELIVERED.stored()
+}
+
+fn each(place: &Path) {
+    let own = || fs::read_to_string("/proc/self/status").expect("the status reads");
+    let thread = || fs::read_to_string("/proc/thread-self/status").expect("the status reads");
+    assert_ne!(
+        mask(&thread(), "SigBlk:") & bit(Signal::Terminate),
+        0,
+        "TERM starts blocked"
+    );
+    signal_self("TERM");
+    assert_ne!(
+        mask(&own(), "ShdPnd:") & bit(Signal::Terminate),
+        0,
+        "TERM waits"
+    );
+    assert_eq!(DELIVERED.stored(), None);
+    install(&DELIVERED).expect("the handlers install");
+    let caught = mask(&own(), "SigCgt:");
+    for signal in Signal::ALL {
+        assert_ne!(caught & bit(signal), 0, "{signal:?} has a handler");
+    }
+    assert_eq!(
+        mask(&thread(), "SigBlk:") & bit(Signal::Terminate),
+        0,
+        "the handler unblocks its signal once it stands"
+    );
+    let mut record = Record::new(&DELIVERED);
+    for (signal, name) in [
+        (Signal::Terminate, None),
+        (Signal::Interrupt, Some("INT")),
+        (Signal::Hangup, Some("HUP")),
+    ] {
+        if let Some(name) = name {
+            signal_self(name);
+        }
+        assert_eq!(
+            stored_within(MARKER_LIMIT),
+            Some(signal),
+            "{signal:?} reaches the record"
+        );
+        record.arm();
+        assert_eq!(record.read(), Err(Interrupted(signal)));
+    }
+    fs::write(place.join("done"), b"").expect("the window records its end");
+}
+
+#[test]
+fn each_handled_signal_reaches_the_record_and_a_blocked_one_waits_for_it() {
+    if let (Some(_), Some(place)) = (std::env::var_os(ROLE), std::env::var_os(PLACE)) {
+        each(Path::new(&place));
+        return;
+    }
+    let scratch = super::Scratch::new("signals-each");
+    let output = start_window_with(EACH_CASE, "each", &scratch.0, "", &["--block-signal=TERM"])
+        .output()
+        .expect("the window starts");
+    passed("each", &output);
     assert!(scratch.0.join("done").exists(), "the window ran its checks");
 }

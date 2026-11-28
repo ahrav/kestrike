@@ -15,8 +15,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::record::{Interrupted, Record, SLICE, left};
-use crate::plants::git::{code, newlines};
-use crate::text::strip_str;
+use crate::environ;
+use crate::python::returncode;
+use crate::text::{newlines, strip_str};
 
 /// The program a call starts, found on the given `PATH`.
 pub const AWS: &str = "aws";
@@ -120,7 +121,7 @@ type Reader = JoinHandle<io::Result<Vec<u8>>>;
 /// `PATH`, a start, a reader thread, a wait or a read that fails, output other than UTF-8, the cut,
 /// or an exit other than 0.
 pub fn launch(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
-    let ended = run(record, call);
+    let ended = run(record, call, find);
     finish(record, ended)
 }
 
@@ -130,27 +131,37 @@ fn finish(record: &mut Record<'_>, ended: Result<String, Ended>) -> Result<Strin
     ended
 }
 
-fn run(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
+fn run(
+    record: &mut Record<'_>,
+    call: &Call<'_>,
+    find: impl FnOnce(&[(OsString, OsString)]) -> Option<PathBuf>,
+) -> Result<String, Ended> {
     let no_answer =
         |reason: &dyn fmt::Display| Ended::Failed(CallFailed::no_answer(call.argv, reason));
     record.read().map_err(Ended::Interrupted)?;
-    let program = find(call.env);
+    environ::check(call.env).map_err(|error| no_answer(&error))?;
+    let command = find(call.env).map(|program| command(program, call));
     record.read().map_err(Ended::Interrupted)?;
-    let Some(program) = program else {
+    let Some(mut command) = command else {
         return Err(no_answer(&"no directory of PATH holds an executable aws"));
     };
-    let mut child = command(program, call)
-        .and_then(|mut command| command.spawn())
-        .map_err(|error| no_answer(&error))?;
+    let mut child = command.spawn().map_err(|error| no_answer(&error))?;
     let started = Instant::now();
     let abandoned = Arc::new(AtomicBool::new(false));
-    let readers = read_all(child.stdout.take(), Arc::clone(&abandoned))
-        .and_then(|out| Ok((out, read_all(child.stderr.take(), Arc::clone(&abandoned))?)));
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        let stopped = stop(&mut child, &abandoned);
+        return Err(no_answer(&unstopped(
+            "a pipe of the child is missing",
+            stopped,
+        )));
+    };
+    let readers = read_all(stdout, Arc::clone(&abandoned))
+        .and_then(|out| Ok((out, read_all(stderr, Arc::clone(&abandoned))?)));
     let (out, err) = match readers {
         Ok(readers) => readers,
         Err(error) => {
-            stop(&mut child, &abandoned);
-            return Err(no_answer(&error));
+            let stopped = stop(&mut child, &abandoned);
+            return Err(no_answer(&unstopped(error, stopped)));
         }
     };
     let status = wait(
@@ -163,25 +174,31 @@ fn run(record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
     )
     .map_err(|end| match end {
         Waited::Raised(raised) => Ended::Interrupted(raised),
-        Waited::Cut => no_answer(&format_args!("timed out after {:?}", call.cut)),
+        Waited::Cut(stopped) => no_answer(&unstopped(
+            format_args!("timed out after {:?}", call.cut),
+            stopped,
+        )),
         Waited::Failed(error) => no_answer(&error),
     })?;
     let stdout = joined(out).map_err(|error| no_answer(&error))?;
     let stderr = joined(err).map_err(|error| no_answer(&error))?;
-    let code = code(status);
+    let code = returncode(status);
     if code != 0 {
         return Err(Ended::Failed(CallFailed::exited(call.argv, code, &stderr)));
     }
     Ok(stdout)
 }
 
+fn unstopped(reason: impl fmt::Display, stopped: io::Result<()>) -> String {
+    match stopped {
+        Ok(()) => reason.to_string(),
+        Err(error) => format!("{reason}, and the child was not stopped: {error}"),
+    }
+}
+
 /// `program` selects the executable; the child receives `aws` as `argv[0]`. `command` uses the first
 /// value for each name in `call.env`.
-///
-/// # Errors
-///
-/// A name in `call.env` holds `=` after its first byte.
-fn command(program: PathBuf, call: &Call<'_>) -> io::Result<Command> {
+fn command(program: PathBuf, call: &Call<'_>) -> Command {
     let cut = whole_seconds(call.cut).to_string();
     let mut command = Command::new(program);
     command
@@ -197,19 +214,7 @@ fn command(program: PathBuf, call: &Call<'_>) -> io::Result<Command> {
             &cut,
         ])
         .env_clear();
-    let mut given: Vec<&OsStr> = Vec::with_capacity(call.env.len());
-    for (name, value) in call.env {
-        if name.as_bytes().iter().skip(1).any(|&byte| byte == b'=') {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "illegal environment variable name",
-            ));
-        }
-        if !given.contains(&name.as_os_str()) {
-            given.push(name);
-            command.env(name, value);
-        }
-    }
+    environ::give(&mut command, call.env);
     command
         .env("AWS_PAGER", "")
         .env("AWS_CLI_AUTO_PROMPT", "off")
@@ -223,7 +228,7 @@ fn command(program: PathBuf, call: &Call<'_>) -> io::Result<Command> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    Ok(command)
+    command
 }
 
 /// The last [`TAIL`] characters of `text`, counted in Unicode scalar values.
@@ -238,7 +243,7 @@ fn tail(text: &str) -> &str {
 
 enum Waited {
     Raised(Interrupted),
-    Cut,
+    Cut(io::Result<()>),
     Failed(io::Error),
 }
 
@@ -263,18 +268,17 @@ fn wait(
             }
         };
         if let Err(raised) = record.read() {
-            stop(child, abandoned);
+            let _ = stop(child, abandoned);
             return Err(Waited::Raised(raised));
+        }
+        let left = left(end);
+        if left.is_zero() {
+            return Err(Waited::Cut(stop(child, abandoned)));
         }
         if let Some(status) = status
             && readers.iter().all(|reader| reader.is_finished())
         {
             return Ok(status);
-        }
-        let left = left(end);
-        if left.is_zero() {
-            stop(child, abandoned);
-            return Err(Waited::Cut);
         }
         thread::sleep(left.min(pause));
         pause = pause.saturating_mul(2).min(SLICE);
@@ -283,23 +287,21 @@ fn wait(
 
 /// `stop` attempts to send SIGKILL to an unreaped child. Readers discard output once they observe
 /// `abandoned`. `child.wait()` can block indefinitely.
-fn stop(child: &mut Child, abandoned: &AtomicBool) {
-    let _ = child.kill();
+fn stop(child: &mut Child, abandoned: &AtomicBool) -> io::Result<()> {
+    let killed = child.kill();
     abandoned.store(true, Ordering::SeqCst);
-    let _ = child.wait();
+    let reaped = child.wait();
+    killed.and(reaped.map(drop))
 }
 
 /// A thread that reads `stream` to its end; once `abandoned` holds, the thread returns at its next
 /// read and drops the bytes.
 fn read_all(
-    stream: Option<impl Read + Send + 'static>,
+    mut stream: impl Read + Send + 'static,
     abandoned: Arc<AtomicBool>,
 ) -> io::Result<Reader> {
     thread::Builder::new().spawn(move || {
         let mut bytes = Vec::new();
-        let Some(mut stream) = stream else {
-            return Ok(bytes);
-        };
         let mut buffer = [0; 8192];
         loop {
             match stream.read(&mut buffer) {
@@ -339,10 +341,8 @@ fn find(env: &[(OsString, OsString)]) -> Option<PathBuf> {
         })
 }
 
-fn whole_seconds(cut: Duration) -> u64 {
-    cut.as_secs()
-        .saturating_add(u64::from(cut.subsec_nanos() > 0))
-        .max(1)
+fn whole_seconds(cut: Duration) -> u128 {
+    (u128::from(cut.as_secs()) + u128::from(cut.subsec_nanos() > 0)).max(1)
 }
 
 #[cfg(test)]

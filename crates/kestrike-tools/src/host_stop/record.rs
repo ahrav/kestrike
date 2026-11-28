@@ -232,11 +232,12 @@ fn register(signal: Signal, delivered: &'static Delivered) -> io::Result<()> {
     let number = signal.number();
     let action = move || delivered.deliver(signal);
     // SAFETY: each `sigset_t` is zeroed, then filled by `sigemptyset` or `pthread_sigmask`, and
-    // outlives the calls that use it. `SIG_BLOCK` defers delivery of `number` on this thread during
-    // `signal_hook::low_level::register`. Restoring `before` permits delivery of `number` on this
-    // thread if `before` leaves `number` unblocked. The `'static` reference keeps `delivered` valid
-    // for the handler's lifetime; `deliver` uses one atomic compare-exchange on an `AtomicI32`, which
-    // is async-signal-safe.
+    // outlives the calls that use it. `sigaddset` and `sigdelset` require `number` to be a valid
+    // signal number. `SIG_BLOCK` defers delivery of `number` on this thread during
+    // `signal_hook::low_level::register`. A successful `SIG_SETMASK` unblocks `number` regardless of
+    // the registration result and restores every other signal's prior mask setting.
+    // `delivered: &'static Delivered` keeps the handler's reference valid for its lifetime.
+    // `Delivered::deliver` must be async-signal-safe.
     unsafe {
         let mut blocked: libc::sigset_t = std::mem::zeroed();
         let mut before: libc::sigset_t = std::mem::zeroed();
@@ -247,7 +248,11 @@ fn register(signal: Signal, delivered: &'static Delivered) -> io::Result<()> {
             return Err(io::Error::from_raw_os_error(status));
         }
         let registered = signal_hook::low_level::register(number, action);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut());
+        libc::sigdelset(&mut before, number);
+        let restored = libc::pthread_sigmask(libc::SIG_SETMASK, &before, std::ptr::null_mut());
+        if restored != 0 {
+            return Err(io::Error::from_raw_os_error(restored));
+        }
         registered.map(drop)
     }
 }

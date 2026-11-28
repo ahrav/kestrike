@@ -382,6 +382,23 @@ impl PartialEq<&str> for Text {
     }
 }
 
+pub fn newlines(text: String) -> String {
+    if !text.contains('\r') {
+        return text;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(next) = chars.next() {
+        if next == '\r' {
+            out.push('\n');
+            chars.next_if_eq(&'\n');
+        } else {
+            out.push(next);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[path = "text_tests.rs"]
 mod tests;
