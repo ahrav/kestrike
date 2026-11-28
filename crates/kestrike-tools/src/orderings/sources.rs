@@ -160,7 +160,7 @@ static INLINE: LazyLock<Regex> =
 static BARE: LazyLock<Regex> =
     LazyLock::new(|| compiled(&format!(r"mod{SPACE}+(?:r#)?({WORD}+){SPACE}*;")));
 
-static INCLUDE: LazyLock<Regex> = LazyLock::new(|| compiled("include"));
+pub(super) static INCLUDE: LazyLock<Regex> = LazyLock::new(|| compiled("include"));
 
 /// An assertion, a panic or an `expect` named at the end of a window before its bracket.
 static DIAGNOSTIC: LazyLock<Regex> = LazyLock::new(|| {
@@ -232,12 +232,12 @@ fn cfg_path(text: &str, from: usize) -> Option<usize> {
         .last()
 }
 
-/// The offset of the first `mod` keyword of `text` that neither `#` nor a word character precedes and no
-/// word character follows.
-fn mod_keyword(text: &str) -> Option<usize> {
+/// The offsets of the `mod` keywords of `text` that neither `#` nor a word character precedes and no
+/// word character follows, in order.
+pub(super) fn mod_keywords(text: &str) -> impl Iterator<Item = usize> {
     text.match_indices("mod")
         .map(|(offset, _)| offset)
-        .find(|&offset| {
+        .filter(move |&offset| {
             let before = text[..offset].chars().next_back();
             let after = text[offset + 3..].chars().next();
             !before.is_some_and(|c| c == '#' || is_word(c)) && !after.is_some_and(is_word)
@@ -287,7 +287,7 @@ fn loads(module: &str, child: &str, source: &str, live: bool) -> Loads {
         let whole = head.get_match();
         let end = call_end(&view, whole.end() - 1);
         let tokens = &view[whole.end()..end];
-        if mod_keyword(tokens).is_some() || !path_attributes(tokens).is_empty() {
+        if mod_keywords(tokens).next().is_some() || !path_attributes(tokens).is_empty() {
             found.refusals.push(Refusal::scope(format!(
                 "{module}:{}: a module declaration inside a macro's tokens, which the scope rule \
                  cannot read",
@@ -906,13 +906,14 @@ impl Classifier<'_> {
 /// The files outside the kernel package at `package` that it includes by `#[path]`, as `package_walk`
 /// lists them, classified by the declarations that load each one, relative to the checkout `root`.
 ///
-/// The package is walked on disk under `root`. The path holders are the crate sources under `tree`
-/// whose text holds a path attribute; each holder and each module file is read through `read`. A source
-/// of the package that resolves inside it is passed over, one outside `root` is refused, and each other
-/// is production, excluded, refused as declared only by a path attribute elsewhere, refused as declared
-/// by no module file. A module file of its directory that cannot be read is refused by name, and the
-/// file takes the standing its other declarations give it, in neither list when they give none. A crate
-/// source that cannot be read from `tree`, or a holder `read` fails on, holds no path attribute.
+/// `package_walk` lists the sources that the scope rule classifies. The path holders are the crate
+/// sources under `tree` whose text holds a path attribute; each holder and each module file is read
+/// through `read`. A source of the package that resolves inside it is passed over, one outside
+/// `root` is refused, and each other is production, excluded, refused as declared only by a path
+/// attribute elsewhere, refused as declared by no module file. A module file of its directory that
+/// cannot be read is refused by name, and the file takes the standing its other declarations give
+/// it, in neither list when they give none. A crate source that cannot be read from `tree`, or a
+/// holder `read` fails on, holds no path attribute.
 ///
 /// # Errors
 ///

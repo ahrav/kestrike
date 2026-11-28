@@ -2,27 +2,45 @@
 //! scoped files.
 //!
 //! A row's `find` must occur exactly once in its file's production text and hold exactly one site, of
-//! the row's `op`. Applying one weakening from [`steps`] to that site in `find` must yield `replace`; a
+//! the row's `op`. Applying one weakening step to that site in `find` must yield `replace`; a
 //! fence row deletes the call with a `;` directly after it. Each site takes one row per step. When the
 //! checker skips a listed file, its rows stay unmatched and the refusal names the file.
 //!
+//! The steps: `SeqCst` goes to `Acquire` for a `load`, `Release` for a `store` and `AcqRel` for an
+//! `rmw`; an `AcqRel` `rmw` goes to `Acquire` and to `Release`; a `Release` `store` or `rmw` and an
+//! `Acquire` `load` or `rmw` go to `Relaxed`.
+//!
+//! The checker counts non-overlapping occurrences of `find` and matches the row at the first one. It
+//! reads `find` against the production text with one space per code point of a blanked test-only
+//! element.
+//!
 //! A matched row without a binding names its enclosing item in `scope`; a bound row's enclosing item is
 //! its binding's production scope. Either must resolve to one body that holds the `find`, with the site
-//! outside every `fn` or `impl` nested in it. Every accepted row, matched or not, holds exactly one
+//! outside every `fn` or `impl` nested in it. A bound row whose binding's production scope is an empty
+//! list passes the enclosing-item check. Every accepted row, matched or not, holds exactly one
 //! well-formed disposition, names a run unless it is one of [`UNMODELED`], records a 40-digit lowercase
 //! hex revision when it is decided, and names only positive tests of its lanes, whose model sources or
 //! kernel files hold its failures. Its binding and twins must be ones the declarations hold. A value
 //! these checks read that has another shape makes the row malformed, and the checks of that row stop
 //! there.
 //!
-//! The report is a JSON object of six members in this order: `refusals`, each `refusal` and `message`
-//! in the order refused; `rows`, each well-formed row's id with its one disposition's name, or null for
-//! none or several, in catalog order; `unrun`, the ids of the unrun rows in code point order; `sites`,
-//! the count of sites in the files read; `excluded`, the files the kernel package includes that every
-//! chain of declarations loads through a test-only item, in code point order; and `credited`.
-//! `credited` is true exactly when both `refusals` and `unrun` are empty. The exit code is 0 for an
-//! empty `refusals` list and 1 for a nonempty one. An input that cannot be read gives exit 2 and a
-//! report of one member, `error`.
+//! The report is a JSON object of six members in this order: `refusals`, each `refusal` and
+//! `message` in the order refused; `rows`, the id of each row that `row_defect` accepts with its one
+//! disposition's name, or null for none or several, in catalog order; `unrun`, the ids of the unrun
+//! rows in code point order; `sites`, the count of sites in the files read; `excluded`, the files
+//! the kernel package includes that every chain of declarations loads through a test-only item, in
+//! code point order; and `credited`. `credited` is true exactly when both `refusals` and `unrun` are
+//! empty. The exit code is 0 for an empty `refusals` list and 1 for a nonempty one. The refusals
+//! follow the check's passes in order: the include defects, the scope rule, the listed and included
+//! files, each read file's spellings and loaders, the rows in catalog order, then each file's sites.
+//!
+//! An unreadable or misshapen catalog, declaration, litmus list or obligation record, and a kernel
+//! package that cannot be walked or resolved, give exit 2 and a report of one member, `error`. An
+//! unreadable listed file or model source is a refusal.
+//!
+//! The word class at the edges of `include`, `mod`, `fn` and `impl` uses the `regex` crate's Unicode
+//! tables, which can assign letters and numbers that the Python interpreter's Unicode tables leave
+//! unassigned.
 //!
 //! Offsets are byte offsets of a scoped file's text, which its production and scanned texts share.
 
@@ -32,23 +50,25 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::sites::{self, Kind, Pin, Strength, body_open, line_of};
+use super::sites::{self, Kind, Op, Pin, Strength, body_open, line_of};
 use super::sources::{
-    PackageWalk, Reader, References, c_literals, diagnostics, include_defects, module_source,
-    path_attributes, references, scope_files, stem,
+    INCLUDE, PackageWalk, Reader, References, c_literals, diagnostics, include_defects,
+    mod_keywords, module_source, path_attributes, references, scope_files, stem,
 };
-use crate::classes::{bounded_iter, compiled, is_word};
+use crate::classes::{bounded_iter, compiled};
 use crate::genmc::{self, normalized};
 use crate::json::{Integer, Object, Text, UniqueError, Value, parse_unique};
 use crate::production_text::closing;
-use crate::python::repr;
-use crate::rust_text::code;
+use crate::python::{repr, str_of};
 use crate::text::{text, words};
 
 /// The check reads `CATALOG`, `GENMC`, `RC11` and `OBLIGATIONS` in that order.
 pub const CATALOG: &str = "verification/orderings/expected.json";
+/// The GenMC declaration, which holds the bindings, the positive cases and the kernel package.
 pub const GENMC: &str = "verification/genmc/expected.json";
+/// The litmus list, which names the `rc11` twins.
 pub const RC11: &str = "verification/rc11/expected.json";
+/// The obligation records, which name the positive loom tests and their controls.
 pub const OBLIGATIONS: &str = "verification/obligations.json";
 
 /// Only rows listed in `UNMODELED` may have an empty run list.
@@ -61,8 +81,6 @@ pub const UNMODELED: [&str; 4] = [
 
 const OPS: [&str; 4] = ["load", "store", "rmw", "fence"];
 
-const DISPOSITIONS: [&str; 3] = ["kill", "survives", "unrun"];
-
 const REQUIRED: [&str; 5] = ["id", "path", "op", "find", "replace"];
 
 const ROW_KEYS: [&str; 12] = [
@@ -71,41 +89,32 @@ const ROW_KEYS: [&str; 12] = [
 ];
 
 /// `steps` returns the permitted one-step weakenings in code point order.
-fn steps(strength: Strength, op: &str) -> &'static [&'static str] {
+fn steps(strength: Strength, op: Op) -> &'static [&'static str] {
     match (strength, op) {
-        (Strength::SeqCst, "load") => &["Acquire"],
-        (Strength::SeqCst, "store") => &["Release"],
-        (Strength::SeqCst, "rmw") => &["AcqRel"],
-        (Strength::AcqRel, "rmw") => &["Acquire", "Release"],
-        (Strength::Release, "store" | "rmw") | (Strength::Acquire, "load" | "rmw") => &["Relaxed"],
+        (Strength::SeqCst, Op::Load) => &["Acquire"],
+        (Strength::SeqCst, Op::Store) => &["Release"],
+        (Strength::SeqCst, Op::Rmw) => &["AcqRel"],
+        (Strength::AcqRel, Op::Rmw) => &["Acquire", "Release"],
+        (Strength::Release, Op::Store | Op::Rmw) | (Strength::Acquire, Op::Load | Op::Rmw) => {
+            &["Relaxed"]
+        }
         _ => &[],
     }
 }
 
 #[derive(Default)]
-struct Refusals(Vec<(&'static str, Text)>);
+struct Refusals(Vec<Value>);
 
 impl Refusals {
     fn refuse(&mut self, name: &'static str, message: Text) {
-        self.0.push((name, message));
+        let mut entry = Object::new();
+        entry.insert("refusal", Value::String(Text::from(name)));
+        entry.insert("message", Value::String(message));
+        self.0.push(Value::Object(entry));
     }
 
     fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    fn value(&self) -> Value {
-        Value::Array(
-            self.0
-                .iter()
-                .map(|(name, message)| {
-                    let mut entry = Object::new();
-                    entry.insert("refusal", Value::String(Text::from(*name)));
-                    entry.insert("message", Value::String(message.clone()));
-                    Value::Object(entry)
-                })
-                .collect(),
-        )
     }
 }
 
@@ -124,8 +133,36 @@ struct Row<'v> {
 struct Scoped {
     path: String,
     reading: sites::Reading,
+    matched: Matched,
     normal: String,
     targets: Vec<Vec<&'static str>>,
+}
+
+/// The text a row's `find` is matched in: a scoped file's production text with one space for each code
+/// point a test-only element blanks, and for each byte offset of the production text at a code point's
+/// start, or at its end, the offset in `text`.
+struct Matched {
+    text: String,
+    offsets: Vec<usize>,
+}
+
+impl Matched {
+    fn new(source: &str, production: &str) -> Self {
+        let (raw, blanked) = (source.as_bytes(), production.as_bytes());
+        let mut text = String::with_capacity(production.len());
+        let mut offsets = vec![0; production.len() + 1];
+        for (at, code) in source.char_indices() {
+            offsets[at] = text.len();
+            let end = at + code.len_utf8();
+            text.push(if raw[at..end] == blanked[at..end] {
+                code
+            } else {
+                ' '
+            });
+        }
+        offsets[production.len()] = text.len();
+        Self { text, offsets }
+    }
 }
 
 fn strings<'t>(names: impl IntoIterator<Item = &'t str>) -> Value {
@@ -221,9 +258,9 @@ fn row_defect<'v>(row: &'v Value, ids: &BTreeSet<Text>, files: &[Text]) -> Resul
 /// `find`, or refuses the row.
 fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Option<usize> {
     let name = row.id;
-    let production = scoped.reading.production();
+    let Matched { text, offsets } = &scoped.matched;
     let find = row.find.to_str();
-    let count = find.map_or(0, |find| production.matches(find).count());
+    let count = find.map_or(0, |find| text.matches(find).count());
     let Some(find) = find.filter(|_| count == 1) else {
         refusals.refuse(
             "find",
@@ -231,13 +268,13 @@ fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Opt
         );
         return None;
     };
-    let start = production
+    let start = text
         .find(find)
         .expect("a find that occurs once has a first offset");
     let held: Vec<usize> = (0..scoped.reading.sites().len())
         .filter(|&index| {
             let site = scoped.reading.sites()[index];
-            start <= site.start() && site.end() <= start + find.len()
+            start <= offsets[site.start()] && offsets[site.end()] <= start + find.len()
         })
         .collect();
     let [index] = held[..] else {
@@ -248,7 +285,8 @@ fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Opt
         return None;
     };
     let site = scoped.reading.sites()[index];
-    let (before, after) = (&find[..site.start() - start], &find[site.end() - start..]);
+    let (low, high) = (offsets[site.start()] - start, offsets[site.end()] - start);
+    let (before, after) = (&find[..low], &find[high..]);
     let op = site.op_name();
     if op == "unread" {
         refusals.refuse(
@@ -268,7 +306,7 @@ fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Opt
         Kind::Fence { .. } => {
             (*row.replace == format!("{before}{after}").as_str()).then_some("delete")
         }
-        Kind::Ordering { strength, .. } => steps(strength, op)
+        Kind::Ordering { strength, op } => steps(strength, op)
             .iter()
             .copied()
             .find(|step| *row.replace == format!("{before}Ordering::{step}{after}").as_str()),
@@ -286,7 +324,7 @@ fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Opt
         return None;
     };
     scoped.targets[index].push(target);
-    Some(site.start() - start)
+    Some(low)
 }
 
 /// The `(start, end)` of each place in `code`, a scoped file's production text with comments and literals
@@ -294,21 +332,21 @@ fn match_row(row: &Row<'_>, scoped: &mut Scoped, refusals: &mut Refusals) -> Opt
 /// attribute as [`path_attributes`] finds it, in order. A word inside a path attribute belongs to it.
 fn loaders(code: &str) -> Vec<(usize, usize)> {
     let attributes = path_attributes(code);
-    let mut found = attributes.clone();
-    for (word, hash_allowed) in [("include", true), ("mod", false)] {
-        for (offset, _) in code.match_indices(word) {
-            let before = code[..offset].chars().next_back();
-            let next = code[offset + word.len()..].chars().next();
-            let bounded = !before.is_some_and(|c| is_word(c) || (!hash_allowed && c == '#'))
-                && !next.is_some_and(is_word);
-            let inside = attributes
+    let includes = bounded_iter(&INCLUDE, code).map(|found| {
+        let word = found.get_match();
+        (word.start(), word.end())
+    });
+    let mods = mod_keywords(code).map(|offset| (offset, offset + "mod".len()));
+    let words: Vec<(usize, usize)> = includes
+        .chain(mods)
+        .filter(|&(offset, _)| {
+            !attributes
                 .iter()
-                .any(|&(start, end)| start < offset && offset < end);
-            if bounded && !inside {
-                found.push((offset, offset + word.len()));
-            }
-        }
-    }
+                .any(|&(start, end)| start < offset && offset < end)
+        })
+        .collect();
+    let mut found = attributes;
+    found.extend(words);
     found.sort_unstable();
     found
 }
@@ -413,10 +451,7 @@ pub const WANTED: [(&str, Option<&str>); 3] = [
 /// `row_entries` refuses a row that holds no disposition, and one whose first disposition, in the
 /// order `kill`, `survives`, `unrun`, is malformed.
 pub fn row_entries(row: &Object) -> Result<(Vec<&Object>, Option<&'static str>), Text> {
-    let id = match row.get("id") {
-        Some(Value::String(id)) => id.clone(),
-        _ => Text::new(),
-    };
+    let id = row.get("id").map(str_of).unwrap_or_default();
     let Some((kind, wanted)) = WANTED.into_iter().find(|(kind, _)| row.get(kind).is_some()) else {
         return Err(text!(id, ": it holds no disposition"));
     };
@@ -576,7 +611,7 @@ fn check_failure(
     let mut sources: Vec<String> = Vec::new();
     for test in tests {
         let source = if lane == "loom" {
-            test.to_str().and_then(|test| module_source(test, read))
+            lookup_name(test).and_then(|test| module_source(&test, read))
         } else {
             family_kernel(test, references.kernels()).map(|(_, text)| text.to_owned())
         };
@@ -686,10 +721,10 @@ fn check_references(
                 ),
             );
         } else if let Some(Value::String(call)) = call {
-            let held = match (call.to_str(), row.find.to_str()) {
-                (Some(call), Some(find)) => normalized(find).contains(&normalized(call)),
-                _ => false,
-            };
+            let held = normal_forms(row.find)
+                .iter()
+                .zip(normal_forms(call))
+                .all(|(find, call)| find.contains(&call));
             if !held {
                 refusals.refuse(
                     "reference",
@@ -773,8 +808,7 @@ fn nested(body: &str, position: usize) -> bool {
 
 /// Refuses `row` unless `scope`, its enclosing item's headers, resolves in `normal`, its file's
 /// [`normalized`] production text, to one body that holds its `find`, with its site, `offset` bytes into
-/// the find, outside every `fn` or `impl` nested in that body. The bodies are searched header by header
-/// while some body remains; the joined name of a refusal needs every header to be a string.
+/// the find, outside every `fn` or `impl` nested in that body.
 fn check_enclosing(
     row: &Row<'_>,
     refusals: &mut Refusals,
@@ -793,42 +827,37 @@ fn check_enclosing(
             return Ok(());
         }
     };
-    let unnamed = Malformed("a header of its binding's scope is no string");
-    let mut bodies = vec![normal.to_owned()];
-    for header in headers {
-        if bodies.is_empty() {
-            continue;
-        }
-        let Value::String(header) = header else {
-            return Err(unnamed);
-        };
-        bodies = match header.to_str() {
-            Some(header) => {
-                let header = normalized(header);
-                bodies
-                    .iter()
-                    .flat_map(|text| genmc::bodies(text, &header))
-                    .collect()
-            }
-            None => Vec::new(),
-        };
-    }
-    let texts: Option<Vec<&Text>> = headers
+    let Some(headers) = headers
         .iter()
         .map(|header| match header {
             Value::String(header) => Some(header),
             _ => None,
         })
-        .collect();
+        .collect::<Option<Vec<&Text>>>()
+    else {
+        return Err(Malformed("a header of its binding's scope is no string"));
+    };
+    let mut bodies = vec![normal.to_owned()];
+    for header in &headers {
+        if bodies.is_empty() {
+            break;
+        }
+        let [header, other] = normal_forms(header);
+        bodies = if header == other {
+            bodies
+                .iter()
+                .flat_map(|text| genmc::bodies(text, &header))
+                .collect()
+        } else {
+            Vec::new()
+        };
+    }
     let find = row.find.to_str().unwrap_or_default();
     let start = match &bodies[..] {
         [body] => body.find(&normalized(find)),
         _ => None,
     };
-    let Some(texts) = texts else {
-        return Err(unnamed);
-    };
-    let joined = Text::join(" > ", texts);
+    let joined = Text::join(" > ", headers);
     match start {
         None => refusals.refuse(
             "enclosing item",
@@ -897,6 +926,44 @@ fn listed(runs: &[(Text, usize)]) -> String {
         }
     }
     out
+}
+
+/// `text` with each lone surrogate U+D800 + k written as the private use code point `plane` * 0x10000 + k,
+/// for `plane` 15 or 16.
+fn surrogates_in(text: &Text, plane: u32) -> String {
+    text.code_points()
+        .map(|code| match code {
+            0xd800..=0xdfff => (plane << 16) + code - 0xd800,
+            _ => code,
+        })
+        .map(|code| char::from_u32(code).expect("a code point of a text or a private use plane"))
+        .collect()
+}
+
+/// The [`normalized`] form of `text` with its lone surrogates written in private use plane 15, then in
+/// plane 16. A surrogate inside a comment or a literal leaves the two forms equal.
+fn normal_forms(text: &Text) -> [String; 2] {
+    [15, 16].map(|plane| normalized(&surrogates_in(text, plane)))
+}
+
+/// The name that finds loom test `test`'s model source: its modules, each `::` they end in, and an empty
+/// test name, read up to the last `::` of a left-to-right split, or the empty name when it holds none.
+fn lookup_name(test: &Text) -> Option<String> {
+    let codes: Vec<u32> = test.code_points().collect();
+    let (mut at, mut last) = (0, None);
+    while at + 1 < codes.len() {
+        if codes[at] == u32::from(b':') && codes[at + 1] == u32::from(b':') {
+            last = Some(at);
+            at += 2;
+        } else {
+            at += 1;
+        }
+    }
+    let Some(last) = last else {
+        return Some(String::new());
+    };
+    let modules = Text::from_code_points(codes[..last].iter().copied())?;
+    modules.to_str().map(|modules| format!("{modules}::"))
 }
 
 fn failed(prefix: &str, reason: &str) -> (Value, u8) {
@@ -971,11 +1038,12 @@ fn inputs(read: Reader<'_>, root: &Path) -> Result<Inputs, String> {
     })
 }
 
-/// The report and the exit code of the catalog check: the catalog, the declarations and the scoped
-/// files come from `read`, the kernel package is walked under the checkout `root`, and the crate
-/// sources that can declare an included file are found under `tree`. `package_walk` lists the sources
-/// the scope rule classifies; the kernel texts and the include defects are read on disk under `root`.
-/// A strength constant with no `S::NAME` mention in its file takes its op from its pin in `pins`.
+/// The report and the exit code of the catalog check: the catalog, the declarations, the scoped
+/// files, the crate's module files and path holders, and each loom test's model source come from
+/// `read`, the kernel package is walked under the checkout `root`, and the crate sources that can
+/// declare an included file are found under `tree`. `package_walk` lists the sources the scope rule
+/// classifies; the kernel texts and the include defects are read on disk under `root`. A strength
+/// constant with no `S::NAME` mention in its file takes its op from its pin in `pins`.
 ///
 /// The check acts with the authority of its caller and trusts the directories it is given; it reads
 /// each input whole.
@@ -1049,8 +1117,8 @@ pub fn check(
         for defect in reading.defects() {
             refusals.refuse("spelling", Text::from(defect.as_str()));
         }
-        let code = code(reading.production());
-        for (start, end) in loaders(&code) {
+        let code = reading.scanned();
+        for (start, end) in loaders(code) {
             let loader = words(&code[start..end]).collect::<Vec<_>>().join(" ");
             refusals.refuse(
                 "scope file",
@@ -1066,9 +1134,11 @@ pub fn check(
         }
         let targets = vec![Vec::new(); reading.sites().len()];
         let normal = normalized(reading.production());
+        let matched = Matched::new(&text, reading.production());
         scoped.push(Scoped {
             path: path.to_owned(),
             reading,
+            matched,
             normal,
             targets,
         });
@@ -1089,8 +1159,9 @@ pub fn check(
             }
         };
         ids.insert(row.id.clone());
-        let held: Vec<&str> = DISPOSITIONS
+        let held: Vec<&str> = WANTED
             .into_iter()
+            .map(|(key, _)| key)
             .filter(|key| row.object.get(key).is_some())
             .collect();
         let disposition = match held[..] {
@@ -1125,7 +1196,7 @@ pub fn check(
             }
             let expected: &[&str] = match site.kind() {
                 Kind::Fence { .. } => &["delete"],
-                Kind::Ordering { strength, op } => steps(strength, op.name()),
+                Kind::Ordering { strength, op } => steps(strength, op),
             };
             let mut matched = targets.clone();
             matched.sort_unstable();
@@ -1157,7 +1228,7 @@ pub fn check(
     let credited = refusals.is_empty() && unrun.is_empty();
     let code = u8::from(!refusals.is_empty());
     let mut report = Object::new();
-    report.insert("refusals", refusals.value());
+    report.insert("refusals", Value::Array(refusals.0));
     report.insert("rows", Value::Object(dispositions));
     report.insert(
         "unrun",

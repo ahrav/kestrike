@@ -16,7 +16,7 @@
 //! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 
 use crate::decimal::{nearest_double, spells_shortest};
@@ -157,7 +157,6 @@ fn subtract_digits(left: &str, right: &str) -> String {
     String::from_utf8(difference).expect("digits are ASCII")
 }
 
-#[cfg(target_os = "linux")]
 impl crate::text::Piece for Integer {
     fn push_to(&self, text: &mut Text) {
         text.push_str(&self.to_string());
@@ -304,7 +303,7 @@ pub fn parse(text: &str) -> Result<Value, Error> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
-            StrictError::Repeated(_) | StrictError::Listed(..) | StrictError::Number(_) => {
+            StrictError::Repeated(..) | StrictError::Number(_) => {
                 unreachable!("a read that keeps repeated keys and every number refuses neither")
             }
         })
@@ -347,10 +346,7 @@ pub fn parse_unique(text: &str) -> Result<Value, UniqueError> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => UniqueError::Syntax(error),
-            StrictError::Listed(name, keys) => UniqueError::Repeated(name, keys),
-            StrictError::Repeated(_) => {
-                unreachable!("the unique read lists the repeating object's keys")
-            }
+            StrictError::Repeated(name, keys) => UniqueError::Repeated(name, keys),
             StrictError::Number(_) => unreachable!("a read that keeps every number refuses none"),
         })
 }
@@ -368,13 +364,12 @@ pub(crate) enum Unnumber {
 }
 
 /// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, or a
-/// number strict JSON refuses. The unique read gives `Listed` for a repeat, with the repeating object's
-/// keys as [`UniqueError::Repeated`] holds them.
+/// number strict JSON refuses. A repeat of the unique read carries the repeating object's keys as
+/// [`UniqueError::Repeated`] holds them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StrictError {
     Syntax(Error),
-    Repeated(Text),
-    Listed(Text, Vec<(Text, usize)>),
+    Repeated(Text, Vec<(Text, usize)>),
     Number(Unnumber),
 }
 
@@ -385,7 +380,7 @@ impl fmt::Display for StrictError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Syntax(error) => error.fmt(f),
-            Self::Repeated(_) | Self::Listed(..) => f.write_str("an object repeats a key"),
+            Self::Repeated(..) => f.write_str("an object repeats a key"),
             Self::Number(Unnumber::Constant(token)) => {
                 write!(f, "the constant {token} is no number")
             }
@@ -431,50 +426,17 @@ pub fn parse_members(text: &str) -> Result<Value, Error> {
         .document()
         .map_err(|error| match error {
             StrictError::Syntax(error) => error,
-            StrictError::Repeated(_) | StrictError::Listed(..) | StrictError::Number(_) => {
+            StrictError::Repeated(..) | StrictError::Number(_) => {
                 unreachable!("a read that keeps every member and every number refuses neither")
             }
         })
 }
 
-/// The keys an object of the unique read spells from its first repeated key on, in order: each distinct
-/// key once, and the order as runs of one key's index, so a key repeated many times in a row costs one
-/// run.
-#[derive(Default)]
-struct Later {
-    index: HashMap<Text, usize>,
-    runs: Vec<(usize, usize)>,
-}
-
-impl Later {
-    fn push(&mut self, key: Text) {
-        let next = self.index.len();
-        let id = *self.index.entry(key).or_insert(next);
-        match self.runs.last_mut() {
-            Some((last, count)) if *last == id => *count += 1,
-            _ => self.runs.push((id, 1)),
-        }
-    }
-
-    /// The runs of the keys of `object`, the members read before the first repeat, then of these keys.
-    fn runs(self, object: Object) -> Vec<(Text, usize)> {
-        let mut names = vec![Text::new(); self.index.len()];
-        for (key, id) in self.index {
-            names[id] = key;
-        }
-        let mut runs: Vec<(Text, usize)> = Vec::new();
-        let keys = object.0.into_iter().map(|(key, _)| (key, 1));
-        let later = self
-            .runs
-            .into_iter()
-            .map(|(id, count)| (names[id].clone(), count));
-        for (key, count) in keys.chain(later) {
-            match runs.last_mut() {
-                Some((last, total)) if *last == key => *total += count,
-                _ => runs.push((key, count)),
-            }
-        }
-        runs
+/// Counts `key` in `runs`, runs of one key and the count of its spellings in a row.
+fn tally(runs: &mut Vec<(Text, usize)>, key: Text) {
+    match runs.last_mut() {
+        Some((last, count)) if *last == key => *count += 1,
+        _ => runs.push((key, 1)),
     }
 }
 
@@ -608,7 +570,7 @@ impl<'a> Reader<'a> {
         }
         let mut repeated = None;
         let mut keys = HashSet::new();
-        let mut later = Later::default();
+        let mut later = Vec::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -626,27 +588,27 @@ impl<'a> Reader<'a> {
             } else if self.mode == Mode::Keep {
                 object.insert(key, value);
             } else if repeated.is_none() {
-                // The parser defers the first duplicate-key error until the object closes, and the
-                // members after it are read and dropped.
+                // The parser defers the first duplicate-key error until the object closes. The strict
+                // read drops the members after it; the unique read drops their values and tallies
+                // their keys for the refusal.
                 if keys.insert(key.clone()) {
                     object.0.push((key, value));
                 } else {
                     if self.mode == Mode::Unique {
-                        later.push(key.clone());
+                        for (key, _) in object.0.drain(..) {
+                            tally(&mut later, key);
+                        }
+                        tally(&mut later, key.clone());
                     }
                     repeated = Some(key);
                 }
             } else if self.mode == Mode::Unique {
-                later.push(key);
+                tally(&mut later, key);
             }
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
-                    return Err(if self.mode == Mode::Unique {
-                        StrictError::Listed(name, later.runs(object))
-                    } else {
-                        StrictError::Repeated(name)
-                    });
+                    return Err(StrictError::Repeated(name, later));
                 }
                 return Ok(self.closed(object, members));
             }
