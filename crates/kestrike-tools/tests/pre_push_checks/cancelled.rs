@@ -1,7 +1,8 @@
-//! The cases of a cancelled push: a signal to the tool's process while `git worktree add` runs, while a
-//! check and its child run, twice in a row, and after one check's leader ended. Each waits for the file a
-//! stand-in writes before it signals, and for the end of the check's process group against
-//! [`LIMIT`](super::push::LIMIT) after the tool exits.
+//! The cases of a cancelled push: a signal to the tool's process while `git worktree add` runs or after it
+//! exited while its group holds a stream, while a check and its child run, twice in a row, after one
+//! check's leader ended, during a ref line's reads, the guard, a scan and the removal. A case signals once
+//! a stand-in has written its file or from a wrapper of Git that signals the tool itself, and waits for the
+//! end of the check's process group against [`LIMIT`](super::push::LIMIT) after the tool exits.
 
 use std::fs;
 use std::io;
@@ -11,7 +12,7 @@ use std::time::Instant;
 
 use super::chaos_checks::contract;
 use super::push::{
-    BINARY, Fixture, LIMIT, STUB, alive, executable, finished, group_alive, process_id, signal,
+    BINARY, Fixture, LIMIT, STUB, alive, executable, finished, group_ended, process_id, signal,
     spawn_with_input, top, waited, which,
 };
 
@@ -38,11 +39,102 @@ fn hold_removal(fx: &Fixture) {
          \x20 printf 'remove\\n' >> \"$STUB_LOG.git\"\n\
          \x20 n=0\n\
          \x20 while [ ! -e \"$STUB_LOG.release\" ] && [ \"$n\" -lt 1000 ]; do sleep 0.01; n=$((n + 1)); done\n\
+         \x20 if [ ! -e \"$STUB_LOG.release\" ]; then printf 'expired\\n' >> \"$STUB_LOG.git\"; fi\n\
          fi",
     );
 }
 
-/// `invoked` lists the first argument of each Git command the `.git` log holds, in the order they ran.
+/// `holding_add` puts a `git` first on `PATH` whose `git worktree add` runs Git's add, leaves a shell in
+/// its process group that holds the add's standard error alone until `.release` appears or a minute
+/// passes, publishes that shell's id as `.held` and its own as `.add`, and exits `code`.
+fn holding_add(fx: &Fixture, code: i32) {
+    let git = which("git");
+    executable(
+        &fx.bin.join("git"),
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1 $2\" = 'worktree add' ]; then\n\
+             \x20 \"{git}\" \"$@\" || exit\n\
+             \x20 ( n=0; while [ ! -e \"$STUB_LOG.release\" ] && [ \"$n\" -lt 6000 ]; do sleep 0.01; n=$((n + 1)); done ) > /dev/null < /dev/null &\n\
+             \x20 printf '%s\\n' \"$!\" > \"$STUB_LOG.held.tmp\" && mv \"$STUB_LOG.held.tmp\" \"$STUB_LOG.held\"\n\
+             \x20 printf '%s\\n' \"$$\" > \"$STUB_LOG.add.tmp\" && mv \"$STUB_LOG.add.tmp\" \"$STUB_LOG.add\"\n\
+             \x20 exit {code}\n\
+             fi\n\
+             exec \"{git}\" \"$@\"\n",
+            git = git.display()
+        ),
+    );
+}
+
+/// A `git worktree add` that exits 0 while a process of its group holds its standard error starts no
+/// check until that stream ends: the add's leader stays unreaped, and once the holder ends the checks run.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_successful_add_starts_no_check_while_its_group_holds_standard_error() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
+    holding_add(&fx, 0);
+    let tool = fx.start(&Fixture::input(&[(&head, &fx.base)]));
+    let add = process_id(&fx.logged(".add"));
+    let held = process_id(&fx.logged(".held"));
+    let exited = waited(|| zombie(add));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let early = fx.ran();
+    fs::write(fx.logged(".release"), "").expect("the holder is released");
+    let run = finished(tool);
+    let ended = waited(|| !alive(held) || zombie(held));
+    assert!(exited, "the add's leader exits and stays unreaped");
+    assert!(
+        early.is_empty(),
+        "a check started while the stream was held: {early:?}"
+    );
+    assert!(ended, "the holder ends");
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(!fx.ran().is_empty(), "the checks run once the stream ends");
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// A SIGTERM after a failed `git worktree add` exited, while a process of its group holds its standard
+/// error, ends that group and exits 143 within [`LIMIT`], with no check run and no worktree left.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_signal_after_a_failed_add_exits_while_its_group_holds_standard_error_ends_the_group() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
+    holding_add(&fx, 1);
+    let tool = fx.start(&Fixture::input(&[(&head, &fx.base)]));
+    let add = process_id(&fx.logged(".add"));
+    let held = process_id(&fx.logged(".held"));
+    let exited = waited(|| zombie(add));
+    let sent = Instant::now();
+    signal(tool.id(), libc::SIGTERM);
+    let run = finished(tool);
+    let elapsed = sent.elapsed();
+    let ended = waited(|| !alive(held) || zombie(held));
+    fs::write(fx.logged(".release"), "").expect("the holder is released");
+    assert!(exited, "the add's leader exits and stays unreaped");
+    assert!(
+        elapsed < LIMIT,
+        "the tool exits {elapsed:?} after the signal"
+    );
+    assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
+    assert_eq!(run.stderr, scanned(&head, &fx.base));
+    assert!(ended, "the holder in the add's group ends");
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// `logging_git` puts a `git` first on `PATH` that logs its first argument, and its second where it has
+/// one, to the `.git` log, runs the shell text `after`, and then runs Git's own program.
+fn logging_git(fx: &Fixture, after: &str) {
+    fx.wrap_git_around(&format!(
+        "printf '%s\\n' \"$1${{2:+ $2}}\" >> \"$STUB_LOG.git\"\n{after}"
+    ));
+}
+
+/// `invoked` lists the Git commands the `.git` log holds, in the order they ran.
 fn invoked(fx: &Fixture) -> Vec<String> {
     fs::read_to_string(fx.logged(".git"))
         .expect("the wrapper logs each Git command")
@@ -117,10 +209,7 @@ fn each_signal_while_a_check_and_its_child_run_ends_the_group_and_removes_the_wo
         assert_eq!(run.code, Some(128 + sent), "{sent}: {}", run.stderr);
         let announced = announced(&head, "test-select-tests.py");
         assert!(run.stderr.ends_with(&announced), "{sent}: {}", run.stderr);
-        assert!(
-            waited(|| !group_alive(leader)),
-            "{sent}: the check's group ends"
-        );
+        assert!(group_ended(leader), "{sent}: the check's group ends");
         assert!(
             !alive(child) || zombie(child),
             "{sent}: the check's child ends"
@@ -149,7 +238,13 @@ fn two_signals_in_a_row_remove_the_worktree_once() {
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     let announced = announced(&head, "test-select-tests.py");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
-    assert!(waited(|| !group_alive(leader)), "the check's group ends");
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert!(group_ended(leader), "the check's group ends");
     let removes = fs::read_to_string(fx.logged(".git")).expect("the wrapper logs the removal");
     assert_eq!(removes, "remove\n");
     assert_eq!(fx.worktrees(), 1);
@@ -167,21 +262,29 @@ fn a_leader_that_ended_before_the_signal_gets_none() {
     let leader = process_id(&fx.logged(".leader"));
     signal(tool.id(), libc::SIGTERM);
     let run = finished(tool);
-    let survived = alive(lingering) && !zombie(lingering);
-    if survived {
-        // SAFETY: `kill` takes two integers and touches no memory of the caller.
-        unsafe { libc::kill(lingering, libc::SIGKILL) };
-        // SAFETY: `waitpid` with a null status pointer reaps the child where this process is its subreaper
-        // and returns at once where it is not this process's child.
-        unsafe { libc::waitpid(lingering, std::ptr::null_mut(), 0) };
-    }
+    let sampled = alive(lingering) && !zombie(lingering);
+    // SAFETY: `kill` takes two integers and touches no memory of the caller; the lingering child is this
+    // process's adopted child on Linux, unreaped, so its id names it.
+    unsafe { libc::kill(lingering, libc::SIGTERM) };
+    let mut status = 0;
+    // SAFETY: `waitpid` writes the status into `status`, which outlives the call; it reaps the child where
+    // this process is its subreaper and returns at once where it is not this process's child.
+    let reaped = unsafe { libc::waitpid(lingering, &mut status, 0) } == lingering;
+    let survived = if reaped {
+        libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGTERM
+    } else {
+        sampled
+    };
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     let announced = announced(&head, "verify-receipts.py admit");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
-    assert!(
-        waited(|| !group_alive(leader)),
-        "the running check's group ends"
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
     );
+    assert!(group_ended(leader), "the running check's group ends");
     assert!(
         survived,
         "the child of the reaped leader received no signal"
@@ -212,7 +315,13 @@ fn an_ignored_signal_is_still_recorded() {
     assert_eq!(run.code, Some(128 + libc::SIGHUP), "{}", run.stderr);
     let announced = announced(&head, "test-select-tests.py");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
-    assert!(waited(|| !group_alive(leader)), "the check's group ends");
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert!(group_ended(leader), "the check's group ends");
     assert_eq!(fx.worktrees(), 1);
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
@@ -278,29 +387,33 @@ fn a_signal_while_worktree_add_runs_stops_the_add() {
     let held = process_id(&fx.logged(".held"));
     // SAFETY: `getpgid` takes one integer and touches no memory of the caller.
     let grouped = unsafe { libc::getpgid(held) } == add;
+    let live = alive(held) && !zombie(held);
     let sent = Instant::now();
     signal(tool.id(), libc::SIGTERM);
     let run = finished(tool);
+    let elapsed = sent.elapsed();
     let ended = waited(|| !alive(held) || zombie(held));
     if !ended {
         // SAFETY: `kill` takes two integers and touches no memory of the caller.
         unsafe { libc::kill(held, libc::SIGKILL) };
     }
     assert!(grouped, "the add's sleep stands in the add's group");
+    assert!(live, "the add's sleep runs when the signal is sent");
     assert!(
-        sent.elapsed() < LIMIT,
-        "the tool exits {:?} after the signal",
-        sent.elapsed()
+        elapsed < LIMIT,
+        "the tool exits {elapsed:?} after the signal"
     );
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert_eq!(run.stderr, scanned(&head, &fx.base));
     assert!(ended, "the add's sleep ends");
-    assert!(waited(|| !group_alive(add)), "the add's group ends");
+    assert!(group_ended(add), "the add's group ends");
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
+/// The case reads the stopped tool's state from `/proc`, so it runs on Linux alone.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_signal_recorded_before_the_leader_s_reap_ends_what_the_leader_left() {
     let fx = Fixture::new();
@@ -319,7 +432,13 @@ fn a_signal_recorded_before_the_leader_s_reap_ends_what_the_leader_left() {
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     let announced = announced(&head, "test-select-tests.py");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
-    assert!(waited(|| !group_alive(leader)), "the leader's group ends");
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert!(group_ended(leader), "the leader's group ends");
     assert!(!alive(child) || zombie(child), "the leader's child ends");
     assert_eq!(fx.ran(), ["test-select-tests.py"]);
     assert_eq!(fx.worktrees(), 1);
@@ -352,7 +471,13 @@ fn a_signal_blocked_at_the_tool_s_start_is_still_recorded() {
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     let announced = announced(&head, "test-select-tests.py");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
-    assert!(waited(|| !group_alive(leader)), "the check's group ends");
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert!(group_ended(leader), "the check's group ends");
     assert_eq!(fx.worktrees(), 1);
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
@@ -366,13 +491,19 @@ fn a_check_that_ignores_the_recorded_signals_still_ends() {
     let leader = process_id(&fx.logged(".leader"));
     signal(tool.id(), libc::SIGTERM);
     let run = finished(tool);
-    let ended = waited(|| !group_alive(leader));
+    let ended = group_ended(leader);
     if !ended {
         killpg(leader, libc::SIGKILL);
     }
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     let announced = announced(&head, "test-select-tests.py");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
     assert!(ended, "the check's group ends");
     assert!(!alive(child) || zombie(child), "the check's child ends");
     assert_eq!(fx.worktrees(), 1);
@@ -397,7 +528,13 @@ fn a_signal_to_the_tool_s_group_during_the_removal_leaves_no_worktree_registered
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     let announced = announced(&head, "test-select-tests.py");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
-    assert!(waited(|| !group_alive(leader)), "the check's group ends");
+    assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert!(group_ended(leader), "the check's group ends");
     let removes = fs::read_to_string(fx.logged(".git")).expect("the wrapper logs the removal");
     assert_eq!(removes, "remove\n");
     assert_eq!(fx.worktrees(), 1);
@@ -410,14 +547,14 @@ fn a_signal_to_the_tool_s_group_during_the_removal_leaves_no_worktree_registered
 fn a_signal_during_the_first_read_of_a_ref_line_starts_no_later_read() {
     let fx = Fixture::new();
     let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
-    fx.wrap_git_around(
-        "printf '%s\\n' \"$1\" >> \"$STUB_LOG.git\"\n\
-         case \"$1 $3\" in 'cat-file '*'^{commit}') kill -TERM \"$PPID\" ;; esac",
+    logging_git(
+        &fx,
+        "case \"$1 $3\" in 'cat-file '*'^{commit}') kill -TERM \"$PPID\" ;; esac",
     );
     let run = fx.push(&[(&head, &fx.base)]);
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert!(run.stderr.is_empty(), "{}", run.stderr);
-    assert_eq!(invoked(&fx), ["remote", "cat-file"]);
+    assert_eq!(invoked(&fx), ["remote", "cat-file -e"]);
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
 }
@@ -429,9 +566,9 @@ fn a_signal_during_the_first_read_of_the_guard_starts_no_later_read() {
     let fx = Fixture::new();
     let base = contract(&fx);
     let head = fx.commit(&[("chaos/receipts/run/row.json", r#"{"a": 1}"#)]);
-    fx.wrap_git_around(
-        "printf '%s\\n' \"$1\" >> \"$STUB_LOG.git\"\n\
-         if [ \"$1\" = ls-tree ]; then kill -TERM \"$PPID\"; fi",
+    logging_git(
+        &fx,
+        "if [ \"$1\" = ls-tree ]; then kill -TERM \"$PPID\"; fi",
     );
     let run = fx.push(&[(&head, &base)]);
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
@@ -439,18 +576,21 @@ fn a_signal_during_the_first_read_of_the_guard_starts_no_later_read() {
     let invoked = invoked(&fx);
     assert_eq!(
         invoked.last().map(String::as_str),
-        Some("ls-tree"),
+        Some("ls-tree -r"),
         "{invoked:?}"
     );
-    assert_eq!(invoked.iter().filter(|name| *name == "ls-tree").count(), 1);
+    assert_eq!(
+        invoked.iter().filter(|name| *name == "ls-tree -r").count(),
+        1
+    );
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
 }
 
-/// A SIGTERM while the guard reads a pushed commit's records, in a push that selects no check, exits 143
-/// and prints no failure.
+/// A SIGTERM while the guard reads a pushed commit's records exits 143 and prints no failure; the guard's
+/// read is the last Git command, so no worktree is added or removed after it.
 #[test]
-fn a_signal_during_the_guard_of_a_push_with_no_check_exits_with_the_signal() {
+fn a_signal_during_the_guard_s_read_of_pushed_records_exits_with_the_signal() {
     let fx = Fixture::new();
     let base = contract(&fx);
     fx.commit(&[(
@@ -460,11 +600,20 @@ fn a_signal_during_the_guard_of_a_push_with_no_check_exits_with_the_signal() {
     fx.git(&["rm", "-q", "--", "chaos/receipts/run/row.json"]);
     fx.git(&["commit", "-q", "-m", "remove the record"]);
     let clean = fx.git(&["rev-parse", "HEAD"]);
-    fx.wrap_git_around("if [ \"$1\" = diff-tree ]; then kill -TERM \"$PPID\"; fi");
+    logging_git(
+        &fx,
+        "if [ \"$1\" = diff-tree ]; then kill -TERM \"$PPID\"; fi",
+    );
     let run = fx.push(&[(&clean, &base)]);
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert_eq!(run.stderr, scanned(&clean, &base));
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    let logged = invoked(&fx);
+    assert_eq!(
+        logged.last().map(String::as_str),
+        Some("diff-tree -r"),
+        "the guard's read is the last Git command: {logged:?}"
+    );
     assert_eq!(fx.worktrees(), 1);
 }
 
@@ -482,6 +631,12 @@ fn a_signal_during_the_removal_after_passing_checks_exits_with_the_signal() {
     let announced = announced(&head, "verify-receipts.py admit");
     assert!(run.stderr.ends_with(&announced), "{}", run.stderr);
     assert_eq!(
+        run.stderr.matches(announced.as_str()).count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert_eq!(
         fx.ran(),
         ["test-select-tests.py", "verify-receipts.py admit"]
     );
@@ -497,12 +652,23 @@ fn a_signal_during_the_first_of_two_scans_starts_no_second_scan() {
     let fx = Fixture::new();
     let first = fx.commit(&[("notes/a.txt", "a\n")]);
     let second = fx.commit(&[("notes/b.txt", "b\n")]);
-    fx.wrap_git_around(
+    logging_git(
+        &fx,
         "if [ \"$1 $2\" = 'rev-list --count' ] && [ ! -e \"$STUB_LOG.sent\" ]; then : > \"$STUB_LOG.sent\"; kill -TERM \"$PPID\"; fi",
     );
     let run = fx.push(&[(&first, &fx.base), (&second, &fx.base)]);
     assert_eq!(run.code, Some(128 + libc::SIGTERM), "{}", run.stderr);
     assert_eq!(run.stderr, scanned(&first, &fx.base));
+    let logged = invoked(&fx);
+    let counted = logged
+        .iter()
+        .position(|command| command == "rev-list --count")
+        .expect("the first scan counts its commits");
+    let after = &logged[counted + 1..];
+    assert!(
+        !after.is_empty() && !after.iter().any(|command| command == "rev-list --count"),
+        "the first scan reads on after its count and no second scan starts: {logged:?}"
+    );
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
 }

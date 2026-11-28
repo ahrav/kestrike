@@ -1,11 +1,12 @@
 //! The hook's cases of where and how a check starts and of the tool's own failures, started through the
 //! tool: a check runs in a worktree of mode 0700 under `TMPDIR`, else `/tmp`, with the push's environment
-//! and the tool's standard output, and each failure of the tool's own steps exits with its code after the
-//! worktree is removed.
+//! and the tool's standard output, a `TMPDIR` that its group or other users can write and that has no
+//! sticky bit is refused before the tool reads its input, and each failure of the tool's own steps exits
+//! with its code after the worktree is removed.
 
-use std::fs::{self, File};
+use std::fs::{self, DirBuilder, File};
 use std::io::Write;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt, symlink};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
@@ -124,6 +125,41 @@ fn a_check_that_cannot_start_exits_1_after_the_worktree_is_removed() {
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
+/// A `git worktree add` that registers the worktree and exits 0 after writing a byte outside UTF-8 to its
+/// standard output is refused: the tool runs no check, removes the worktree and exits 2 with a
+/// `pre-push: git worktree add` line.
+#[test]
+fn a_worktree_add_whose_output_is_not_utf8_exits_2_before_any_check() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let git = which("git");
+    executable(
+        &fx.bin.join("git"),
+        &format!(
+            "#!/bin/sh
+\
+             if [ \"$1 $2\" = 'worktree add' ]; then \"{git}\" \"$@\" || exit; printf '\\377'; exit 0; fi\n\
+             exec \"{git}\" \"$@\"\n",
+            git = git.display()
+        ),
+    );
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the refusal");
+    assert!(
+        last.starts_with("pre-push: git worktree add"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
 #[test]
 fn a_failed_worktree_add_exits_2_after_the_directory_is_removed() {
     let fx = Fixture::new();
@@ -149,6 +185,8 @@ fn a_failed_worktree_add_exits_2_after_the_directory_is_removed() {
     assert!(fx.left().is_empty(), "{:?}", fx.left());
 }
 
+/// A `git worktree remove` that Git runs and refuses is named by its line, the worktree stays registered,
+/// and the checks decide the exit, as the script's removal did.
 #[test]
 fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
     let fx = Fixture::new();
@@ -190,14 +228,12 @@ fn a_failed_worktree_removal_is_named_and_the_checks_decide_the_exit() {
 fn a_failed_write_to_standard_error_exits_120_before_any_check() {
     let fx = Fixture::new();
     let head = fx.commit(&[INVENTORY]);
-    let full = File::options()
-        .write(true)
-        .open("/dev/full")
-        .expect("the full device opens");
+    let (reader, unread) = std::io::pipe().expect("the pipe is made");
+    drop(reader);
     let mut child = fx
         .tool()
         .stdin(Stdio::piped())
-        .stderr(full)
+        .stderr(unread)
         .spawn()
         .expect("the tool starts");
     child
@@ -206,7 +242,7 @@ fn a_failed_write_to_standard_error_exits_120_before_any_check() {
         .expect("standard input is piped")
         .write_all(Fixture::input(&[(&head, &fx.base)]).as_bytes())
         .expect("the ref lines are written");
-    let status = finished(child);
+    let status = finished(child.into());
     assert_eq!(status.code, Some(120));
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
     assert_eq!(fx.worktrees(), 1);
@@ -221,7 +257,7 @@ fn a_failed_read_of_standard_input_exits_1() {
         .stdin(File::open(&fx.repo).expect("the directory opens"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = finished(command.spawn().expect("the tool starts"));
+    let output = finished(command.spawn().expect("the tool starts").into());
     assert_eq!(output.code, Some(1));
     assert_eq!(
         output.stderr,
@@ -289,13 +325,7 @@ fn a_tool_started_with_sigchld_ignored_reads_each_child_s_status() {
 #[test]
 fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
     let mut fx = Fixture::new();
-    let head = fx.commit(&[
-        INVENTORY,
-        (
-            "scripts/test-select-tests.py",
-            &format!("# unlink-git\n{STUB}"),
-        ),
-    ]);
+    let head = fx.commit(&[INVENTORY]);
     let tools = fx.temp.join("tools");
     let linked = fx.temp.join("git-dir");
     for dir in [&tools, &linked] {
@@ -306,8 +336,13 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
     ] {
         symlink(which(program), tools.join(program)).expect("the link is made");
     }
-    let link = linked.join("git");
-    symlink(which("git"), &link).expect("the link is made");
+    executable(
+        &linked.join("git"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'worktree add' ]; then \"{git}\" \"$@\"; status=$?; rm -f \"$0\"; exit \"$status\"; fi\nexec \"{git}\" \"$@\"\n",
+            git = which("git").display()
+        ),
+    );
     let path = fx
         .env
         .iter()
@@ -320,7 +355,6 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
         searched.push(dir);
     }
     fx.set("PATH", searched);
-    fx.set("STUB_GIT_LINK", link.clone());
     let run = fx.push(&[(&head, &fx.base)]);
     fx.set("PATH", path);
     assert_eq!(run.code, Some(1), "{}", run.stderr);
@@ -351,8 +385,8 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
 
 /// A `git worktree add` that ends after registering a locked worktree whose directory lacks its `.git`
 /// file leaves the registration standing: the removal names the worktree it could not remove, the exit is
-/// the add's 2, and the locked entry stays registered until a `git worktree remove` or `prune` of the
-/// user's own clears it.
+/// the add's 2, and the locked entry stays registered until `git worktree unlock` and then
+/// `git worktree prune`, or a doubly forced `git worktree remove`, clears it.
 #[test]
 fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
     let fx = Fixture::new();
@@ -389,14 +423,65 @@ fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
     assert_eq!(fx.worktrees(), 1);
 }
 
-/// A ref field holding a NUL byte reaches a Git argument that the standard library refuses before any
-/// start; the tool prints `pre-push: ` and the refusal and exits 2, as for a Git read that fails.
+/// A `git worktree add` stopped before it writes the worktree's `gitdir` file can leave an entry under the
+/// common `.git/worktrees` directory that holds only its `locked` file: Git lists no such worktree, the
+/// removal names a tree Git does not know, the exit is the add's 2, and the entry stays for its owner to
+/// delete.
+#[test]
+fn a_locked_only_entry_left_by_a_failed_add_stays_and_is_not_listed() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    executable(
+        &fx.bin.join("git"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'worktree add' ]; then\n\
+             \x20 entry=\"$(\"{git}\" rev-parse --git-common-dir)/worktrees/$(basename \"$5\")\"\n\
+             \x20 mkdir -p \"$entry\" && : > \"$entry/locked\" || exit\n\
+             \x20 printf '%s\\n' \"$entry\" > \"$STUB_LOG.entry\"\n\
+             \x20 exit 128\n\
+             fi\nexec \"{git}\" \"$@\"\n",
+            git = which("git").display()
+        ),
+    );
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    let prefix = format!(
+        "pre-push: could not remove worktree {}/kestrike-pre-push-",
+        fx.tmp.display()
+    );
+    assert!(
+        run.stderr.lines().any(|line| line.starts_with(&prefix)),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
+    assert_eq!(fx.worktrees(), 1);
+    let entry = fs::read_to_string(fx.logged(".entry")).expect("the stand-in names its entry");
+    let entry = fx.repo.join(entry.trim_end());
+    let held: Vec<_> = fs::read_dir(&entry)
+        .expect("the entry stays")
+        .map(|item| item.expect("the entry reads").file_name())
+        .collect();
+    assert_eq!(held, ["locked"]);
+    fs::remove_dir_all(&entry).expect("the entry is deleted");
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// A ref field holding a NUL byte is no full object id: the tool refuses the line as malformed, the byte
+/// shown as `\x00`, and exits 2.
 #[test]
 fn a_nul_byte_in_a_ref_field_exits_2() {
     let fx = Fixture::new();
     let run = finished(fx.start(&format!("refs/heads/x a\0b refs/heads/x {}\n", fx.base)));
     assert_eq!(run.code, Some(2), "{}", run.stderr);
-    assert!(run.stderr.starts_with("pre-push: "), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "pre-push: malformed ref line: 'refs/heads/x a\\x00b refs/heads/x {}'\n",
+            fx.base
+        )
+    );
     assert!(fx.ran().is_empty(), "{:?}", fx.ran());
 }
 
@@ -448,6 +533,254 @@ fn a_tmpdir_that_names_a_missing_directory_exits_1() {
     assert!(!missing.exists());
 }
 
+/// The refusal of the scratch directory `parent` for its write bits.
+fn writable_line(parent: &Path) -> String {
+    format!(
+        "pre-push: the scratch directory {} is writable by its group or by other users and has no sticky \
+         bit; set TMPDIR to a directory that you own and only you can write\n",
+        parent.display()
+    )
+}
+
+/// `unread` runs the tool with a standard input that stays open and empty until the tool has exited, so
+/// a tool that waits for its input runs into the fixture's limit and fails the case.
+fn unread(fx: &Fixture) -> super::push::Run {
+    let mut child = fx
+        .tool()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the tool starts");
+    let held = child.stdin.take();
+    let run = finished(child.into());
+    drop(held);
+    run
+}
+
+/// A `TMPDIR` whose mode gives its group or every user write access without the sticky bit ends the push
+/// with exit 2 and the sentence that names it before the tool reads its standard input, so whatever the
+/// push would plan: the tool starts no Git command, runs no check and makes nothing under it. The same
+/// directory with the sticky bit, or with neither write bit, is the control: the tool traces Git commands
+/// and runs the check in a worktree under it.
+#[test]
+fn a_scratch_parent_others_can_write_is_refused_unless_it_is_sticky() {
+    let mut fx = Fixture::new();
+    let head = reporting(&fx);
+    let parent = fx.tmp.clone();
+    let trace = fx.temp.join("trace");
+    let mode = |mode: u32| {
+        fs::set_permissions(&parent, fs::Permissions::from_mode(mode)).expect("the mode is set");
+    };
+    for (refused, accepted) in [(0o777, 0o1777), (0o770, 0o1770), (0o702, 0o1702)]
+        .into_iter()
+        .chain([(0o777, 0o755), (0o770, 0o750), (0o702, 0o700)])
+    {
+        mode(refused);
+        fx.set("GIT_TRACE", trace.clone());
+        let run = unread(&fx);
+        assert_eq!(run.code, Some(2), "{refused:o}: {}", run.stderr);
+        assert_eq!(run.stderr, writable_line(&parent), "{refused:o}");
+        assert!(run.stdout.is_empty(), "{refused:o}: {}", run.stdout);
+        assert!(!trace.exists(), "{refused:o}: a Git command started");
+        assert!(fx.ran().is_empty(), "{refused:o}: {:?}", fx.ran());
+        assert!(fx.left().is_empty(), "{refused:o}: {:?}", fx.left());
+        mode(accepted);
+        let run = fx.push(&[(&head, &fx.base)]);
+        assert_eq!(run.code, Some(0), "{accepted:o}: {}", run.stderr);
+        assert!(trace.exists(), "{accepted:o}: no Git command started");
+        fs::remove_file(&trace).expect("the trace is removed");
+        fx.unset("GIT_TRACE");
+        let where_ = fs::read_to_string(fx.logged(".where")).expect("the check logs its directory");
+        in_worktree(&where_, &parent);
+        assert_eq!(fx.worktrees(), 1, "{accepted:o}");
+        assert!(fx.left().is_empty(), "{accepted:o}: {:?}", fx.left());
+        fx.clear();
+    }
+}
+
+/// A `TMPDIR` that is a link is judged by the directory it names and shown as given: a link to a
+/// directory of mode 0777 is refused by the link's path, and the same link runs the check under its
+/// target once the target is the user's alone.
+#[test]
+fn a_linked_scratch_parent_is_judged_by_its_target_and_named_by_the_link() {
+    let mut fx = Fixture::new();
+    let head = reporting(&fx);
+    let link = fx.temp.join("linked");
+    symlink(&fx.tmp, &link).expect("the link is made");
+    fx.set("TMPDIR", link.clone());
+    fs::set_permissions(&fx.tmp, fs::Permissions::from_mode(0o777)).expect("the mode is set");
+    let run = unread(&fx);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert_eq!(run.stderr, writable_line(&link));
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    fs::set_permissions(&fx.tmp, fs::Permissions::from_mode(0o700)).expect("the mode is set");
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    let where_ = fs::read_to_string(fx.logged(".where")).expect("the check logs its directory");
+    in_worktree(&where_, &fx.tmp);
+    assert_eq!(fx.worktrees(), 1);
+}
+
+/// A `TMPDIR` that is the user's alone is refused where a directory its path is reached through gives
+/// other users write access without the sticky bit: such a user could put another directory in its
+/// place. The sentence names both directories, and the tool starts no Git command. The control is the
+/// same `TMPDIR` once the directory above it is the user's alone, which runs the check under it.
+#[test]
+fn a_private_scratch_parent_under_a_directory_others_can_write_is_refused() {
+    let mut fx = Fixture::new();
+    let head = reporting(&fx);
+    let above = fx.temp.join("above");
+    let parent = above.join("private");
+    for directory in [&above, &parent] {
+        DirBuilder::new()
+            .mode(0o700)
+            .create(directory)
+            .expect("the directory is made");
+    }
+    fx.set("TMPDIR", parent.clone());
+    let trace = fx.temp.join("trace");
+    fx.set("GIT_TRACE", trace.clone());
+    fs::set_permissions(&above, fs::Permissions::from_mode(0o777)).expect("the mode is set");
+    let run = unread(&fx);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "pre-push: the scratch directory {} is reached through {}, which is writable by its group \
+             or by other users and has no sticky bit; set TMPDIR to a directory that you own and only \
+             you can write\n",
+            parent.display(),
+            above.display()
+        )
+    );
+    assert!(!trace.exists(), "a Git command started");
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    fs::set_permissions(&above, fs::Permissions::from_mode(0o700)).expect("the mode is set");
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(trace.exists(), "no Git command started");
+    let where_ = fs::read_to_string(fx.logged(".where")).expect("the check logs its directory");
+    in_worktree(&where_, &parent);
+}
+
+/// The tool reads the scratch parent's status again before it makes a worktree's directory: a parent
+/// that gains a write bit for other users during the plan's history read is refused there with exit 2 and
+/// the sentence, with no worktree added and no check run. The control is the same push with the parent
+/// left as it was, which adds the worktree and runs the check.
+#[test]
+fn a_scratch_parent_opened_to_others_during_the_plan_is_refused_before_the_worktree() {
+    let fx = Fixture::new();
+    let head = reporting(&fx);
+    let log_adds =
+        "if [ \"$1 $2\" = 'worktree add' ]; then printf 'add\\n' >> \"$STUB_LOG.git\"; fi";
+    fx.wrap_git_around(log_adds);
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert_eq!(
+        fx.ran(),
+        ["test-select-tests.py", "verify-receipts.py admit"]
+    );
+    assert_eq!(
+        fs::read_to_string(fx.logged(".git")).expect("the wrapper logs the add"),
+        "add\n"
+    );
+    fx.clear();
+    fx.wrap_git_around(&format!(
+        "if [ \"$1\" = rev-list ]; then chmod 777 \"$TMPDIR\"; fi\n{log_adds}"
+    ));
+    let run = fx.push(&[(&head, &fx.base)]);
+    fs::set_permissions(&fx.tmp, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .ends_with(&format!("\n{}", writable_line(&fx.tmp))),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert!(!fx.logged(".git").exists(), "a worktree was added");
+    fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
+    assert_eq!(fx.worktrees(), 1);
+    assert!(fx.left().is_empty(), "{:?}", fx.left());
+}
+
+/// A `TMPDIR` that names a regular file is no directory to refuse, whatever its mode: the worktree's
+/// `mkdir` fails under it, and the tool prints the path and the error and exits 1.
+#[test]
+fn a_tmpdir_that_names_a_file_others_can_write_fails_the_mkdir() {
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let file = fx.temp.join("file");
+    File::create_new(&file).expect("the file is made");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o666)).expect("the mode is set");
+    fx.set("TMPDIR", file.clone());
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the failure");
+    assert!(
+        tree_line(last, &file, ": Not a directory (os error 20)"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    assert_eq!(fx.worktrees(), 1);
+}
+
+/// A `TMPDIR` whose status cannot be read, here one under a directory the user may not search, ends the
+/// run with exit 1 and the path's error before the tool reads its standard input and with no Git command
+/// started: the tool cannot tell who owns or may write it. The control is the same `TMPDIR` once the
+/// directory above it can be searched: the path is then absent, the tool goes on to its Git reads, and the
+/// worktree's `mkdir` fails.
+#[test]
+fn a_scratch_parent_whose_status_cannot_be_read_exits_1_before_the_plan() {
+    // SAFETY: `geteuid` takes no arguments and touches no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    let closed = fx.temp.join("closed");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&closed)
+        .expect("the directory is made");
+    let parent = closed.join("tmp");
+    fx.set("TMPDIR", parent.clone());
+    let trace = fx.temp.join("trace");
+    fx.set("GIT_TRACE", trace.clone());
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).expect("the mode is set");
+    let run = unread(&fx);
+    fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).expect("the mode is restored");
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert_eq!(
+        run.stderr,
+        format!(
+            "pre-push-checks: {}: Permission denied (os error 13)\n",
+            parent.display()
+        )
+    );
+    assert!(!trace.exists(), "a Git command started");
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(1), "{}", run.stderr);
+    assert!(trace.exists(), "no Git command started");
+    let last = run
+        .stderr
+        .lines()
+        .last()
+        .expect("the tool prints the failure");
+    assert!(
+        tree_line(last, &parent, ": No such file or directory (os error 2)"),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+}
+
 /// A relative `TMPDIR` is made absolute against the tool's working directory, its `..` components kept:
 /// Git's `worktree add` gets the absolute path, and the check runs there.
 #[test]
@@ -455,9 +788,13 @@ fn a_relative_tmpdir_is_read_against_the_working_directory() {
     let mut fx = Fixture::new();
     let head = reporting(&fx);
     let parent = fx.temp.join("relative");
-    fs::create_dir(&parent).expect("the parent is made");
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&parent)
+        .expect("the parent is made");
     let started = fx.repo.join("sub");
     fs::create_dir(&started).expect("the working directory is made");
+    let started = fs::canonicalize(&started).expect("the working directory resolves");
     fx.set("TMPDIR", "../../relative");
     fx.wrap_git_around(
         "if [ \"$1 $2\" = 'worktree add' ]; then printf '%s\\n' \"$5\" >> \"$STUB_LOG.git\"; fi",

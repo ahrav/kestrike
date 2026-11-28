@@ -6,7 +6,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 
 use crate::environ::Environ;
-use crate::git::push_environ;
+use crate::git::{is_object_id, push_environ};
 use crate::text::{Text, words};
 
 use super::guard::{pushed_records, read_accounts, record_pathspecs, tip_records};
@@ -128,6 +128,35 @@ impl Plan {
             .collect()
     }
 
+    /// `object_ids` reads the local and the remote object id of one ref line, as the hook's caller decoded
+    /// it from its input, and `None` for a blank line. Each id is a full object id, 40 or 64 hexadecimal
+    /// digits, returned in lowercase, the form Git writes, so one commit has one text as a tip, a scan
+    /// range and a Git argument, and a field reaches Git as a revision alone. It starts no Git read.
+    ///
+    /// # Errors
+    ///
+    /// A line that is not blank and has other than four fields, or whose second or fourth field is no
+    /// full object id, is [`Failure::Malformed`] with the line as given.
+    pub fn object_ids(line: &OsStr) -> Result<Option<(Text, Text)>, Failure> {
+        let text = Text::from_os(line);
+        if text.strip().is_empty() {
+            return Ok(None);
+        }
+        let id = |field: &Text| {
+            field
+                .to_str()
+                .map(str::to_ascii_lowercase)
+                .filter(|id| is_object_id(id))
+                .map(Text::from)
+        };
+        let fields = text.split();
+        let ids = match fields.as_slice() {
+            [_, local, _, remote] => id(local).zip(id(remote)),
+            _ => None,
+        };
+        ids.map(Some).ok_or(Failure::Malformed(text))
+    }
+
     /// `line` adds one ref line, as the hook's caller decoded it from its input. A line with no comparison
     /// base gives `note` its [`Skipped`] note once the base and the links registry are read, before the
     /// line's later reads.
@@ -139,20 +168,19 @@ impl Plan {
     /// test where a source it reads changed, the replay, and each self-test where none of its own scripts
     /// changed and another of its inputs did. Then the commits under the record directories that the tip
     /// reaches and the destination is not known to hold. A presence read, and a read of the inventory or the
-    /// registry, whose Git command fails for any reason reads as an absent file. A line that returns an
-    /// error leaves the plan as it stood before the line.
+    /// registry, whose Git command runs and exits nonzero reads as an absent file. The probe also runs once
+    /// the skipped-scan note returns, before the next read. A line that returns an error leaves the plan as
+    /// it stood before the line.
     ///
     /// # Errors
     ///
-    /// A line that is not blank and has other than four fields is [`Failure::Malformed`], a failed read is
-    /// its error, and a probe that reports `Err` once a read returns is [`Failure::Cancelled`].
+    /// A line [`Plan::object_ids`] refuses is [`Failure::Malformed`] before any Git read of the line
+    /// starts, a failed read is its error, and a probe that reports `Err` once a read returns is
+    /// [`Failure::Cancelled`].
     pub fn line(&mut self, line: &OsStr, note: impl FnOnce(Skipped)) -> Result<(), Failure> {
-        let text = Text::from_os(line);
-        if text.strip().is_empty() {
+        let Some((local, remote)) = Self::object_ids(line)? else {
             return Ok(());
-        }
-        let [_, local, _, remote] =
-            <[Text; 4]>::try_from(text.split()).map_err(|_| Failure::Malformed(text.clone()))?;
+        };
         if local.to_str() == Some(ZERO) {
             return Ok(());
         }
@@ -162,6 +190,7 @@ impl Plan {
         let (checks, guard) = match &base {
             None => {
                 note(Skipped(local.clone()));
+                (reads.probe)().map_err(Failure::Cancelled)?;
                 (unbased_checks(reads, &local, links.as_ref())?, true)
             }
             Some(base) => {

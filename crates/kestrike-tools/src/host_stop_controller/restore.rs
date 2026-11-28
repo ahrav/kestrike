@@ -4,31 +4,47 @@
 //! `restore` names the evidence by the pathname `DIR/injection` and trusts the operator to keep that
 //! directory under that name until `restore` returns.
 
+use std::cmp::Ordering;
 use std::ffi::OsStr;
-use std::fs;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::context::{Stream, beside, pure, seconds};
-use super::controller::Controller;
-use super::fault::{Fault, Halt};
-use super::run::{TOOL, lock_sentence, probe_refusal};
-use super::seal::{read_halt, run_end};
+use super::checks::{check_roles, other_package, read_halt, refused};
+use super::context::{Stream, beside, seconds};
+use super::controller::{Controller, window};
+use super::fault::Halt;
+use super::run::{TOOL, lock_sentence};
 use crate::gameday::{ends_observation, read_evidence};
 use crate::host_stop::{
     Files, Number, Request, SKEW_SECONDS, Seam, check_reviewed, check_stopped, instance_id,
-    launch_time, lock, probe, read_json, stands,
+    launch_time, lock, read_json,
 };
 use crate::json::{Object, Value};
-use crate::plants::files::strerror;
 use crate::python::{repr, repr_float};
 use crate::text::Text;
 
+/// The times a ready read is dated against: restore's start, a wall reading; the latest time among
+/// the stop, the stopped report and the abort; and the stopped report's time where one stands.
+#[derive(Clone, Copy)]
+struct Times {
+    start: f64,
+    floor: Number,
+    stopped_at: Option<Number>,
+}
+
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
-    /// `restore` returns 0 when it writes `restoration.json`, and 1 with no mark after a signal from
-    /// the caller check on, a poll that reaches its bound, or a failed write. Where
-    /// `injection/collected.json` stands, it first reads the evidence as the judge does, and exits 1
-    /// after writing a restoration that ends observation, which the seal does not name.
+    /// A return of 0 means `restore` wrote `restoration.json`. It returns 1 and writes no mark after
+    /// a signal in the caller check or the poll, or a poll that reaches its bound. It returns 1
+    /// after a write that fails: a failure through the link leaves the name as it found it, so an
+    /// entry found at the link keeps its bytes and a later `restore` refuses it; a sync that fails
+    /// after the link leaves the mark removed with the removal synced, removed with the removal
+    /// unsynced, so the mark may stand again after a crash, or standing whole with its durability
+    /// unknown, as the line on stderr says. Where `injection/collected.json` stands, `restore`
+    /// first reads the evidence as the judge does, and returns 1 after writing a restoration that
+    /// ends observation; that mark stands.
+    ///
+    /// A panic in the armed span or the mark's write unwinds out of `restore` and can leave the
+    /// record armed or held and the poll's deadline set; [`entry`](super::entry) disarms the record
+    /// and ends its hold.
     ///
     /// # Errors
     ///
@@ -64,7 +80,6 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                  target and the operator's",
             ));
         }
-        self.instance = Some(instance.clone());
         let _held = lock(self.cx.files, &injection)
             .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
         let shown = self.stands_in(&injection, "stopped.json")?;
@@ -113,11 +128,14 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
                 floor = at;
             }
         }
+        let times = Times {
+            start,
+            floor,
+            stopped_at,
+        };
         self.injection = Some(injection);
         let mut seen = Text::from("no status read was made");
-        self.cx.record.arm();
-        let polled = self.poll(&instance, start, floor, stopped_at, &mut seen);
-        self.cx.record.disarm();
+        let polled = self.armed(|c| c.poll(&instance, times, &mut seen));
         self.deadline = None;
         let ready = match polled {
             Ok(ready) => ready,
@@ -153,7 +171,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         if let Some(p) = sealed
             && ends_observation(&p, Some(&ready.value()))
         {
-            let end = repr(run_end(&p));
+            let end = window(&p, "run").1;
             let line = format!(
                 "{TOOL}the restoration dates {ready}, less than the clock error after the run \
                  window's end {end}, and the seal does not name it, so the judge refuses this \
@@ -170,30 +188,32 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     }
 
     /// The approved package of a sealed run: the evidence directory at `root` as the judge's
-    /// [`read_evidence`] admits it, with `package.json` of the approval's digest.
+    /// [`read_evidence`] admits it, with `package.json` of the approval's digest. Only the package
+    /// is kept: the checks that follow read `stopped.json` and `abort.json` again by name, so the
+    /// floor and the review rest on those reads and not on the bytes the load verified. The load
+    /// drops a failed close of a directory it opened.
     fn sealed(&mut self, root: &Path) -> Result<Object, Halt> {
         let bounds = self.bounds()?;
         let evidence = read_evidence(root, self.cx.file_limit, &bounds).map_err(read_halt)?;
         if *self.operator.approval().package_sha256() != evidence.package_sha256() {
             return Err(other_package());
         }
-        Ok(evidence.package().clone())
+        Ok(evidence.into_package())
     }
 
     fn poll(
         &mut self,
         instance: &Text,
-        start: f64,
-        floor: Number,
-        stopped_at: Option<Number>,
+        times: Times,
         seen: &mut Text,
     ) -> Result<Option<Number>, Halt> {
         self.cx.record.release()?;
+        self.deadline = None;
         self.require_caller()?;
         let deadline = self.monotonic() + seconds(self.operator.deadline_seconds());
         self.deadline = Some(deadline);
         while self.monotonic() < deadline {
-            match self.ready_read(instance, start, floor, stopped_at, seen) {
+            match self.ready_read(instance, times, seen) {
                 Ok(Some(ready)) => return Ok(Some(ready)),
                 Ok(None) => {}
                 Err(Halt::Failed(failed)) => {
@@ -210,9 +230,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     fn ready_read(
         &mut self,
         instance: &Text,
-        start: f64,
-        floor: Number,
-        stopped_at: Option<Number>,
+        times: Times,
         seen: &mut Text,
     ) -> Result<Option<Number>, Halt> {
         let states = self.statuses(std::slice::from_ref(instance), None)?;
@@ -223,15 +241,20 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         if !(*status.state() == "running" && ok(status.instance()) && ok(status.system())) {
             return Ok(None);
         }
-        if at < start {
+        // A reading that does not compare at or after the start, NaN included, leads to another
+        // poll.
+        if !matches!(
+            at.partial_cmp(&times.start),
+            Some(Ordering::Greater | Ordering::Equal)
+        ) {
             seen.push_str(&format!(
                 " at {}, before restore's start {}",
                 repr_float(at),
-                repr_float(start)
+                repr_float(times.start)
             ));
             return Ok(None);
         }
-        match self.dated(instance, at, floor, stopped_at)? {
+        match self.dated(instance, at, times)? {
             Ok(ready) => Ok(Some(ready)),
             Err(shown) => {
                 *seen = shown;
@@ -240,15 +263,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         }
     }
 
-    /// `dated` returns `Ok(time)` when the record supports a restoration time for the ready read
-    /// at wall reading `at`, and `Err(reason)` when it does not. The time is
-    /// the record's `LaunchTime` less [`SKEW_SECONDS`], at least `floor`.
+    /// For the ready read at wall reading `at`, `dated` returns `Ok(Err(reason))` when the record
+    /// provides insufficient evidence to establish a restoration time. When the record establishes
+    /// a time, `dated` returns `Ok(Ok(time))`, where `time` is the greater of `times.floor` and
+    /// the record's `LaunchTime` minus [`SKEW_SECONDS`].
     fn dated(
         &mut self,
         instance: &Text,
         at: f64,
-        floor: Number,
-        stopped_at: Option<Number>,
+        times: Times,
     ) -> Result<Result<Number, Text>, Halt> {
         let record = self.instance_record(instance, None)?;
         let launch = launch_time(record.launch()).map_err(Halt::Failed)?;
@@ -258,7 +281,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Ok(Err(shown));
         }
         let skew = Number::from(SKEW_SECONDS);
-        if let Some(stopped_at) = stopped_at
+        if let Some(stopped_at) = times.stopped_at
             && launch.plus(skew) < stopped_at
         {
             let shown = format!(
@@ -276,7 +299,11 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Ok(Err(Text::from(shown)));
         }
         let earliest = launch.minus(skew);
-        Ok(Ok(if earliest > floor { earliest } else { floor }))
+        Ok(Ok(if earliest > times.floor {
+            earliest
+        } else {
+            times.floor
+        }))
     }
 
     fn write_restoration(
@@ -290,89 +317,12 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         mark.insert("state", Value::String(Text::from("running")));
         mark.insert("time", ready.value());
         mark.insert("reviewed_sha256", reviewed);
-        let mut line = Text::from(TOOL);
         match self.mark("restoration", &Value::Object(mark)) {
-            Ok(()) => {}
-            Err(Halt::Fault(Fault::Unwritten(sentence))) => {
-                line.push_text(&sentence);
-                self.cx.say(Stream::Err, &line);
-                return Ok(1);
+            Ok(()) => Ok(0),
+            Err(failed) => {
+                self.failed_write("restoration.json", failed)?;
+                Ok(1)
             }
-            Err(Halt::Fault(Fault::Os { code, text })) => {
-                line.push_str("restoration.json is unwritten: ");
-                line.push_str(&errno_text(code, &text));
-                self.cx.say(Stream::Err, &line);
-                return Ok(1);
-            }
-            Err(Halt::Fault(Fault::Refusal(sentence))) => return Err(Halt::refused(sentence)),
-            Err(other) => return Err(other),
         }
-        Ok(0)
-    }
-
-    /// The evidence root that `evidence` names, in `pathlib`'s form, and its `injection/`, once
-    /// both are directories that no link names and `injection/` takes an unnamed file. `missing`
-    /// ends the refusal of an `injection/` that is no directory.
-    pub(super) fn evidence_dirs(
-        &self,
-        evidence: &OsStr,
-        missing: &str,
-    ) -> Result<(PathBuf, PathBuf), Halt> {
-        let root = pure(evidence.as_bytes());
-        let injection = beside(&root, "injection");
-        if !directory(&root) {
-            let mut sentence = Text::from_os(evidence);
-            sentence.push_str(" is no directory");
-            return Err(Halt::refused(sentence));
-        }
-        if !directory(&injection) {
-            let mut sentence = Text::from_os(injection.as_os_str());
-            sentence.push_str(" is no directory: ");
-            sentence.push_str(missing);
-            return Err(Halt::refused(sentence));
-        }
-        probe(self.cx.files, &injection).map_err(|error| probe_refusal(&injection, &error))?;
-        Ok((root, injection))
-    }
-
-    pub(super) fn stands_in(&self, injection: &Path, name: &str) -> Result<bool, Halt> {
-        stands(self.cx.files, &beside(injection, name)).map_err(|error| {
-            Halt::refused(Text::from(format!(
-                "injection/{name} cannot be looked up: {}",
-                strerror(&error)
-            )))
-        })
-    }
-}
-
-pub(super) fn refused(sentence: &str) -> Halt {
-    Halt::refused(Text::from(sentence))
-}
-
-pub(super) fn directory(path: &Path) -> bool {
-    fs::metadata(path).is_ok_and(|found| found.is_dir())
-        && !fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_symlink())
-}
-
-/// Refuses a `roles.json` that names another package than the approval's `digest`.
-pub(super) fn check_roles(roles: &Value, digest: &Text) -> Result<(), Halt> {
-    let named = matches!(roles, Value::Object(roles)
-        if matches!(roles.get("package_sha256"), Some(Value::String(named)) if named == digest));
-    if named {
-        return Ok(());
-    }
-    Err(refused(
-        "injection/roles.json names another package than the approval's",
-    ))
-}
-
-pub(super) fn other_package() -> Halt {
-    refused("package.json holds other bytes than the approval's package")
-}
-
-pub(super) fn errno_text(code: Option<i32>, text: &str) -> String {
-    match code {
-        Some(code) => format!("[Errno {code}] {text}"),
-        None => text.to_owned(),
     }
 }

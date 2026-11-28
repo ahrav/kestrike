@@ -59,8 +59,9 @@ fn revision(commit: &Text, suffix: &str) -> OsString {
     revision
 }
 
-/// `holds` holds when `git cat-file -e` of `path` at `commit` passes; a lookup that fails for any reason,
-/// an object the clone lacks included, reads as `path` absent.
+/// `holds` holds when `git cat-file -e` of `path` at `commit` passes; a lookup that runs and exits
+/// nonzero, for an object the clone lacks among other reasons, reads as `path` absent, and Git that cannot
+/// start or a recorded signal ends the plan.
 fn holds(reads: Reads<'_>, commit: &Text, path: &str) -> Result<bool, Failure> {
     let spec = revision(commit, &format!(":{path}"));
     Ok(
@@ -119,8 +120,9 @@ pub(super) fn comparison_base(
     Ok(probed(reads, base)?.map(Text::from))
 }
 
-/// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it fails for any
-/// reason, an object the clone lacks included; the callers read `None` as an absent file.
+/// `shown_file` returns the bytes `git show <commit>:<path>` prints, and `None` when it runs and exits
+/// nonzero, for an object the clone lacks among other reasons; the callers read `None` as an absent file.
+/// Git that cannot start or a recorded signal ends the plan.
 fn shown_file(reads: Reads<'_>, commit: &Text, path: &str) -> Result<Option<Vec<u8>>, Failure> {
     let shown = output(
         reads,
@@ -248,10 +250,11 @@ pub(super) fn changes_ignore(
     if rust.is_empty() {
         return Ok(false);
     }
-    let (Some(base), Some(local)) = (base.to_str(), local.to_str()) else {
-        let named = if base.to_str().is_none() { base } else { local };
-        return Err(Failure::Unencodable(named.clone()));
-    };
+    let [base, local] = [base, local].map(|commit| {
+        commit
+            .to_str()
+            .expect("a commit of the plan is a full object id or Git's UTF-8 output")
+    });
     let names: Vec<String> = rust
         .iter()
         .flat_map(|path| [base, local].map(|commit| format!("{commit}:{path}")))

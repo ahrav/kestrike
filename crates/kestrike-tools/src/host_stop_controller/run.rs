@@ -30,11 +30,16 @@ use crate::text::{Text, text};
 
 pub(super) const TOOL: &str = "host-stop-controller: ";
 
-/// Runs `command` on `cx` and returns the exit code: 0 for a run that ends with the restoration
-/// pending, 1 for an abort, 2 for a refusal, a signal before any mark, or an unforeseen failure that
-/// reaches the entry, whose line names the marks that stand. A panic counts as an unforeseen failure,
-/// a panic inside the abort path itself included. The entry leaves the record unarmed and unheld,
-/// with a stored signal still stored.
+/// Runs `command` on `cx` and returns the exit code. For `run`: 0 for a run that ends with the
+/// restoration pending, 1 for an abort, 2 for a refusal or a signal before any mark. For `restore`:
+/// 0 for a restoration written; 1 for a restoration not shown within its bound, cut by a signal in
+/// the caller check or the poll, or unwritten, which can leave a linked mark standing, and for a
+/// restoration written after the seal that ends observation, which stands. For `seal`: 0 for a seal
+/// written; 1 for a seal unwritten or left standing with its durability unknown; 2 for a signal
+/// before the mark's write, which writes nothing. Every command returns 2 for a refusal and for an
+/// unforeseen failure that reaches the entry, whose line names the marks the command counted. A
+/// panic counts as an unforeseen failure, a panic inside the abort path itself included. The entry
+/// leaves the record unarmed and unheld, with a stored signal still stored, after a panic as well.
 ///
 /// The library installs no signal handler. A process calls
 /// [`install`](crate::host_stop::install) before it reads its arguments and passes in `cx` an unarmed,
@@ -197,7 +202,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
     /// `ended`, or the signal a read of the record raises at the end of an armed span whose last
     /// read came before it: a refusal, a cause of the abort or the span's end then gives way to the
     /// signal, and a failure or a panic keeps its own end.
-    fn raised<T>(&mut self, ended: Result<T, Halt>) -> Result<T, Halt> {
+    pub(super) fn raised<T>(&mut self, ended: Result<T, Halt>) -> Result<T, Halt> {
         match ended {
             Ok(_) | Err(Halt::Refused { .. } | Halt::Aborted(_)) => {
                 self.cx.record.read()?;
@@ -329,7 +334,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         encoded(
             &roles,
             &Text::from("injection/roles.json"),
-            self.cx.mark_limit,
+            self.cx.mark_bound(),
         )?;
         self.within_deadline()?;
         Ok(roles)

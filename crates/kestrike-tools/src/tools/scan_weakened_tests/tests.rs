@@ -1,9 +1,10 @@
-use super::digits::{integer, is_digits};
+use super::digits::integer;
 use super::hunks::{Hunk, hunks, paired};
 use super::inventory::inventory_changes;
 use super::patterns::*;
 use super::tree::records;
 use super::{Failure, Shown};
+use crate::python::isdigit as is_digits;
 
 type Cases = &'static [(
     &'static str,
@@ -110,6 +111,8 @@ fn the_const_budget_pattern_matches_the_inputs_of_the_scan() {
                 &[("const PREEMPTION_BOUND: usize = 9", Some("9"))],
             ),
             ("const SEEDS: u64 = 0x40;", &[]),
+            ("const SEEDS: u64 = \u{b2};", &[]),
+            ("const SEEDS: u64 = 4\u{b2};", &[]),
             (
                 "const SEEDS: u64 = 48 /* x */ ;",
                 &[("const SEEDS: u64 = 48", Some("48"))],
@@ -329,6 +332,18 @@ fn a_run_of_more_than_4300_digits_refuses_and_4300_reads() {
     assert!(integer(&"1".repeat(4300)).is_ok());
     let error = integer(&format!("{}_1", "0".repeat(4300))).expect_err("the run passes the limit");
     assert!(matches!(error, Failure::Digits(4301)), "{error:?}");
+}
+
+#[test]
+fn a_run_with_a_digit_outside_nd_or_no_digit_is_refused() {
+    use crate::python::{DigitsError, int_digits};
+    assert_eq!(
+        int_digits("1\u{b2}").map(|_| ()),
+        Err(DigitsError::NotDecimal('\u{b2}'))
+    );
+    assert_eq!(int_digits("__").map(|_| ()), Err(DigitsError::Empty));
+    assert!(matches!(integer("1\u{b2}"), Err(Failure::Refused(_))));
+    assert!(matches!(integer("__"), Err(Failure::Refused(_))));
 }
 
 #[test]

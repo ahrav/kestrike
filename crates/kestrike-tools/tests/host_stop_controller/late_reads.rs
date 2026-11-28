@@ -19,7 +19,7 @@ fn detail(found: &std::collections::BTreeMap<String, Value>) -> String {
 }
 
 /// Runs `deliver` once, at the first monotonic reading at which `when` holds.
-fn at_reading(
+pub(crate) fn at_reading(
     case: &Case,
     when: impl Fn(&State) -> bool + 'static,
     deliver: impl Fn(&mut State) + 'static,

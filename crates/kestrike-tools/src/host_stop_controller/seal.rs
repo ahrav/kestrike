@@ -7,7 +7,12 @@
 //! evidence directory, before the mark. It looks up a standing mark and links its own by the
 //! pathname `DIR/injection`, and trusts the operator to keep that directory under that name until
 //! `seal` returns.
+//!
+//! A seal run again after a refused sync opens new descriptors. Their sync can report success for
+//! pages whose writeback failed under the earlier descriptors, so the bytes a second seal names can
+//! differ from the bytes on storage.
 
+use std::cmp::Ordering;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -15,19 +20,17 @@ use std::fs::File;
 use std::os::fd::AsFd;
 use std::path::Path;
 
+use super::checks::{check_roles, other_package, read_halt, refused};
 use super::context::Stream;
-use super::controller::Controller;
+use super::controller::{Controller, window};
 use super::fault::{Fault, Halt};
-use super::restore::{check_roles, errno_text, other_package, refused};
 use super::run::{TOOL, lock_sentence};
 use crate::fixtures::close;
-use crate::gameday::{
-    FleetBounds, Names, ReadError, admit, entries, load_evidence, open_dir, package_of, parsed,
-};
+use crate::gameday::{FleetBounds, admit, entries, load_evidence, open_dir, package_of, parsed};
 use crate::host_stop::{Files, Number, Seam, encoded, lock};
 use crate::json::{Object, Value};
 use crate::plants::files::strerror;
-use crate::python::{hexdigest, repr, repr_float};
+use crate::python::{hexdigest, repr_float};
 use crate::text::Text;
 
 /// The directories `seal` opens and lists, by relative path, in that order.
@@ -35,18 +38,36 @@ const DIRECTORIES: [&str; 3] = ["", "records", "injection"];
 
 const SEAL: &str = "injection/collected.json";
 
-/// The bytes `seal` read by relative path, the names the package gives, and its list bounds.
-type Collected = (BTreeMap<Text, Vec<u8>>, Names, FleetBounds);
+/// The bytes `seal` read by relative path, and the package's list bounds.
+type Collected = (BTreeMap<Text, Vec<u8>>, FleetBounds);
+
+/// The mark's bytes the judge's loader admitted, the number of files it names, and the SHA-256
+/// digest of the bytes.
+struct Sealing {
+    data: Vec<u8>,
+    count: usize,
+    digest: String,
+}
 
 impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
-    /// `seal` returns 0 when it writes `injection/collected.json`, and 1 when the write fails; for
-    /// a mark it linked, it prints the mark's SHA-256 too.
+    /// `seal` returns 0 when it writes `injection/collected.json`. A link that finds an entry at
+    /// that name is the refusal that the seal is written once, and the entry keeps its bytes. Any
+    /// other failed write returns 1: a failure before the link leaves no mark, and a sync that
+    /// fails after the link leaves the mark removed with the removal synced, removed with the
+    /// removal unsynced, or standing whole with its durability unknown, and `seal` prints the
+    /// SHA-256 of the bytes it linked. `seal` publishes the mark bytes the judge's loader admitted.
     ///
     /// After taking the lock, `seal` arms the signal record, ends a hold an earlier command left on
-    /// it and reads it. It reads the record again
-    /// before each file read. Before writing the mark it reads the record once more and disarms it.
-    /// If a record read reports a signal, `seal` returns [`Halt::Interrupted`] before writing
-    /// `injection/collected.json`.
+    /// it and reads it. It reads the record again before each file read and once more at the end of
+    /// its armed span. A signal reported by the final read takes precedence over a refusal. It then
+    /// disarms the record and writes the mark. If a record read reports a signal, `seal` returns
+    /// [`Halt::Interrupted`] before writing `injection/collected.json`. A panic in the armed span or
+    /// the mark's write unwinds out of `seal` and can leave the record armed or held;
+    /// [`entry`](super::entry) disarms the record and ends its hold.
+    ///
+    /// A seal that succeeds after an earlier seal's refused sync of a collected file does not show
+    /// that the bytes of the failed writeback reached storage; the collections are restored from
+    /// their source before sealing again.
     ///
     /// # Errors
     ///
@@ -61,44 +82,50 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         let (root, injection) = self.evidence_dirs(evidence, "no run to seal")?;
         let _held = lock(self.cx.files, &injection)
             .map_err(|error| Halt::refused(lock_sentence(&injection, &error)))?;
-        self.cx.record.arm();
+        let sealed = self.armed(|c| c.sealing(evidence, &root, &injection, now))?;
+        self.injection = Some(injection);
+        self.write_seal(&sealed, now)
+    }
+
+    /// `sealing` returns the mark bytes, the number of files the mark names and the bytes' SHA-256
+    /// digest once the judge's loader accepts the collected files together with the mark.
+    fn sealing(
+        &mut self,
+        evidence: &OsStr,
+        root: &Path,
+        injection: &Path,
+        now: f64,
+    ) -> Result<Sealing, Halt> {
         self.cx.record.release()?;
-        if self.stands_in(&injection, "collected.json")? {
+        if self.stands_in(injection, "collected.json")? {
             return Err(written_once());
         }
-        let (files, mut names, bounds) = self.collect(evidence, &root, now)?;
-        let sealed: BTreeSet<Text> = files
-            .keys()
-            .filter(|rel| **rel != "package.json")
-            .cloned()
-            .collect();
+        let (files, bounds) = self.collect(evidence, root, now)?;
         let mut digests = Object::new();
-        for rel in &sealed {
-            digests.insert(
-                rel.clone(),
-                Value::String(Text::from(hexdigest(&files[rel]))),
-            );
+        for (rel, data) in files.iter().filter(|(rel, _)| **rel != "package.json") {
+            digests.insert(rel.clone(), Value::String(Text::from(hexdigest(data))));
         }
+        let count = digests.len();
         let mut mark = Object::new();
         mark.insert("time", Value::Float(now));
         mark.insert("files", Value::Object(digests));
-        let count = sealed.len();
-        names.insert("sealed", sealed);
-        let mark = Value::Object(mark);
-        let data = encoded(&mark, &Text::from(SEAL), self.cx.mark_limit)?;
-        let digest = hexdigest(&data);
+        let seal = Text::from(SEAL);
+        let data = encoded(&Value::Object(mark), &seal, self.cx.mark_bound())?;
         let mut judged = files;
-        judged.insert(Text::from(SEAL), data);
-        load_evidence(&judged, &bounds)?;
-        self.injection = Some(injection);
-        self.cx.record.read()?;
-        self.cx.record.disarm();
-        self.write_seal(&mark, &names, count, now, &digest)
+        judged.insert(seal.clone(), data);
+        let digest = load_evidence(&judged, &bounds)?.seal_sha256().to_owned();
+        let data = judged
+            .remove(&seal)
+            .expect("the seal's bytes stand among the judged");
+        Ok(Sealing {
+            data,
+            count,
+            digest,
+        })
     }
 
-    /// The bytes of `package.json`, `injection/roles.json` and each other file the listing holds,
-    /// by relative path, with the names the package gives, every file synced and then its
-    /// directories.
+    /// `collect` indexes the bytes of `package.json`, `injection/roles.json` and each other listed
+    /// file by relative path, and syncs all of them before syncing their directories.
     fn collect(&mut self, evidence: &OsStr, root: &Path, now: f64) -> Result<Collected, Halt> {
         let shown = |rel: &str| {
             if rel.is_empty() {
@@ -123,7 +150,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             return Err(other_package());
         }
         let bounds = self.bounds()?;
-        let (p, names) = package_of(&package, &bounds)?;
+        let (p, _) = package_of(&package, &bounds)?;
         files.insert(Text::from("package.json"), package);
         let Some(Value::String(kind)) = p.get("kind") else {
             unreachable!("the package check admitted a text kind")
@@ -137,12 +164,15 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             );
             return Err(Halt::refused(sentence));
         }
-        let end = run_end(&p);
-        if Number::of(end).expect("a numeric end") > Number::from(now) {
+        let end = window(&p, "run").1;
+        // A seal time that does not compare at or after the end, NaN included, is refused.
+        if !matches!(
+            end.partial_cmp(&Number::from(now)),
+            Some(Ordering::Less | Ordering::Equal)
+        ) {
             return Err(Halt::refused(Text::from(format!(
-                "the run window ends at {}, after the seal's time {}, so its collections may \
+                "the run window ends at {end}, after the seal's time {}, so its collections may \
                  still grow",
-                repr(end),
                 repr_float(now)
             ))));
         }
@@ -175,13 +205,13 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         )?;
         files.insert(Text::from("injection/roles.json"), roles);
         for rel in stand {
-            if let Entry::Vacant(slot) = files.entry(rel) {
-                let shown = slot
+            if let Entry::Vacant(vacant) = files.entry(rel) {
+                let name = vacant
                     .key()
                     .to_str()
                     .expect("a listed name of the layout is UTF-8");
-                let data = self.read_in(&dirs, shown)?;
-                slot.insert(data);
+                let data = self.read_in(&dirs, name)?;
+                vacant.insert(data);
             }
         }
         for rel in ["records", "injection", ""] {
@@ -198,7 +228,7 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
         while let Some(dir) = dirs.pop() {
             close(dir).map_err(|error| Halt::Fault(Fault::os(&error)))?;
         }
-        Ok((files, names, bounds))
+        Ok((files, bounds))
     }
 
     /// The file `rel` of the layout, read and synced through the descriptor of its directory once
@@ -216,48 +246,33 @@ impl<S: Seam, F: Files> Controller<'_, '_, S, F> {
             .map_err(read_halt)
     }
 
-    /// The package's list bounds, read from the tree's top.
-    pub(super) fn bounds(&self) -> Result<FleetBounds, Halt> {
-        FleetBounds::new(self.cx.top, self.cx.file_limit)
-            .ok_or_else(|| refused("the tree's top has a path no file can have"))
-    }
-
-    /// Writes the seal's `mark` under `names` and prints its `count` files, its time `now` and its
-    /// `digest`. A link that finds an entry at the name is refused; a write that fails before the
-    /// link exits 1, and so does one that fails after it, which prints the digest too.
-    fn write_seal(
-        &mut self,
-        mark: &Value,
-        names: &Names,
-        count: usize,
-        now: f64,
-        digest: &str,
-    ) -> Result<u8, Halt> {
-        let mut line = Text::from(TOOL);
-        match self.mark_under("collected", mark, names) {
+    /// On success, `write_seal` reports the file count, the seal time `now`, and the SHA-256 digest
+    /// the judge's loader computed over the mark's bytes. If `injection/collected.json` already
+    /// exists, `write_seal` returns `Err(written_once())`. For other write failures, `write_seal`
+    /// propagates errors from `failed_write` and otherwise returns `Ok(1)`.
+    fn write_seal(&mut self, sealed: &Sealing, now: f64) -> Result<u8, Halt> {
+        let Sealing {
+            data,
+            count,
+            digest,
+        } = sealed;
+        match self.publish_mark("collected", data) {
             Ok(()) => {}
             Err(Halt::Fault(Fault::Os {
                 code: Some(libc::EEXIST),
                 ..
             })) => return Err(written_once()),
-            Err(Halt::Fault(Fault::Unwritten(sentence))) => {
-                line.push_text(&sentence);
-                self.cx.say(Stream::Err, &line);
-                let linked = format!(
-                    "{TOOL}the mark this seal linked: injection/collected.json sha256 {digest}"
-                );
-                self.cx.say(Stream::Out, &Text::from(linked));
+            Err(failed) => {
+                if self.failed_write("collected.json", failed)? {
+                    let linked = format!(
+                        "{TOOL}the mark this seal linked: injection/collected.json sha256 {digest}"
+                    );
+                    self.cx.say(Stream::Out, &Text::from(linked));
+                }
                 return Ok(1);
             }
-            Err(Halt::Fault(Fault::Os { code, text })) => {
-                line.push_str("collected.json is unwritten: ");
-                line.push_str(&errno_text(code, &text));
-                self.cx.say(Stream::Err, &line);
-                return Ok(1);
-            }
-            Err(Halt::Fault(Fault::Refusal(sentence))) => return Err(Halt::refused(sentence)),
-            Err(other) => return Err(other),
         }
+        let mut line = Text::from(TOOL);
         line.push_str(&format!(
             "sealed {count} files at {}; injection/collected.json sha256 {digest}",
             repr_float(now)
@@ -277,22 +292,4 @@ fn slot(rel: &str) -> usize {
 
 fn written_once() -> Halt {
     refused("injection/collected.json exists: the seal is written once")
-}
-
-/// The halt of a read or an open that failed: its refusal, or a failed close as a system error
-/// with the system's text.
-pub(super) fn read_halt(error: ReadError) -> Halt {
-    match error {
-        ReadError::Refused(refusal) => refusal.into(),
-        ReadError::Closed(text) => Halt::Fault(Fault::Os { code: None, text }),
-        ReadError::Nul => unreachable!("a listed name and a pathname argument hold no NUL byte"),
-    }
-}
-
-/// The end of package `p`'s run window, which the package check admitted.
-pub(super) fn run_end(p: &Object) -> &Value {
-    match p.get("run") {
-        Some(Value::Object(run)) => run.get("end").expect("the package check admitted the end"),
-        _ => unreachable!("the package check admitted the run window"),
-    }
 }

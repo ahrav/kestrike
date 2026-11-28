@@ -1,12 +1,13 @@
 //! The hook's cases of the ref lines and the tree a check reads, started through the tool: the checks read
-//! the pushed commit, a deletion and a blank line run nothing, a malformed line and a failed Git read end
-//! the push with exit 2, and a path outside ASCII is read whatever the locale.
+//! the pushed commit, a deletion and a blank line run nothing, a malformed line, a field shaped as an
+//! option among them, and a failed Git read end the push with exit 2, and a path outside ASCII is read
+//! whatever the locale.
 
 use std::fs;
 
 use super::push::{BINARY, Fixture, STUB, ZERO, finished, spawn_with_input, top};
 
-fn unnamed(fx: &Fixture, input: &str) -> std::process::Child {
+fn unnamed(fx: &Fixture, input: &str) -> super::push::Tool {
     let mut command = fx.command(BINARY);
     command.arg(top()).args(["pre-push-checks", ""]);
     spawn_with_input(&mut command, input)
@@ -55,6 +56,45 @@ fn a_malformed_ref_line_fails() {
     assert_eq!(run.stderr, "pre-push: malformed ref line: 'ref-update'\n");
     assert!(run.stdout.is_empty(), "{}", run.stdout);
     assert!(fx.ran().is_empty());
+}
+
+/// A push with a ref line whose local or remote field is shaped as an option exits 2 with the malformed
+/// line's sentence, also where a line Git could have written stands before it and the destination is
+/// named: the tool checks every line's form before its first Git read, so it starts no Git command,
+/// creates no file and runs no check. The control is the push of the first line alone, which traces Git
+/// commands and runs its checks.
+#[test]
+fn a_ref_line_with_an_option_as_a_field_exits_2_before_any_git_read() {
+    let mut fx = Fixture::new();
+    let head = fx.commit(&[("scripts/test-inventory.json", r#"{"rows": []}"#)]);
+    let trace = fx.temp.join("trace");
+    fx.set("GIT_TRACE", trace.clone());
+    let valid = Fixture::input(&[(&head, &fx.base)]);
+    for (local, remote) in [
+        ("--output=../made", fx.base.as_str()),
+        (head.as_str(), "--output=../made"),
+    ] {
+        let line = format!("refs/heads/x {local} refs/heads/x {remote}");
+        let run = finished(fx.start(&format!("{valid}{line}\n")));
+        assert_eq!(run.code, Some(2), "{line}: {}", run.stderr);
+        assert_eq!(
+            run.stderr,
+            format!("pre-push: malformed ref line: '{line}'\n")
+        );
+        assert!(run.stdout.is_empty(), "{line}: {}", run.stdout);
+        assert!(!trace.exists(), "{line}: a Git command started");
+        assert!(!fx.temp.join("made").exists(), "{line}: a file is made");
+        assert!(fx.ran().is_empty(), "{line}: {:?}", fx.ran());
+    }
+    let run = finished(fx.start(&valid));
+    assert_eq!(run.code, Some(0), "{}", run.stderr);
+    assert!(trace.exists(), "no Git command started");
+    assert_eq!(
+        fx.ran(),
+        ["test-select-tests.py", "verify-receipts.py admit"]
+    );
+    fx.unset("GIT_TRACE");
+    assert_eq!(fx.worktrees(), 1);
 }
 
 /// An `origin/main` that names a missing object exits 2 with Git's merge-base failure and prints no

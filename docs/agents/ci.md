@@ -1400,16 +1400,27 @@ input, then the user-wide hook. The tool `pre-push-checks` runs the checks
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
 commit pushed under a new name included. A failed check blocks the push. The
-tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
-as the pushing user's: where another user can rename entries in it, as in a
-directory writable by others without the sticky bit, that user can swap
-either between the steps that name it. The default `/tmp` is sticky. CI
+hook spools the ref lines in the same directory. Before it reads its standard
+input, the tool refuses with exit 2 a directory there that a user other than
+the pushing user and root owns, and one whose mode, or the mode of a
+directory its path is reached through, from the root down and through links,
+gives its group or every user write access without the sticky bit: such a
+user could swap the spool, a worktree or a directory on the way between the
+steps that name them. It reads the statuses again before each worktree it
+adds. A directory above the scratch directory that another user owns is
+trusted. The default `/tmp` is sticky and root's, and passes. Where root's
+directories read as another id, as in a user namespace that maps the pushing
+user alone, such a `/tmp` is refused and a `TMPDIR` the user owns passes. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's and the host stop
 controller's self-tests run in the hook and by hand; no CI job runs them.
 
-Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`.
+Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`,
+each sha a full object id of 40 or 64 hexadecimal digits, which the tool reads
+in lowercase, as Git writes it. The tool checks every line's form before its
+first Git read and refuses the push as malformed where a line holds another
+field there.
 For each pushed tip the tool lists the files the push changes against the
 remote commit, or against the tip's merge base with `origin/main` for a new
 branch or a remote commit this clone lacks, and runs the checks those files
@@ -1521,7 +1532,8 @@ on any change; and a
 changed Rust path that holds a line feed runs the selection and admission
 checks. The first two apply on any nonempty diff from the comparison base,
 whatever path changed, and the third to `.rs` paths alone. A `git show` that
-fails for any reason reads as an absent file: an absent inventory names no
+runs and exits nonzero reads as an absent file, while Git that cannot start,
+output that cannot be read and a recorded signal end the plan: an absent inventory names no
 source, and an absent registry names the registry alone at a tip that holds
 the links check and nothing at another. The selector reads no further schema:
 an inventory with no `sources`, or whose `sources` is an object or a string,
@@ -1550,18 +1562,26 @@ guards that tip's chaos records. A deleted ref needs no check, and a blank
 line is skipped.
 
 The tool prints each failure as `pre-push: failed: FAILURE` at the end. Exit 0
-passes; 1 is a failed check or a failed step of the tool's own (reading
+passes; 1 is a failed check or a failed step of the tool's own (reading the
+scratch directory's status, where the working directory of a relative
+`TMPDIR` cannot be read or the `stat` fails for another reason than an absent
+path, reading
 standard input, making or removing the worktree's directory, starting or
 waiting for a check or for `git worktree add`, starting Git, or reading or
 writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
 the worktree; 2 is every other refusal before the checks, printed as
-`pre-push: ` and its text: a malformed ref line, a Git read that exits
-nonzero where the read is not a presence test (Git's own text), Git output or
-a record the tool cannot read and a Git argument the standard library refuses
-(the tool's text), and a `git worktree add` that exits nonzero, which exits 1
-where Git cannot start for the removal; 2 is also signal handlers that cannot
-be installed. A presence read, and a read of the inventory or the registry,
+`pre-push: ` and its text: a scratch directory that another user can reach
+by ownership or a write bit, as stated above, a malformed ref
+line, a Git read that exits
+nonzero where the read is not a presence test (Git's own text), Git output
+that is not UTF-8, a tree entry or a raw diff record of a form Git's manual
+does not give (the tool's
+text), and a `git worktree add` that exits nonzero, which exits 1 where Git
+cannot start for the removal; 2 is also signal handlers that cannot be
+installed, named by a `pre-push-checks: ` line. A guarded chaos record that is
+missing or not JSON is a failure listed at the end, and exits 1 with the
+failed checks. A presence read, and a read of the inventory or the registry,
 whose Git command exits nonzero reads as an absent file, and a removal that
 Git refuses is a warning. 120 is a failed write to standard error. A panic in
 the scan ends the tool with 101.
@@ -1571,6 +1591,7 @@ reaches it, whatever disposition or mask it inherited: it blocks the four
 while it
 installs their handlers, then unblocks them, and it sets SIGCHLD to its
 default disposition before it starts any child. It reads the record after
+reading the scratch directory's status, after
 reading standard input, after each Git read of a ref line's plan and of the
 guard, after each scan, after each line it prints, and while it waits for
 `git worktree add` or a check; once it reads a record it starts no further
@@ -1579,7 +1600,10 @@ Git read, scan or check. Each check,
 On a record the tool sends SIGKILL to the group of the running check or add
 while its leader is the tool's own child that it has not reaped, a leader that
 ended and waits for its reap included, then reaps the leader; a leader already
-reaped gets no signal. It removes the worktree once, and the removal runs to
+reaped gets no signal. On Apple's systems a `killpg` that fails with `EPERM`
+beside a leader that has ended reads as a group already ended, also where the
+group's only live members are processes the tool may not signal, which then
+run on; Linux reports success in both cases. It removes the worktree once, and the removal runs to
 its end, since a signal to the tool's process group does not reach it. It
 prints only a failed removal and a check whose SIGKILL or reap failed, and
 exits `128 + n`. The read of standard input, each Git read of a plan or of
@@ -1593,11 +1617,19 @@ process can run on.
 A `git worktree add` that ends after registering a locked worktree whose
 directory lacks its `.git` file leaves that registration: the removal fails,
 the tool prints `pre-push: could not remove worktree <tree>: <reason>`, and
-`git worktree unlock` and `git worktree prune` clear the entry. A line to
-standard error waits while the stream cannot take it, and a recorded signal
-ends that wait with `128 + n`.
-A removal that Git refuses prints the same line, and the checks' results
-decide the exit. A check, or `git worktree add` and what it starts, that
+`git worktree unlock` and then `git worktree prune`, or a doubly forced
+`git worktree remove`, clear the entry, which `git worktree list` shows. An
+add stopped earlier can leave an entry under the repository's common
+`.git/worktrees` directory that holds only its `locked` file: Git lists no
+such worktree, the tool's removal names a tree Git does not know, and the
+entry's directory under `.git/worktrees` is deleted by hand. A line to
+standard error is written in slices of at most 512 bytes, and before each
+slice the tool waits while the stream cannot take a write; a recorded signal
+ends that wait with `128 + n`. Another writer that fills the stream between
+the poll and the write can still hold a slice's write until the stream's
+reader drains it.
+A removal that Git refuses prints the same line, the worktree stays
+registered, and the checks' results decide the exit. A check, or `git worktree add` and what it starts, that
 reads the terminal or changes its modes stops by SIGTTIN or SIGTTOU in its
 background group, and the tool waits for it. SIGKILL cannot be caught: a
 SIGKILL to Git's process group ends the tool, while the running check or add
