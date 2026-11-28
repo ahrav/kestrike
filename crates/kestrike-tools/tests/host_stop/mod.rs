@@ -7,17 +7,17 @@ mod record;
 mod signals;
 
 use std::cell::RefCell;
-use std::fs::{self, DirBuilder, File};
+use std::fs::{self, File};
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use kestrike_tools::host_stop::{Disk, Files, Links};
+use kestrike_tools::temp_dir::make_temp_dir;
 
 /// The variable that names the window a re-started test executable runs.
 const ROLE: &str = "HOST_STOP_WINDOW";
@@ -31,22 +31,11 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new(label: &str) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        loop {
-            let at = NEXT.fetch_add(1, Ordering::Relaxed);
-            let parent = std::env::temp_dir()
-                .canonicalize()
-                .expect("the temporary directory resolves");
-            let path = parent.join(format!(
-                "kestrike-tools-host-stop-{label}-{}-{at}",
-                std::process::id()
-            ));
-            match DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => return Self(path),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => panic!("{}: {error}", path.display()),
-            }
-        }
+        let parent = std::env::temp_dir()
+            .canonicalize()
+            .expect("the temporary directory resolves");
+        let prefix = format!("kestrike-tools-host-stop-{label}-");
+        Self(make_temp_dir(&prefix, &parent).expect("the scratch directory is made"))
     }
 
     fn dir(&self, name: &str) -> PathBuf {
@@ -78,22 +67,56 @@ fn listing(directory: &Path) -> Vec<String> {
     names
 }
 
-/// `wait_for` waits up to [`MARKER_LIMIT`] for `path` to exist and fails the case when it does not.
-fn wait_for(path: &Path) {
+/// `gone` holds once no process `pid` is left, a zombie included, since a zombie keeps `/proc/<pid>`.
+fn gone(pid: u32) -> bool {
+    match fs::symlink_metadata(Path::new("/proc").join(pid.to_string())) {
+        Ok(_) => false,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+        Err(error) => panic!("/proc/{pid}: {error}"),
+    }
+}
+
+/// A newline marks a complete process ID record in `path`.
+fn starts(path: &Path) -> Vec<u32> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => panic!("{}: {error}", path.display()),
+    };
+    let mut pids = Vec::new();
+    for line in text.split_inclusive('\n') {
+        let Some(digits) = line.strip_suffix('\n') else {
+            break;
+        };
+        let canonical = !digits.is_empty()
+            && !digits.starts_with('0')
+            && digits.bytes().all(|byte| byte.is_ascii_digit());
+        assert!(canonical, "{}: {digits:?} is a process id", path.display());
+        pids.push(digits.parse().expect("a start line holds a process id"));
+    }
+    pids
+}
+
+fn no_marker(path: &Path) {
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        other => panic!("{}: no start leaves no marker: {other:?}", path.display()),
+    }
+}
+
+fn first_start(path: &Path) -> u32 {
     let start = Instant::now();
-    while !path.exists() {
+    loop {
+        if let Some(&pid) = starts(path).first() {
+            return pid;
+        }
         assert!(
             start.elapsed() < MARKER_LIMIT,
-            "{} appears within {MARKER_LIMIT:?}",
+            "{} records a start within {MARKER_LIMIT:?}",
             path.display()
         );
         thread::sleep(Duration::from_millis(5));
     }
-}
-
-/// `gone` holds once no process `pid` is left, a zombie included, since a zombie keeps `/proc/<pid>`.
-fn gone(pid: &str) -> bool {
-    !Path::new("/proc").join(pid).exists()
 }
 
 /// One file step [`Observed`] saw: the step's name and the descriptor or descriptors it acted on.
@@ -120,9 +143,10 @@ struct Observed {
     seen: RefCell<Vec<Seen>>,
     faults: Vec<Fault>,
     write_cap: Option<usize>,
-    stall: bool,
+    stall: Option<usize>,
     overreport: bool,
     pause: Option<(&'static str, usize, PathBuf)>,
+    unnamed: RefCell<Option<(u64, u64)>>,
 }
 
 impl Observed {
@@ -142,7 +166,7 @@ impl Observed {
     }
 
     /// `enter` logs the step and returns its planted failure, or pauses the writer at it.
-    fn enter(&self, step: &'static str, fds: Vec<RawFd>, path: Option<&Path>) -> io::Result<()> {
+    fn enter(&self, step: &'static str, fds: Vec<RawFd>, path: Option<&Path>) -> io::Result<usize> {
         let mut seen = self.seen.borrow_mut();
         seen.push(Seen {
             step,
@@ -166,7 +190,7 @@ impl Observed {
             .find(|fault| fault.step == step && fault.nth == nth)
         {
             Some(fault) => Err(io::Error::from_raw_os_error(fault.errno)),
-            None => Ok(()),
+            None => Ok(nth),
         }
     }
 }
@@ -179,12 +203,18 @@ impl Files for Observed {
 
     fn open_unnamed(&self, directory: &Path) -> io::Result<File> {
         self.enter("open_unnamed", vec![], Some(directory))?;
-        Disk.open_unnamed(directory)
+        let file = Disk.open_unnamed(directory)?;
+        if let Some(seen) = self.seen.borrow_mut().last_mut() {
+            seen.fds = vec![file.as_raw_fd()];
+        }
+        let metadata = file.metadata()?;
+        *self.unnamed.borrow_mut() = Some((metadata.dev(), metadata.ino()));
+        Ok(file)
     }
 
     fn write(&self, file: &File, bytes: &[u8]) -> io::Result<usize> {
-        self.enter("write", vec![file.as_raw_fd()], None)?;
-        if self.stall {
+        let nth = self.enter("write", vec![file.as_raw_fd()], None)?;
+        if self.stall == Some(nth) {
             return Ok(0);
         }
         let taken = self
@@ -244,13 +274,31 @@ impl Files for Observed {
 }
 
 /// `start_window` starts this test executable again for the test `name` alone, with `window` in
-/// [`ROLE`] and `place` in [`PLACE`], under `/bin/sh` running `prefix` before it replaces itself with
-/// the executable. The environment is the variables the window reads and nothing else.
+/// [`ROLE`] and `place` in [`PLACE`]. A `prefix` runs under `/bin/sh`, which then replaces itself with
+/// the executable; with an empty `prefix`, `env` starts the executable itself. The environment is the
+/// variables the window reads and nothing else.
 fn start_window(name: &str, window: &str, place: &Path, prefix: &str) -> Command {
-    let mut command = Command::new("/bin/sh");
+    start_window_with(name, window, place, prefix, &[])
+}
+
+/// `start_window_with` also gives `env` the options `signals`. A disposition `env` sets reaches the
+/// window when `prefix` is empty: a shell between the two can replace it, as dash catches SIGCHLD
+/// whatever it inherits, and a caught signal has its default action after the `exec`.
+fn start_window_with(
+    name: &str,
+    window: &str,
+    place: &Path,
+    prefix: &str,
+    signals: &[&str],
+) -> Command {
+    let mut command = Command::new("/usr/bin/env");
+    command.arg("--default-signal=INT,TERM,HUP").args(signals);
+    if !prefix.is_empty() {
+        command
+            .args(["/bin/sh", "-c"])
+            .arg(format!("{prefix} exec \"$0\" \"$@\""));
+    }
     command
-        .arg("-c")
-        .arg(format!("{prefix} exec \"$0\" \"$@\""))
         .arg(std::env::current_exe().expect("the test executable is known"))
         .args(["--exact", name, "--nocapture", "--test-threads", "1"])
         .env_clear()

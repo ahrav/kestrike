@@ -1,20 +1,25 @@
-//! A JSON reader that preserves document order, and the writers [`text`], [`dump`], [`indented`] and
-//! [`indented_by`].
+//! A JSON reader that preserves document order, the writers [`text`], [`dump`], [`indented`],
+//! [`indented_in_order`] and [`indented_by`], and the [`Integer`] of at most [`MAX_INTEGER_DIGITS`] digits,
+//! which adds, steps down by one and sums without passing that bound.
 //!
 //! Beyond strict JSON, [`parse`] takes `NaN`, `Infinity` and `-Infinity` as non-finite floats, reads a float
 //! that overflows as an infinity, and keeps an unmatched surrogate escape as a lone surrogate while it joins an
 //! escaped high and low surrogate pair into one scalar. A repeated key keeps its first position and takes its
-//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead.
-//! [`parse_strict`] also refuses the three constants and a fractional number whose decimal value is not
+//! last value, and `-0` reads as the integer zero; [`parse_unique`] refuses a repeated key instead, and
+//! [`parse_members`] keeps every member of an object, a repeated key's included.
+//! The strict read also refuses the three constants and a fractional number whose decimal value is not
 //! the shortest form of a finite double, so each float it reads stands for the decimal the text spells.
 //! The reader refuses nesting past [`MAX_DEPTH`] and an integer
 //! token of more than [`MAX_INTEGER_DIGITS`] digits. The compact writers write non-finite floats as `NaN`,
-//! `Infinity` and `-Infinity`, which strict JSON readers refuse; [`indented`] refuses them.
+//! `Infinity` and `-Infinity`, which strict JSON readers refuse.
+//! [`indented_in_order`] writes non-finite floats as `NaN`, `Infinity` and `-Infinity`. [`indented`]
+//! returns `Err(NonFinite)` for these values.
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 
-use crate::decimal::spells_shortest;
+use crate::decimal::{nearest_double, spells_shortest};
 use crate::python::repr_float;
 pub use crate::text::Text;
 
@@ -23,6 +28,9 @@ pub const MAX_DEPTH: usize = 1000;
 
 /// The most decimal digits an integer token of [`parse`] and an [`Integer`] hold.
 pub const MAX_INTEGER_DIGITS: usize = 4300;
+
+/// The reason of the error for nesting past [`MAX_DEPTH`].
+pub const DEPTH_REASON: &str = "nesting deeper than the reader takes";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -72,6 +80,90 @@ impl Integer {
     }
 }
 
+impl Integer {
+    /// `checked_add` is the sum of the two integers, or `None` when it holds more than
+    /// [`MAX_INTEGER_DIGITS`] digits.
+    fn checked_add(&self, other: &Self) -> Option<Self> {
+        if self.negative == other.negative {
+            return Self::from_digits(self.negative, &add_digits(&self.digits, &other.digits));
+        }
+        let (larger, smaller) = match self.magnitude(other) {
+            Ordering::Less => (other, self),
+            _ => (self, other),
+        };
+        Self::from_digits(
+            larger.negative,
+            &subtract_digits(&larger.digits, &smaller.digits),
+        )
+    }
+
+    /// `minus_one` is the integer one below, or `None` when it holds more than [`MAX_INTEGER_DIGITS`]
+    /// digits.
+    pub fn minus_one(&self) -> Option<Self> {
+        self.checked_add(&Self {
+            negative: true,
+            digits: "1".to_owned(),
+        })
+    }
+
+    /// `sum` adds `items` from zero, as Python's `sum` does, or returns `None` once a partial sum holds
+    /// more than [`MAX_INTEGER_DIGITS`] digits.
+    pub fn sum<'a>(items: impl IntoIterator<Item = &'a Self>) -> Option<Self> {
+        items
+            .into_iter()
+            .try_fold(Self::from(0u64), |total, item| total.checked_add(item))
+    }
+
+    fn magnitude(&self, other: &Self) -> Ordering {
+        self.digits
+            .len()
+            .cmp(&other.digits.len())
+            .then_with(|| self.digits.cmp(&other.digits))
+    }
+}
+
+/// `add_digits` adds two runs of ASCII decimal digits and returns the digits of the sum.
+fn add_digits(left: &str, right: &str) -> String {
+    let (mut left, mut right) = (left.bytes().rev(), right.bytes().rev());
+    let mut sum = Vec::with_capacity(left.len().max(right.len()) + 1);
+    let mut carry = 0;
+    loop {
+        let (one, other) = (left.next(), right.next());
+        if one.is_none() && other.is_none() && carry == 0 {
+            break;
+        }
+        let total =
+            one.map_or(0, |digit| digit - b'0') + other.map_or(0, |digit| digit - b'0') + carry;
+        sum.push(b'0' + total % 10);
+        carry = total / 10;
+    }
+    sum.reverse();
+    String::from_utf8(sum).expect("digits are ASCII")
+}
+
+/// `subtract_digits` subtracts the ASCII decimal digits `right` from `left`, which spells a value at least
+/// as large, and returns the digits of the difference, leading zeros included.
+fn subtract_digits(left: &str, right: &str) -> String {
+    let mut right = right.bytes().rev();
+    let mut difference: Vec<u8> = Vec::with_capacity(left.len());
+    let mut borrow = 0;
+    for digit in left.bytes().rev() {
+        let taken = right.next().map_or(0, |digit| digit - b'0') + borrow;
+        let digit = digit - b'0';
+        borrow = u8::from(digit < taken);
+        difference.push(b'0' + digit + 10 * borrow - taken);
+    }
+    difference.reverse();
+    String::from_utf8(difference).expect("digits are ASCII")
+}
+
+#[cfg(target_os = "linux")]
+impl crate::text::Piece for Integer {
+    fn push_to(&self, text: &mut Text) {
+        text.push_str(&self.to_string());
+    }
+}
+
 impl From<u64> for Integer {
     fn from(value: u64) -> Self {
         Self {
@@ -101,12 +193,7 @@ impl fmt::Display for Integer {
 
 impl Ord for Integer {
     fn cmp(&self, other: &Self) -> Ordering {
-        let magnitude = || {
-            self.digits
-                .len()
-                .cmp(&other.digits.len())
-                .then_with(|| self.digits.cmp(&other.digits))
-        };
+        let magnitude = || self.magnitude(other);
         match (self.negative, other.negative) {
             (false, false) => magnitude(),
             (true, true) => magnitude().reverse(),
@@ -135,6 +222,14 @@ impl Object {
         self.0
             .iter()
             .find(|(name, _)| *name == key)
+            .map(|(_, value)| value)
+    }
+
+    /// `get_text` is [`Object::get`] for a key of any code points.
+    pub fn get_text(&self, key: &Text) -> Option<&Value> {
+        self.0
+            .iter()
+            .find(|(name, _)| name == key)
             .map(|(_, value)| value)
     }
 
@@ -267,7 +362,7 @@ pub(crate) enum Unnumber {
     Digits(String),
 }
 
-/// A refusal of [`parse_strict`]: an error of [`parse`], an object that repeats the member `name`, or a
+/// A refusal of the strict read: an error of [`parse`], an object that repeats the member `name`, or a
 /// number strict JSON refuses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum StrictError {
@@ -312,8 +407,27 @@ impl std::error::Error for StrictError {}
 /// The reader stops at the first refusal in document order. A number is judged where it stands and a
 /// repeated key when its object closes, so in `[{"k": 1, "k": 2}, NaN]` the repeat comes first and in
 /// `{"k": 1, "k": NaN}` the constant does.
+#[cfg(target_os = "linux")]
 pub(crate) fn parse_strict(text: &str) -> Result<Value, StrictError> {
     Reader::new(text, Mode::Strict).document()
+}
+
+/// `parse_members` reads what [`parse`] reads and returns each object as an array of its keys and values in
+/// document order, `[key, value, key, value, ...]`, so each member of a repeated key stands in it. An
+/// object and an array of the same items read alike in the result.
+///
+/// # Errors
+///
+/// `parse_members` refuses what [`parse`] refuses.
+pub fn parse_members(text: &str) -> Result<Value, Error> {
+    Reader::new(text, Mode::Members)
+        .document()
+        .map_err(|error| match error {
+            StrictError::Syntax(error) => error,
+            StrictError::Repeated(_) | StrictError::Number(_) => {
+                unreachable!("a read that keeps every member and every number refuses neither")
+            }
+        })
 }
 
 struct Reader<'a> {
@@ -329,8 +443,10 @@ enum Mode {
     Keep,
     /// A repeated key.
     Unique,
-    /// A repeated key, and a number [`parse_strict`] refuses.
+    /// A repeated key, and a number the strict read refuses.
     Strict,
+    /// Nothing more, and an object reads as the array of its keys and values, a repeated key's included.
+    Members,
 }
 
 impl<'a> Reader<'a> {
@@ -411,7 +527,7 @@ impl<'a> Reader<'a> {
 
     fn nest(&mut self, depth: usize) -> Result<(), StrictError> {
         if depth > MAX_DEPTH {
-            return Err(self.error("nesting deeper than the reader takes"));
+            return Err(self.error(DEPTH_REASON));
         }
         self.at += 1;
         self.space();
@@ -437,11 +553,13 @@ impl<'a> Reader<'a> {
     fn object(&mut self, depth: usize) -> Result<Value, StrictError> {
         self.nest(depth)?;
         let mut object = Object::new();
+        let mut members = Vec::new();
         if self.peek() == Some(b'}') {
             self.at += 1;
-            return Ok(Value::Object(object));
+            return Ok(self.closed(object, members));
         }
         let mut repeated = None;
+        let mut keys = HashSet::new();
         loop {
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a key"));
@@ -454,20 +572,36 @@ impl<'a> Reader<'a> {
             self.at += 1;
             self.space();
             let value = self.value(depth)?;
-            if self.mode != Mode::Keep
-                && repeated.is_none()
-                && object.iter().any(|(name, _)| *name == key)
-            {
-                repeated = Some(key.clone());
+            if self.mode == Mode::Members {
+                members.extend([Value::String(key), value]);
+            } else if self.mode == Mode::Keep {
+                object.insert(key, value);
+            } else if repeated.is_none() {
+                // The parser defers the first duplicate-key error until the object closes, and the
+                // members after it are read and dropped.
+                if keys.insert(key.clone()) {
+                    object.0.push((key, value));
+                } else {
+                    repeated = Some(key);
+                }
             }
-            object.insert(key, value);
             self.space();
             if self.separator(b'}', "expected ',' or '}'")? {
                 if let Some(name) = repeated {
                     return Err(StrictError::Repeated(name));
                 }
-                return Ok(Value::Object(object));
+                return Ok(self.closed(object, members));
             }
+        }
+    }
+
+    /// `closed` is the value of a read object: the array of its keys and values when the read keeps every
+    /// member, else the object.
+    fn closed(&self, object: Object, members: Vec<Value>) -> Value {
+        if self.mode == Mode::Members {
+            Value::Array(members)
+        } else {
+            Value::Object(object)
         }
     }
 
@@ -518,10 +652,12 @@ impl<'a> Reader<'a> {
         }
         let text = std::str::from_utf8(&self.text[start..self.at]).expect("a number is ASCII");
         if self.at > integer {
-            let value = text.parse().expect("a JSON number parses as an f64");
             if self.mode == Mode::Strict {
+                let value = nearest_double(text);
                 double(text, value).map_err(StrictError::Number)?;
+                return Ok(Value::Float(value));
             }
+            let value = text.parse().expect("a JSON number parses as an f64");
             return Ok(Value::Float(value));
         }
         if integer - digits > MAX_INTEGER_DIGITS {
@@ -648,9 +784,7 @@ pub fn dump(value: &Value) -> String {
 /// `,` between items, `:` after a key, non-ASCII code points as `\uXXXX` escapes, and non-finite floats as
 /// `NaN`, `Infinity` and `-Infinity`.
 pub fn text(value: &Value) -> String {
-    let mut out = String::new();
-    write(value, &mut out, None).expect("the compact layout writes every float");
-    out
+    written(value, Layout::COMPACT)
 }
 
 /// `indented` uses the layout of Python's `json.dumps(value, indent=2, sort_keys=True)`: object keys sorted
@@ -662,8 +796,22 @@ pub fn text(value: &Value) -> String {
 /// `indented` refuses a non-finite float.
 pub fn indented(value: &Value) -> Result<String, NonFinite> {
     let mut out = String::new();
-    write(value, &mut out, Some(0))?;
+    write(value, &mut out, Layout::SORTED)?;
     Ok(out)
+}
+
+/// `indented_in_order` uses the layout of Python's `json.dumps(value, indent=2)`: the layout of
+/// [`indented`] with members in document order and non-finite floats as `NaN`, `Infinity` and
+/// `-Infinity`.
+pub fn indented_in_order(value: &Value) -> String {
+    written(value, Layout::IN_ORDER)
+}
+
+fn written(value: &Value, layout: Layout) -> String {
+    let mut out = String::new();
+    write(value, &mut out, layout)
+        .expect("a layout that writes non-finite floats writes every value");
+    out
 }
 
 /// `indented_by` uses the layout of [`indented`] with `width` spaces per level, as Python's
@@ -691,7 +839,7 @@ pub fn indented_by(value: &Value, width: u8) -> Result<String, NonFinite> {
     Ok(out)
 }
 
-/// A float the indented layout refuses: `NaN`, `Infinity` or `-Infinity`.
+/// A float [`indented`] and [`indented_by`] refuse: `NaN`, `Infinity` or `-Infinity`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NonFinite(f64);
 
@@ -709,26 +857,55 @@ impl fmt::Display for NonFinite {
 
 impl std::error::Error for NonFinite {}
 
-/// `depth` is `None` in the compact layout and the nesting depth of `value` in the indented layout.
-fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), NonFinite> {
+/// How a writer lays a value out: `depth` is `None` in the compact layout and the nesting depth of the
+/// value in an indented one, `sort_keys` sorts object keys, and `finite_only` refuses non-finite floats.
+#[derive(Clone, Copy)]
+struct Layout {
+    depth: Option<usize>,
+    sort_keys: bool,
+    finite_only: bool,
+}
+
+impl Layout {
+    const COMPACT: Self = Self {
+        depth: None,
+        sort_keys: false,
+        finite_only: false,
+    };
+    const SORTED: Self = Self {
+        depth: Some(0),
+        sort_keys: true,
+        finite_only: true,
+    };
+    const IN_ORDER: Self = Self {
+        depth: Some(0),
+        sort_keys: false,
+        finite_only: false,
+    };
+
+    fn inner(self) -> Self {
+        Self {
+            depth: self.depth.map(|depth| depth + 1),
+            ..self
+        }
+    }
+}
+
+fn write(value: &Value, out: &mut String, layout: Layout) -> Result<(), NonFinite> {
     match value {
-        Value::Object(object) if depth.is_some() => {
+        Value::Object(object) if layout.sort_keys => {
             let mut members: Vec<&(Text, Value)> = object.iter().collect();
             members.sort_by(|left, right| left.0.cmp(&right.0));
-            write_items(&members, ('{', '}'), depth, out, |member, out, inner| {
+            write_items(&members, ('{', '}'), layout, out, |member, out, inner| {
                 write_member(member, out, inner)
             })?;
         }
-        Value::Object(object) => write_items(&object.0, ('{', '}'), depth, out, write_member)?,
-        Value::Array(items) => {
-            write_items(items, ('[', ']'), depth, out, |item, out, inner| {
-                write(item, out, inner)
-            })?;
-        }
+        Value::Object(object) => write_items(&object.0, ('{', '}'), layout, out, write_member)?,
+        Value::Array(items) => write_items(items, ('[', ']'), layout, out, write)?,
         Value::String(text) => write_string(text, out),
         Value::Integer(integer) => out.push_str(&integer.to_string()),
         Value::Float(value) if value.is_finite() => out.push_str(&repr_float(*value)),
-        Value::Float(value) if depth.is_some() => return Err(NonFinite(*value)),
+        Value::Float(value) if layout.finite_only => return Err(NonFinite(*value)),
         Value::Float(value) if value.is_nan() => out.push_str("NaN"),
         Value::Float(value) if *value > 0.0 => out.push_str("Infinity"),
         Value::Float(_) => out.push_str("-Infinity"),
@@ -742,36 +919,36 @@ fn write(value: &Value, out: &mut String, depth: Option<usize>) -> Result<(), No
 fn write_member(
     (key, member): &(Text, Value),
     out: &mut String,
-    inner: Option<usize>,
+    inner: Layout,
 ) -> Result<(), NonFinite> {
     write_string(key, out);
-    out.push_str(if inner.is_some() { ": " } else { ":" });
+    out.push_str(if inner.depth.is_some() { ": " } else { ":" });
     write(member, out, inner)
 }
 
 fn write_items<T>(
     items: &[T],
     (open, close): (char, char),
-    depth: Option<usize>,
+    layout: Layout,
     out: &mut String,
-    mut each: impl FnMut(&T, &mut String, Option<usize>) -> Result<(), NonFinite>,
+    mut each: impl FnMut(&T, &mut String, Layout) -> Result<(), NonFinite>,
 ) -> Result<(), NonFinite> {
     let line = |out: &mut String, depth: usize| {
         out.push('\n');
         out.push_str(&"  ".repeat(depth));
     };
     out.push(open);
-    let inner = depth.map(|depth| depth + 1);
+    let inner = layout.inner();
     for (at, item) in items.iter().enumerate() {
         if at > 0 {
             out.push(',');
         }
-        if let Some(inner) = inner {
-            line(out, inner);
+        if let Some(depth) = inner.depth {
+            line(out, depth);
         }
         each(item, out, inner)?;
     }
-    if let (Some(depth), false) = (depth, items.is_empty()) {
+    if let (Some(depth), false) = (layout.depth, items.is_empty()) {
         line(out, depth);
     }
     out.push(close);

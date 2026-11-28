@@ -16,10 +16,12 @@ const WRITTEN: &str = "the texts the judge's rules were written from";
 /// # Errors
 ///
 /// In order: `the game-day catalog holds no entries, budgets and run rule`;
-/// `the game-day catalog holds <n> entries GD-2, not one`; `GD-2 is not a causal package`; then, each
-/// ending `differs from the texts the judge's rules were written from`, the hypothesis clauses with their
-/// bounds, the guardrails, `oracle.reach` and `oracle.expected`, which must also hold the witness
-/// sentence.
+/// `the game-day catalog holds <n> entries GD-2, not one`; `GD-2 is not a causal package`;
+/// `GD-2's hypothesis clauses or their bounds differ from the texts the judge's rules were written from`;
+/// `GD-2's guardrails differ from the texts the judge's rules were written from`;
+/// `GD-2's oracle.reach differs from the texts the judge's rules were written from`; and
+/// `GD-2's oracle.expected differs from the texts the judge's rules were written from`, which also
+/// refuses an `oracle.expected` that does not hold the witness sentence.
 pub fn gd2_entry(catalog: &Value) -> Result<&Object, Refusal> {
     let shaped = match catalog {
         Value::Object(catalog) => match (
@@ -107,21 +109,14 @@ fn clauses_written(hypothesis: Option<&Value>) -> bool {
     let Some(Value::Array(clauses)) = hypothesis else {
         return false;
     };
-    let objects: Option<Vec<&Object>> = clauses
-        .iter()
-        .map(|clause| match clause {
-            Value::Object(clause) if clause.get("bound").is_some() => Some(clause),
-            _ => None,
-        })
-        .collect();
-    let Some(objects) = objects else {
-        return false;
-    };
-    objects.len() == WRITTEN_CLAUSES.len()
-        && objects
+    clauses.len() == WRITTEN_CLAUSES.len()
+        && clauses
             .iter()
             .zip(WRITTEN_CLAUSES)
             .all(|(clause, (text, bound))| {
+                let Value::Object(clause) = clause else {
+                    return false;
+                };
                 is(clause.get("clause"), text)
                     && match bound {
                         Some(bound) => is(clause.get("bound"), bound),

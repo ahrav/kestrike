@@ -1,12 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
 
 use crate::args::{Kind, Opt, Parsed, Prefixes, Reader, any};
-use crate::git::{blob_texts, git, git_text, merge_base};
+use crate::environ::Environ;
+use crate::git::{blob_texts, caller_environ, git, git_text, merge_base};
 use crate::json::Integer;
 use crate::stream::emit;
 use crate::text::{escaped, strip_str};
@@ -17,7 +18,7 @@ use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
-use super::tree::files;
+use super::tree::{directory, files};
 use super::{Change, Class, Failure, Finding, Shown};
 
 const TOOL: &str = super::NAME;
@@ -27,6 +28,7 @@ const HELP: &str = "usage: scan-weakened-tests [-h] --base BASE [--head HEAD]\n\
                     and exit\n  --base BASE\n  --head HEAD\n";
 const TIMEOUT_FILES: [&str; 2] = [".github/workflows/agent-checks.yml", "scripts/rust-lane.sh"];
 const STREAM_FAILED: u8 = 120;
+const LOG_BATCH: usize = 1024;
 
 const OPTIONS: [Opt; 3] = [
     Opt {
@@ -49,17 +51,20 @@ const OPTIONS: [Opt; 3] = [
     },
 ];
 
-fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
-    let listed = git(&[
-        "diff",
-        "--no-relative",
-        "--no-renames",
-        "--ignore-submodules=none",
-        "--name-only",
-        "-z",
-        base,
-        head,
-    ])?;
+fn findings(environ: &Environ, base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
+    let listed = git(
+        environ,
+        &[
+            "diff",
+            "--no-relative",
+            "--no-renames",
+            "--ignore-submodules=none",
+            "--name-only",
+            "-z",
+            base,
+            head,
+        ],
+    )?;
     let paths: Vec<&str> = listed.split('\0').filter(|path| !path.is_empty()).collect();
     let rust: Vec<&str> = paths
         .iter()
@@ -76,9 +81,16 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         .copied()
         .filter(|path| path.ends_with(".rs") || TIMEOUT_FILES.contains(path))
         .collect();
-    // A diffed path that is a link, a tree or a submodule at either commit is refused here.
-    files(base, &diffed)?;
-    files(head, &diffed)?;
+    // `files` rejects a checked path at either commit if it names a non-file entry or is missing beneath a link
+    // or a submodule.
+    let mut checked = diffed.clone();
+    for path in std::iter::once(INVENTORY).chain(TIMEOUT_FILES) {
+        if !checked.contains(&path) {
+            checked.push(path);
+        }
+    }
+    let base_held = files(environ, base, &checked)?;
+    let head_held = files(environ, head, &checked)?;
     let specs: Vec<String> = rust
         .iter()
         .flat_map(|path| [format!("{base}:{path}"), format!("{head}:{path}")])
@@ -86,9 +98,9 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
     let texts = if rust.is_empty() {
         Vec::new()
     } else {
-        blob_texts(&specs)?
+        blob_texts(environ, &specs)?
     };
-    let diffs = path_hunks(base, head, &diffed)?;
+    let diffs = path_hunks(environ, base, head, &diffed)?;
     let hunks_of = |path: &str| {
         diffs
             .get(path)
@@ -137,12 +149,16 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         }
     };
     if paths.iter().any(within(INVENTORY)) {
-        let old = inventory_text(base)?;
-        let new = inventory_text(head)?;
+        let old = inventory_text(environ, base, base_held.contains(&INVENTORY))?;
+        let new = inventory_text(environ, head, head_held.contains(&INVENTORY))?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
+    // The test directory is checked at the head and then the base on every range; its cases are listed only
+    // when the diff names the directory or a path below it.
+    let cases_head = directory(environ, head, CASES)?;
+    let cases_base = directory(environ, base, CASES)?;
     if paths.iter().any(within(CASES)) {
-        found.extend(removed(base, head)?);
+        found.extend(removed(&cases_base, &cases_head)?);
     }
     Ok(found)
 }
@@ -237,6 +253,7 @@ fn assertions(changes: &[Hunk]) -> Option<Change> {
 /// belongs to the longest `key` whose `Weakens-Test: {key}: ` prefix matches. Empty `keys` make
 /// `acknowledgements` return an empty map before invoking Git.
 fn acknowledgements(
+    environ: &Environ,
     base: &str,
     head: &str,
     keys: &[String],
@@ -249,8 +266,7 @@ fn acknowledgements(
         .iter()
         .map(|key| (format!("Weakens-Test: {key}: "), key))
         .collect();
-    let range = format!("{base}..{head}");
-    let log = git_text(&["log", "--encoding=UTF-8", "--format=%B", &range])?;
+    let log = messages(environ, base, head)?;
     for line in log.split('\n') {
         if !line.starts_with("Weakens-Test: ") {
             continue;
@@ -271,7 +287,32 @@ fn acknowledgements(
     Ok(reasons)
 }
 
-fn resolve(rev: &OsStr) -> Result<String, Failure> {
+/// `messages` returns messages for commits reachable from `head` but not from `base`, in the order
+/// `git rev-list base..head` lists them. That walk bounds its `base` side by committer date and can list a
+/// commit that `base` reaches, so `messages` drops every commit that `git rev-list base` lists.
+fn messages(environ: &Environ, base: &str, head: &str) -> Result<String, Failure> {
+    let listed = git(environ, &["rev-list", &format!("{base}..{head}")])?;
+    let reached = git(environ, &["rev-list", base])?;
+    let reached: HashSet<&str> = reached.lines().collect();
+    let commits: Vec<&str> = listed
+        .lines()
+        .filter(|commit| !reached.contains(commit))
+        .collect();
+    let mut log = String::new();
+    for batch in commits.chunks(LOG_BATCH) {
+        let mut args = vec![
+            "log",
+            "--no-walk=unsorted",
+            "--encoding=UTF-8",
+            "--format=%B",
+        ];
+        args.extend(batch);
+        log.push_str(&git_text(environ, &args)?);
+    }
+    Ok(log)
+}
+
+fn resolve(environ: &Environ, rev: &OsStr) -> Result<String, Failure> {
     let mut named = rev.to_owned();
     named.push("^{commit}");
     let args: [&OsStr; 4] = [
@@ -280,30 +321,38 @@ fn resolve(rev: &OsStr) -> Result<String, Failure> {
         OsStr::new("--end-of-options"),
         &named,
     ];
-    Ok(strip_str(&git(&args)?).to_owned())
+    Ok(strip_str(&git(environ, &args)?).to_owned())
 }
 
+/// `base` is the caller's base revision, resolved to a commit, and the exclusive boundary of the
+/// acknowledgement range `base..head`. `fork` is the merge base of `base` and `head`, which the findings
+/// compare with `head`.
 struct Scan {
     base: String,
+    fork: String,
     head: String,
     found: Vec<Finding>,
     reasons: HashMap<String, String>,
 }
 
-fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
-    let (base, head) = (resolve(base)?, resolve(head)?);
+/// `scan` compares `head` with the merge base of `base` and `head`, and reads acknowledgements from the
+/// commits that `head` reaches and `base` does not. When `base` is an ancestor of `head`, `base` is also the
+/// merge base. When `base` and `head` have several best common ancestors, `fork` identifies one of them, and
+/// the acknowledgement range remains `base..head` for every choice of `fork`.
+fn scan(environ: &Environ, base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
+    let (base, head) = (resolve(environ, base)?, resolve(environ, head)?);
     let range = format!("{base}..{head}");
-    if strip_str(&git(&["rev-list", "--count", &range])?) == "0" {
+    if strip_str(&git(environ, &["rev-list", "--count", &range])?) == "0" {
         return Ok(None);
     }
-    let Some(fork) = merge_base(&base, &head)? else {
+    let Some(fork) = merge_base(environ, &base, &head)? else {
         return Err(Failure::Refused(format!(
             "{} and {} share no history",
             short(&base),
             short(&head)
         )));
     };
-    let found = findings(&fork, &head)?;
+    let found = findings(environ, &fork, &head)?;
     let mut keys: Vec<String> = Vec::new();
     for key in found
         .iter()
@@ -314,9 +363,10 @@ fn scan(base: &OsStr, head: &OsStr) -> Result<Option<Scan>, Failure> {
             keys.push(key);
         }
     }
-    let reasons = acknowledgements(&fork, &head, &keys)?;
+    let reasons = acknowledgements(environ, &base, &head, &keys)?;
     Ok(Some(Scan {
-        base: fork,
+        base,
+        fork,
         head,
         found,
         reasons,
@@ -347,17 +397,33 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
         Parsed::Refused { code, text } => return fail(&text, code),
     };
     let rev = |name: &str, absent: &str| values.get(name).unwrap_or(OsStr::new(absent)).to_owned();
-    let scanned = match scan(&rev("--base", ""), &rev("--head", "HEAD")) {
-        Ok(Some(scanned)) => scanned,
-        Ok(None) => return 0,
-        Err(error) => return fail(&format!("{TOOL}: {error}\n"), 2),
-    };
-    report(&scanned).unwrap_or(STREAM_FAILED)
+    scan_range(
+        &caller_environ(),
+        &rev("--base", ""),
+        &rev("--head", "HEAD"),
+        io::stdout().as_fd(),
+    )
 }
 
-/// `report` writes each field of a line through [`escaped`]. It returns `Err` when standard error cannot be
-/// written.
-fn report(scanned: &Scan) -> Result<u8, io::Error> {
+/// `scan_range` scans the commits of `head` that `base` lacks, with every Git child started in `environ`,
+/// and returns the tool's exit code. It writes the report lines to `lines`, the refusals and the
+/// acknowledgement hints to standard error, and with report lines it appends them to the file
+/// `GITHUB_STEP_SUMMARY` names in this process's environment. It returns 0 for a range with no commit,
+/// writing nothing, and for a scan with no unacknowledged blocking finding; 1 for a scan with one; 2 for a
+/// failed scan and for a step summary that cannot be appended after the lines were written; and 120 for a
+/// failed write to `lines` or to standard error.
+pub fn scan_range(environ: &Environ, base: &OsStr, head: &OsStr, lines: BorrowedFd<'_>) -> u8 {
+    let scanned = match scan(environ, base, head) {
+        Ok(Some(scanned)) => scanned,
+        Ok(None) => return 0,
+        Err(error) => return fail(&format!("{TOOL}: {}\n", escaped(&error.to_string())), 2),
+    };
+    report(&scanned, lines).unwrap_or(STREAM_FAILED)
+}
+
+/// `report` writes each field of a line through [`escaped`], and the lines to `stream`. It returns `Err` when
+/// standard error cannot be written.
+fn report(scanned: &Scan, stream: BorrowedFd<'_>) -> Result<u8, io::Error> {
     let mut lines = String::new();
     let mut unacknowledged: Vec<String> = Vec::new();
     for found in &scanned.found {
@@ -381,17 +447,18 @@ fn report(scanned: &Scan) -> Result<u8, io::Error> {
             }
         }
     }
+    let compared = format!("{}..{}", short(&scanned.fork), short(&scanned.head));
     let range = format!("{}..{}", short(&scanned.base), short(&scanned.head));
     let mut code = u8::from(!unacknowledged.is_empty());
     if !lines.is_empty() {
-        if let Err(error) = emit(io::stdout().as_fd(), &lines) {
+        if let Err(error) = emit(stream, &lines) {
             complain(&format!("{TOOL}: standard output: {error}\n"))?;
             return Ok(STREAM_FAILED);
         }
         if let Some(summary) =
             std::env::var_os("GITHUB_STEP_SUMMARY").filter(|path| !path.is_empty())
         {
-            let text = format!("Weakened-test scan of {range}:\n\n```text\n{lines}```\n");
+            let text = format!("Weakened-test scan of {compared}:\n\n```text\n{lines}```\n");
             let written = OpenOptions::new()
                 .append(true)
                 .create(true)

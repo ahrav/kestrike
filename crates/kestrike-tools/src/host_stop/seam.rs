@@ -31,27 +31,10 @@ pub trait Seam {
     fn sleep(&mut self, record: &mut Record<'_>, length: Duration) -> Result<(), Interrupted>;
 }
 
-/// The system's seam: [`launch`], [`SystemTime`] and [`Instant`], which reads `CLOCK_MONOTONIC`. Its
-/// monotonic clock counts from the first `System` the process makes, so every value reads one clock.
-#[derive(Clone, Copy, Debug)]
-pub struct System {
-    origin: Instant,
-}
-
-impl System {
-    pub fn new() -> Self {
-        static ORIGIN: OnceLock<Instant> = OnceLock::new();
-        Self {
-            origin: *ORIGIN.get_or_init(Instant::now),
-        }
-    }
-}
-
-impl Default for System {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// The first call to `System::monotonic` sets the time origin for all `System` instances in the
+/// process.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct System;
 
 impl Seam for System {
     fn call(&mut self, record: &mut Record<'_>, call: &Call<'_>) -> Result<String, Ended> {
@@ -60,17 +43,28 @@ impl Seam for System {
 
     fn wall(&self) -> f64 {
         match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(since) => since.as_secs_f64(),
-            Err(before) => -before.duration().as_secs_f64(),
+            Ok(since) => seconds(since),
+            Err(before) => -seconds(before.duration()),
         }
     }
 
     fn monotonic(&self) -> f64 {
-        self.origin.elapsed().as_secs_f64()
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed().as_secs_f64()
     }
 
     fn sleep(&mut self, record: &mut Record<'_>, length: Duration) -> Result<(), Interrupted> {
         sleep(record, length)
+    }
+}
+
+/// For whole seconds, only the cast to `f64` can round the result. For fractional seconds, the
+/// nanosecond cast and the division by 1e9 can each round.
+fn seconds(since: Duration) -> f64 {
+    if since.subsec_nanos() == 0 {
+        since.as_secs() as f64
+    } else {
+        since.as_nanos() as f64 / 1e9
     }
 }
 
@@ -92,3 +86,7 @@ pub fn sleep(record: &mut Record<'_>, length: Duration) -> Result<(), Interrupte
         thread::sleep(left.min(SLICE));
     }
 }
+
+#[cfg(test)]
+#[path = "seam_tests.rs"]
+mod tests;

@@ -38,7 +38,9 @@ pub trait Files {
             .open(directory)
     }
 
-    /// One `write(2)`, which may take fewer bytes than it is given.
+    /// One `write(2)`, which may take fewer bytes than it is given. A write that reaches
+    /// `RLIMIT_FSIZE` can return a short count. An attempt to extend the file from that limit raises
+    /// SIGXFSZ, whose default action terminates the process.
     fn write(&self, file: &File, bytes: &[u8]) -> io::Result<usize> {
         let mut file = file;
         file.write(bytes)
@@ -49,19 +51,21 @@ pub trait Files {
         file.sync_all()
     }
 
-    /// `fsync(2)` of an open directory, which makes its entries durable.
+    /// `fsync(2)` of an open directory, which makes its entries durable on storage that honors it.
     fn fsync_directory(&self, directory: &File) -> io::Result<()> {
         directory.sync_all()
     }
 
     /// `linkat` of `/proc/self/fd/<file>` to `name` in `directory` with `AT_SYMLINK_FOLLOW`, which
-    /// names the open file.
+    /// names the open file. `linkat` resolves a relative `name` from `directory` and an absolute
+    /// `name` from the root.
     fn link(&self, file: &File, directory: &File, name: &OsStr) -> io::Result<()> {
         linkat(file, directory, name)
     }
 
-    /// `unlink(2)` of `/proc/self/fd/<directory>/<name>`, the name in the directory the descriptor
-    /// holds.
+    /// `unlink(2)` of `/proc/self/fd/<directory>` joined with `name`. `Path::join` puts an absolute
+    /// `name` in place of the directory's path. During path resolution, each `..` selects the parent of
+    /// the directory reached at that component.
     fn unlink(&self, directory: &File, name: &OsStr) -> io::Result<()> {
         fs::remove_file(proc_path(directory).join(name))
     }
@@ -75,12 +79,13 @@ pub trait Files {
         })
     }
 
-    /// `lstat(2)`, which reads a link as an entry.
+    /// When the final component of `path` is a symlink, `lstat` returns the symlink's metadata.
     fn lstat(&self, path: &Path) -> io::Result<fs::Metadata> {
         fs::symlink_metadata(path)
     }
 
-    /// Whether `stat(2)` of the path succeeds, links followed.
+    /// `exists` follows symlinks and returns `true` only if it can read metadata for the resolved
+    /// `path`.
     fn exists(&self, path: &Path) -> bool {
         path.exists()
     }

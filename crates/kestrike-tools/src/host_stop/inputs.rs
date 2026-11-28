@@ -18,11 +18,12 @@ pub(super) const NUL: &str = "file name contained an unexpected NUL byte";
 /// # Errors
 ///
 /// `<what> has a path no file can have: <reason>` for a path with a NUL byte, then each refusal of
-/// [`read_file`] naming `what`.
+/// [`read_file`] naming `what`, and `<what> cannot be read: <reason>` for a failed close.
 pub fn read_bytes(path: &Path, what: &Text, limit: u64) -> Result<Vec<u8>, Refusal> {
     read_file(path, None, what, limit, false).map_err(|error| match error {
         ReadError::Refused(refusal) => refusal,
         ReadError::Nul => Refusal::new(sentence!(what, " has a path no file can have: ", NUL)),
+        ReadError::Closed(reason) => Refusal::new(sentence!(what, " cannot be read: ", reason)),
     })
 }
 

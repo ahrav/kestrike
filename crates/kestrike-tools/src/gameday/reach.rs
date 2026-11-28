@@ -2,7 +2,7 @@
 
 use super::constants::{MIN_OWNED, MIN_STOOD};
 use super::refusal::said;
-use super::schema::{checked_list, checked_object, checked_text, string};
+use super::schema::{checked_list, checked_member as member, checked_object, checked_text, string};
 use crate::json::{Object, Value};
 use crate::text::Text;
 
@@ -88,12 +88,6 @@ pub fn roles_reach(roles: &Object, p: &Object) -> Vec<Text> {
         }
     }
     unmet
-}
-
-fn member<'a>(object: &'a Object, key: &str) -> &'a Value {
-    object
-        .get(key)
-        .unwrap_or_else(|| panic!("the checked object holds {key}"))
 }
 
 #[cfg(test)]
