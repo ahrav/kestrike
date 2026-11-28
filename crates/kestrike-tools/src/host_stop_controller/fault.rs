@@ -70,9 +70,9 @@ impl Fault {
             Unwritten::Failed { error, .. } => Self::os(error),
             Unwritten::Stalled => Self::Os {
                 code: Some(libc::EIO),
-                text: unwritten.sentence(path),
+                text: unwritten.sentence(path).to_string(),
             },
-            _ => Self::Unwritten(Text::from(unwritten.sentence(path))),
+            _ => Self::Unwritten(unwritten.sentence(path)),
         }
     }
 
