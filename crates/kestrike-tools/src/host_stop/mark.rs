@@ -2,12 +2,11 @@
 //!
 //! [`publish`] opens the directory without following a link and makes every later step on that open
 //! directory: it opens a file there that has no name (`O_TMPFILE`, mode 0644), writes every byte, syncs
-//! the file, links it to the name, syncs the file again and syncs the directory. The file is synced
-//! again once named, since btrfs logs an inode in full only then. Before the link no
-//! entry has the name, so a failure or a kill there leaves nothing; an entry already at the name fails
-//! the link and keeps its bytes. After the link the mark stands. A failed sync after the link removes
-//! the name and syncs the directory, and the result says whether the removal stands synced, stands
-//! unsynced, or failed with the mark standing.
+//! the file, links it to the name, then syncs the file and directory. A failure or process kill before
+//! the link leaves the destination unchanged; an entry already at the name fails the link and keeps
+//! its bytes. If a sync fails after the link, the function tries to remove the name. If removal
+//! succeeds, the function syncs the directory. The result says whether that sync returned success,
+//! returned an error, or the removal failed with the mark standing.
 
 use std::ffi::OsStr;
 use std::io;
@@ -110,11 +109,13 @@ impl Unwritten {
     }
 }
 
-/// Writes `data` as the entry `name` of `directory` once, as the module states.
+/// `publish` writes `data` to `name` in `directory` only if `name` is vacant. On storage that honors
+/// file and directory syncs, a mark `publish` returns `Ok` for survives a crash within `directory`;
+/// the directory's own entry is the caller's to sync.
 ///
 /// # Errors
 ///
-/// [`Unwritten`] names the step that failed and what stands at the name.
+/// [`Unwritten`] names the step that failed and what this write left at the name.
 pub fn publish(
     files: &impl Files,
     directory: &Path,

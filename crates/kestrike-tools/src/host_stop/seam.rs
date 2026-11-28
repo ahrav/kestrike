@@ -31,7 +31,8 @@ pub trait Seam {
     fn sleep(&mut self, record: &mut Record<'_>, length: Duration) -> Result<(), Interrupted>;
 }
 
-/// The monotonic seconds count from the process's first `monotonic` call, which sets `ORIGIN`.
+/// The first call to `System::monotonic` sets the time origin for all `System` instances in the
+/// process.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct System;
 

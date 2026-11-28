@@ -133,9 +133,9 @@ impl<'a> Record<'a> {
         self.delivered.stored()
     }
 
-    /// `read` preserves the record's state when the record is held or disarmed. Otherwise, `read` takes
-    /// the stored signal and disarms the record. Taking the signal frees `Delivered` to accept a later
-    /// delivery.
+    /// `read` raises only when the record is armed, not held, and holds a stored signal: it takes the
+    /// signal and disarms the record. Every other read preserves the record's state. Taking the signal
+    /// frees `Delivered` to accept a later delivery.
     ///
     /// # Errors
     ///
