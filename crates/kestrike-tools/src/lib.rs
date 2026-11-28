@@ -12,6 +12,8 @@ pub mod fixtures;
 pub mod gameday;
 pub mod git;
 pub mod host_stop;
+#[cfg(target_os = "linux")]
+pub mod host_stop_controller;
 pub mod json;
 pub mod ownership;
 pub mod paths;
