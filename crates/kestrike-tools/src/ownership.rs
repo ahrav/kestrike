@@ -249,19 +249,22 @@ pub enum Opened {
     File(fs::File),
 }
 
-/// `open_regular` opens `path` once for reading, following links, and checks the opened file, so a check
-/// and the read that follows it name the same file. The open does not wait on a FIFO and takes no
-/// controlling terminal. An entry that cannot be opened, such as a socket or an unreadable directory, is
-/// [`Opened::Other`] when [`status`] names no regular file there.
+/// `open_regular` opens the regular file `path` names, following links, and checks the opened file, so a
+/// check and the read that follows it name the same file. [`status`] decides first, so an entry that is
+/// no regular file, a device or a socket a link names included, is never opened; the open does not wait
+/// on a FIFO and takes no controlling terminal, and an opened file that is no regular file is
+/// [`Opened::Other`].
 ///
 /// # Errors
 ///
-/// The open of a regular file fails with an error outside [`ignored`], [`status`] fails after a failed
-/// open, or the opened file's `fstat` fails.
+/// [`status`] fails, the open fails with an error outside [`ignored`], or the opened file's `fstat`
+/// fails.
 pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
     use std::os::unix::fs::OpenOptionsExt;
-    if path.as_os_str().as_bytes().contains(&0) {
-        return Ok(Opened::Absent);
+    match status(path)? {
+        None => return Ok(Opened::Absent),
+        Some(found) if !found.is_file() => return Ok(Opened::Other),
+        Some(_) => {}
     }
     let file = match fs::OpenOptions::new()
         .read(true)
@@ -270,12 +273,7 @@ pub fn open_regular(path: &Path) -> Result<Opened, PathError> {
     {
         Ok(file) => file,
         Err(error) if ignored(&error) => return Ok(Opened::Absent),
-        Err(error) => {
-            return match status(path)? {
-                Some(found) if !found.is_file() => Ok(Opened::Other),
-                _ => Err(PathError::new(path, error)),
-            };
-        }
+        Err(error) => return Err(PathError::new(path, error)),
     };
     let status = file
         .metadata()
