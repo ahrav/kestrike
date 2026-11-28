@@ -61,7 +61,7 @@ printf 'rustup %s|%s|RUSTUP_HOME=%s|CARGO_HOME=%s|RUSTUP_TOOLCHAIN=%s|RUSTUP_AUT
   "${RUSTUP_AUTO_INSTALL-unset}" >> "$root/log"
 echo 'info: the stand-in rustup on standard error' >&2
 case $#$args in
-'1[show]') cat "$root/answers/show" ;;
+'1[show]') [ ! -e "$root/answers/read-stdin" ] || cat > "$root/rustup.stdin"; cat "$root/answers/show" ;;
 '2[toolchain][list]') [ ! -e "$root/answers/list-fails" ] && cat "$root/answers/list" ;;
 '4[which][--toolchain]'*'][cargo]') [ ! -e "$root/answers/which-fails" ] && cat "$root/answers/cargo" ;;
 *) exit 3 ;;
@@ -1258,6 +1258,28 @@ fn each_refused_state_exits_127_and_starts_no_binary() {
     );
     assert!(output.stdout.is_empty(), "{output:?}");
     assert_eq!(tree.take_log(), Vec::<String>::new());
+}
+
+/// The launcher's preparation reads no byte of the caller's standard input, so the binary receives every
+/// byte the caller wrote, such as Git's ref lines.
+#[test]
+fn the_preparation_reads_no_byte_of_the_binary_s_standard_input() {
+    let tree = Tree::new(workflow_text("\n").as_bytes());
+    tree.answer("read-stdin", Some(""));
+    let input = b"refs/heads/a 1 refs/heads/a 2\nrefs/heads/b 3 refs/heads/b 4\n";
+    let output = tree.start_with_input(
+        &tree.launcher(),
+        &tree.at("caller"),
+        &tree.default_path(),
+        &[],
+        &["pre-push-checks"],
+        input,
+    );
+    ran("input", &output, 1);
+    let read = fs::read(tree.at("rustup.stdin")).expect("the preparation's read is recorded");
+    assert_eq!(read, b"");
+    let stdin = fs::read(tree.at("binary.stdin")).expect("the binary's standard input reads");
+    assert_eq!(stdin, input);
 }
 
 /// A successful call prints nothing of its own: the binary's standard output, standard error and exit
