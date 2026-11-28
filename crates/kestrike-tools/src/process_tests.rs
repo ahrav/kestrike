@@ -181,11 +181,8 @@ fn a_command_name_with_a_parenthesis_and_a_space_is_read() {
     );
     assert_eq!(
         parsed(&line("sh", "S", 12, 1), 12, own + 1),
-        Err(format!(
-            "names the parent {own}, so the process is no child of the process {}",
-            own + 1
-        )),
-        "a process with another parent"
+        Ok(Leader::Reaped),
+        "a process with another parent holds an id taken again after a reap elsewhere"
     );
     let cut = |count: usize| {
         let mut fields = stat_fields("S", own, 12, 1);
@@ -841,4 +838,28 @@ fn a_failed_read_of_the_state_of_an_exited_child_kills_its_group_before_the_reap
     assert!(reaped, "the stop reaped the child before it returned");
     let status = status.expect("the wait runs").expect("the stop reaped it");
     assert_eq!(status.code(), Some(3));
+}
+
+/// Holds released out of the order they started end as nested holds do: the release that ends the last
+/// standing hold reports the recorded signal, and the earlier release reports nothing.
+#[test]
+fn the_release_that_ends_the_last_hold_reports_the_signal() {
+    let interrupt = Interrupt::new();
+    let outer = interrupt.hold();
+    let inner = interrupt.hold();
+    interrupt.record(libc::SIGTERM);
+    assert_eq!(outer.release(), Ok(()), "a hold still stands");
+    assert!(interrupt.held());
+    assert_eq!(inner.release(), Err(Interrupted(libc::SIGTERM)));
+    assert!(!interrupt.held());
+}
+
+/// A body that panics under the block leaves the calling thread's mask as it was before the block.
+#[test]
+fn a_panic_under_the_block_sets_the_mask_back() {
+    let before = mask_holds(libc::SIGHUP);
+    let unwound = std::panic::catch_unwind(|| super::blocked(|| panic!("the body panics")));
+    assert!(unwound.is_err());
+    assert_eq!(mask_holds(libc::SIGHUP), before);
+    assert!(!before, "the test thread starts with SIGHUP unblocked");
 }

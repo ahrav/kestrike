@@ -81,17 +81,13 @@ impl Interrupt {
         self.deliveries.load(Ordering::SeqCst)
     }
 
-    /// `hold` starts a hold of the recorded signals, which lasts until [`Hold::release`] or its drop. A
-    /// hold started while another stands nests in it: its release reports nothing, and the outermost
-    /// hold's release reports the first signal recorded before it. Within a hold the holder's own steps
-    /// decide where a recorded signal takes effect.
+    /// `hold` starts a hold of the recorded signals, which lasts until [`Hold::release`] or its drop. Holds
+    /// nest: the release that ends the last hold standing reports the first signal recorded by then, in
+    /// whatever order the holds end, and every other release reports nothing. Within a hold the holder's
+    /// own steps decide where a recorded signal takes effect.
     pub fn hold(&self) -> Hold<'_> {
-        let outer = self.holds.fetch_add(1, Ordering::SeqCst) == 0;
-        Hold {
-            interrupt: self,
-            outer,
-            standing: true,
-        }
+        self.holds.fetch_add(1, Ordering::SeqCst);
+        Hold { interrupt: self }
     }
 
     /// Whether a hold stands.
@@ -112,10 +108,9 @@ impl Interrupt {
 
 /// A hold of an [`Interrupt`]'s signals; [`Interrupt::hold`] starts one.
 #[derive(Debug)]
+#[must_use = "a hold lasts until its release or its drop"]
 pub struct Hold<'a> {
     interrupt: &'a Interrupt,
-    outer: bool,
-    standing: bool,
 }
 
 impl Hold<'_> {
@@ -123,25 +118,21 @@ impl Hold<'_> {
     ///
     /// # Errors
     ///
-    /// The outermost hold ends while a signal is recorded: the interruption of the first one.
-    pub fn release(mut self) -> Result<(), Interrupted> {
-        self.end();
-        if self.outer {
-            return self.interrupt.check();
+    /// The release ends the last hold that stands while a signal is recorded: the interruption of the
+    /// first one.
+    pub fn release(self) -> Result<(), Interrupted> {
+        let interrupt = self.interrupt;
+        std::mem::forget(self);
+        if interrupt.holds.fetch_sub(1, Ordering::SeqCst) == 1 {
+            return interrupt.check();
         }
         Ok(())
-    }
-
-    fn end(&mut self) {
-        if std::mem::take(&mut self.standing) {
-            self.interrupt.holds.fetch_sub(1, Ordering::SeqCst);
-        }
     }
 }
 
 impl Drop for Hold<'_> {
     fn drop(&mut self) {
-        self.end();
+        self.interrupt.holds.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -162,7 +153,18 @@ pub fn blocked<T>(body: impl FnOnce() -> T) -> io::Result<T> {
     if status != 0 {
         return Err(io::Error::from_raw_os_error(status));
     }
+    /// Sets the mask back when `body` unwinds; the normal path sets it back itself and reports a failure.
+    struct Restore(Option<libc::sigset_t>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                let _ = mask(libc::SIG_SETMASK, &previous);
+            }
+        }
+    }
+    let mut restore = Restore(Some(previous));
     let value = body();
+    restore.0 = None;
     mask(libc::SIG_SETMASK, &previous)?;
     Ok(value)
 }
@@ -349,7 +351,8 @@ pub(crate) enum Leader {
     /// The state `Z` with one thread left: the process exited and is held unreaped, so its id still names
     /// its group.
     Exited,
-    /// The state file is gone: a wait outside this module reaped the leader.
+    /// The state file is gone, or the record names another parent, so the id names a process that is no
+    /// child of this one: a wait outside this module reaped the leader.
     Reaped,
 }
 
@@ -357,13 +360,13 @@ pub(crate) enum Leader {
 /// `parsed` takes the last `)` as the end of the command name because the name can contain spaces and
 /// parentheses. The state follows the last `)`. Offsets 1, 2 and 17 after the state identify the parent,
 /// the process group and the thread count. A leader whose main thread ended reads `Z` while other threads
-/// run, so `Z` with one thread is an exited process.
+/// run, so `Z` with one thread is an exited process. A record that names another parent is
+/// [`Leader::Reaped`]: the leader was reaped outside the stop and its id taken by another process.
 ///
 /// # Errors
 ///
 /// `parsed` returns an error if it cannot locate a one-byte state after the command name, the parent PID,
-/// process group ID or thread count fails to parse as `u64`, the parent PID differs from `parent`, or the
-/// process group ID differs from `pid`.
+/// process group ID or thread count fails to parse as `u64`, or the process group ID differs from `pid`.
 fn parsed(stat: &[u8], pid: u32, parent: u32) -> Result<Leader, String> {
     let close = stat
         .iter()
@@ -387,9 +390,7 @@ fn parsed(stat: &[u8], pid: u32, parent: u32) -> Result<Leader, String> {
     };
     let named = number(1).ok_or("holds no parent")?;
     if named != u64::from(parent) {
-        return Err(format!(
-            "names the parent {named}, so the process is no child of the process {parent}"
-        ));
+        return Ok(Leader::Reaped);
     }
     let group = number(2).ok_or("holds no process group")?;
     if group != u64::from(pid) {
@@ -481,19 +482,28 @@ fn polled<T>(
     limit: Duration,
     cap: Duration,
     ended: &dyn Fn() -> bool,
+    step: impl FnMut() -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
+    polled_until(Instant::now().checked_add(limit), cap, ended, step)
+}
+
+/// `polled_until` is [`polled`] with the limit an instant of the monotonic clock, `None` for none.
+fn polled_until<T>(
+    cutoff: Option<Instant>,
+    cap: Duration,
+    ended: &dyn Fn() -> bool,
     mut step: impl FnMut() -> io::Result<Option<T>>,
 ) -> io::Result<Option<T>> {
-    let start = Instant::now();
     let mut pause = FIRST_PAUSE.min(cap);
     loop {
         if let Some(value) = step()? {
             return Ok(Some(value));
         }
-        let waited = start.elapsed();
-        if waited >= limit || ended() {
+        let left = cutoff.map(|cutoff| cutoff.saturating_duration_since(Instant::now()));
+        if ended() || left == Some(Duration::ZERO) {
             return Ok(None);
         }
-        thread::sleep(pause.min(limit - waited));
+        thread::sleep(left.map_or(pause, |left| pause.min(left)));
         pause = (pause * 2).min(cap);
     }
 }
@@ -511,7 +521,22 @@ pub(crate) fn leader_left_within(
     cap: Duration,
     ended: &dyn Fn() -> bool,
 ) -> io::Result<Leader> {
-    let left = polled(limit, cap, ended, || {
+    leader_left_by(pid, Instant::now().checked_add(limit), cap, ended)
+}
+
+/// `leader_left_by` is [`leader_left_within`] with the limit an instant of the monotonic clock, `None`
+/// for none, so a wait whose budget counts from an earlier reading ends at that reading plus the budget.
+///
+/// # Errors
+///
+/// A read of the state fails as [`leader`] states.
+pub(crate) fn leader_left_by(
+    pid: u32,
+    cutoff: Option<Instant>,
+    cap: Duration,
+    ended: &dyn Fn() -> bool,
+) -> io::Result<Leader> {
+    let left = polled_until(cutoff, cap, ended, || {
         Ok(Some(leader(pid)?).filter(|&state| state != Leader::Running))
     })?;
     Ok(left.unwrap_or(Leader::Running))
@@ -619,8 +644,9 @@ enum Signalled {
 /// file is gone while the child still runs. `stop_group` then reads the leader's state once more: a
 /// leader that reads running or exited, or whose read fails, gets SIGKILL to its group before any wait,
 /// since the sole-waiter precondition holds it unreaped; a caller that breaks that precondition while the
-/// read also fails gets one SIGKILL to a group id that may have been taken again. A leader whose state
-/// file is gone gets that SIGKILL only where `child.try_wait()` then finds it running. A running child
+/// read fails gets one SIGKILL to a group id that may have been taken again. A leader whose state file is
+/// gone, or whose record names another parent, gets that SIGKILL only where `child.try_wait()` then finds
+/// it running. A running child
 /// also gets SIGKILL to itself, and the reap runs again. `stop_group` returns the first error.
 pub(crate) fn stop_group(child: &mut Child, stop: &GroupStop<'_>) -> io::Result<GroupStopped> {
     stop_with(child, stop, &mut signal_group)
