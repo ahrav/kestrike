@@ -9,8 +9,8 @@ use super::constants::{
 };
 use super::error::{Error, need};
 use super::shape::{
-    self, Fault, Member, compare, contains, count, distinct, equals, finite, get, holds_all,
-    index_by, is_integer, is_real, items, members, object, within,
+    self, Fault, compare, contains, count, distinct, equals, get, holds_all, index_by, is_integer,
+    items, keys, limit, members, object, within,
 };
 use crate::json::{self, Object, Value};
 use crate::python::{repr, str_of, truthy};
@@ -56,7 +56,9 @@ fn decode(bytes: &[u8]) -> Result<Value, Error> {
     json::parse(text).map_err(|error| {
         Error::malformed(&text!(
             "the bytes are no JSON document: ",
-            error.to_string()
+            error.reason(),
+            " at byte ",
+            skipped + error.offset()
         ))
     })
 }
@@ -95,36 +97,31 @@ fn texts(names: &[&str]) -> Vec<Text> {
 /// [`Error::Refused`] after `malformed hardware manifest: `, naming the first check that fails, or the
 /// first point where a value's kind is one the check cannot read, with a statement of that shape.
 pub fn check_manifest(document: &Value) -> Result<&Object, Error> {
-    let optional_object = |top: &Object, key: &str| {
+    let refused = || Error::malformed(&Text::from("top-level keys"));
+    let Value::Object(top) = document else {
+        return Err(refused());
+    };
+    let optional_object = |key: &str| {
         top.get(key)
             .is_none_or(|value| matches!(value, Value::Object(_)))
     };
-    let top = match document {
-        Value::Object(top) => Some(top),
-        _ => None,
+    let names = keys(top);
+    let keyed = holds_all(&names, &["version", "platforms", "profiles"])
+        && within(
+            &names,
+            &[
+                "version",
+                "platforms",
+                "profiles",
+                "qualification",
+                "packages",
+            ],
+        )
+        && optional_object("qualification")
+        && optional_object("packages");
+    if !keyed {
+        return Err(refused());
     }
-    .filter(|top| {
-        let keys: Vec<Member> = top
-            .iter()
-            .map(|(key, _)| Member::Text(key.clone()))
-            .collect();
-        holds_all(&keys, &["version", "platforms", "profiles"])
-            && within(
-                &keys,
-                &[
-                    "version",
-                    "platforms",
-                    "profiles",
-                    "qualification",
-                    "packages",
-                ],
-            )
-            && optional_object(top, "qualification")
-            && optional_object(top, "packages")
-    });
-    let Some(top) = top else {
-        return Err(Error::malformed(&Text::from("top-level keys")));
-    };
     let version = member(top, "version");
     need(equals(version, 1), || text!("version ", repr(version)))?;
     let (Value::Object(platforms), Value::Object(profiles)) =
@@ -156,18 +153,13 @@ fn check_platform(name: &Text, row: &Value) -> Result<(), Error> {
     })?;
     let at = text!("platform ", name);
     let keys = members(row).map_err(|fault| shaped(&at, &fault))?;
-    let keyed = holds_all(&keys, &["machine", "supported", "owner"])
-        && within(&keys, &["machine", "supported", "owner", "envelope"]);
-    let row = if keyed {
-        Some(object(row).map_err(|fault| shaped(&at, &fault))?)
-    } else {
-        None
-    };
-    let supported = row.and_then(|row| match member(row, "supported") {
-        Value::Bool(flag) => Some(*flag),
-        _ => None,
-    });
-    let (Some(row), Some(supported)) = (row, supported) else {
+    need(
+        holds_all(&keys, &["machine", "supported", "owner"])
+            && within(&keys, &["machine", "supported", "owner", "envelope"]),
+        || at.clone(),
+    )?;
+    let row = object(row).map_err(|fault| shaped(&at, &fault))?;
+    let Value::Bool(supported) = *member(row, "supported") else {
         return Err(Error::malformed(&at));
     };
     let machine = member(row, "machine");
@@ -326,29 +318,17 @@ fn check_profile<'a>(
     need(conjunction(profile, roles), || {
         text!("profile ", name, " conjunction")
     })?;
-    let evidence = profile
-        .get("evidence")
-        .is_none_or(|evidence| str_of(evidence).starts_with(&Text::from("KESTRIKE_")));
+    let evidence = profile.get("evidence").is_none_or(|evidence| {
+        matches!(evidence, Value::String(evidence) if evidence.starts_with(&Text::from("KESTRIKE_")))
+    });
     need(evidence, || text!("profile ", name, " evidence"))?;
     need(profile.get("evidence").is_some() || !kills, || {
         text!("profile ", name, " kills a role without an evidence gate")
     })?;
+    let mut clients: Vec<&Text> = Vec::new();
     for (role_name, role) in roles.iter() {
-        check_role(name, role_name, role, roles)?;
+        clients.extend(check_role(name, role_name, role, roles)?);
     }
-    let mut clients: Vec<&Text> = roles
-        .iter()
-        .filter_map(|(_, role)| match role {
-            Value::Object(role) => match role.get("env") {
-                Some(Value::Object(env)) => match env.get("KESTRIKE_CLIENT") {
-                    Some(Value::String(client)) => Some(client),
-                    _ => None,
-                },
-                _ => None,
-            },
-            _ => None,
-        })
-        .collect();
     let count = clients.len();
     clients.sort_unstable();
     clients.dedup();
@@ -370,8 +350,8 @@ fn kills_a_role(name: &Text, roles: &Object) -> Result<bool, Error> {
     Ok(false)
 }
 
-/// Whether a profile's `conjunction` is a list of non-empty chains of `role:case` entries, each role one
-/// of `roles` and each case named.
+/// `conjunction` accepts an omitted field or an array of non-empty chains. Each entry is a string whose
+/// first `:` separates a key in `roles` from a non-empty case name.
 fn conjunction(profile: &Object, roles: &Object) -> bool {
     let Some(chains) = profile.get("conjunction") else {
         return true;
@@ -382,8 +362,12 @@ fn conjunction(profile: &Object, roles: &Object) -> bool {
     chains.iter().all(|chain| match chain {
         Value::Array(entries) if !entries.is_empty() => entries.iter().all(|entry| match entry {
             Value::String(entry) => {
-                let (role, case) = partition(entry, ':');
-                roles.get_text(&role).is_some() && !case.is_empty()
+                let bytes = entry.as_bytes();
+                let (role, case) = match bytes.iter().position(|&byte| byte == b':') {
+                    Some(at) => (&bytes[..at], &bytes[at + 1..]),
+                    None => (bytes, &bytes[bytes.len()..]),
+                };
+                roles.iter().any(|(key, _)| key.as_bytes() == role) && !case.is_empty()
             }
             _ => false,
         }),
@@ -391,73 +375,55 @@ fn conjunction(profile: &Object, roles: &Object) -> bool {
     })
 }
 
-/// `partition` is `text.partition(separator)` without the separator.
-fn partition(text: &Text, separator: char) -> (Text, Text) {
-    let codes: Vec<u32> = text.code_points().collect();
-    let separator = u32::from(separator);
-    let (before, after) = match codes.iter().position(|&code| code == separator) {
-        Some(at) => (&codes[..at], &codes[at + 1..]),
-        None => (&codes[..], &codes[codes.len()..]),
-    };
-    let rebuilt = |codes: &[u32]| {
-        Text::from_code_points(codes.iter().copied())
-            .expect("the code points of a text are at most U+10FFFF")
-    };
-    (rebuilt(before), rebuilt(after))
-}
-
-/// The checks of one role and its cases, in order.
-fn check_role(name: &Text, role_name: &Text, entry: &Value, roles: &Object) -> Result<(), Error> {
+/// `check_role` validates the role and its cases in order and returns `env.KESTRIKE_CLIENT` if present.
+fn check_role<'a>(
+    name: &Text,
+    role_name: &Text,
+    entry: &'a Value,
+    roles: &'a Object,
+) -> Result<Option<&'a Text>, Error> {
     let at = text!("role ", name, "/", role_name);
     let fault = |fault: Fault| shaped(&at, &fault);
-    let keys = members(entry).map_err(fault)?;
-    let role = if within(&keys, &ROLE_KEYS) {
-        let role = object(entry).map_err(fault)?;
-        role.get("cases").is_some_and(truthy).then_some(role)
-    } else {
-        None
-    };
-    let Some(role) = role else {
-        return Err(Error::malformed(&at));
-    };
-    let no_env = Value::Object(Object::new());
-    let env = role.get("env").unwrap_or(&no_env);
-    let env_named = match env {
-        Value::Object(env) => env
-            .iter()
-            .all(|(key, value)| is_environment_name(key) && matches!(value, Value::String(_))),
-        _ => false,
-    };
-    need(env_named, || text!(at, " env"))?;
-    let after = role.get("after").filter(|after| **after != Value::Null);
-    need(
-        match after {
-            None => true,
-            Some(Value::String(after)) => roles.get_text(after).is_some(),
-            Some(_) => false,
-        },
-        || text!(at, " waits on an unknown role"),
-    )?;
-    let ready_after = match after {
-        None => true,
-        Some(after) => {
-            let predecessor = index_by(roles, after).map_err(fault)?;
-            let ready = get(predecessor, "ready")
-                .map_err(|fault| shaped(&text!("role ", name, "/", str_of(after)), &fault))?;
-            matches!(ready, Some(Value::String(ready)) if !ready.is_empty())
+    need(within(&members(entry).map_err(fault)?, &ROLE_KEYS), || {
+        at.clone()
+    })?;
+    let role = object(entry).map_err(fault)?;
+    need(role.get("cases").is_some_and(truthy), || at.clone())?;
+    let env = match role.get("env") {
+        None => None,
+        Some(Value::Object(env))
+            if env.iter().all(|(key, value)| {
+                is_environment_name(key) && matches!(value, Value::String(_))
+            }) =>
+        {
+            Some(env)
         }
+        Some(_) => return Err(Error::malformed(&text!(at, " env"))),
     };
-    need(ready_after, || {
-        text!(
-            at,
-            " waits on ",
-            after.map_or_else(|| Text::from("None"), str_of),
-            ", which declares no readiness line"
-        )
-    })?;
-    need(predecessors(roles, entry).map_err(fault)?.is_some(), || {
-        text!(at, " waits on itself")
-    })?;
+    let unknown = || Error::malformed(&text!(at, " waits on an unknown role"));
+    let predecessor = match role.get("after") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(after)) => Some((after, roles.get_text(after).ok_or_else(unknown)?)),
+        Some(_) => return Err(unknown()),
+    };
+    if let Some((after, predecessor)) = predecessor {
+        let ready = get(predecessor, "ready")
+            .map_err(|fault| shaped(&text!("role ", name, "/", after), &fault))?;
+        need(
+            matches!(ready, Some(Value::String(ready)) if !ready.is_empty()),
+            || {
+                text!(
+                    at,
+                    " waits on ",
+                    after,
+                    ", which declares no readiness line"
+                )
+            },
+        )?;
+    }
+    let depth = predecessors(roles, role_name, entry)
+        .map_err(|(holder, fault)| shaped(&text!("role ", name, "/", holder), &fault))?;
+    need(depth.is_some(), || text!(at, " waits on itself"))?;
     let lines = ["ready", "closing"].iter().all(|key| match role.get(key) {
         None => true,
         Some(Value::String(line)) => !line.is_empty(),
@@ -467,7 +433,8 @@ fn check_role(name: &Text, role_name: &Text, entry: &Value, roles: &Object) -> R
         text!(at, " readiness and closing lines are non-empty strings")
     })?;
     let cases = member(role, "cases");
-    let closes = role.get("ready").is_some_and(truthy) && role.get("closing").is_some_and(truthy)
+    let ready = role.get("ready").is_some_and(truthy);
+    let closes = ready && role.get("closing").is_some_and(truthy)
         || !closes_on_sigterm(cases).map_err(fault)?;
     need(closes, || {
         text!(
@@ -478,12 +445,7 @@ fn check_role(name: &Text, role_name: &Text, entry: &Value, roles: &Object) -> R
     let killed = role.get("kill");
     let delay = match killed {
         None => true,
-        Some(kill) => {
-            is_real(kill)
-                && finite(kill).map_err(fault)?
-                && compare(kill, 0).is_some_and(|order| order.is_ge())
-                && role.get("ready").is_some_and(truthy)
-        }
+        Some(kill) => limit(kill, false).map_err(fault)? && ready,
     };
     need(delay, || text!(at, " kill"))?;
     need(
@@ -491,18 +453,24 @@ fn check_role(name: &Text, role_name: &Text, entry: &Value, roles: &Object) -> R
         || text!(at, " kill role runs one case"),
     )?;
     let listed = items(cases).map_err(fault)?;
-    let ids = listed
+    let read = listed
         .iter()
-        .map(|case| get(case, "id"))
+        .map(|case| object(case))
         .collect::<Result<Vec<_>, _>>()
         .map_err(fault)?;
+    let ids: Vec<Option<&Value>> = read.iter().map(|case| case.get("id")).collect();
     need(distinct(&ids).map_err(fault)? == ids.len(), || {
         text!(at, " names a case twice")
     })?;
-    for case in &listed {
-        check_case(object(case).map_err(fault)?, env)?;
+    for case in read {
+        check_case(case, env)?;
     }
-    Ok(())
+    Ok(env
+        .and_then(|env| env.get("KESTRIKE_CLIENT"))
+        .and_then(|client| match client {
+            Value::String(client) => Some(client),
+            _ => None,
+        }))
 }
 
 /// Whether a case's `closes_on_sigterm` is true, read in order up to the first that is.
@@ -515,30 +483,33 @@ fn closes_on_sigterm(cases: &Value) -> Result<bool, Fault> {
     Ok(false)
 }
 
-/// `predecessors` counts the roles `role` waits on through its `after` chain, or gives `None` once the
-/// count passes the number of roles, which only a loop reaches.
-fn predecessors<'a>(roles: &'a Object, mut role: &'a Value) -> Result<Option<usize>, Fault> {
+/// `predecessors` counts the roles the role `name` waits on through its `after` chain, or gives `None` once
+/// the count passes the number of roles, which only a loop reaches. A fault comes with the name of the role
+/// whose entry or `after` was read.
+fn predecessors<'a>(
+    roles: &'a Object,
+    mut name: &'a Text,
+    mut role: &'a Value,
+) -> Result<Option<usize>, (&'a Text, Fault)> {
     let mut depth = 0;
     loop {
-        let Some(after) = shape::get(role, "after")?.filter(|after| **after != Value::Null) else {
+        let after = shape::get(role, "after").map_err(|fault| (name, fault))?;
+        let Some(after) = after.filter(|after| **after != Value::Null) else {
             return Ok(Some(depth));
         };
         depth += 1;
         if depth > roles.len() {
             return Ok(None);
         }
-        role = index_by(roles, after)?;
+        (name, role) = index_by(roles, after).map_err(|fault| (name, fault))?;
     }
 }
 
-/// The checks of one case, in order; `env` is its role's `env`.
-fn check_case(case: &Object, env: &Value) -> Result<(), Error> {
-    let keys: Vec<Member> = case
-        .iter()
-        .map(|(key, _)| Member::Text(key.clone()))
-        .collect();
+/// The checks of one case, in order; `env` is its role's `env`, where the role holds one.
+fn check_case(case: &Object, env: Option<&Object>) -> Result<(), Error> {
+    let names = keys(case);
     need(
-        holds_all(&keys, &CASE_KEYS) && within(&keys, &CASE_KEYS),
+        holds_all(&names, &CASE_KEYS) && within(&names, &CASE_KEYS),
         || {
             let mut sorted: Vec<&Text> = case.iter().map(|(key, _)| key).collect();
             sorted.sort();
@@ -557,16 +528,8 @@ fn check_case(case: &Object, env: &Value) -> Result<(), Error> {
         is_integer(expected) && compare(expected, 1).is_some_and(|order| order.is_ge()),
         || text!(at, " expects no test"),
     )?;
-    let mut limits = true;
-    for limit in [member(case, "deadline"), member(case, "grace")] {
-        if !(is_real(limit)
-            && finite(limit).map_err(fault)?
-            && compare(limit, 0).is_some_and(|order| order.is_gt()))
-        {
-            limits = false;
-            break;
-        }
-    }
+    let limits = limit(member(case, "deadline"), true).map_err(fault)?
+        && limit(member(case, "grace"), true).map_err(fault)?;
     need(limits, || {
         text!(at, " needs a finite positive deadline and grace")
     })?;
@@ -600,7 +563,7 @@ fn check_case(case: &Object, env: &Value) -> Result<(), Error> {
         )
     })?;
     let episode = contains(inputs, "KESTRIKE_EPISODE").map_err(fault)?
-        || contains(env, "KESTRIKE_EPISODE").map_err(fault)?;
+        || env.is_some_and(|env| env.get("KESTRIKE_EPISODE").is_some());
     need(!episode, || {
         text!(at, " names KESTRIKE_EPISODE, which the lane sets itself")
     })?;
