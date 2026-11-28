@@ -1,12 +1,13 @@
+//! The check of a hardware manifest and its reader.
+
 use std::fs;
-use std::io;
 use std::path::Path;
 
 use super::constants::{
     CASE_KEYS, CHANNEL, DISPOSITIONS, ENVELOPE_FIELDS, OPTIONAL_PROFILE_KEYS, PROFILE_KEYS,
     ROLE_KEYS, UNREAD, identity_lines, is_device_identity, is_environment_name, is_episode_name,
 };
-use super::refusal::{Refusal, need};
+use super::error::{Error, need};
 use super::shape::{
     self, Fault, Member, compare, contains, count, distinct, equals, finite, get, holds_all,
     index_by, is_integer, is_real, items, members, object, within,
@@ -17,48 +18,60 @@ use crate::text::{Text, text};
 
 const UTF8_MARK: &[u8] = b"\xef\xbb\xbf";
 
-#[derive(Debug)]
-pub enum ManifestError {
-    Read(io::Error),
-    Document(Refusal),
-    Check(Refusal),
+/// `read_manifest` reads the file at `path` once, decodes it as JSON, checks the whole document with
+/// [`check_manifest`] and returns its platform rows in document order.
+///
+/// # Errors
+///
+/// [`Error::System`] with the read's error, and [`Error::Refused`] after `malformed hardware manifest: ` for
+/// bytes that are no UTF-8 JSON document and for a failed check.
+pub fn read_manifest(path: &Path) -> Result<Object, Error> {
+    let bytes = fs::read(path).map_err(Error::System)?;
+    let document = decode(&bytes)?;
+    check_manifest(&document).cloned()
 }
 
-pub fn read_manifest(path: &Path) -> Result<Object, ManifestError> {
-    let bytes = fs::read(path).map_err(ManifestError::Read)?;
-    let document = decode(&bytes).map_err(ManifestError::Document)?;
-    check_manifest(&document)
-        .cloned()
-        .map_err(ManifestError::Check)
-}
-
-fn decode(bytes: &[u8]) -> Result<Value, Refusal> {
+/// `decode` drops one leading UTF-8 byte order mark and reads the rest as strict UTF-8 holding one JSON
+/// document: objects keep their members in document order, a repeated key keeps its last value, and
+/// `NaN`, `Infinity` and `-Infinity` are floats.
+fn decode(bytes: &[u8]) -> Result<Value, Error> {
     let skipped = if bytes.starts_with(UTF8_MARK) {
         UTF8_MARK.len()
     } else {
         0
     };
     let text = std::str::from_utf8(&bytes[skipped..]).map_err(|error| {
-        Refusal::malformed(&text!(
+        Error::malformed(&text!(
             "the bytes are not UTF-8 from byte ",
             skipped + error.valid_up_to()
         ))
     })?;
     json::parse(text).map_err(|error| {
-        Refusal::malformed(&text!("the bytes are no JSON document: ", error.to_string()))
+        Error::malformed(&text!(
+            "the bytes are no JSON document: ",
+            error.to_string()
+        ))
     })
 }
 
-fn shaped(at: &Text, fault: &Fault) -> Refusal {
-    Refusal::malformed(&text!(at, ": ", fault.to_string()))
+/// The refusal at a point where the item `at` holds a value of a kind the check cannot read.
+fn shaped(at: &Text, fault: &Fault) -> Error {
+    Error::malformed(&text!(at, ": ", fault.to_string()))
 }
 
+/// The value of a key the check has found in `object`.
+///
+/// # Panics
+///
+/// `member` panics when the key is absent; each caller reads a key that a passed check of the object's keys
+/// requires.
 fn member<'a>(object: &'a Object, key: &str) -> &'a Value {
     object
         .get(key)
         .unwrap_or_else(|| panic!("the key check found the key {key}"))
 }
 
+/// The repr of a Python list or tuple of texts, between `open` and `close`.
 fn list_repr<'a>(items: impl IntoIterator<Item = &'a Text>, open: char, close: char) -> Text {
     let items: Vec<String> = items.into_iter().map(Text::repr).collect();
     text!(open.to_string(), items.join(", "), close.to_string())
@@ -68,7 +81,13 @@ fn texts(names: &[&str]) -> Vec<Text> {
     names.iter().map(|name| Text::from(*name)).collect()
 }
 
-pub fn check_manifest(document: &Value) -> Result<&Object, Refusal> {
+/// `check_manifest` makes the 35 checks of a hardware manifest in order and returns its platform rows.
+///
+/// # Errors
+///
+/// [`Error::Refused`] after `malformed hardware manifest: `, naming the first check that fails, or the
+/// first point where a value's kind is one the check cannot read, with a statement of that shape.
+pub fn check_manifest(document: &Value) -> Result<&Object, Error> {
     let optional_object = |top: &Object, key: &str| {
         top.get(key)
             .is_none_or(|value| matches!(value, Value::Object(_)))
@@ -82,20 +101,26 @@ pub fn check_manifest(document: &Value) -> Result<&Object, Refusal> {
         holds_all(&keys, &["version", "platforms", "profiles"])
             && within(
                 &keys,
-                &["version", "platforms", "profiles", "qualification", "packages"],
+                &[
+                    "version",
+                    "platforms",
+                    "profiles",
+                    "qualification",
+                    "packages",
+                ],
             )
             && optional_object(top, "qualification")
             && optional_object(top, "packages")
     });
     let Some(top) = top else {
-        return Err(Refusal::malformed(&Text::from("top-level keys")));
+        return Err(Error::malformed(&Text::from("top-level keys")));
     };
     let version = member(top, "version");
     need(equals(version, 1), || text!("version ", repr(version)))?;
     let (Value::Object(platforms), Value::Object(profiles)) =
         (member(top, "platforms"), member(top, "profiles"))
     else {
-        return Err(Refusal::malformed(&Text::from(
+        return Err(Error::malformed(&Text::from(
             "platforms and profiles must be objects",
         )));
     };
@@ -109,7 +134,8 @@ pub fn check_manifest(document: &Value) -> Result<&Object, Refusal> {
     Ok(platforms)
 }
 
-fn check_platform(name: &Text, row: &Value) -> Result<(), Refusal> {
+/// The checks of one platform row, in order.
+fn check_platform(name: &Text, row: &Value) -> Result<(), Error> {
     need(is_episode_name(name), || {
         text!(
             "platform name ",
@@ -132,7 +158,7 @@ fn check_platform(name: &Text, row: &Value) -> Result<(), Refusal> {
         _ => None,
     });
     let (Some(row), Some(supported)) = (row, supported) else {
-        return Err(Refusal::malformed(&at));
+        return Err(Error::malformed(&at));
     };
     let machine = member(row, "machine");
     let lines = match machine {
@@ -161,7 +187,7 @@ fn check_platform(name: &Text, row: &Value) -> Result<(), Refusal> {
         Some(_) => None,
     };
     let Some(envelope) = envelope else {
-        return Err(Refusal::malformed(&text!("platform ", name, " envelope")));
+        return Err(Error::malformed(&text!("platform ", name, " envelope")));
     };
     let short: Vec<Text> = ENVELOPE_FIELDS
         .iter()
@@ -181,6 +207,7 @@ fn check_platform(name: &Text, row: &Value) -> Result<(), Refusal> {
     })
 }
 
+/// Whether an envelope's field is `in (None, "", [], {}, "unreadable")`, an absent field included.
 fn empty(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => true,
@@ -191,6 +218,9 @@ fn empty(value: Option<&Value>) -> bool {
     }
 }
 
+/// Whether an envelope's `devices`, `cpu_family` or `cpu_features` has its shape: PCI identities, the
+/// machine's identity lines with stripped, read values, and features of one word each. Every other field
+/// has its shape.
 fn shaped_field(field: &str, value: Option<&Value>, lines: &[&str]) -> bool {
     match (field, value) {
         ("devices", Some(Value::Object(devices))) => devices.iter().all(
@@ -223,12 +253,14 @@ fn shaped_field(field: &str, value: Option<&Value>, lines: &[&str]) -> bool {
     }
 }
 
+/// The checks of one profile, its roles and their cases; it returns the profile's name when one of its
+/// roles is killed.
 fn check_profile<'a>(
     name: &'a Text,
     profile: &Value,
     platforms: &Object,
     killer: Option<&Text>,
-) -> Result<Option<&'a Text>, Refusal> {
+) -> Result<Option<&'a Text>, Error> {
     let at = text!("profile ", name);
     let keys = members(profile).map_err(|fault| shaped(&at, &fault))?;
     let optional: Vec<&str> = PROFILE_KEYS
@@ -278,7 +310,9 @@ fn check_profile<'a>(
     need(equals(member(profile, "retries"), 0), || {
         text!("profile ", name, " declares retries")
     })?;
-    need(!roles.is_empty(), || text!("profile ", name, " has no roles"))?;
+    need(!roles.is_empty(), || {
+        text!("profile ", name, " has no roles")
+    })?;
     need(conjunction(profile, roles), || {
         text!("profile ", name, " conjunction")
     })?;
@@ -317,15 +351,20 @@ fn check_profile<'a>(
     Ok(kills.then_some(name))
 }
 
-fn kills_a_role(name: &Text, roles: &Object) -> Result<bool, Refusal> {
+/// Whether `"kill" in role` holds for a role, read in order up to the first that holds.
+fn kills_a_role(name: &Text, roles: &Object) -> Result<bool, Error> {
     for (role_name, role) in roles.iter() {
-        if contains(role, "kill").map_err(|fault| shaped(&text!("role ", name, "/", role_name), &fault))? {
+        if contains(role, "kill")
+            .map_err(|fault| shaped(&text!("role ", name, "/", role_name), &fault))?
+        {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
+/// Whether a profile's `conjunction` is a list of non-empty chains of `role:case` entries, each role one
+/// of `roles` and each case named.
 fn conjunction(profile: &Object, roles: &Object) -> bool {
     let Some(chains) = profile.get("conjunction") else {
         return true;
@@ -345,6 +384,7 @@ fn conjunction(profile: &Object, roles: &Object) -> bool {
     })
 }
 
+/// `partition` is `text.partition(separator)` without the separator.
 fn partition(text: &Text, separator: char) -> (Text, Text) {
     let codes: Vec<u32> = text.code_points().collect();
     let separator = u32::from(separator);
@@ -359,12 +399,8 @@ fn partition(text: &Text, separator: char) -> (Text, Text) {
     (rebuilt(before), rebuilt(after))
 }
 
-fn check_role(
-    name: &Text,
-    role_name: &Text,
-    entry: &Value,
-    roles: &Object,
-) -> Result<(), Refusal> {
+/// The checks of one role and its cases, in order.
+fn check_role(name: &Text, role_name: &Text, entry: &Value, roles: &Object) -> Result<(), Error> {
     let at = text!("role ", name, "/", role_name);
     let fault = |fault: Fault| shaped(&at, &fault);
     let keys = members(entry).map_err(fault)?;
@@ -375,14 +411,14 @@ fn check_role(
         None
     };
     let Some(role) = role else {
-        return Err(Refusal::malformed(&at));
+        return Err(Error::malformed(&at));
     };
     let no_env = Value::Object(Object::new());
     let env = role.get("env").unwrap_or(&no_env);
     let env_named = match env {
-        Value::Object(env) => env.iter().all(|(key, value)| {
-            is_environment_name(key) && matches!(value, Value::String(_))
-        }),
+        Value::Object(env) => env
+            .iter()
+            .all(|(key, value)| is_environment_name(key) && matches!(value, Value::String(_))),
         _ => false,
     };
     need(env_named, || text!(at, " env"))?;
@@ -415,13 +451,11 @@ fn check_role(
     need(predecessors(roles, entry).map_err(fault)?.is_some(), || {
         text!(at, " waits on itself")
     })?;
-    let lines = ["ready", "closing"]
-        .iter()
-        .all(|key| match role.get(key) {
-            None => true,
-            Some(Value::String(line)) => !line.is_empty(),
-            Some(_) => false,
-        });
+    let lines = ["ready", "closing"].iter().all(|key| match role.get(key) {
+        None => true,
+        Some(Value::String(line)) => !line.is_empty(),
+        Some(_) => false,
+    });
     need(lines, || {
         text!(at, " readiness and closing lines are non-empty strings")
     })?;
@@ -429,7 +463,10 @@ fn check_role(
     let closes = role.get("ready").is_some_and(truthy) && role.get("closing").is_some_and(truthy)
         || !closes_on_sigterm(cases).map_err(fault)?;
     need(closes, || {
-        text!(at, " closes on SIGTERM without a readiness and a closing line")
+        text!(
+            at,
+            " closes on SIGTERM without a readiness and a closing line"
+        )
     })?;
     let killed = role.get("kill");
     let delay = match killed {
@@ -461,6 +498,7 @@ fn check_role(
     Ok(())
 }
 
+/// Whether a case's `closes_on_sigterm` is true, read in order up to the first that is.
 fn closes_on_sigterm(cases: &Value) -> Result<bool, Fault> {
     for case in items(cases)? {
         if get(&case, "closes_on_sigterm")?.is_some_and(truthy) {
@@ -486,7 +524,8 @@ fn predecessors<'a>(roles: &'a Object, mut role: &'a Value) -> Result<Option<usi
     }
 }
 
-fn check_case(case: &Object, env: &Value) -> Result<(), Refusal> {
+/// The checks of one case, in order; `env` is its role's `env`.
+fn check_case(case: &Object, env: &Value) -> Result<(), Error> {
     let keys: Vec<Member> = case
         .iter()
         .map(|(key, _)| Member::Text(key.clone()))
@@ -563,3 +602,7 @@ fn check_case(case: &Object, env: &Value) -> Result<(), Refusal> {
         || text!(at, " closes_on_sigterm"),
     )
 }
+
+#[cfg(test)]
+#[path = "manifest_tests.rs"]
+mod tests;

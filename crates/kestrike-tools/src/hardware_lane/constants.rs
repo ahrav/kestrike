@@ -18,7 +18,7 @@ pub const INTERRUPTED: u8 = 5;
 /// The hardware manifest's path under the checkout's top level.
 pub const MANIFEST: &str = "scripts/hardware-profiles.json";
 
-/// The longest a controller of a case runs after the case's grace, in seconds.
+/// The default window of one call of a case's containment controller, in seconds.
 pub const CONTROLLER_SECONDS: f64 = 30.0;
 
 /// The longest the lane waits for every member of a stopped process group to report stopped, in seconds.

@@ -1,0 +1,256 @@
+{
+"base": {
+  "version": 1,
+  "platforms": {
+   "aarch64-host": {
+    "machine": "aarch64",
+    "supported": true,
+    "owner": "platform owner",
+    "envelope": {
+     "instance_type": "r8gb.8xlarge",
+     "cpu_features": [
+      "fp",
+      "asimd"
+     ],
+     "cpu_family": {
+      "CPU implementer": "0x41",
+      "CPU part": "0xd4f"
+     },
+     "kernel": "6.12",
+     "firmware": "uefi",
+     "vfio": "noiommu",
+     "numa_nodes": 1,
+     "page_size": 4096,
+     "hugepage_size": 2097152,
+     "devices": {
+      "0000:00:1f.0": "0x1d0f:0x0061"
+     },
+     "address_mode": "iova-pa",
+     "volume": "gp3",
+     "eni": "ena",
+     "limits": {
+      "iops": 3000
+     },
+     "coherence": "coherent",
+     "disposable_resources": [
+      "volume"
+     ],
+     "reset_blast_radius": "host",
+     "fis_blast_radius": "volume",
+     "restoration_authority": "owner",
+     "containment_authority": "owner"
+    }
+   },
+   "x86_64-host": {
+    "machine": "x86_64",
+    "supported": false,
+    "owner": "platform owner"
+   }
+  },
+  "profiles": {
+   "pair": {
+    "platforms": {
+     "aarch64-host": "runs",
+     "x86_64-host": "pending"
+    },
+    "retries": 0,
+    "conjunction": [
+     [
+      "owner:a",
+      "peer:c"
+     ]
+    ],
+    "roles": {
+     "owner": {
+      "cases": [
+       {
+        "id": "a",
+        "expected": 1,
+        "inputs": [
+         "KESTRIKE_MAPPINGS"
+        ],
+        "deadline": 60,
+        "grace": 5,
+        "witnesses": [
+         "a ... ok"
+        ],
+        "restoration": "none",
+        "closes_on_sigterm": true
+       },
+       {
+        "id": "b",
+        "expected": 1,
+        "inputs": [
+         "KESTRIKE_CONTROLLER_REQUESTS",
+         "KESTRIKE_CONTROLLER_ACKS"
+        ],
+        "deadline": 60,
+        "grace": 5,
+        "witnesses": [
+         "b ... ok"
+        ],
+        "restoration": "none",
+        "closes_on_sigterm": false
+       }
+      ],
+      "ready": "owner ready",
+      "closing": "owner closing",
+      "env": {
+       "KESTRIKE_CLIENT": "0"
+      }
+     },
+     "peer": {
+      "cases": [
+       {
+        "id": "c",
+        "expected": 1,
+        "inputs": [],
+        "deadline": 30.5,
+        "grace": 1,
+        "witnesses": [
+         "c ... ok"
+        ],
+        "restoration": "none",
+        "closes_on_sigterm": false
+       }
+      ],
+      "after": "owner",
+      "env": {
+       "KESTRIKE_CLIENT": "1"
+      }
+     }
+    }
+   },
+   "kill": {
+    "platforms": {
+     "aarch64-host": "runs",
+     "x86_64-host": "excluded"
+    },
+    "retries": 0,
+    "evidence": "KESTRIKE_EVIDENCE",
+    "roles": {
+     "victim": {
+      "cases": [
+       {
+        "id": "k",
+        "expected": 2,
+        "inputs": [],
+        "deadline": 60,
+        "grace": 5,
+        "witnesses": [
+         "k ... ok"
+        ],
+        "restoration": "none",
+        "closes_on_sigterm": false
+       }
+      ],
+      "ready": "victim ready",
+      "kill": 1.5
+     }
+    }
+   }
+  },
+  "qualification": {},
+  "packages": {}
+ }
+,
+"copies": [
+ {"name": "the base passes", "edits": [], "lane": null},
+ {"name": "check 1: a top-level key is missing", "edits": [["delete", ["profiles"]]], "lane": "malformed hardware manifest: top-level keys"},
+ {"name": "check 2: the version is 2", "edits": [["set", ["version"], 2]], "lane": "malformed hardware manifest: version 2"},
+ {"name": "check 3: the platforms are an array", "edits": [["set", ["platforms"], []]], "lane": "malformed hardware manifest: platforms and profiles must be objects"},
+ {"name": "check 4: a platform name starts with a hyphen", "edits": [["set", ["platforms", "-host"], {"machine": "x86_64", "supported": false, "owner": "platform owner"}]], "lane": "malformed hardware manifest: platform name '-host' is not an episode name of letters, digits, '.', '_' and '-' starting with a letter or digit, which a CI episode needs"},
+ {"name": "check 5: a platform row lacks its owner", "edits": [["delete", ["platforms", "x86_64-host", "owner"]]], "lane": "malformed hardware manifest: platform x86_64-host"},
+ {"name": "check 6: a platform names a machine without identity lines", "edits": [["set", ["platforms", "x86_64-host", "machine"], "riscv64"]], "lane": "malformed hardware manifest: platform x86_64-host names machine 'riscv64', which has no CPU identity lines"},
+ {"name": "check 7: an envelope holds an unknown field", "edits": [["set", ["platforms", "x86_64-host", "envelope"], {"colour": "red"}]], "lane": "malformed hardware manifest: platform x86_64-host envelope"},
+ {"name": "check 8: a supported row's kernel is unreadable", "edits": [["set", ["platforms", "aarch64-host", "envelope", "kernel"], "unreadable"]], "lane": "malformed hardware manifest: platform aarch64-host is supported with an envelope short of ['kernel']"},
+ {"name": "check 9: a profile lacks its retries", "edits": [["delete", ["profiles", "pair", "retries"]]], "lane": "malformed hardware manifest: profile pair"},
+ {"name": "check 10: a disposition is unknown", "edits": [["set", ["profiles", "pair", "platforms", "x86_64-host"], "skipped"]], "lane": "malformed hardware manifest: profile pair needs one disposition of ('runs', 'pending', 'excluded') per platform row"},
+ {"name": "check 11: a profile follows the kill profile", "edits": [["set", ["profiles", "late"], {"platforms": {"aarch64-host": "runs", "x86_64-host": "pending"}, "retries": 0, "conjunction": [["owner:a", "peer:c"]], "roles": {"owner": {"cases": [{"id": "a", "expected": 1, "inputs": ["KESTRIKE_MAPPINGS"], "deadline": 60, "grace": 5, "witnesses": ["a ... ok"], "restoration": "none", "closes_on_sigterm": true}, {"id": "b", "expected": 1, "inputs": ["KESTRIKE_CONTROLLER_REQUESTS", "KESTRIKE_CONTROLLER_ACKS"], "deadline": 60, "grace": 5, "witnesses": ["b ... ok"], "restoration": "none", "closes_on_sigterm": false}], "ready": "owner ready", "closing": "owner closing", "env": {"KESTRIKE_CLIENT": "0"}}, "peer": {"cases": [{"id": "c", "expected": 1, "inputs": [], "deadline": 30.5, "grace": 1, "witnesses": ["c ... ok"], "restoration": "none", "closes_on_sigterm": false}], "after": "owner", "env": {"KESTRIKE_CLIENT": "1"}}}}]], "lane": "malformed hardware manifest: profile late follows the kill profile kill, whose host awaits containment"},
+ {"name": "check 12: a profile declares retries", "edits": [["set", ["profiles", "pair", "retries"], 1]], "lane": "malformed hardware manifest: profile pair declares retries"},
+ {"name": "check 13: a profile has no roles", "edits": [["set", ["profiles", "pair", "roles"], {}]], "lane": "malformed hardware manifest: profile pair has no roles"},
+ {"name": "check 14: a conjunction entry names no case", "edits": [["set", ["profiles", "pair", "conjunction"], [["owner"]]]], "lane": "malformed hardware manifest: profile pair conjunction"},
+ {"name": "check 15: the evidence gate lacks its prefix", "edits": [["set", ["profiles", "kill", "evidence"], "EVIDENCE"]], "lane": "malformed hardware manifest: profile kill evidence"},
+ {"name": "check 16: a kill profile has no evidence gate", "edits": [["delete", ["profiles", "kill", "evidence"]]], "lane": "malformed hardware manifest: profile kill kills a role without an evidence gate"},
+ {"name": "check 17: a role holds an unknown key", "edits": [["set", ["profiles", "pair", "roles", "owner", "colour"], 1]], "lane": "malformed hardware manifest: role pair/owner"},
+ {"name": "check 18: a role's env names a variable outside KESTRIKE_", "edits": [["set", ["profiles", "pair", "roles", "owner", "env", "CLIENT"], "x"]], "lane": "malformed hardware manifest: role pair/owner env"},
+ {"name": "check 19: a role waits on an unknown role", "edits": [["set", ["profiles", "pair", "roles", "peer", "after"], "nobody"]], "lane": "malformed hardware manifest: role pair/peer waits on an unknown role"},
+ {"name": "check 20: a role waits on a role without a readiness line", "edits": [["set", ["profiles", "pair", "roles", "peer", "after"], "peer"]], "lane": "malformed hardware manifest: role pair/peer waits on peer, which declares no readiness line"},
+ {"name": "check 21: a role waits on itself", "edits": [["set", ["profiles", "pair", "roles", "peer", "ready"], "peer ready"], ["set", ["profiles", "pair", "roles", "peer", "after"], "peer"]], "lane": "malformed hardware manifest: role pair/peer waits on itself"},
+ {"name": "check 22: a closing line is empty", "edits": [["set", ["profiles", "pair", "roles", "owner", "closing"], ""]], "lane": "malformed hardware manifest: role pair/owner readiness and closing lines are non-empty strings"},
+ {"name": "check 23: a role closes on SIGTERM without a closing line", "edits": [["delete", ["profiles", "pair", "roles", "owner", "closing"]]], "lane": "malformed hardware manifest: role pair/owner closes on SIGTERM without a readiness and a closing line"},
+ {"name": "check 24: a kill delay is negative", "edits": [["set", ["profiles", "kill", "roles", "victim", "kill"], -1]], "lane": "malformed hardware manifest: role kill/victim kill"},
+ {"name": "check 25: a kill role runs two cases", "edits": [["set", ["profiles", "kill", "roles", "victim", "cases"], [{"id": "k", "expected": 2, "inputs": [], "deadline": 60, "grace": 5, "witnesses": ["k ... ok"], "restoration": "none", "closes_on_sigterm": false}, {"id": "k2", "expected": 1, "inputs": [], "deadline": 60, "grace": 5, "witnesses": ["k2 ... ok"], "restoration": "none", "closes_on_sigterm": false}]]], "lane": "malformed hardware manifest: role kill/victim kill role runs one case"},
+ {"name": "check 26: a role names a case twice", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 1, "id"], "a"]], "lane": "malformed hardware manifest: role pair/owner names a case twice"},
+ {"name": "check 27: a case lacks its witnesses", "edits": [["delete", ["profiles", "pair", "roles", "owner", "cases", 0, "witnesses"]]], "lane": "malformed hardware manifest: case 'a' keys ['closes_on_sigterm', 'deadline', 'expected', 'grace', 'id', 'inputs', 'restoration']"},
+ {"name": "check 28: a case expects no test", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "expected"], 0]], "lane": "malformed hardware manifest: case a expects no test"},
+ {"name": "check 29: a case's grace is zero", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "grace"], 0]], "lane": "malformed hardware manifest: case a needs a finite positive deadline and grace"},
+ {"name": "check 30: a case's input lacks the prefix", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], ["MAPPINGS"]]], "lane": "malformed hardware manifest: case a inputs"},
+ {"name": "check 31: a case names half a channel", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 1, "inputs"], ["KESTRIKE_CONTROLLER_ACKS"]]], "lane": "malformed hardware manifest: case b names half a channel"},
+ {"name": "check 32: a case parked on its channel closes on SIGTERM", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 1, "closes_on_sigterm"], true]], "lane": "malformed hardware manifest: case b closes on SIGTERM while parked on its containment channel"},
+ {"name": "check 33: a case names KESTRIKE_EPISODE", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], ["KESTRIKE_EPISODE"]]], "lane": "malformed hardware manifest: case a names KESTRIKE_EPISODE, which the lane sets itself"},
+ {"name": "check 34: closes_on_sigterm is a number", "edits": [["set", ["profiles", "pair", "roles", "peer", "cases", 0, "closes_on_sigterm"], 0]], "lane": "malformed hardware manifest: case c closes_on_sigterm"},
+ {"name": "check 35: two roles share a client index", "edits": [["set", ["profiles", "pair", "roles", "peer", "env", "KESTRIKE_CLIENT"], "0"]], "lane": "malformed hardware manifest: profile pair declares one client index for two roles"},
+ {"name": "the version refuses before the platforms", "edits": [["set", ["version"], 2], ["set", ["platforms"], []]], "lane": "malformed hardware manifest: version 2"},
+ {"name": "a role's own check refuses before its successor's", "edits": [["delete", ["profiles", "pair", "roles", "owner", "ready"]]], "lane": "malformed hardware manifest: role pair/owner closes on SIGTERM without a readiness and a closing line"},
+ {"name": "the platform rows refuse before the profiles", "edits": [["set", ["platforms", "x86_64-host", "owner"], null], ["delete", ["platforms", "x86_64-host", "owner"]], ["delete", ["profiles", "pair", "retries"]]], "lane": "malformed hardware manifest: platform x86_64-host"},
+ {"name": "a role's cases refuse before the next role", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "expected"], 0], ["set", ["profiles", "pair", "roles", "peer", "after"], "nobody"]], "lane": "malformed hardware manifest: case a expects no test"},
+ {"name": "a profile's client index refuses after its roles' cases", "edits": [["set", ["profiles", "pair", "roles", "peer", "env", "KESTRIKE_CLIENT"], "0"], ["set", ["profiles", "pair", "roles", "peer", "cases", 0, "grace"], 0]], "lane": "malformed hardware manifest: case c needs a finite positive deadline and grace"},
+ {"name": "a version of 1.0 passes", "edits": [["set", ["version"], 1.0]], "lane": null},
+ {"name": "a version of true passes", "edits": [["set", ["version"], true]], "lane": null},
+ {"name": "a version of '1' is refused with its repr", "edits": [["set", ["version"], "1"]], "lane": "malformed hardware manifest: version '1'"},
+ {"name": "a version of 1.5 is refused with its repr", "edits": [["set", ["version"], 1.5]], "lane": "malformed hardware manifest: version 1.5"},
+ {"name": "retries of 0.0 pass", "edits": [["set", ["profiles", "pair", "retries"], 0.0]], "lane": null},
+ {"name": "retries of false pass", "edits": [["set", ["profiles", "pair", "retries"], false]], "lane": null},
+ {"name": "an expected count of true passes", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "expected"], true]], "lane": null},
+ {"name": "an expected count of 1.0 is refused", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "expected"], 1.0]], "lane": "malformed hardware manifest: case a expects no test"},
+ {"name": "a kill of true is refused", "edits": [["set", ["profiles", "kill", "roles", "victim", "kill"], true]], "lane": "malformed hardware manifest: role kill/victim kill"},
+ {"name": "a kill of 0 passes", "edits": [["set", ["profiles", "kill", "roles", "victim", "kill"], 0]], "lane": null},
+ {"name": "a deadline of true is refused", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "deadline"], true]], "lane": "malformed hardware manifest: case a needs a finite positive deadline and grace"},
+ {"name": "a deadline of NaN is refused", "edits": [["set-float", ["profiles", "pair", "roles", "owner", "cases", 0, "deadline"], "nan"]], "lane": "malformed hardware manifest: case a needs a finite positive deadline and grace"},
+ {"name": "ids 1 and 1.0 name a case twice", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "id"], 1], ["set", ["profiles", "pair", "roles", "owner", "cases", 1, "id"], 1.0]], "lane": "malformed hardware manifest: role pair/owner names a case twice"},
+ {"name": "ids 1 and true name a case twice", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "id"], 1], ["set", ["profiles", "pair", "roles", "owner", "cases", 1, "id"], true]], "lane": "malformed hardware manifest: role pair/owner names a case twice"},
+ {"name": "ids NaN and NaN are two cases", "edits": [["set-float", ["profiles", "pair", "roles", "owner", "cases", 0, "id"], "nan"], ["set-float", ["profiles", "pair", "roles", "owner", "cases", 1, "id"], "nan"]], "lane": "malformed hardware manifest: role pair/owner names a case twice", "tool": null},
+ {"name": "ids 2**53 + 1 and 2.0**53 are two cases", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "id"], 9007199254740993], ["set", ["profiles", "pair", "roles", "owner", "cases", 1, "id"], 9007199254740992.0]], "lane": null},
+ {"name": "a case keys message writes its id's repr", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "id"], 1.0], ["delete", ["profiles", "pair", "roles", "owner", "cases", 0, "witnesses"]]], "lane": "malformed hardware manifest: case 1.0 keys ['closes_on_sigterm', 'deadline', 'expected', 'grace', 'id', 'inputs', 'restoration']"},
+ {"name": "a role that is a string holding 'kill' kills", "edits": [["set", ["profiles", "pair", "roles", "owner"], "skill"]], "lane": "malformed hardware manifest: profile pair kills a role without an evidence gate"},
+ {"name": "a role that is an array holding 'kill' kills", "edits": [["set", ["profiles", "pair", "roles", "owner"], ["kill"]]], "lane": "malformed hardware manifest: profile pair kills a role without an evidence gate"},
+ {"name": "a platform row that is a string is refused", "edits": [["set", ["platforms", "x86_64-host"], "machine"]], "lane": "malformed hardware manifest: platform x86_64-host"},
+ {"name": "a profile that is a string is refused", "edits": [["set", ["profiles", "pair"], "platforms"]], "lane": "malformed hardware manifest: profile pair"},
+ {"name": "inputs that are an empty string pass", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], ""]], "lane": null},
+ {"name": "inputs that are an object pass by their keys", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], {"KESTRIKE_MAPPINGS": 1}]], "lane": null},
+ {"name": "an input after a refused one is not read", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], ["MAPPINGS", 5]]], "lane": "malformed hardware manifest: case a inputs"},
+ {"name": "a platform name outside ASCII is refused with its repr", "edits": [["set", ["platforms", "h\u00f6st"], {"machine": "x86_64", "supported": false, "owner": "platform owner"}]], "lane": "malformed hardware manifest: platform name 'h\u00f6st' is not an episode name of letters, digits, '.', '_' and '-' starting with a letter or digit, which a CI episode needs"},
+ {"name": "a platform name holding a lone surrogate is refused with its repr", "edits": [["set", ["platforms", "\ud800"], {"machine": "x86_64", "supported": false, "owner": "platform owner"}]], "lane": "malformed hardware manifest: platform name '\\ud800' is not an episode name of letters, digits, '.', '_' and '-' starting with a letter or digit, which a CI episode needs"},
+ {"name": "a platform name holding an unassigned code point is refused with its repr", "edits": [["set", ["platforms", "h\u0378st"], {"machine": "x86_64", "supported": false, "owner": "platform owner"}]], "lane": "malformed hardware manifest: platform name 'h\\u0378st' is not an episode name of letters, digits, '.', '_' and '-' starting with a letter or digit, which a CI episode needs", "tool": "malformed hardware manifest: platform name 'h\u0378st' is not an episode name of letters, digits, '.', '_' and '-' starting with a letter or digit, which a CI episode needs"},
+ {"name": "a feature holding a space leaves the envelope short", "edits": [["set", ["platforms", "aarch64-host", "envelope", "cpu_features"], ["fp asimd"]]], "lane": "malformed hardware manifest: platform aarch64-host is supported with an envelope short of ['cpu_features']"},
+ {"name": "a CPU family value with white space leaves the envelope short", "edits": [["set", ["platforms", "aarch64-host", "envelope", "cpu_family", "CPU part"], " 0xd4f\u2003"]], "lane": "malformed hardware manifest: platform aarch64-host is supported with an envelope short of ['cpu_family']"},
+ {"name": "an envelope missing two fields lists both in order", "edits": [["delete", ["platforms", "aarch64-host", "envelope", "volume"]], ["delete", ["platforms", "aarch64-host", "envelope", "cpu_family"]]], "lane": "malformed hardware manifest: platform aarch64-host is supported with an envelope short of ['cpu_family', 'volume']"},
+ {"name": "a device identity in capitals leaves the envelope short", "edits": [["set", ["platforms", "aarch64-host", "envelope", "devices", "0000:00:1f.0"], "0x1D0F:0x0061"]], "lane": "malformed hardware manifest: platform aarch64-host is supported with an envelope short of ['devices']"},
+ {"name": "an unsupported row may lack its envelope fields", "edits": [["set", ["platforms", "x86_64-host", "envelope"], {"kernel": null}]], "lane": null},
+ {"name": "a deadline of infinity is refused", "edits": [["set-float", ["profiles", "pair", "roles", "owner", "cases", 0, "deadline"], "inf"]], "lane": "malformed hardware manifest: case a needs a finite positive deadline and grace"},
+ {"name": "a grace too large for a float after a refused deadline is not read", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "deadline"], 0], ["set", ["profiles", "pair", "roles", "owner", "cases", 0, "grace"], 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000]], "lane": "malformed hardware manifest: case a needs a finite positive deadline and grace"},
+ {"name": "shape: a platform row that is a number", "edits": [["set", ["platforms", "x86_64-host"], 5]], "lane": "malformed hardware manifest: TypeError: 'int' object is not iterable", "tool": "malformed hardware manifest: platform x86_64-host: an integer stands where items are read"},
+ {"name": "shape: a platform row that is an array of its keys", "edits": [["set", ["platforms", "x86_64-host"], ["machine", "supported", "owner"]]], "lane": "malformed hardware manifest: TypeError: list indices must be integers or slices, not str", "tool": "malformed hardware manifest: platform x86_64-host: an array stands where an object is read by key"},
+ {"name": "shape: a platform row that is an array holding an array", "edits": [["set", ["platforms", "x86_64-host"], [["machine"]]]], "lane": "malformed hardware manifest: TypeError: unhashable type: 'list'", "tool": "malformed hardware manifest: platform x86_64-host: an array stands where a key or a set member is read"},
+ {"name": "shape: a profile that is null", "edits": [["set", ["profiles", "pair"], null]], "lane": "malformed hardware manifest: TypeError: 'NoneType' object is not iterable", "tool": "malformed hardware manifest: profile pair: null stands where items are read"},
+ {"name": "shape: a profile that is an array of its keys", "edits": [["set", ["profiles", "pair"], ["platforms", "roles", "retries"]]], "lane": "malformed hardware manifest: TypeError: list indices must be integers or slices, not str", "tool": "malformed hardware manifest: profile pair: an array stands where an object is read by key"},
+ {"name": "shape: roles that are an array", "edits": [["set", ["profiles", "pair", "roles"], [{"cases": [{"id": "a", "expected": 1, "inputs": ["KESTRIKE_MAPPINGS"], "deadline": 60, "grace": 5, "witnesses": ["a ... ok"], "restoration": "none", "closes_on_sigterm": true}, {"id": "b", "expected": 1, "inputs": ["KESTRIKE_CONTROLLER_REQUESTS", "KESTRIKE_CONTROLLER_ACKS"], "deadline": 60, "grace": 5, "witnesses": ["b ... ok"], "restoration": "none", "closes_on_sigterm": false}], "ready": "owner ready", "closing": "owner closing", "env": {"KESTRIKE_CLIENT": "0"}}]]], "lane": "malformed hardware manifest: AttributeError: 'list' object has no attribute 'values'", "tool": "malformed hardware manifest: profile pair roles: an array stands where an object is read by key"},
+ {"name": "shape: a role that is a number", "edits": [["set", ["profiles", "pair", "roles", "owner"], 5]], "lane": "malformed hardware manifest: TypeError: argument of type 'int' is not iterable", "tool": "malformed hardware manifest: role pair/owner: an integer stands where items are read"},
+ {"name": "shape: a role that is an empty string", "edits": [["set", ["profiles", "pair", "roles", "owner"], ""]], "lane": "malformed hardware manifest: AttributeError: 'str' object has no attribute 'get'", "tool": "malformed hardware manifest: role pair/owner: a string stands where an object is read by key"},
+ {"name": "shape: a role that is a number after a kill role", "edits": [["set", ["profiles", "kill", "roles", "spare"], 5]], "lane": "malformed hardware manifest: TypeError: 'int' object is not iterable", "tool": "malformed hardware manifest: role kill/spare: an integer stands where items are read"},
+ {"name": "shape: a predecessor that is an array", "edits": [["set", ["profiles", "pair", "roles", "owner", "after"], "zed"], ["set", ["profiles", "pair", "roles", "zed"], ["cases"]]], "lane": "malformed hardware manifest: AttributeError: 'list' object has no attribute 'get'", "tool": "malformed hardware manifest: role pair/zed: an array stands where an object is read by key"},
+ {"name": "shape: a chain through an unknown role", "edits": [["set", ["profiles", "pair", "roles", "owner", "after"], "peer"], ["set", ["profiles", "pair", "roles", "peer", "ready"], "peer ready"], ["set", ["profiles", "pair", "roles", "peer", "after"], "nobody"]], "lane": "malformed hardware manifest: KeyError: 'nobody'", "tool": "malformed hardware manifest: role pair/owner: no role 'nobody' stands in the profile's roles"},
+ {"name": "shape: a chain through an array key", "edits": [["set", ["profiles", "pair", "roles", "owner", "after"], "peer"], ["set", ["profiles", "pair", "roles", "peer", "ready"], "peer ready"], ["set", ["profiles", "pair", "roles", "peer", "after"], ["owner"]]], "lane": "malformed hardware manifest: TypeError: unhashable type: 'list'", "tool": "malformed hardware manifest: role pair/owner: an array stands where a key or a set member is read"},
+ {"name": "shape: a chain through a role that is an array", "edits": [["set", ["profiles", "pair", "roles", "owner", "after"], "peer"], ["set", ["profiles", "pair", "roles", "peer", "ready"], "peer ready"], ["set", ["profiles", "pair", "roles", "peer", "after"], "zed"], ["set", ["profiles", "pair", "roles", "zed"], ["cases"]]], "lane": "malformed hardware manifest: AttributeError: 'list' object has no attribute 'get'", "tool": "malformed hardware manifest: role pair/owner: an array stands where an object is read by key"},
+ {"name": "shape: cases that are a number", "edits": [["set", ["profiles", "pair", "roles", "peer", "cases"], 5]], "lane": "malformed hardware manifest: TypeError: 'int' object is not iterable", "tool": "malformed hardware manifest: role pair/peer: an integer stands where items are read"},
+ {"name": "shape: a case that is a string", "edits": [["set", ["profiles", "pair", "roles", "peer", "cases"], ["c"]]], "lane": "malformed hardware manifest: AttributeError: 'str' object has no attribute 'get'", "tool": "malformed hardware manifest: role pair/peer: a string stands where an object is read by key"},
+ {"name": "shape: a kill delay too large for a float", "edits": [["set", ["profiles", "kill", "roles", "victim", "kill"], 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000]], "lane": "malformed hardware manifest: OverflowError: int too large to convert to float", "tool": "malformed hardware manifest: role kill/victim: an integer too large for a float stands where a finite number is read"},
+ {"name": "shape: a kill role's cases that are a number", "edits": [["set", ["profiles", "kill", "roles", "victim", "closing"], "victim closing"], ["set", ["profiles", "kill", "roles", "victim", "cases"], 5]], "lane": "malformed hardware manifest: TypeError: object of type 'int' has no len()", "tool": "malformed hardware manifest: role kill/victim: an integer stands where items are counted"},
+ {"name": "shape: cases that are an object", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases"], {"a": 1}]], "lane": "malformed hardware manifest: AttributeError: 'str' object has no attribute 'get'", "tool": "malformed hardware manifest: role pair/owner: a string stands where an object is read by key"},
+ {"name": "shape: an id that is an array", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "id"], ["a"]]], "lane": "malformed hardware manifest: TypeError: unhashable type: 'list'", "tool": "malformed hardware manifest: role pair/owner: an array stands where a key or a set member is read"},
+ {"name": "shape: a deadline too large for a float", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "deadline"], 10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000]], "lane": "malformed hardware manifest: OverflowError: int too large to convert to float", "tool": "malformed hardware manifest: case a: an integer too large for a float stands where a finite number is read"},
+ {"name": "shape: inputs that are a number", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], 5]], "lane": "malformed hardware manifest: TypeError: 'int' object is not iterable", "tool": "malformed hardware manifest: case a: an integer stands where items are read"},
+ {"name": "shape: an input that is a number", "edits": [["set", ["profiles", "pair", "roles", "owner", "cases", 0, "inputs"], [5]]], "lane": "malformed hardware manifest: AttributeError: 'int' object has no attribute 'startswith'", "tool": "malformed hardware manifest: case a: an integer stands where a string is read"}
+]
+}

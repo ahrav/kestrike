@@ -1,0 +1,107 @@
+//! The episode name, the seconds reader, the platform refusal and the lane's constants, each expected value
+//! recorded from the hardware lane at the base under Python 3.9.25.
+
+use std::path::Path;
+
+use crate::hardware_lane::{
+    CONTROLLER_SECONDS, CUSTODY_DIR, ENVIRONMENT_NAME, EPISODE_NAME, Error, HELD, INTERRUPTED,
+    MANIFEST, OBSERVER_SECONDS, PLATFORM_NAMED_BY, STOP_SECONDS, episode_name, finite_seconds,
+    manifest_path, platform_refusal,
+};
+use crate::text::Text;
+
+const NOT_EPISODE: &str =
+    " is not an episode name of letters, digits, '.', '_' and '-' starting with a letter or digit";
+
+/// A name of one plain file name component passes as it is; an empty name, a leading `.`, a trailing line
+/// feed and a letter outside ASCII are refused with the name's repr.
+#[test]
+fn an_episode_name_passes_whole_or_is_refused_with_its_repr() {
+    for name in ["fis-1", "a.b_c-1"] {
+        assert_eq!(episode_name(&Text::from(name)).unwrap(), &Text::from(name));
+    }
+    for (name, shown) in [
+        ("", "''"),
+        (".hidden", "'.hidden'"),
+        ("name\n", r"'name\n'"),
+        ("épisode", "'épisode'"),
+    ] {
+        let Err(Error::Refused(sentence)) = episode_name(&Text::from(name)) else {
+            panic!("{name:?} is refused")
+        };
+        assert_eq!(
+            sentence,
+            format!("{shown}{NOT_EPISODE}").as_str(),
+            "{name:?}"
+        );
+    }
+}
+
+/// The reader strips the white space `int()` strips, which holds U+00A0 and leaves U+001F, reads Rust's
+/// float syntax, and refuses a value that is not finite or is below 0 with the text's repr.
+#[test]
+fn finite_seconds_reads_a_finite_duration_of_zero_or_more_seconds() {
+    for (seconds, value) in [
+        ("0", 0.0),
+        ("-0.0", -0.0),
+        ("1e3", 1000.0),
+        (" 2 ", 2.0),
+        ("\u{a0}2", 2.0),
+    ] {
+        let read = finite_seconds(&Text::from(seconds)).unwrap();
+        assert_eq!(read.to_bits(), f64::to_bits(value), "{seconds:?}");
+    }
+    for (seconds, shown) in [
+        ("inf", "'inf'"),
+        ("nan", "'nan'"),
+        ("NaN", "'NaN'"),
+        ("+Infinity", "'+Infinity'"),
+        ("-1", "'-1'"),
+        ("1e400", "'1e400'"),
+    ] {
+        let Err(Error::Refused(sentence)) = finite_seconds(&Text::from(seconds)) else {
+            panic!("{seconds:?} is refused")
+        };
+        assert_eq!(
+            sentence,
+            format!("{shown} is not a finite duration of zero or more seconds").as_str()
+        );
+    }
+    for seconds in ["x", "", "\u{1f}2", "1_0", "\u{661}"] {
+        assert!(
+            matches!(finite_seconds(&Text::from(seconds)), Err(Error::NoNumber)),
+            "{seconds:?} is no number"
+        );
+    }
+}
+
+#[test]
+fn the_platform_refusal_names_the_row_or_none_and_where_the_name_comes_from() {
+    let named = platform_refusal(Some(&Text::from("x")), "KESTRIKE_HARDWARE_PLATFORM");
+    assert_eq!(
+        named.sentence().unwrap(),
+        &"no platform row 'x'; name the host's row with KESTRIKE_HARDWARE_PLATFORM"
+    );
+    let none = platform_refusal(None, PLATFORM_NAMED_BY);
+    assert_eq!(
+        none.sentence().unwrap(),
+        &"no platform row named; name the host's row with --platform or KESTRIKE_HARDWARE_PLATFORM"
+    );
+}
+
+#[test]
+fn the_constants_hold_the_lanes_values() {
+    assert_eq!(MANIFEST, "scripts/hardware-profiles.json");
+    assert_eq!(
+        manifest_path(Path::new("/top")),
+        Path::new("/top/scripts/hardware-profiles.json")
+    );
+    assert_eq!(
+        [CONTROLLER_SECONDS, STOP_SECONDS, OBSERVER_SECONDS].map(f64::to_bits),
+        [30.0, 10.0, 5.0].map(f64::to_bits)
+    );
+    assert_eq!((HELD, INTERRUPTED), (4, 5));
+    assert_eq!(CUSTODY_DIR, "/var/tmp/kestrike-hardware-custody");
+    assert_eq!(EPISODE_NAME, "[A-Za-z0-9][A-Za-z0-9._-]*");
+    assert_eq!(ENVIRONMENT_NAME, "KESTRIKE_[A-Z0-9_]+");
+}
