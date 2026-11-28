@@ -1569,6 +1569,12 @@ pipe or a terminal on standard input waits for that input to end. No check
 has a time limit. On Linux the group's SIGKILL also reaches a process that a
 member of the group forks while it is delivered; on other systems such a
 process can run on.
+A `git worktree add` that ends after registering a locked worktree whose
+directory lacks its `.git` file leaves that registration: the removal fails,
+the tool prints `pre-push: could not remove worktree <tree>: <reason>`, and
+`git worktree unlock` and `git worktree prune` clear the entry. A line to
+standard error waits while the stream cannot take it, and a recorded signal
+ends that wait with `128 + n`.
 
 No handler covers a signal that never reaches the tool. Git starts the hook
 in Git's own process group and signals no group. At a terminal, the

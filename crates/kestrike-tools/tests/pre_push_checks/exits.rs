@@ -356,3 +356,43 @@ fn a_git_that_cannot_start_for_the_removal_exits_1_after_passing_checks() {
     fx.git(&["worktree", "prune"]);
     assert_eq!(fx.worktrees(), 1);
 }
+
+/// A `git worktree add` that ends after registering a locked worktree whose directory lacks its `.git`
+/// file leaves the registration standing: the removal names the worktree it could not remove, the exit is
+/// the add's 2, and the locked entry stays registered until a `git worktree remove` or `prune` of the
+/// user's own clears it.
+#[test]
+fn a_half_linked_locked_worktree_stays_registered_after_a_failed_add() {
+    let fx = Fixture::new();
+    let head = fx.commit(&[INVENTORY]);
+    super::push::executable(
+        &fx.bin.join("git"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1 $2\" = 'worktree add' ]; then\n  shift 2\n  \"{git}\" worktree add --lock \"$@\" || exit\n  rm -f \"$3/.git\"\n  exit 128\nfi\nexec \"{git}\" \"$@\"\n",
+            git = which("git").display()
+        ),
+    );
+    let run = fx.push(&[(&head, &fx.base)]);
+    assert_eq!(run.code, Some(2), "{}", run.stderr);
+    let prefix = format!(
+        "pre-push: could not remove worktree {}/kestrike-pre-push-",
+        fx.tmp.display()
+    );
+    assert!(
+        run.stderr.lines().any(|line| line.starts_with(&prefix)),
+        "{}",
+        run.stderr
+    );
+    assert!(fx.ran().is_empty(), "{:?}", fx.ran());
+    fs::remove_file(fx.bin.join("git")).expect("the wrapper is removed");
+    assert_eq!(fx.worktrees(), 2);
+    let listed = fx.git(&["worktree", "list", "--porcelain"]);
+    let half_linked = listed
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .nth(1)
+        .expect("the half-linked worktree is listed");
+    fx.git(&["worktree", "unlock", half_linked]);
+    fx.git(&["worktree", "prune"]);
+    assert_eq!(fx.worktrees(), 1);
+}

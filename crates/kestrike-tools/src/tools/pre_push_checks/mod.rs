@@ -48,8 +48,11 @@ pub fn run(_top: &Path, args: &[OsString]) -> u8 {
     push(destination).unwrap_or_else(|code| code)
 }
 
-/// `say` writes `line` and a line feed to standard error; a failed write is exit 120.
+/// `say` writes `line` and a line feed to standard error; a failed write is exit 120. While standard error
+/// cannot take the line, `say` waits for it and reads the signal record, so a recorded signal ends the
+/// wait with its exit code and the line is not written.
 fn say(line: &str) -> Result<(), Exit> {
+    cancel::writable(io::stderr().as_fd())?;
     emit(io::stderr().as_fd(), &format!("{line}\n")).map_err(|_| STREAM_FAILED)
 }
 

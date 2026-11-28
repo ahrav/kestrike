@@ -18,6 +18,7 @@
 //! starter blocked stays blocked in the check.
 
 use std::io;
+use std::os::fd::{AsRawFd, BorrowedFd};
 use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread;
@@ -92,6 +93,34 @@ pub(super) fn check() -> Result<(), u8> {
     match RECORD.load(Ordering::SeqCst) {
         0 => Ok(()),
         signal => Err(code(signal)),
+    }
+}
+
+/// `writable` returns once `stream` can take a write, polling it every [`LONGEST_PAUSE`] and reading the
+/// record between polls. A stream that reports an error or a hang-up, and a failed poll, return at once,
+/// so the write that follows reports the failure.
+///
+/// # Errors
+///
+/// A signal was recorded while `stream` could not take a write; the field is the exit code.
+pub(super) fn writable(stream: BorrowedFd<'_>) -> Result<(), u8> {
+    let timeout = libc::c_int::try_from(LONGEST_PAUSE.as_millis()).expect("the pause fits c_int");
+    loop {
+        let mut polled = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: `polled` is one initialized `pollfd` that outlives the call, and the count is 1.
+        let ready = unsafe { libc::poll(&mut polled, 1, timeout) };
+        if ready != 0 {
+            let interrupted =
+                ready < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted;
+            if !interrupted {
+                return Ok(());
+            }
+        }
+        check()?;
     }
 }
 

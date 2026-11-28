@@ -4,7 +4,10 @@
 //! made with mode 0700 under `TMPDIR` when it is set and not empty, else under `/tmp`, and drawn again
 //! while a name is taken. On every way out of [`run_checks`] after the directory is made,
 //! `git worktree remove --force --force` runs once, the second `--force` removing a worktree that a killed
-//! `git worktree add` left locked, and then the directory is removed if it still stands.
+//! `git worktree add` left locked, and then the directory is removed if it still stands. An add that ends
+//! after registering a locked worktree whose directory lacks its `.git` file leaves that registration: the
+//! removal reads the directory as no working tree and fails, and the tool names the worktree it could not
+//! remove.
 //!
 //! The tool assumes the invoking user controls the worktree's parent directory. Where another user can
 //! rename entries in that parent, as in one writable by others without the sticky bit, that user can swap
