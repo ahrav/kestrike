@@ -367,7 +367,7 @@ pub(crate) fn replies<T>(
 
 /// `is_object_id` holds for a name of 40 or 64 lowercase hexadecimal digits, the full form of a SHA-1 or a
 /// SHA-256 object id.
-fn is_object_id(name: &str) -> bool {
+pub(crate) fn is_object_id(name: &str) -> bool {
     matches!(name.len(), 40 | 64)
         && name
             .bytes()

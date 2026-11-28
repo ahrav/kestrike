@@ -334,8 +334,9 @@ fn a_new_branch_without_origin_main_runs_the_contract_checks_its_tip_holds() {
     assert_eq!(fx.ran(), expected);
 }
 
-/// A worktree parent that another user can write fails the host stop controller's row before `cargo`
-/// starts, naming the parent; the control, the fixture's own `TMPDIR` of mode 0700, runs it.
+/// A sticky worktree parent that every user can write, as the default `/tmp` is, passes the scratch
+/// check and fails the host stop controller's row before `cargo` starts, naming the parent; the
+/// control, the fixture's own `TMPDIR` of mode 0700, runs it.
 #[test]
 fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
     let mut fx = Fixture::new();
@@ -346,7 +347,7 @@ fn a_shared_worktree_parent_fails_the_host_stop_row_before_cargo_starts() {
     fx.clear();
     let shared = fx.temp.join("shared");
     fs::create_dir(&shared).expect("the shared directory is made");
-    fs::set_permissions(&shared, fs::Permissions::from_mode(0o777))
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o1777))
         .expect("the shared directory's mode is set");
     fx.set("TMPDIR", shared.clone());
     let run = fx.push(&[(&head, &held)]);

@@ -1409,10 +1409,21 @@ input, then the user-wide hook. The tool `pre-push-checks` runs the checks
 it adds under `TMPDIR`, or `/tmp` when `TMPDIR` is unset or empty, and removes
 at the end. The worktree checks run the pushed tip's own scripts, a fetched
 commit pushed under a new name included. A failed check blocks the push. The
-tool and the hook's spool of the ref lines trust the directory `TMPDIR` names
-as the pushing user's: where another user can rename entries in it, as in a
-directory writable by others without the sticky bit, that user can swap
-either between the steps that name it. The default `/tmp` is sticky. CI
+hook spools the ref lines in the same directory. Before it reads its standard
+input, the tool refuses with exit 2 a directory there that a user other than
+the pushing user and root owns, and one whose mode, or the mode of a
+directory its path is reached through, from the root down and through links,
+gives its group or every user write access without the sticky bit: such a
+user could swap the spool, a worktree or a directory on the way between the
+steps that name them. It also refuses a directory there whose path passes
+through a link that such a user owns in a directory its group or every user
+can write, a sticky one included, since that user can replace the link. It
+reads the statuses again before each worktree it adds. A directory above the
+scratch directory that another user owns is trusted, and with it a link in a
+directory that only its owner can write. The default `/tmp` is sticky and
+root's, and passes. Where root's directories read as another id, as in a user
+namespace that maps the pushing user alone, such a `/tmp` is refused and a
+`TMPDIR` the user owns passes. CI
 runs the selection and reconciliation checks on every PR; the model links check
 and its self-test run in the hook. The chaos contract check, the receipt
 replay, the judges' test and the game-day judge's self-test run in the hook
@@ -1420,7 +1431,11 @@ and by hand; no CI job runs them. The hook also runs the host stop
 controller's Rust cases, which the `workspace` job runs with every case of
 the crate.
 
-Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`.
+Git gives one line per ref, `<local ref> <local sha> <remote ref> <remote sha>`,
+each sha a full object id of 40 or 64 hexadecimal digits, which the tool reads
+in lowercase, as Git writes it. The tool checks every line's form before its
+first Git read and refuses the push as malformed where a line holds another
+field there.
 For each pushed tip the tool lists the files the push changes against the
 remote commit, or against the tip's merge base with `origin/main` for a new
 branch or a remote commit this clone lacks, and runs the checks those files
@@ -1592,16 +1607,21 @@ guards that tip's chaos records. A deleted ref needs no check, and a blank
 line is skipped.
 
 The tool prints each failure as `pre-push: failed: FAILURE` at the end. Exit 0
-passes; 1 is a failed check or a failed step of the tool's own (reading
+passes; 1 is a failed check or a failed step of the tool's own (reading the
+scratch directory's status, where the working directory of a relative
+`TMPDIR` cannot be read or the `stat` fails for another reason than an absent
+path, reading
 standard input, making or removing the worktree's directory, starting or
 waiting for a check or for `git worktree add`, starting Git, or reading or
 writing the batch read's Git child), named by a `pre-push-checks: ` line or,
 for Git that cannot start for the worktree's removal, by the line that names
 the worktree; 2 is every other refusal before the checks, printed as
-`pre-push: ` and its text: a malformed ref line, a Git read that exits
+`pre-push: ` and its text: a scratch directory that another user can reach
+by ownership, a write bit or a link, as stated above, a malformed ref
+line, a Git read that exits
 nonzero where the read is not a presence test (Git's own text), Git output
 that is not UTF-8, a tree entry or a raw diff record of a form Git's manual
-does not give, and a Git argument the standard library refuses (the tool's
+does not give (the tool's
 text), and a `git worktree add` that exits nonzero, which exits 1 where Git
 cannot start for the removal; 2 is also signal handlers that cannot be
 installed, named by a `pre-push-checks: ` line. A guarded chaos record that is
@@ -1616,6 +1636,7 @@ reaches it, whatever disposition or mask it inherited: it blocks the four
 while it
 installs their handlers, then unblocks them, and it sets SIGCHLD to its
 default disposition before it starts any child. It reads the record after
+reading the scratch directory's status, after
 reading standard input, after each Git read of a ref line's plan and of the
 guard, after each scan, after each line it prints, and while it waits for
 `git worktree add` or a check; once it reads a record it starts no further
