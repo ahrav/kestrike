@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The hook holds Git's ref lines in the shell variable `refs`, its only copy of them. `unset` drops a
-# `refs` of the hook's own environment, so the lines stay in this shell alone and each program it starts
-# gets the environment without them. `read` takes bytes up to the first NUL byte or the end of standard
-# input. In the C locale it takes each byte as it stands, and with `TMOUT=0` it waits for the end of the
-# input however long that takes. Exit status 0 means it met a NUL byte, which Git writes in none of its
-# ref lines. Exit status 1 with `refs` set means it reached the end of the input with every byte in
-# `refs`, a final line feed or its absence included. A read error leaves `refs` unset.
+# The hook holds Git's ref lines in the shell variable `refs`, its only copy of them. `unset` before the
+# read and `export -n` after it keep `refs` a variable of this shell alone, whatever the hook inherits, so
+# each program it starts gets the environment without the lines. `read` takes bytes up to the first NUL
+# byte or the end of standard input. In the C locale it takes each byte as it stands. Its own time limit
+# of a billion seconds replaces a `TMOUT` of the environment, a readonly one included. Exit status 0 means
+# it met a NUL byte, which Git writes in none of its ref lines. Exit status 1 with `refs` set means it
+# reached the end of the input with every byte in `refs`, a final line feed or its absence included. A
+# read error leaves `refs` unset.
 unset refs
 status=0
-LC_ALL=C TMOUT=0 IFS= read -r -d '' refs || status=$?
+LC_ALL=C IFS= read -r -d '' -t 1000000000 refs || status=$?
 if [ "$status" -eq 0 ]; then
   echo "pre-push: standard input holds a NUL byte" >&2
   exit 2
@@ -19,15 +20,32 @@ if [ "$status" -ne 1 ] || [ -z "${refs+read}" ]; then
   echo "pre-push: standard input could not be read to its end" >&2
   exit 1
 fi
+export -n refs
 
-# `send` writes the ref lines to its standard output from a subshell, so the reader of a pipeline gets
-# the bytes of `refs` on its standard input. A reader that closes the pipe before the last byte ends the
-# write, and the subshell still exits 0: the reader's exit status then decides the pipeline's. A subshell
-# that a signal ends gives the pipeline that signal's status.
-send() (
+# `send` writes the ref lines to its standard output. It runs as the left side of a pipeline alone, so
+# the subshell of that side holds its settings: tracing off, which keeps the lines out of a trace of the
+# hook, and SIGPIPE ignored, while each reader starts with the hook's own disposition. The builtin
+# `printf` writes in a command substitution that takes its error text in the C locale. A write that
+# fails on a broken pipe, with that text or with none on a bash that prints none, means the reader
+# closed its input before the last byte: `send` then returns 0 and the reader's exit status decides the
+# pipeline's. Any other failure returns its status with its text on standard error, and a writer that a
+# signal ends has that signal's status; either fails the pipeline where the reader exits 0.
+send() {
+  local error status=0
+  set +x
   trap '' PIPE
-  printf '%s' "$refs" 2>&- || :
-)
+  { error=$(LC_ALL=C; builtin printf '%s' "$refs" 2>&1 >&3); } 3>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$status" -eq 1 ]; then
+    case "$error" in
+      ""|*"Broken pipe") return 0 ;;
+    esac
+  fi
+  echo "pre-push: the ref lines could not be written: $error" >&2
+  return "$status"
+}
 
 send | bash "$(dirname -- "${BASH_SOURCE[0]}")/../scripts/tool.sh" pre-push-checks "${1-}"
 status=0
