@@ -255,16 +255,8 @@ impl Case {
         self.in_context_on(record, |cx| entry(&command, cx))
     }
 
-    /// Runs `body` on a context over this case's plane, file steps, record, environment and streams.
-    pub(crate) fn in_context<T>(
-        &self,
-        body: impl FnOnce(&mut Context<'_, Plane, Steps>) -> T,
-    ) -> T {
-        let mut record = Record::new(self.delivered);
-        self.in_context_on(&mut record, body)
-    }
-
-    /// Runs `body` as [`Case::in_context`] does, over `record`.
+    /// Runs `body` on a context over this case's plane, file steps, environment and streams, and
+    /// `record`.
     pub(crate) fn in_context_on<T>(
         &self,
         record: &mut Record<'static>,
@@ -585,12 +577,23 @@ impl Case {
         &mut self,
         step: impl FnOnce(Controller<'_, '_, Plane, Steps>) -> T,
     ) -> T {
+        let mut record = Record::new(self.delivered);
+        self.owned_on(&mut record, Vec::new(), step)
+    }
+
+    /// Runs `step` as [`Case::owned`] does, over `record` and a list of written marks that starts as
+    /// `written`.
+    pub(crate) fn owned_on<T>(
+        &mut self,
+        record: &mut Record<'static>,
+        mut written: Vec<&'static str>,
+        step: impl FnOnce(Controller<'_, '_, Plane, Steps>) -> T,
+    ) -> T {
         let catalog = value(&fs::read_to_string(&self.catalog).expect("the catalog reads"));
         let gd2 = gd2_of(&catalog).expect("GD-2 is the one written for");
         let operator =
             read_operator(&self.write_operator(), &gd2, FILE_LIMIT).expect("the operator file");
-        self.in_context(|cx| {
-            let mut written = Vec::new();
+        self.in_context_on(record, |cx| {
             step(Controller::new(cx, &mut written, &operator, gd2))
         })
     }
