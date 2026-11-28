@@ -32,6 +32,8 @@ fn patch(base: &str, head: &str, paths: &[&str]) -> Result<String, Failure> {
         "--no-literal-pathspecs",
         "-c",
         "core.quotePath=false",
+        "-c",
+        "core.precomposeUnicode=false",
         "diff",
         "--no-relative",
         "--no-renames",

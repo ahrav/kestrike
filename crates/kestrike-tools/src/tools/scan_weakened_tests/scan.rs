@@ -17,7 +17,7 @@ use super::finding::short;
 use super::hunks::{Hunk, line_changes, named_bounds, path_hunks};
 use super::inventory::{INVENTORY, inventory_changes, inventory_text};
 use super::patterns::{ASSERT, Pattern, rust_budgets, timeouts};
-use super::tree::files;
+use super::tree::{directory, files};
 use super::{Change, Class, Failure, Finding, Shown};
 
 const TOOL: &str = super::NAME;
@@ -148,7 +148,13 @@ fn findings(base: &str, head: &str) -> Result<Vec<Finding>, Failure> {
         let new = inventory_text(head, head_held.contains(&INVENTORY))?;
         push(INVENTORY, inventory_changes(&old, &new)?);
     }
-    found.extend(removed(base, head, paths.iter().any(within(CASES)))?);
+    // The test directory is checked at the head and then the base on every range; its cases are listed only
+    // when the diff names the directory or a path below it.
+    let cases_head = directory(head, CASES)?;
+    let cases_base = directory(base, CASES)?;
+    if paths.iter().any(within(CASES)) {
+        found.extend(removed(&cases_base, &cases_head)?);
+    }
     Ok(found)
 }
 

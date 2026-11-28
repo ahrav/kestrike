@@ -2295,7 +2295,7 @@ fn a_workflow_diff_that_is_not_utf8_exits_two_and_names_its_command() {
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     assert!(
         run.stderr.starts_with(
-            "scan-weakened-tests: git --no-literal-pathspecs -c core.quotePath=false diff "
+            "scan-weakened-tests: git --no-literal-pathspecs -c core.quotePath=false -c core.precomposeUnicode=false diff "
         ),
         "{}",
         run.stderr
@@ -3151,7 +3151,17 @@ fn a_case_directory_under_a_link_or_a_submodule_exits_two() {
     let crates_module = repo.gitlink("crates", "a submodule at crates");
     repo.git(&["rm", "-q", "--cached", "crates"]);
     let crates_later = repo.change(&[("src/later.rs", "fn later() {}\n")]);
+    repo.reset(&repo.base);
+    let data = repo.change(&[(&format!("{CASES}/data.txt"), "data\n")]);
+    repo.git(&["rm", "-q", "--", &format!("{CASES}/data.txt")]);
+    repo.change(&[("elsewhere2/data.txt", "data\n")]);
+    let data_linked = repo.link(CASES, "../../elsewhere2", "link the cases over a data file");
     for (base, head, line) in [
+        (
+            &data,
+            &data_linked,
+            format!("{CASES} at {} is a link", short(&data_linked)),
+        ),
         (
             &crate_linked,
             &crate_gone,
@@ -3192,15 +3202,24 @@ fn a_refusal_that_holds_a_line_break_is_written_escaped() {
     repo.write("src/a\r::error::b.rs", b"// \xff\n");
     repo.git(&["add", "--", "src/a\r::error::b.rs"]);
     let blob = repo.commit(&[], "a byte outside UTF-8", &[]);
-    let run = repo.scan_env(&["--base", &repo.base, "--head", &blob], &[("LC_ALL", "C")]);
-    assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
-    assert_eq!(
-        run.stderr,
-        format!(
-            "scan-weakened-tests: {blob}:src/a\\r::error::b.rs: invalid utf-8 sequence of 1 bytes \
-             from index 3\n"
-        )
+    repo.refused(
+        &repo.base,
+        &blob,
+        &format!("{blob}:src/a\\r::error::b.rs: invalid utf-8 sequence of 1 bytes from index 3"),
     );
+    repo.reset(&repo.base);
+    let wide = "src/a\u{202e}\u{e0001}b.rs";
+    repo.write(wide, b"// \xff\n");
+    repo.git(&["add", "--", wide]);
+    let wide_blob = repo.commit(&[], "a byte outside UTF-8 under wide code points", &[]);
+    repo.refused(
+        &repo.base,
+        &wide_blob,
+        &format!(
+            "{wide_blob}:src/a\\u202e\\U000e0001b.rs: invalid utf-8 sequence of 1 bytes from index 3"
+        ),
+    );
+    repo.reset(&repo.base);
     let run = repo.scan_env(&["--base", "a\r::error::b"], &[("LC_ALL", "C")]);
     assert_eq!(run.outcome(), (Some(2), ""), "{}", run.stderr);
     assert_eq!(
@@ -3301,17 +3320,19 @@ fn a_name_outside_utf8_in_an_unchanged_case_directory_exits_zero_with_nothing_pr
     assert_eq!(run.stderr, "");
 }
 
-/// A Rust path 1,900 directories deep, whose ancestors' names together pass 2,621,440 bytes, the argument
-/// budget of a Linux host with a 10 MiB stack, exits 0 with nothing on either stream as an added file.
+/// Two Rust paths 1,900 directories deep in one batch, whose ancestors' names together pass 6 MiB, the most
+/// any Linux host gives a program's arguments, exit 0 with nothing on either stream as added files.
 #[test]
 fn a_path_whose_ancestors_pass_the_argument_limit_exits_zero_with_nothing_printed() {
     let repo = Repo::new("deep-path");
-    let deep = format!("{}x.rs", "a/".repeat(1900));
     let ancestors: usize = (1..=1900).map(|depth| 2 * depth).sum();
-    assert!(ancestors > 2_621_440);
+    assert!(2 * ancestors > 6 * 1024 * 1024);
     let blob = repo.git(&["rev-parse", &format!("{}:src/model.rs", repo.base)]);
-    let entry = format!("100644,{blob},{deep}");
-    repo.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    for top in ["a/", "b/"] {
+        let deep = format!("{}x.rs", top.repeat(1900));
+        let entry = format!("100644,{blob},{deep}");
+        repo.git(&["update-index", "--add", "--cacheinfo", &entry]);
+    }
     let head = repo.commit(&[], "a deep path", &[]);
     let run = repo.scan_head(&head);
     assert_eq!(run.outcome(), (Some(0), ""), "{}", run.stderr);
@@ -3391,4 +3412,29 @@ fn an_inventory_that_is_an_empty_tree_at_either_commit_exits_two() {
     let line = format!("{INVENTORY} at {} is not a file", &tree[..12]);
     repo.refused(&repo.base, &tree, &line);
     repo.refused(&tree, &file, &line);
+}
+
+/// A link that stands only in the second batch of ancestor probes, `src/d256` above the 257th deleted file,
+/// is refused at the head.
+#[test]
+fn a_link_in_a_later_batch_of_ancestor_probes_exits_two() {
+    let repo = Repo::new("later-probe");
+    let names: Vec<String> = (0..257).map(|at| format!("src/d{at:03}/t.rs")).collect();
+    let files: Vec<(&str, &str)> = names
+        .iter()
+        .map(|name| (name.as_str(), "fn t() {}\n"))
+        .collect();
+    let base = repo.change(&files);
+    for name in &names {
+        repo.git(&["rm", "-q", "--", name]);
+    }
+    let head = repo.link("src/d256", "d000", "link the last directory");
+    repo.refused(
+        &base,
+        &head,
+        &format!(
+            "src/d256/t.rs at {} lies under src/d256, which is a link",
+            &head[..12]
+        ),
+    );
 }

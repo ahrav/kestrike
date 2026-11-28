@@ -16,7 +16,7 @@ const TREE: &str = "040000";
 /// from the top level. `-t` prints each tree that Git enters on the way to a deeper requested path, so a
 /// requested path that is a tree has its record whatever else the batch requests. A record that is not
 /// `<mode> <type> <id>`, a tab and a path is refused.
-pub fn entries(
+fn entries(
     commit: &str,
     paths: &[&str],
     recursive: bool,
@@ -145,16 +145,30 @@ fn modes(commit: &str, paths: &[&str]) -> Result<HashMap<String, String>, Failur
     Ok(modes)
 }
 
+/// A directory that [`directory`] found to be no link or submodule, and to lie under none, at one commit.
+/// Its listing reads that same commit.
+pub struct Directory<'c> {
+    commit: &'c str,
+    path: &'static str,
+}
+
+impl Directory<'_> {
+    /// `listing` returns `(mode, path)` for the directory and every entry under it, as [`entries`] reads them.
+    pub fn listing(&self) -> Result<Vec<(String, String)>, Failure> {
+        entries(self.commit, &[self.path], true)
+    }
+}
+
 /// `directory` refuses `dir` at `commit` when its entry is a link or a submodule, as
 /// `<dir> at <short id> is a link` (or `a submodule`), and when it has no entry under such an ancestor, as
 /// [`modes`] refuses a path.
-pub fn directory(commit: &str, dir: &str) -> Result<(), Failure> {
+pub fn directory<'c>(commit: &'c str, dir: &'static str) -> Result<Directory<'c>, Failure> {
     match redirect(modes(commit, &[dir])?.get(dir)) {
         Some(kind) => Err(Failure::Refused(format!(
             "{dir} at {} is {kind}",
             short(commit)
         ))),
-        None => Ok(()),
+        None => Ok(Directory { commit, path: dir }),
     }
 }
 
